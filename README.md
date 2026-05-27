@@ -16,6 +16,7 @@ Match-MA 是面向内部咨询公司 / 中间方团队的并购标的与买家�
 - `docs/postgres_schema_v0.1.md`：PostgreSQL schema 草案，包含核心表 DDL、约束、索引、pgvector search_doc 和迁移注意事项。
 - `docs/backend_skeleton_v0.1.md`：后端工程骨架说明，包含 FastAPI / SQLAlchemy / Alembic / 健康检查 / 本地运行方式。
 - `docs/deployment_railway_v0.1.md`：Railway 测试部署记录，包含服务结构、环境变量、端口配置和健康检查。
+- `docs/api_phase1_minimal_v0.1.md`：一期最小业务 API，包含标的和买家意向的新建、列表、详情接口。
 
 ## 数据库草案
 
@@ -54,6 +55,12 @@ uvicorn backend.app.main:app --reload
 GET /api/v1/health
 GET /api/v1/health/db
 GET /api/v1/meta/seed-status
+POST /api/v1/seller-targets
+GET /api/v1/seller-targets
+GET /api/v1/seller-targets/{id}
+POST /api/v1/buyer-intents
+GET /api/v1/buyer-intents
+GET /api/v1/buyer-intents/{id}
 ```
 
 Railway 部署说明：
