@@ -17,6 +17,7 @@ Match-MA 是面向内部咨询公司 / 中间方团队的并购标的与买家�
 - `docs/backend_skeleton_v0.1.md`：后端工程骨架说明，包含 FastAPI / SQLAlchemy / Alembic / 健康检查 / 本地运行方式。
 - `docs/deployment_railway_v0.1.md`：Railway 测试部署记录，包含服务结构、环境变量、端口配置和健康检查。
 - `docs/api_phase1_minimal_v0.1.md`：一期最小业务 API，包含标的和买家意向的新建、列表、详情接口。
+- `docs/api_test_commands_v0.1.md`：PowerShell API 测试命令，包含中文 UTF-8 请求和响应排查方式。
 
 ## 数据库草案
 
