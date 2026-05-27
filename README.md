@@ -15,6 +15,7 @@ Match-MA 是面向内部咨询公司 / 中间方团队的并购标的与买家�
 - `docs/risk_taxonomy_v0.1.md`：风险枚举与负面清单草案，定义 `risk_type`、`risk_status`、`severity`、风险写入和推荐过滤规则。
 - `docs/postgres_schema_v0.1.md`：PostgreSQL schema 草案，包含核心表 DDL、约束、索引、pgvector search_doc 和迁移注意事项。
 - `docs/backend_skeleton_v0.1.md`：后端工程骨架说明，包含 FastAPI / SQLAlchemy / Alembic / 健康检查 / 本地运行方式。
+- `docs/deployment_railway_v0.1.md`：Railway 测试部署记录，包含服务结构、环境变量、端口配置和健康检查。
 
 ## 数据库草案
 
@@ -52,6 +53,7 @@ uvicorn backend.app.main:app --reload
 ```text
 GET /api/v1/health
 GET /api/v1/health/db
+GET /api/v1/meta/seed-status
 ```
 
 Railway 部署说明：
