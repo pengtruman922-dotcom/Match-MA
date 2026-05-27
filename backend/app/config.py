@@ -21,8 +21,15 @@ class Settings(BaseSettings):
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
+    @property
+    def sqlalchemy_database_url(self) -> str | None:
+        if not self.database_url:
+            return None
+        if self.database_url.startswith("postgresql://"):
+            return self.database_url.replace("postgresql://", "postgresql+psycopg://", 1)
+        return self.database_url
+
 
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-

@@ -32,6 +32,7 @@ backend/app/config.py
 backend/app/db.py
 backend/app/api/routes/health.py
 alembic/
+railway.toml
 ```
 
 本地运行参考：
@@ -52,6 +53,12 @@ uvicorn backend.app.main:app --reload
 GET /api/v1/health
 GET /api/v1/health/db
 ```
+
+Railway 部署说明：
+
+- `railway.toml` 已配置 `preDeployCommand = "alembic upgrade head"`，部署前会先跑数据库迁移。
+- `startCommand` 使用 `$PORT` 启动 Uvicorn。
+- Railway 注入的 `postgresql://...` 形式 `DATABASE_URL` 会在应用内自动转换为 SQLAlchemy/psycopg 可用的 `postgresql+psycopg://...`。
 
 ## 当前已确认方向
 

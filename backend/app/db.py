@@ -12,18 +12,18 @@ _session_factory: sessionmaker[Session] | None = None
 
 def engine_is_configured() -> bool:
     settings = get_settings()
-    return bool(settings.database_url)
+    return bool(settings.sqlalchemy_database_url)
 
 
 def get_engine() -> Engine:
     global _engine
 
     settings = get_settings()
-    if not settings.database_url:
+    if not settings.sqlalchemy_database_url:
         raise RuntimeError("DATABASE_URL is not configured.")
 
     if _engine is None:
-        _engine = create_engine(settings.database_url, pool_pre_ping=True)
+        _engine = create_engine(settings.sqlalchemy_database_url, pool_pre_ping=True)
 
     return _engine
 
@@ -56,4 +56,3 @@ def session_scope() -> Iterator[Session]:
         raise
     finally:
         session.close()
-

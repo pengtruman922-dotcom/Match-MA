@@ -19,7 +19,7 @@ target_metadata = None
 
 def get_database_url() -> str:
     settings = get_settings()
-    database_url = settings.database_url or config.get_main_option("sqlalchemy.url")
+    database_url = settings.sqlalchemy_database_url or config.get_main_option("sqlalchemy.url")
     if not database_url or database_url.startswith("postgresql+psycopg://user:password@"):
         raise RuntimeError("DATABASE_URL must be configured before running Alembic.")
     return database_url
@@ -53,4 +53,3 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
-
