@@ -242,3 +242,57 @@ Invoke-RestMethod `
   -Uri "https://match-ma-production.up.railway.app/api/v1/business-updates/$($businessUpdate.id)" `
   -Method Get
 ```
+
+---
+
+## 11. 人工创建 extracted action
+
+```powershell
+$json = @{
+  action_type = "seller_event"
+  target_entity_type = "seller_target"
+  target_entity_id = "26d78a25-961c-4763-8002-e8baedb8fa40"
+  proposed_changes_json = @{
+    event_summary = "周二下午已与项目方见面沟通，无锡某上市公司计划近期进场。"
+  }
+  raw_evidence_text = "周二下午已与项目方见面沟通。无锡某上市公司仍在联系中，计划近期进场。"
+  confidence = 1
+  metadata_json = @{
+    source = "manual_test"
+  }
+} | ConvertTo-Json -Depth 5
+
+$body = [System.Text.Encoding]::UTF8.GetBytes($json)
+
+$action = Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/business-updates/$($businessUpdate.id)/extracted-actions" `
+  -Method Post `
+  -ContentType "application/json; charset=utf-8" `
+  -Body $body
+
+$action
+```
+
+查询业务更新下的动作：
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/extracted-actions?business_update_id=$($businessUpdate.id)" `
+  -Method Get
+```
+
+更新复核状态：
+
+```powershell
+$json = @{
+  review_status = "accepted"
+} | ConvertTo-Json
+
+$body = [System.Text.Encoding]::UTF8.GetBytes($json)
+
+Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/extracted-actions/$($action.id)" `
+  -Method Patch `
+  -ContentType "application/json; charset=utf-8" `
+  -Body $body
+```

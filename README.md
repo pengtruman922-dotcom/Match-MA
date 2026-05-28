@@ -70,6 +70,10 @@ GET /api/v1/update-logs?entity_type=buyer_intent&entity_id={id}
 POST /api/v1/business-updates
 GET /api/v1/business-updates
 GET /api/v1/business-updates/{id}
+POST /api/v1/business-updates/{id}/extracted-actions
+GET /api/v1/extracted-actions
+GET /api/v1/extracted-actions/{id}
+PATCH /api/v1/extracted-actions/{id}
 ```
 
 Railway 部署说明：

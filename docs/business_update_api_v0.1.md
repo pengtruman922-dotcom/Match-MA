@@ -102,8 +102,7 @@ GET /api/v1/business-updates/{business_update_id}
 
 下一步可以在此基础上增加：
 
-1. `POST /api/v1/business-updates/{id}/extract-actions`：触发 LLM 拆分，生成 `extracted_action`。
+1. `POST /api/v1/business-updates/{id}/extracted-actions`：人工创建或后续由 LLM 生成 `extracted_action`。
 2. `GET /api/v1/extracted-actions?business_update_id={id}`：查看待复核动作。
 3. `POST /api/v1/extracted-actions/{id}/apply`：人工确认并写入业务表与 `action_application_log`。
 4. 支持截图/附件输入，接入 OCR 和附件解析。
-
