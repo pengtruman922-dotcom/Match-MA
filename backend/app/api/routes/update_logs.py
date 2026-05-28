@@ -29,7 +29,7 @@ class UpdateLogOut(BaseModel):
 
 @router.get("", response_model=list[UpdateLogOut])
 def list_update_logs(
-    entity_type: str = Query(pattern="^(seller_target|buyer_intent)$"),
+    entity_type: str = Query(pattern="^(seller_target|buyer_intent|buyer_party)$"),
     entity_id: UUID | None = None,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
@@ -71,4 +71,3 @@ def list_update_logs(
     ).mappings().all()
 
     return [dict(row) for row in rows]
-

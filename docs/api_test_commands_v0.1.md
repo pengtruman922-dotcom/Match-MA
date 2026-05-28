@@ -364,3 +364,64 @@ Invoke-RestMethod `
   -Uri "https://match-ma-production.up.railway.app/api/v1/update-logs?entity_type=seller_target&entity_id=26d78a25-961c-4763-8002-e8baedb8fa40" `
   -Method Get
 ```
+
+---
+
+## 13. 买家主体 CRUD
+
+新建买家主体：
+
+```powershell
+$json = @{
+  buyer_name = "浙江某国资平台"
+  legal_name = "浙江某国资平台有限公司"
+  buyer_type = "state_owned_platform"
+  listed_status = "unlisted"
+  region_province = "浙江省"
+  region_city = "杭州市"
+  main_business = "国资产业投资与并购整合"
+  profile_summary = "关注医药健康、新能源、新材料等方向。"
+} | ConvertTo-Json -Depth 5
+
+$body = [System.Text.Encoding]::UTF8.GetBytes($json)
+
+$buyerParty = Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/buyer-parties" `
+  -Method Post `
+  -ContentType "application/json; charset=utf-8" `
+  -Body $body
+
+$buyerParty
+```
+
+查询买家主体：
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/buyer-parties?q=国资" `
+  -Method Get
+```
+
+更新买家主体：
+
+```powershell
+$json = @{
+  profile_summary = "重点关注医药健康、新能源和高端装备并购机会。"
+} | ConvertTo-Json -Depth 5
+
+$body = [System.Text.Encoding]::UTF8.GetBytes($json)
+
+Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/buyer-parties/$($buyerParty.id)" `
+  -Method Patch `
+  -ContentType "application/json; charset=utf-8" `
+  -Body $body
+```
+
+查询买家主体更新记录：
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/update-logs?entity_type=buyer_party&entity_id=$($buyerParty.id)" `
+  -Method Get
+```

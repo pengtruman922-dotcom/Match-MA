@@ -60,6 +60,11 @@ GET /api/v1/seller-targets
 GET /api/v1/seller-targets/{id}
 PATCH /api/v1/seller-targets/{id}
 DELETE /api/v1/seller-targets/{id}
+POST /api/v1/buyer-parties
+GET /api/v1/buyer-parties
+GET /api/v1/buyer-parties/{id}
+PATCH /api/v1/buyer-parties/{id}
+DELETE /api/v1/buyer-parties/{id}
 POST /api/v1/buyer-intents
 GET /api/v1/buyer-intents
 GET /api/v1/buyer-intents/{id}
