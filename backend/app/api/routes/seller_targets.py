@@ -8,7 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
-from backend.app.api.routes.utils import diff_payload, write_action_log
+from backend.app.api.routes.utils import diff_payload, write_action_log, write_action_logs_for_diff
 from backend.app.db import get_db
 
 router = APIRouter(prefix="/seller-targets", tags=["seller-targets"])
@@ -219,15 +219,12 @@ def update_seller_target(
         },
     ).mappings().one()
 
-    for field_path, (old_value, new_value) in diff.items():
-        write_action_log(
-            db,
-            entity_type="seller_target",
-            entity_id=seller_target_id,
-            field_path=field_path,
-            old_value=old_value,
-            new_value=new_value,
-        )
+    write_action_logs_for_diff(
+        db,
+        entity_type="seller_target",
+        entity_id=seller_target_id,
+        diff=diff,
+    )
 
     db.commit()
     return dict(row)

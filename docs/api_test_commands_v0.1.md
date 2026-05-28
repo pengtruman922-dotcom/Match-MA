@@ -296,3 +296,71 @@ Invoke-RestMethod `
   -ContentType "application/json; charset=utf-8" `
   -Body $body
 ```
+
+---
+
+## 12. 应用 seller_fact_update 动作
+
+创建一个可应用到标的字段的动作：
+
+```powershell
+$json = @{
+  action_type = "seller_fact_update"
+  target_entity_type = "seller_target"
+  target_entity_id = "26d78a25-961c-4763-8002-e8baedb8fa40"
+  proposed_changes_json = @{
+    information_status = "normal"
+    business_summary = "通过 extracted_action apply 写入：项目方已沟通，无锡某上市公司计划近期进场。"
+  }
+  raw_evidence_text = "项目方已沟通，无锡某上市公司计划近期进场。"
+  confidence = 1
+} | ConvertTo-Json -Depth 5
+
+$body = [System.Text.Encoding]::UTF8.GetBytes($json)
+
+$factAction = Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/business-updates/$($businessUpdate.id)/extracted-actions" `
+  -Method Post `
+  -ContentType "application/json; charset=utf-8" `
+  -Body $body
+```
+
+先接受动作：
+
+```powershell
+$json = @{
+  review_status = "accepted"
+} | ConvertTo-Json
+
+$body = [System.Text.Encoding]::UTF8.GetBytes($json)
+
+Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/extracted-actions/$($factAction.id)" `
+  -Method Patch `
+  -ContentType "application/json; charset=utf-8" `
+  -Body $body
+```
+
+再应用动作：
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/extracted-actions/$($factAction.id)/apply" `
+  -Method Post
+```
+
+验证标的字段已更新：
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/seller-targets/26d78a25-961c-4763-8002-e8baedb8fa40" `
+  -Method Get
+```
+
+验证更新记录已写入：
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/update-logs?entity_type=seller_target&entity_id=26d78a25-961c-4763-8002-e8baedb8fa40" `
+  -Method Get
+```

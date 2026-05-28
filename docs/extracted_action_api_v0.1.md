@@ -81,7 +81,7 @@ PATCH /api/v1/extracted-actions/{extracted_action_id}
 }
 ```
 
-当前只更新复核状态，不执行应用动作。
+更新复核状态本身不执行应用动作。
 
 允许状态沿用数据库枚举：
 
@@ -97,10 +97,49 @@ ignored
 
 ## 6. 后续演进
 
+## 6. 应用动作
+
+```text
+POST /api/v1/extracted-actions/{extracted_action_id}/apply
+```
+
+当前只支持：
+
+```text
+action_type = seller_fact_update
+target_entity_type = seller_target
+```
+
+应用逻辑：
+
+1. 要求 `review_status` 为 `accepted` 或 `auto_accepted`。
+2. 读取 `proposed_changes_json`。
+3. 只允许更新标的的白名单字段。
+4. 更新 `seller_target`。
+5. 写入 `action_application_log`。
+6. 写入 `extracted_action.applied_at`。
+7. 刷新 `business_update.processing_status` 为 `applied` 或 `partially_applied`。
+
+响应示例：
+
+```json
+{
+  "status": "applied",
+  "extracted_action_id": "uuid",
+  "business_update_id": "uuid",
+  "entity_type": "seller_target",
+  "entity_id": "uuid",
+  "applied_fields": ["business_summary", "information_status"]
+}
+```
+
+---
+
+## 7. 后续演进
+
 下一步：
 
-1. 增加 `apply` 接口，把已接受动作应用到业务表。
-2. `seller_fact_update` 应更新 `seller_target` 字段并写 `action_application_log`。
-3. `buyer_intent_suggestion` 应只生成显眼 suggestion，不自动改买家意向。
+1. 支持 `seller_event` 生成事件时间线。
+2. 支持 `buyer_intent_suggestion` 只生成显眼 suggestion，不自动改买家意向。
+3. 支持 `buyer_seller_relation_update` 更新买家-标的关系。
 4. 后续接入 LLM，由 LLM 根据 `business_update.raw_text` 自动生成 `extracted_action`。
-

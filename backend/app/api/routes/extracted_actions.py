@@ -9,6 +9,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+from backend.app.api.routes.utils import diff_payload, write_action_logs_for_diff
 from backend.app.db import get_db
 
 router = APIRouter(tags=["extracted-actions"])
@@ -43,6 +44,15 @@ class ExtractedActionOut(BaseModel):
     applied_at: str | None
     metadata_json: dict[str, Any]
     created_at: str
+
+
+class ApplyActionOut(BaseModel):
+    status: str
+    extracted_action_id: UUID
+    business_update_id: UUID
+    entity_type: str
+    entity_id: UUID
+    applied_fields: list[str]
 
 
 @router.post(
@@ -204,6 +214,91 @@ def update_extracted_action_review(
     return dict(row)
 
 
+@router.post("/extracted-actions/{extracted_action_id}/apply", response_model=ApplyActionOut)
+def apply_extracted_action(extracted_action_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+    action = _get_extracted_action_or_404(db, extracted_action_id)
+
+    if action["action_type"] != "seller_fact_update" or action["target_entity_type"] != "seller_target":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only seller_fact_update actions targeting seller_target are supported now.",
+        )
+    if action["target_entity_id"] is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target_entity_id is required.")
+    if action["applied_at"] is not None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Action has already been applied.")
+    if action["review_status"] not in {"accepted", "auto_accepted"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Action must be accepted before apply.",
+        )
+
+    changes = _allowed_seller_target_changes(action["proposed_changes_json"])
+    if not changes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No supported changes to apply.")
+
+    seller_target_id = action["target_entity_id"]
+    original = _get_seller_target_snapshot_or_404(db, seller_target_id)
+    diff = diff_payload(original, changes)
+    if not diff:
+        _mark_action_applied(db, extracted_action_id)
+        _refresh_business_update_status(db, action["business_update_id"])
+        db.commit()
+        return {
+            "status": "noop",
+            "extracted_action_id": extracted_action_id,
+            "business_update_id": action["business_update_id"],
+            "entity_type": "seller_target",
+            "entity_id": seller_target_id,
+            "applied_fields": [],
+        }
+
+    set_clauses = [f"{field} = :{field}" for field in diff]
+    set_clauses.extend(["updated_at = now()", "updated_by = :updated_by"])
+
+    db.execute(
+        text(
+            f"""
+            update seller_target
+            set {', '.join(set_clauses)}
+            where id = :seller_target_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ),
+        {
+            **{field: changes[field] for field in diff},
+            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "seller_target_id": seller_target_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )
+
+    write_action_logs_for_diff(
+        db,
+        entity_type="seller_target",
+        entity_id=seller_target_id,
+        diff=diff,
+        source_type="extracted_action",
+        business_update_id=action["business_update_id"],
+        extracted_action_id=extracted_action_id,
+    )
+    _mark_action_applied(db, extracted_action_id)
+    _refresh_business_update_status(db, action["business_update_id"])
+    db.commit()
+
+    return {
+        "status": "applied",
+        "extracted_action_id": extracted_action_id,
+        "business_update_id": action["business_update_id"],
+        "entity_type": "seller_target",
+        "entity_id": seller_target_id,
+        "applied_fields": list(diff.keys()),
+    }
+
+
 def _ensure_business_update_exists(db: Session, business_update_id: UUID) -> None:
     exists = db.execute(
         text(
@@ -254,3 +349,109 @@ def _get_extracted_action_or_404(db: Session, extracted_action_id: UUID) -> dict
 
     return dict(row)
 
+
+def _get_seller_target_snapshot_or_404(db: Session, seller_target_id: UUID) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            """
+            select
+              target_name, industry_primary, industry_secondary,
+              headquarter_province, headquarter_city, listed_status,
+              current_revenue_yuan, current_net_profit_yuan, valuation_yuan,
+              asking_price_yuan, pe_ratio, is_for_sale, can_control, can_consolidate,
+              recommendation_status, information_status,
+              business_summary, transaction_summary, risk_summary
+            from seller_target
+            where id = :seller_target_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ),
+        {
+            "seller_target_id": seller_target_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Seller target not found.")
+    return dict(row)
+
+
+def _allowed_seller_target_changes(changes: dict[str, Any]) -> dict[str, Any]:
+    allowed_fields = {
+        "target_name",
+        "industry_primary",
+        "industry_secondary",
+        "headquarter_province",
+        "headquarter_city",
+        "listed_status",
+        "current_revenue_yuan",
+        "current_net_profit_yuan",
+        "valuation_yuan",
+        "asking_price_yuan",
+        "pe_ratio",
+        "is_for_sale",
+        "can_control",
+        "can_consolidate",
+        "recommendation_status",
+        "information_status",
+        "business_summary",
+        "transaction_summary",
+        "risk_summary",
+    }
+    return {key: value for key, value in changes.items() if key in allowed_fields}
+
+
+def _mark_action_applied(db: Session, extracted_action_id: UUID) -> None:
+    db.execute(
+        text(
+            """
+            update extracted_action
+            set applied_at = now()
+            where id = :extracted_action_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {
+            "extracted_action_id": extracted_action_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )
+
+
+def _refresh_business_update_status(db: Session, business_update_id: UUID) -> None:
+    pending_count = db.execute(
+        text(
+            """
+            select count(*)
+            from extracted_action
+            where business_update_id = :business_update_id
+              and applied_at is null
+              and review_status in ('pending_review', 'accepted', 'auto_accepted')
+            """
+        ),
+        {"business_update_id": business_update_id},
+    ).scalar_one()
+    new_status = "applied" if int(pending_count) == 0 else "partially_applied"
+    db.execute(
+        text(
+            """
+            update business_update
+            set processing_status = :processing_status
+            where id = :business_update_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {
+            "processing_status": new_status,
+            "business_update_id": business_update_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )

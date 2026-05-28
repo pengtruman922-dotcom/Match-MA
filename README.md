@@ -74,6 +74,7 @@ POST /api/v1/business-updates/{id}/extracted-actions
 GET /api/v1/extracted-actions
 GET /api/v1/extracted-actions/{id}
 PATCH /api/v1/extracted-actions/{id}
+POST /api/v1/extracted-actions/{id}/apply
 ```
 
 Railway 部署说明：
