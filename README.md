@@ -59,9 +59,13 @@ GET /api/v1/meta/seed-status
 POST /api/v1/seller-targets
 GET /api/v1/seller-targets
 GET /api/v1/seller-targets/{id}
+PATCH /api/v1/seller-targets/{id}
+DELETE /api/v1/seller-targets/{id}
 POST /api/v1/buyer-intents
 GET /api/v1/buyer-intents
 GET /api/v1/buyer-intents/{id}
+PATCH /api/v1/buyer-intents/{id}
+DELETE /api/v1/buyer-intents/{id}
 ```
 
 Railway 部署说明：

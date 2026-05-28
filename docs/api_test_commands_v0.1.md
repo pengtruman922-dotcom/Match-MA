@@ -89,3 +89,78 @@ $res = Invoke-WebRequest `
 
 这类测试数据后续需要通过更新/删除接口清理。当前一期最小 API 还没有删除接口，可以先保留，不影响验证读写链路。
 
+---
+
+## 5. 更新标的
+
+```powershell
+$json = @{
+  target_name = "杭州启元三号项目"
+  information_status = "normal"
+  business_summary = "医疗器械相关标的，利润约2500万，信息已人工确认。"
+} | ConvertTo-Json
+
+$body = [System.Text.Encoding]::UTF8.GetBytes($json)
+
+Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/seller-targets/$($sellerTarget2.id)" `
+  -Method Patch `
+  -ContentType "application/json; charset=utf-8" `
+  -Body $body
+```
+
+---
+
+## 6. 软删除标的
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/seller-targets/$($sellerTarget2.id)" `
+  -Method Delete
+```
+
+删除后列表不再返回该标的：
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/seller-targets?q=启元" `
+  -Method Get
+```
+
+---
+
+## 7. 更新买家意向
+
+```powershell
+$json = @{
+  status = "paused"
+  pause_reason = "买家阶段性暂停收购"
+  preference_summary = "后续如恢复收购，仍优先关注浙江医药健康标的。"
+} | ConvertTo-Json
+
+$body = [System.Text.Encoding]::UTF8.GetBytes($json)
+
+Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/buyer-intents/$($buyerIntent2.id)" `
+  -Method Patch `
+  -ContentType "application/json; charset=utf-8" `
+  -Body $body
+```
+
+---
+
+## 8. 软删除买家意向
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/buyer-intents/$($buyerIntent2.id)" `
+  -Method Delete
+```
+
+删除后列表不再返回该意向：
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/buyer-intents?q=医药" `
+  -Method Get
+```

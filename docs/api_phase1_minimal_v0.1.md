@@ -12,7 +12,8 @@
 
 1. `seller_target` 可以人工创建和查询。
 2. `buyer_intent` 可以人工创建和查询。
-3. Railway + PostgreSQL + Alembic + FastAPI 能支持真实业务表读写。
+3. `seller_target` 和 `buyer_intent` 可以通过 PATCH 维护，通过 DELETE 软删除测试数据。
+4. Railway + PostgreSQL + Alembic + FastAPI 能支持真实业务表读写。
 
 暂不实现：
 
@@ -163,13 +164,81 @@ GET /api/v1/buyer-intents/{buyer_intent_id}
 
 ---
 
+### 3.4 标的更新
+
+```text
+PATCH /api/v1/seller-targets/{seller_target_id}
+```
+
+示例：
+
+```json
+{
+  "target_name": "杭州启元三号项目",
+  "information_status": "normal",
+  "business_summary": "医疗器械相关标的，利润约2500万，信息已人工确认。"
+}
+```
+
+说明：
+
+- 只更新请求体里显式传入的字段。
+- 直接 API 更新会写入基础 `action_application_log`，用于后续详情页更新记录。
+
+### 3.5 标的软删除
+
+```text
+DELETE /api/v1/seller-targets/{seller_target_id}
+```
+
+说明：
+
+- 不物理删除。
+- 写入 `deleted_at / deleted_by`。
+- 列表和详情默认不返回软删除数据。
+
+---
+
+### 4.4 买家意向更新
+
+```text
+PATCH /api/v1/buyer-intents/{buyer_intent_id}
+```
+
+示例：
+
+```json
+{
+  "status": "paused",
+  "pause_reason": "买家阶段性暂停收购",
+  "preference_summary": "后续如恢复收购，仍优先关注浙江医药健康标的。"
+}
+```
+
+说明：
+
+- 只更新请求体里显式传入的字段。
+- 直接 API 更新会写入基础 `action_application_log`。
+
+### 4.5 买家意向软删除
+
+```text
+DELETE /api/v1/buyer-intents/{buyer_intent_id}
+```
+
+说明：
+
+- 不物理删除。
+- 写入 `deleted_at / deleted_by`。
+- 列表和详情默认不返回软删除数据。
+
+---
+
 ## 5. 下一步
 
 建议下一步继续：
 
 1. 增加 `buyer_party` 最小 API，或把新建买家意向扩展为“可选创建买家主体”。
-2. 增加 `PATCH` 更新 API。
-3. 增加统一错误码和字段枚举校验。
-4. 增加真实测试样例和 curl / PowerShell 验证脚本。
-5. 进入统一业务更新 API 设计。
-
+2. 增加统一错误码和字段枚举校验。
+3. 增加详情页更新记录 API，读取 `action_application_log`。
+4. 进入统一业务更新 API 设计。

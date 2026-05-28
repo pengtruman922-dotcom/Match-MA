@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+from backend.app.api.routes.utils import diff_payload, write_action_log
 from backend.app.db import get_db
 
 router = APIRouter(prefix="/seller-targets", tags=["seller-targets"])
@@ -59,6 +60,28 @@ class SellerTargetOut(BaseModel):
     risk_summary: str | None
     created_at: str
     updated_at: str
+
+
+class SellerTargetUpdate(BaseModel):
+    target_name: str | None = Field(default=None, min_length=1, max_length=300)
+    industry_primary: str | None = None
+    industry_secondary: str | None = None
+    headquarter_province: str | None = None
+    headquarter_city: str | None = None
+    listed_status: str | None = None
+    current_revenue_yuan: Decimal | None = None
+    current_net_profit_yuan: Decimal | None = None
+    valuation_yuan: Decimal | None = None
+    asking_price_yuan: Decimal | None = None
+    pe_ratio: Decimal | None = None
+    is_for_sale: str | None = None
+    can_control: str | None = None
+    can_consolidate: str | None = None
+    recommendation_status: str | None = None
+    information_status: str | None = None
+    business_summary: str | None = None
+    transaction_summary: str | None = None
+    risk_summary: str | None = None
 
 
 @router.post("", response_model=SellerTargetOut, status_code=status.HTTP_201_CREATED)
@@ -143,6 +166,111 @@ def list_seller_targets(
 
 @router.get("/{seller_target_id}", response_model=SellerTargetOut)
 def get_seller_target(seller_target_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+    return _get_seller_target_or_404(db, seller_target_id)
+
+
+@router.patch("/{seller_target_id}", response_model=SellerTargetOut)
+def update_seller_target(
+    seller_target_id: UUID,
+    payload: SellerTargetUpdate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    original = _get_seller_target_or_404(db, seller_target_id)
+    changes = payload.model_dump(exclude_unset=True)
+
+    if "target_name" in changes and changes["target_name"] is not None:
+        changes["target_name"] = changes["target_name"].strip()
+
+    if not changes:
+        return original
+
+    diff = diff_payload(original, changes)
+    if not diff:
+        return original
+
+    set_clauses = [f"{field} = :{field}" for field in changes]
+    set_clauses.extend(["updated_at = now()", "updated_by = :updated_by"])
+
+    row = db.execute(
+        text(
+            f"""
+            update seller_target
+            set {', '.join(set_clauses)}
+            where id = :seller_target_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            returning
+              id, target_name, target_type, recommendation_status, information_status,
+              industry_primary, industry_secondary, headquarter_province, headquarter_city,
+              listed_status, current_revenue_yuan, current_net_profit_yuan,
+              valuation_yuan, asking_price_yuan, pe_ratio,
+              is_for_sale, can_control, can_consolidate,
+              business_summary, transaction_summary, risk_summary,
+              created_at::text as created_at, updated_at::text as updated_at
+            """
+        ),
+        {
+            **changes,
+            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "seller_target_id": seller_target_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one()
+
+    for field_path, (old_value, new_value) in diff.items():
+        write_action_log(
+            db,
+            entity_type="seller_target",
+            entity_id=seller_target_id,
+            field_path=field_path,
+            old_value=old_value,
+            new_value=new_value,
+        )
+
+    db.commit()
+    return dict(row)
+
+
+@router.delete("/{seller_target_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_seller_target(seller_target_id: UUID, db: Session = Depends(get_db)) -> None:
+    _get_seller_target_or_404(db, seller_target_id)
+    db.execute(
+        text(
+            """
+            update seller_target
+            set deleted_at = now(),
+                deleted_by = :deleted_by,
+                updated_at = now(),
+                updated_by = :updated_by
+            where id = :seller_target_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ),
+        {
+            "deleted_by": DEFAULT_ADMIN_USER_ID,
+            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "seller_target_id": seller_target_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )
+    write_action_log(
+        db,
+        entity_type="seller_target",
+        entity_id=seller_target_id,
+        field_path="deleted_at",
+        old_value=None,
+        new_value="now()",
+    )
+    db.commit()
+    return None
+
+
+def _get_seller_target_or_404(db: Session, seller_target_id: UUID) -> dict[str, Any]:
     row = db.execute(
         text(
             """
@@ -200,4 +328,3 @@ def _seller_target_params(payload: SellerTargetCreate) -> dict[str, Any]:
         "created_by": DEFAULT_ADMIN_USER_ID,
         "updated_by": DEFAULT_ADMIN_USER_ID,
     }
-

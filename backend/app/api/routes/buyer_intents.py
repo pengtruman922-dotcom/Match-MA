@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+from backend.app.api.routes.utils import diff_payload, write_action_log
 from backend.app.db import get_db
 
 router = APIRouter(prefix="/buyer-intents", tags=["buyer-intents"])
@@ -62,6 +63,30 @@ class BuyerIntentOut(BaseModel):
     unknown_summary: str | None
     created_at: str
     updated_at: str
+
+
+class BuyerIntentUpdate(BaseModel):
+    intent_name: str | None = Field(default=None, min_length=1, max_length=300)
+    status: str | None = None
+    pause_reason: str | None = None
+    contact_name: str | None = None
+    raw_requirement_text: str | None = None
+    intent_summary: str | None = None
+    industry_primary: str | None = None
+    industry_secondary: str | None = None
+    region_scope_summary: str | None = None
+    min_revenue_yuan: Decimal | None = None
+    min_net_profit_yuan: Decimal | None = None
+    max_pe: Decimal | None = None
+    max_valuation_yuan: Decimal | None = None
+    requires_control: str | None = None
+    requires_consolidation: str | None = None
+    accepts_minority_investment: str | None = None
+    preferred_listed_status: str | None = None
+    transaction_type: str | None = None
+    negative_summary: str | None = None
+    preference_summary: str | None = None
+    unknown_summary: str | None = None
 
 
 @router.post("", response_model=BuyerIntentOut, status_code=status.HTTP_201_CREATED)
@@ -148,6 +173,111 @@ def list_buyer_intents(
 
 @router.get("/{buyer_intent_id}", response_model=BuyerIntentOut)
 def get_buyer_intent(buyer_intent_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+    return _get_buyer_intent_or_404(db, buyer_intent_id)
+
+
+@router.patch("/{buyer_intent_id}", response_model=BuyerIntentOut)
+def update_buyer_intent(
+    buyer_intent_id: UUID,
+    payload: BuyerIntentUpdate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    original = _get_buyer_intent_or_404(db, buyer_intent_id)
+    changes = payload.model_dump(exclude_unset=True)
+
+    if "intent_name" in changes and changes["intent_name"] is not None:
+        changes["intent_name"] = changes["intent_name"].strip()
+
+    if not changes:
+        return original
+
+    diff = diff_payload(original, changes)
+    if not diff:
+        return original
+
+    set_clauses = [f"{field} = :{field}" for field in changes]
+    set_clauses.extend(["updated_at = now()", "updated_by = :updated_by"])
+
+    row = db.execute(
+        text(
+            f"""
+            update buyer_intent
+            set {', '.join(set_clauses)}
+            where id = :buyer_intent_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            returning
+              id, buyer_party_id, intent_name, status, contact_name,
+              raw_requirement_text, intent_summary, industry_primary, industry_secondary,
+              region_scope_summary, min_revenue_yuan, min_net_profit_yuan, max_pe,
+              max_valuation_yuan, requires_control, requires_consolidation,
+              accepts_minority_investment, preferred_listed_status, transaction_type,
+              negative_summary, preference_summary, unknown_summary,
+              created_at::text as created_at, updated_at::text as updated_at
+            """
+        ),
+        {
+            **changes,
+            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "buyer_intent_id": buyer_intent_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one()
+
+    for field_path, (old_value, new_value) in diff.items():
+        write_action_log(
+            db,
+            entity_type="buyer_intent",
+            entity_id=buyer_intent_id,
+            field_path=field_path,
+            old_value=old_value,
+            new_value=new_value,
+        )
+
+    db.commit()
+    return dict(row)
+
+
+@router.delete("/{buyer_intent_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_buyer_intent(buyer_intent_id: UUID, db: Session = Depends(get_db)) -> None:
+    _get_buyer_intent_or_404(db, buyer_intent_id)
+    db.execute(
+        text(
+            """
+            update buyer_intent
+            set deleted_at = now(),
+                deleted_by = :deleted_by,
+                updated_at = now(),
+                updated_by = :updated_by
+            where id = :buyer_intent_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ),
+        {
+            "deleted_by": DEFAULT_ADMIN_USER_ID,
+            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "buyer_intent_id": buyer_intent_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )
+    write_action_log(
+        db,
+        entity_type="buyer_intent",
+        entity_id=buyer_intent_id,
+        field_path="deleted_at",
+        old_value=None,
+        new_value="now()",
+    )
+    db.commit()
+    return None
+
+
+def _get_buyer_intent_or_404(db: Session, buyer_intent_id: UUID) -> dict[str, Any]:
     row = db.execute(
         text(
             """
@@ -207,4 +337,3 @@ def _buyer_intent_params(payload: BuyerIntentCreate) -> dict[str, Any]:
         "created_by": DEFAULT_ADMIN_USER_ID,
         "updated_by": DEFAULT_ADMIN_USER_ID,
     }
-
