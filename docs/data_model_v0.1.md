@@ -523,7 +523,7 @@ information_status
 | --- | --- |
 | `normal` | 正常 |
 | `insufficient` | 信息不足 |
-| `pending_review` | 待确认 |
+| `pending_review` | 待复核 |
 | `parsing` | 附件解析中 |
 | `researching` | 调研中 |
 | `parse_failed` | 解析失败 |
@@ -532,7 +532,7 @@ information_status
 
 ```text
 可推荐 + 信息不足
-可推荐 + 待确认
+可推荐 + 待复核
 暂不推荐 + 信息完整
 可推荐 + 调研中
 ```
@@ -1971,7 +1971,7 @@ seller_fact_update
 seller_event
 buyer_seller_relation_update
 buyer_intent_target_exclusion
-buyer_intent_suggestion
+buyer_intent_update
 buyer_level_blacklist_suggestion
 internal_note
 unresolved_item
@@ -2350,4 +2350,324 @@ alias 保留
 2. 样本评测集：选取真实标的和买家意向，验证 LLM 字段抽取、字典归一化和候选池过滤。
 3. 核心 API 草案：标的新建/更新、买家意向新建/更新、统一业务更新、推荐会话。
 4. 前端信息架构：工作台、标的列表、买家意向列表、智能推荐工作台、统一业务更新确认页。
-5. Trace / Dry Run：为开发测试人员记录 prompt、结构化输出、token、候选池、最终推荐理由。
+5. Debug Mode / Trace：为管理员和开发测试人员记录 prompt、结构化输出、token、候选池、最终推荐理由；一期不做 Dry Run。
+
+---
+
+## 24. AI 后端基础设施补充 v0.1
+
+日期：2026-05-28
+状态：已确认设计，详见 `docs/ai_task_architecture_v0.1.md`
+
+### 24.1 新增核心表
+
+为支持 LLM、OCR、embedding、联网调研、推荐 rerank 和 Debug Mode，后续 schema 需要新增：
+
+```text
+background_job
+ai_trace
+model_provider_config
+model_node_config
+prompt_template
+```
+
+### 24.2 background_job
+
+`background_job` 是后台任务队列和任务台账。
+
+一期采用 PostgreSQL 表做队列，不立即引入 Redis / RabbitMQ。
+
+确认原因：
+
+- 系统已强依赖 PostgreSQL，减少基础设施复杂度。
+- 一期并发规模 PostgreSQL + Worker 可以覆盖。
+- 业务记录和任务记录可以保持事务一致。
+- 后续如引入 Redis / RabbitMQ，`background_job` 仍作为任务 source of truth 保留。
+
+关键字段：
+
+```text
+id
+team_id
+workspace_id
+job_type
+status
+priority
+queue_name
+entity_type
+entity_id
+idempotency_key
+payload_json
+result_json
+error_code
+error_message
+error_detail_json
+attempt_count
+max_attempts
+run_after
+locked_by
+locked_at
+started_at
+finished_at
+parent_job_id
+correlation_id
+created_by
+created_at
+updated_at
+metadata_json
+```
+
+任务状态：
+
+```text
+queued
+running
+succeeded
+failed
+cancelled
+retry_waiting
+```
+
+一期 job_type：
+
+```text
+business_update_extract_actions
+buyer_intent_parse
+seller_profile_extract
+seller_search_doc_rebuild
+buyer_intent_search_doc_rebuild
+embedding_generate
+attachment_parse
+ocr_parse
+research_seller_target
+recommendation_candidate_generate
+recommendation_rerank
+recommendation_report_generate
+```
+
+### 24.3 ai_trace
+
+`ai_trace` 支撑管理员 Debug Mode。
+
+它覆盖：
+
+```text
+llm
+embedding
+ocr
+parser
+retrieval
+rerank
+research
+system
+```
+
+关键字段：
+
+```text
+id
+team_id
+workspace_id
+trace_type
+node_name
+job_id
+correlation_id
+entity_type
+entity_id
+provider_config_id
+node_config_id
+prompt_template_id
+provider_name
+model_name
+prompt_version
+status
+input_json
+prompt_messages_json
+raw_output_text
+parsed_output_json
+output_schema_json
+schema_validation_json
+retrieval_input_json
+retrieval_output_json
+tool_calls_json
+error_code
+error_message
+error_detail_json
+latency_ms
+prompt_tokens
+completion_tokens
+total_tokens
+cost_json
+started_at
+finished_at
+created_by
+metadata_json
+```
+
+Trace 状态：
+
+```text
+started
+succeeded
+failed
+skipped
+```
+
+### 24.4 model_provider_config
+
+供应商配置表。
+
+API Key 不入库，只保存环境变量引用：
+
+```text
+api_key_secret_ref = ALIYUN_API_KEY
+```
+
+关键字段：
+
+```text
+provider_name
+provider_type
+base_url
+api_key_secret_ref
+auth_type
+extra_headers_json
+extra_config_json
+is_active
+is_default
+```
+
+供应商类型：
+
+```text
+openai_compatible
+dashscope
+deepseek
+azure_openai
+ocr
+embedding
+custom
+```
+
+### 24.5 model_node_config
+
+模型节点配置表。
+
+不同业务节点可以使用不同模型。
+
+一期 node_name：
+
+```text
+business_update_extractor
+buyer_intent_parser
+seller_profile_extractor
+recommendation_query_parser
+recommendation_reranker
+recommendation_answer_writer
+recommendation_report_writer
+embedding_seller_doc
+embedding_buyer_intent
+ocr_attachment_parser
+research_seller_target
+```
+
+关键字段：
+
+```text
+node_name
+node_type
+provider_config_id
+model_name
+temperature
+top_p
+max_tokens
+timeout_seconds
+response_format
+output_mode
+embedding_dimension
+is_active
+is_default
+metadata_json
+```
+
+### 24.6 prompt_template
+
+Prompt 版本管理表。
+
+关键字段：
+
+```text
+node_name
+version
+name
+description
+system_prompt
+user_prompt_template
+output_schema_json
+few_shot_examples_json
+template_engine
+variables_json
+is_active
+is_default
+```
+
+Prompt 必须版本化，用于后续评测、回溯和优化。
+
+### 24.7 extracted_action.action_type 调整
+
+旧 action type 已废弃，不再使用：`buyer_intent_suggestion`。
+
+新增并作为最新口径使用：`buyer_intent_update`。
+
+最新 action_type 清单：
+
+```text
+seller_fact_update
+seller_event
+buyer_seller_relation_update
+buyer_intent_target_exclusion
+buyer_intent_update
+buyer_level_blacklist_suggestion
+internal_note
+unresolved_item
+```
+
+原因：买家意向变化不再只生成 suggestion，而是自动应用更新，并通过日志、复核、编辑、回退保证安全。
+
+### 24.8 review_status 新语义
+
+短期仍保留字段名：
+
+```text
+review_status
+```
+
+沿用现有值：
+
+```text
+pending_review
+auto_accepted
+accepted
+rejected
+ignored
+```
+
+新语义：
+
+| 值 | 新语义 |
+| --- | --- |
+| `pending_review` | 待复核，可能尚未应用或无法自动应用 |
+| `auto_accepted` | 系统已自动应用，待用户复核 |
+| `accepted` | 用户已复核并接受 |
+| `rejected` | 用户认为错误，待回退或已回退 |
+| `ignored` | 用户忽略，无需处理 |
+
+### 24.9 Debug Mode
+
+一期做 Debug Mode，不做 Dry Run。
+
+```text
+Debug Mode = 展示 AI / 检索 / 任务执行细节
+```
+
+Debug Mode 不改变业务写入逻辑，只控制管理员是否可以看到 Trace 详情。Dry Run 不进入一期核心设计。

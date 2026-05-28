@@ -1,8 +1,9 @@
 # Match-MA Extracted Action API v0.1
 
 日期：2026-05-28
+状态：过渡版 API 文档，已按最新产品口径修订
 
-范围：实现 `extracted_action` 的非 AI 版本，用于先跑通“业务更新 -> 动作队列 -> 人工复核状态”的数据链路。
+> 口径说明：早期文档中的 `buyer_intent_suggestion` / `buyer_intent_update_suggestion` 已废弃。最新口径为 `buyer_intent_update`。业务更新流程从“确认后应用”调整为“明确动作先自动应用，再复核 / 编辑 / 回退”。当前已部署后端仍处于最小可验证阶段，数据库迁移完成后以后续 API 文档为准。
 
 ---
 
@@ -10,9 +11,13 @@
 
 `business_update` 保存用户原始输入。
 
-`extracted_action` 表示从原始输入中拆出来的一条待处理动作。
+`extracted_action` 表示从原始输入中拆出的业务动作。
 
-一期 v0.1 先允许人工创建动作，后续再由 LLM 自动生成。
+一期后续目标：
+
+```text
+business_update -> background_job -> LLM/OCR/解析 -> extracted_action -> 自动应用 -> action_application_log -> 待复核
+```
 
 ---
 
@@ -33,22 +38,38 @@ POST /api/v1/business-updates/{business_update_id}/extracted-actions
     "event_summary": "周二下午已与项目方见面沟通，无锡某上市公司计划近期进场。"
   },
   "raw_evidence_text": "周二下午已与项目方见面沟通。无锡某上市公司仍在联系中，计划近期进场。",
-  "confidence": 1,
+  "confidence": 0.9,
   "metadata_json": {
     "source": "manual_test"
   }
 }
 ```
 
-创建后：
+---
 
-- `review_status` 默认 `pending_review`。
-- 如果业务更新状态是 `pending / processing`，会更新为 `parsed`。
-- 不会自动改标的、买家意向或关系表。
+## 3. action_type 最新清单
+
+```text
+seller_fact_update
+seller_event
+buyer_seller_relation_update
+buyer_intent_target_exclusion
+buyer_intent_update
+buyer_level_blacklist_suggestion
+internal_note
+unresolved_item
+```
+
+废弃：
+
+```text
+buyer_intent_suggestion
+buyer_intent_update_suggestion
+```
 
 ---
 
-## 3. 查询动作列表
+## 4. 查询动作列表
 
 ```text
 GET /api/v1/extracted-actions
@@ -59,7 +80,7 @@ GET /api/v1/extracted-actions?target_entity_type=seller_target&target_entity_id=
 
 ---
 
-## 4. 查询动作详情
+## 5. 查询动作详情
 
 ```text
 GET /api/v1/extracted-actions/{extracted_action_id}
@@ -67,7 +88,7 @@ GET /api/v1/extracted-actions/{extracted_action_id}
 
 ---
 
-## 5. 更新复核状态
+## 6. 复核状态
 
 ```text
 PATCH /api/v1/extracted-actions/{extracted_action_id}
@@ -81,65 +102,59 @@ PATCH /api/v1/extracted-actions/{extracted_action_id}
 }
 ```
 
-更新复核状态本身不执行应用动作。
+当前沿用字段名 `review_status`，但语义已调整为自动应用后的复核状态。
 
-允许状态沿用数据库枚举：
-
-```text
-pending_review
-accepted
-rejected
-auto_accepted
-ignored
-```
+| 值 | 新语义 |
+| --- | --- |
+| `pending_review` | 待复核，可能尚未应用或无法自动应用 |
+| `auto_accepted` | 系统已自动应用，待用户复核 |
+| `accepted` | 用户已复核并接受 |
+| `rejected` | 用户认为错误，待回退或已回退 |
+| `ignored` | 用户忽略 |
 
 ---
 
-## 6. 后续演进
-
-## 6. 应用动作
+## 7. 应用动作
 
 ```text
 POST /api/v1/extracted-actions/{extracted_action_id}/apply
 ```
 
-当前只支持：
+当前已部署最小版只支持：
 
 ```text
 action_type = seller_fact_update
 target_entity_type = seller_target
 ```
 
-应用逻辑：
+后续目标：
 
-1. 要求 `review_status` 为 `accepted` 或 `auto_accepted`。
-2. 读取 `proposed_changes_json`。
-3. 只允许更新标的的白名单字段。
-4. 更新 `seller_target`。
-5. 写入 `action_application_log`。
-6. 写入 `extracted_action.applied_at`。
-7. 刷新 `business_update.processing_status` 为 `applied` 或 `partially_applied`。
-
-响应示例：
-
-```json
-{
-  "status": "applied",
-  "extracted_action_id": "uuid",
-  "business_update_id": "uuid",
-  "entity_type": "seller_target",
-  "entity_id": "uuid",
-  "applied_fields": ["business_summary", "information_status"]
-}
-```
+- `buyer_intent_update` 自动更新 `buyer_intent`。
+- `buyer_seller_relation_update` 更新 `buyer_seller_relation` / `relation_event`。
+- 所有应用动作写入 `action_application_log`。
+- 自动应用后进入待复核。
+- 支持编辑和回退。
 
 ---
 
-## 7. 后续演进
+## 8. 与 Debug Mode 的关系
 
-下一步：
+后续 LLM 自动拆解时，每次解析应写入：
 
-1. 支持 `seller_event` 生成事件时间线。
-2. 支持 `buyer_intent_suggestion` 只生成显眼 suggestion，不自动改买家意向。
-3. 支持 `buyer_seller_relation_update` 更新买家-标的关系。
-4. 后续接入 LLM，由 LLM 根据 `business_update.raw_text` 自动生成 `extracted_action`。
+```text
+background_job
+ai_trace
+extracted_action
+action_application_log
+```
+
+管理员开启 Debug Mode 后，可以查看：
+
+- job 状态。
+- prompt。
+- 模型配置。
+- 原始输出。
+- parsed JSON。
+- schema 校验错误。
+- token / 耗时 / 费用。
+- 应用日志和错误信息。

@@ -1131,7 +1131,7 @@ create table extracted_action (
   workspace_id uuid not null references workspace(id),
   business_update_id uuid not null references business_update(id),
 
-  action_type text not null check (action_type in ('seller_fact_update', 'seller_event', 'buyer_seller_relation_update', 'buyer_intent_target_exclusion', 'buyer_intent_suggestion', 'buyer_level_blacklist_suggestion', 'internal_note', 'unresolved_item')),
+  action_type text not null check (action_type in ('seller_fact_update', 'seller_event', 'buyer_seller_relation_update', 'buyer_intent_target_exclusion', 'buyer_intent_update', 'buyer_level_blacklist_suggestion', 'internal_note', 'unresolved_item')),
   target_entity_type text,
   target_entity_id uuid,
   proposed_changes_json jsonb not null default '{}'::jsonb,
