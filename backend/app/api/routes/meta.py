@@ -43,6 +43,131 @@ def seed_status(db: Session = Depends(get_db)) -> dict[str, Any]:
     }
 
 
+@router.get("/ai-infra-status")
+def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
+    required_tables = [
+        "model_provider_config",
+        "model_node_config",
+        "prompt_template",
+        "background_job",
+        "ai_trace",
+    ]
+    table_checks = {table: _table_exists(db, table) for table in required_tables}
+
+    provider_counts = _count_by_query(
+        db,
+        """
+        select count(*)
+        from model_provider_config
+        where is_active = true
+        """,
+        enabled=table_checks["model_provider_config"],
+    )
+    node_counts = _count_by_query(
+        db,
+        """
+        select count(*)
+        from model_node_config
+        where is_active = true
+        """,
+        enabled=table_checks["model_node_config"],
+    )
+    prompt_counts = _count_by_query(
+        db,
+        """
+        select count(*)
+        from prompt_template
+        where is_active = true
+        """,
+        enabled=table_checks["prompt_template"],
+    )
+
+    default_provider = _row_exists(
+        db,
+        """
+        select exists(
+          select 1
+          from model_provider_config
+          where provider_name = 'aliyun_dashscope'
+            and api_key_secret_ref = 'ALIYUN_API_KEY'
+            and is_active = true
+        )
+        """,
+        enabled=table_checks["model_provider_config"],
+    )
+    default_llm_nodes = _count_by_query(
+        db,
+        """
+        select count(*)
+        from model_node_config
+        where model_name = 'qwen3.6-flash'
+          and is_default = true
+          and is_active = true
+        """,
+        enabled=table_checks["model_node_config"],
+    )
+    default_embedding_nodes = _count_by_query(
+        db,
+        """
+        select count(*)
+        from model_node_config
+        where model_name = 'text-embedding-v4'
+          and embedding_dimension = 1024
+          and is_default = true
+          and is_active = true
+        """,
+        enabled=table_checks["model_node_config"],
+    )
+    default_prompts = _count_by_query(
+        db,
+        """
+        select count(*)
+        from prompt_template
+        where node_name in ('business_update_extractor', 'buyer_intent_parser')
+          and version = 'v0.1.0'
+          and is_default = true
+          and is_active = true
+        """,
+        enabled=table_checks["prompt_template"],
+    )
+
+    buyer_intent_update_allowed = _action_type_allowed(db, "buyer_intent_update")
+    buyer_intent_suggestion_allowed = _action_type_allowed(db, "buyer_intent_suggestion")
+
+    checks = {
+        "tables": table_checks,
+        "default_provider": default_provider,
+        "default_llm_nodes": default_llm_nodes >= 4,
+        "default_embedding_nodes": default_embedding_nodes >= 2,
+        "default_prompts": default_prompts >= 2,
+        "buyer_intent_update_allowed": buyer_intent_update_allowed,
+        "buyer_intent_suggestion_removed": not buyer_intent_suggestion_allowed,
+    }
+
+    ok = (
+        all(table_checks.values())
+        and default_provider
+        and default_llm_nodes >= 4
+        and default_embedding_nodes >= 2
+        and default_prompts >= 2
+        and buyer_intent_update_allowed
+        and not buyer_intent_suggestion_allowed
+    )
+
+    return {
+        "status": "ok" if ok else "degraded",
+        "checks": checks,
+        "counts": {
+            "active_providers": provider_counts,
+            "active_nodes": node_counts,
+            "active_prompts": prompt_counts,
+            "default_llm_nodes": default_llm_nodes,
+            "default_embedding_nodes": default_embedding_nodes,
+            "default_prompts": default_prompts,
+        },
+    }
+
+
 def _exists(db: Session, table_name: str, entity_id: str) -> bool:
     if table_name not in {"team", "workspace", "app_user"}:
         raise ValueError(f"Unsupported table for seed check: {table_name}")
@@ -67,3 +192,52 @@ def _count_dictionary(db: Session, domain: str) -> int:
         {"domain": domain},
     )
     return int(result.scalar_one())
+
+
+def _table_exists(db: Session, table_name: str) -> bool:
+    allowed_tables = {
+        "model_provider_config",
+        "model_node_config",
+        "prompt_template",
+        "background_job",
+        "ai_trace",
+    }
+    if table_name not in allowed_tables:
+        raise ValueError(f"Unsupported table for AI infra check: {table_name}")
+
+    result = db.execute(
+        text("select to_regclass(:table_name)"),
+        {"table_name": f"public.{table_name}"},
+    )
+    return result.scalar_one() is not None
+
+
+def _count_by_query(db: Session, query: str, *, enabled: bool) -> int:
+    if not enabled:
+        return 0
+    return int(db.execute(text(query)).scalar_one())
+
+
+def _row_exists(db: Session, query: str, *, enabled: bool) -> bool:
+    if not enabled:
+        return False
+    return bool(db.execute(text(query)).scalar_one())
+
+
+def _action_type_allowed(db: Session, action_type: str) -> bool:
+    result = db.execute(
+        text(
+            """
+            select exists(
+              select 1
+              from pg_constraint c
+              join pg_class t on t.oid = c.conrelid
+              where t.relname = 'extracted_action'
+                and c.contype = 'c'
+                and pg_get_constraintdef(c.oid) like :pattern
+            )
+            """
+        ),
+        {"pattern": f"%{action_type}%"},
+    )
+    return bool(result.scalar_one())
