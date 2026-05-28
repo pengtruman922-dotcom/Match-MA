@@ -15,14 +15,14 @@ def run_once(*, queue_name: str, worker_id: str) -> bool:
         return False
 
     try:
-        result = execute_job(job)
+        with session_scope() as db:
+            result = execute_job(db, job)
+            mark_job_succeeded(db, job_id=job.id, result_json=result)
     except Exception as exc:  # pragma: no cover - defensive worker boundary
         with session_scope() as db:
             mark_job_failed(db, job_id=job.id, error_message=str(exc))
         raise
 
-    with session_scope() as db:
-        mark_job_succeeded(db, job_id=job.id, result_json=result)
     return True
 
 
@@ -30,7 +30,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Match-MA background worker")
     parser.add_argument("--queue", default="default", help="Queue name to consume")
     parser.add_argument("--once", action="store_true", help="Run one polling iteration then exit")
-    parser.add_argument("--sleep", type=float, default=2.0, help="Sleep seconds when no job is found")
+    parser.add_argument(
+        "--sleep",
+        type=float,
+        default=2.0,
+        help="Sleep seconds when no job is found",
+    )
     parser.add_argument("--worker-id", default=f"worker-{socket.gethostname()}")
     args = parser.parse_args()
 

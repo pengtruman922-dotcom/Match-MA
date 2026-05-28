@@ -1,7 +1,7 @@
 ﻿# Match-MA Background Job API and Worker v0.1
 
 日期：2026-05-28
-状态：已实现第一版骨架
+状态：已实现第一版 Worker + business_update 占位处理器
 
 ---
 
@@ -16,7 +16,7 @@ Worker 从 PostgreSQL 领取 job
 Worker 标记 succeeded / failed / retry_waiting
 ```
 
-本版不接真实 LLM / OCR / embedding，只证明队列和 Worker 机制可运行。
+本版不接真实 LLM / OCR / embedding，先证明队列、Worker、业务更新处理链路和 `ai_trace` 写入可运行。
 
 ---
 
@@ -85,7 +85,7 @@ cancelled
 GET /api/v1/background-jobs/{job_id}/traces
 ```
 
-当前可查 `ai_trace`，但本版 Worker 尚未生成真实 trace。
+当前可查 `ai_trace`。`business_update_extract_actions` 已会生成一条占位 trace，用于验证 Debug Mode 的数据链路。
 
 ---
 
@@ -140,23 +140,42 @@ python -m backend.app.worker --queue llm --sleep 2
 
 1. 从 `background_job` 中用 `for update skip locked` 领取一个 job。
 2. 标记为 `running`。
-3. 调用占位 handler。
+3. 调用对应 handler。
 4. 标记为 `succeeded`。
+
+### 4.3 business_update_extract_actions 占位处理器
+
+当前已实现第一个业务 handler：
+
+```text
+business_update_extract_actions
+```
+
+它暂不调用真实 LLM，行为是：
+
+1. 读取 `business_update` 原始输入和绑定对象。
+2. 写入一条 `ai_trace`，`node_name = business_update_extractor`，`trace_type = parser`。
+3. `parsed_output_json.actions = []`，明确标记 `extraction_status = placeholder`。
+4. 将 `business_update.processing_status` 更新为 `parsed`。
+5. 不创建 `extracted_action`，避免在真实抽取上线前产生误导性动作。
 
 当前 result_json 类似：
 
 ```json
 {
-  "handled": false,
+  "handled": true,
   "job_type": "business_update_extract_actions",
-  "message": "No real job handler is implemented yet."
+  "business_update_id": "uuid",
+  "actions_created": 0,
+  "trace_created": true,
+  "message": "Placeholder handler completed; real LLM extraction is not implemented yet."
 }
 ```
 
 后续会把不同 job_type 路由到真实 handler，例如：
 
 ```text
-business_update_extract_actions -> LLM extractor
+business_update_extract_actions -> real LLM extractor
 buyer_intent_parse -> LLM parser
 embedding_generate -> embedding service
 ```
@@ -165,7 +184,7 @@ embedding_generate -> embedding service
 
 ## 5. Railway Worker 服务
 
-当前代码已经具备 Worker 启动命令，但是否在 Railway 新增 Worker Service 可以等真实 handler 接入前后再决定。
+当前代码已经具备 Worker 启动命令。由于 `business_update_extract_actions` 已能写入占位 trace，可以在 Railway 新增 Worker Service 来验证从 API 到后台任务再到 Debug Trace 的完整链路。
 
 建议后续 Worker Service start command：
 

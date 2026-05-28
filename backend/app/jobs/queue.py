@@ -16,6 +16,9 @@ class JobClaim:
     id: UUID
     job_type: str
     queue_name: str
+    entity_type: str | None
+    entity_id: UUID | None
+    correlation_id: UUID | None
     payload_json: dict[str, Any]
     attempt_count: int
     max_attempts: int
@@ -58,7 +61,9 @@ def claim_next_job(db: Session, *, worker_id: str, queue_name: str = "default") 
                 attempt_count = attempt_count + 1,
                 updated_at = now()
             where id = :job_id
-            returning id, job_type, queue_name, payload_json, attempt_count, max_attempts
+            returning
+              id, job_type, queue_name, entity_type, entity_id, correlation_id,
+              payload_json, attempt_count, max_attempts
             """
         ),
         {"worker_id": worker_id, "job_id": row["id"]},
@@ -67,7 +72,12 @@ def claim_next_job(db: Session, *, worker_id: str, queue_name: str = "default") 
     return JobClaim(**dict(claimed))
 
 
-def mark_job_succeeded(db: Session, *, job_id: UUID, result_json: dict[str, Any] | None = None) -> None:
+def mark_job_succeeded(
+    db: Session,
+    *,
+    job_id: UUID,
+    result_json: dict[str, Any] | None = None,
+) -> None:
     db.execute(
         text(
             """
