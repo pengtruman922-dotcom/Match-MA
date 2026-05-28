@@ -192,3 +192,53 @@ Invoke-RestMethod `
   -Uri "https://match-ma-production.up.railway.app/api/v1/update-logs?entity_type=seller_target&limit=20" `
   -Method Get
 ```
+
+---
+
+## 10. 新建统一业务更新
+
+```powershell
+$json = @{
+  raw_text = "上海启元项目：周二下午已与项目方见面沟通。无锡某上市公司仍在联系中，计划近期进场。下周继续催促协议签署，并确认具体进场时间。"
+  input_type = "text"
+  bound_seller_target_ids = @("26d78a25-961c-4763-8002-e8baedb8fa40")
+  bound_buyer_intent_ids = @("64c9995b-6d1d-42c1-9f95-e8792cf0131a")
+  metadata_json = @{
+    source = "manual_test"
+  }
+} | ConvertTo-Json -Depth 5
+
+$body = [System.Text.Encoding]::UTF8.GetBytes($json)
+
+$businessUpdate = Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/business-updates" `
+  -Method Post `
+  -ContentType "application/json; charset=utf-8" `
+  -Body $body
+
+$businessUpdate
+```
+
+查询业务更新列表：
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/business-updates" `
+  -Method Get
+```
+
+按标的查询业务更新：
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/business-updates?seller_target_id=26d78a25-961c-4763-8002-e8baedb8fa40" `
+  -Method Get
+```
+
+查询业务更新详情：
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/business-updates/$($businessUpdate.id)" `
+  -Method Get
+```
