@@ -131,6 +131,45 @@ def get_buyer_party(buyer_party_id: UUID, db: Session = Depends(get_db)) -> dict
     return _get_buyer_party_or_404(db, buyer_party_id)
 
 
+@router.get("/{buyer_party_id}/intents")
+def list_buyer_party_intents(
+    buyer_party_id: UUID,
+    db: Session = Depends(get_db),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
+    _get_buyer_party_or_404(db, buyer_party_id)
+    rows = db.execute(
+        text(
+            """
+            select
+              id, buyer_party_id, intent_name, status, contact_name,
+              raw_requirement_text, intent_summary, industry_primary, industry_secondary,
+              region_scope_summary, min_revenue_yuan, min_net_profit_yuan, max_pe,
+              max_valuation_yuan, requires_control, requires_consolidation,
+              accepts_minority_investment, preferred_listed_status, transaction_type,
+              negative_summary, preference_summary, unknown_summary,
+              created_at::text as created_at, updated_at::text as updated_at
+            from buyer_intent
+            where buyer_party_id = :buyer_party_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            order by updated_at desc
+            limit :limit offset :offset
+            """
+        ),
+        {
+            "buyer_party_id": buyer_party_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "limit": limit,
+            "offset": offset,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
 @router.patch("/{buyer_party_id}", response_model=BuyerPartyOut)
 def update_buyer_party(
     buyer_party_id: UUID,
@@ -276,4 +315,3 @@ def _get_buyer_party_or_404(db: Session, buyer_party_id: UUID) -> dict[str, Any]
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Buyer party not found.")
 
     return dict(row)
-

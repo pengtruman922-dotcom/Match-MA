@@ -84,7 +84,26 @@ PATCH /api/v1/buyer-parties/{buyer_party_id}
 
 ---
 
-## 6. 软删除买家主体
+## 6. 查询买家主体下的意向
+
+```text
+GET /api/v1/buyer-parties/{buyer_party_id}/intents
+```
+
+等价于：
+
+```text
+GET /api/v1/buyer-intents?buyer_party_id={buyer_party_id}
+```
+
+用途：
+
+- 支撑买家详情页的“意向”tab。
+- 展示一个买家公司主体下的一个或多个收购意向。
+
+---
+
+## 7. 软删除买家主体
 
 ```text
 DELETE /api/v1/buyer-parties/{buyer_party_id}
@@ -98,7 +117,7 @@ DELETE /api/v1/buyer-parties/{buyer_party_id}
 
 ---
 
-## 7. 后续
+## 8. 后续
 
 下一步可以：
 
@@ -106,4 +125,3 @@ DELETE /api/v1/buyer-parties/{buyer_party_id}
 2. 在买家详情页展示其全部 `buyer_intent`。
 3. 做买家主体去重。
 4. 做买家主体更新记录 tab。
-

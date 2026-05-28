@@ -149,12 +149,14 @@ POST /api/v1/buyer-intents
 ```text
 GET /api/v1/buyer-intents?limit=50&offset=0
 GET /api/v1/buyer-intents?q=医药
+GET /api/v1/buyer-intents?buyer_party_id={buyer_party_id}
 ```
 
 当前支持：
 
 - 按更新时间倒序。
 - 简单关键词搜索 `intent_name / raw_requirement_text`。
+- 可按 `buyer_party_id` 查询某个买家主体下的全部意向。
 
 ### 4.3 买家意向详情
 

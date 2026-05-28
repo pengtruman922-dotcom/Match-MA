@@ -136,6 +136,7 @@ def list_buyer_intents(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     q: str | None = Query(default=None, max_length=200),
+    buyer_party_id: UUID | None = None,
 ) -> list[dict[str, Any]]:
     where = ["team_id = :team_id", "workspace_id = :workspace_id", "deleted_at is null"]
     params: dict[str, Any] = {
@@ -148,6 +149,9 @@ def list_buyer_intents(
     if q:
         where.append("(intent_name ilike :q or raw_requirement_text ilike :q)")
         params["q"] = f"%{q}%"
+    if buyer_party_id:
+        where.append("buyer_party_id = :buyer_party_id")
+        params["buyer_party_id"] = buyer_party_id
 
     rows = db.execute(
         text(

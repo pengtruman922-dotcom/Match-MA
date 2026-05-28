@@ -63,10 +63,12 @@ DELETE /api/v1/seller-targets/{id}
 POST /api/v1/buyer-parties
 GET /api/v1/buyer-parties
 GET /api/v1/buyer-parties/{id}
+GET /api/v1/buyer-parties/{id}/intents
 PATCH /api/v1/buyer-parties/{id}
 DELETE /api/v1/buyer-parties/{id}
 POST /api/v1/buyer-intents
 GET /api/v1/buyer-intents
+GET /api/v1/buyer-intents?buyer_party_id={id}
 GET /api/v1/buyer-intents/{id}
 PATCH /api/v1/buyer-intents/{id}
 DELETE /api/v1/buyer-intents/{id}

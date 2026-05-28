@@ -425,3 +425,43 @@ Invoke-RestMethod `
   -Uri "https://match-ma-production.up.railway.app/api/v1/update-logs?entity_type=buyer_party&entity_id=$($buyerParty.id)" `
   -Method Get
 ```
+
+为买家主体创建一条关联意向：
+
+```powershell
+$json = @{
+  intent_name = "浙江某国资平台医药健康并表需求"
+  buyer_party_id = $buyerParty.id
+  raw_requirement_text = "浙江省内非上市公司，医药健康相关，利润2000万元以上，PE原则不超过13倍，要并表。"
+  industry_primary = "healthcare"
+  region_scope_summary = "浙江优先"
+  min_net_profit_yuan = 20000000
+  max_pe = 13
+  requires_consolidation = "yes"
+  preferred_listed_status = "unlisted"
+} | ConvertTo-Json -Depth 5
+
+$body = [System.Text.Encoding]::UTF8.GetBytes($json)
+
+$linkedIntent = Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/buyer-intents" `
+  -Method Post `
+  -ContentType "application/json; charset=utf-8" `
+  -Body $body
+```
+
+查询该买家主体下的意向：
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/buyer-parties/$($buyerParty.id)/intents" `
+  -Method Get
+```
+
+等价过滤查询：
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/buyer-intents?buyer_party_id=$($buyerParty.id)" `
+  -Method Get
+```
