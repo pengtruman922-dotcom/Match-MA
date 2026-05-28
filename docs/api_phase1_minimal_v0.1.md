@@ -236,9 +236,53 @@ DELETE /api/v1/buyer-intents/{buyer_intent_id}
 
 ## 5. 下一步
 
+## 5. 更新记录 API
+
+直接 API 更新和软删除会写入 `action_application_log`。
+
+### 5.1 查询标的更新记录
+
+```text
+GET /api/v1/update-logs?entity_type=seller_target&entity_id={seller_target_id}
+```
+
+### 5.2 查询买家意向更新记录
+
+```text
+GET /api/v1/update-logs?entity_type=buyer_intent&entity_id={buyer_intent_id}
+```
+
+返回字段：
+
+```json
+{
+  "id": "uuid",
+  "entity_type": "seller_target",
+  "entity_id": "uuid",
+  "field_path": "business_summary",
+  "old_value_json": "旧值",
+  "new_value_json": "新值",
+  "source_type": "direct_api",
+  "applied_by": "uuid",
+  "applied_at": "2026-05-28 10:00:00+00",
+  "edited_before_apply": false,
+  "can_rollback": true,
+  "rollback_at": null
+}
+```
+
+说明：
+
+- 这是后续详情页“更新记录 tab”的基础接口。
+- 当前只支持 `seller_target / buyer_intent`。
+- 当前只读，不支持 rollback。
+
+---
+
+## 6. 下一步
+
 建议下一步继续：
 
 1. 增加 `buyer_party` 最小 API，或把新建买家意向扩展为“可选创建买家主体”。
 2. 增加统一错误码和字段枚举校验。
-3. 增加详情页更新记录 API，读取 `action_application_log`。
-4. 进入统一业务更新 API 设计。
+3. 进入统一业务更新 API 设计。

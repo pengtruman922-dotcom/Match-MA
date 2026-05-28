@@ -164,3 +164,31 @@ Invoke-RestMethod `
   -Uri "https://match-ma-production.up.railway.app/api/v1/buyer-intents?q=医药" `
   -Method Get
 ```
+
+---
+
+## 9. 查询更新记录
+
+查询标的更新记录：
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/update-logs?entity_type=seller_target&entity_id=26d78a25-961c-4763-8002-e8baedb8fa40" `
+  -Method Get
+```
+
+查询买家意向更新记录：
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/update-logs?entity_type=buyer_intent&entity_id=64c9995b-6d1d-42c1-9f95-e8792cf0131a" `
+  -Method Get
+```
+
+只按对象类型查询最近记录：
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://match-ma-production.up.railway.app/api/v1/update-logs?entity_type=seller_target&limit=20" `
+  -Method Get
+```

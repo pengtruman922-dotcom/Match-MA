@@ -65,6 +65,8 @@ GET /api/v1/buyer-intents
 GET /api/v1/buyer-intents/{id}
 PATCH /api/v1/buyer-intents/{id}
 DELETE /api/v1/buyer-intents/{id}
+GET /api/v1/update-logs?entity_type=seller_target&entity_id={id}
+GET /api/v1/update-logs?entity_type=buyer_intent&entity_id={id}
 ```
 
 Railway 部署说明：
