@@ -4,9 +4,25 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from backend.app.config import get_settings
 from backend.app.db import get_db
 
 router = APIRouter(prefix="/meta", tags=["meta"])
+
+
+@router.get("/version")
+def version() -> dict[str, Any]:
+    settings = get_settings()
+    return {
+        "app": settings.app_name,
+        "environment": settings.app_env,
+        "railway": {
+            "service_name": settings.railway_service_name,
+            "environment_name": settings.railway_environment_name,
+            "git_branch": settings.railway_git_branch,
+            "git_commit_sha": settings.railway_git_commit_sha,
+        },
+    }
 
 
 @router.get("/seed-status")

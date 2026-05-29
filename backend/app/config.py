@@ -8,7 +8,11 @@ class Settings(BaseSettings):
     app_env: str = "development"
     debug: bool = True
     database_url: str | None = None
-    cors_origins: str = "http://localhost:3000,http://localhost:5173"
+    cors_origins: str = "*"
+    railway_git_commit_sha: str | None = None
+    railway_git_branch: str | None = None
+    railway_service_name: str | None = None
+    railway_environment_name: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -19,6 +23,8 @@ class Settings(BaseSettings):
 
     @property
     def cors_origin_list(self) -> list[str]:
+        if self.cors_origins.strip() == "*":
+            return ["*"]
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
     @property
