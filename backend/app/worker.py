@@ -39,6 +39,11 @@ def main() -> None:
     parser.add_argument("--worker-id", default=f"worker-{socket.gethostname()}")
     args = parser.parse_args()
 
+    print(
+        f"Starting Match-MA worker queue={args.queue} worker_id={args.worker_id}",
+        flush=True,
+    )
+
     while True:
         found = run_once(queue_name=args.queue, worker_id=args.worker_id)
         if args.once:
