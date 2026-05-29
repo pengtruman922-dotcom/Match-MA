@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -8,8 +9,28 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
+from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
+from backend.app.ai.prompting import render_template
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.jobs.queue import JobClaim
+
+ALLOWED_ACTION_TYPES = {
+    "seller_fact_update",
+    "seller_event",
+    "buyer_seller_relation_update",
+    "buyer_intent_target_exclusion",
+    "buyer_intent_update",
+    "buyer_level_blacklist_suggestion",
+    "internal_note",
+    "unresolved_item",
+}
+
+ALLOWED_TARGET_ENTITY_TYPES = {
+    "seller_target",
+    "buyer_party",
+    "buyer_intent",
+    "buyer_seller_relation",
+}
 
 
 def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
@@ -24,12 +45,146 @@ def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
 
 
 def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[str, object]:
-    started = time.perf_counter()
     business_update_id = _resolve_business_update_id(job)
     if business_update_id is None:
         raise ValueError("business_update_extract_actions job requires a business_update_id.")
 
-    business_update = db.execute(
+    business_update = _get_business_update(db, business_update_id)
+    node_config = _get_default_node_config(db, "business_update_extractor")
+    context_json = _build_business_update_context(db, business_update)
+    prompt_messages = _render_prompt_messages(
+        node_config,
+        {
+            "context_json": context_json,
+            "raw_text": business_update["raw_text"] or "",
+        },
+    )
+    input_json = {
+        "business_update_id": str(business_update["id"]),
+        "raw_text": business_update["raw_text"],
+        "input_type": business_update["input_type"],
+        "bound_seller_target_ids": business_update["bound_seller_target_ids_json"],
+        "bound_buyer_party_ids": business_update["bound_buyer_party_ids_json"],
+        "bound_buyer_intent_ids": business_update["bound_buyer_intent_ids_json"],
+        "bound_recommendation_session_id": (
+            str(business_update["bound_recommendation_session_id"])
+            if business_update["bound_recommendation_session_id"]
+            else None
+        ),
+        "context_json": context_json,
+    }
+
+    started = time.perf_counter()
+    try:
+        llm_result = call_openai_compatible_chat(
+            base_url=node_config["base_url"],
+            api_key_secret_ref=node_config["api_key_secret_ref"],
+            model_name=node_config["model_name"],
+            messages=prompt_messages,
+            temperature=node_config["temperature"],
+            top_p=node_config["top_p"],
+            max_tokens=node_config["max_tokens"],
+            timeout_seconds=node_config["timeout_seconds"] or 90,
+            response_format=node_config["response_format"],
+        )
+    except LlmCallError as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        _insert_llm_trace(
+            db,
+            job=job,
+            business_update_id=business_update_id,
+            node_config=node_config,
+            status="failed",
+            input_json=input_json,
+            prompt_messages_json=prompt_messages,
+            raw_output_text=None,
+            parsed_output_json=None,
+            schema_validation_json={"valid": False, "error": str(exc)},
+            latency_ms=latency_ms,
+            error_code="llm_call_failed",
+            error_message=str(exc),
+        )
+        _mark_business_update_failed(db, business_update_id, job.id, str(exc))
+        raise
+
+    parsed_output_json = llm_result.parsed_output_json
+    schema_validation_json = _validate_extractor_output(parsed_output_json)
+    actions = _normalize_actions(parsed_output_json)
+    created_actions = _insert_extracted_actions(db, business_update_id, actions, job.id)
+
+    _insert_llm_trace(
+        db,
+        job=job,
+        business_update_id=business_update_id,
+        node_config=node_config,
+        status="succeeded" if schema_validation_json["valid"] else "failed",
+        input_json=input_json,
+        prompt_messages_json=prompt_messages,
+        raw_output_text=llm_result.raw_output_text,
+        parsed_output_json=parsed_output_json,
+        schema_validation_json=schema_validation_json,
+        latency_ms=llm_result.latency_ms,
+        prompt_tokens=llm_result.prompt_tokens,
+        completion_tokens=llm_result.completion_tokens,
+        total_tokens=llm_result.total_tokens,
+    )
+
+    if not schema_validation_json["valid"]:
+        _mark_business_update_failed(
+            db,
+            business_update_id,
+            job.id,
+            schema_validation_json.get("error") or "Invalid extractor output.",
+        )
+        raise ValueError(schema_validation_json.get("error") or "Invalid extractor output.")
+
+    db.execute(
+        text(
+            """
+            update business_update
+            set processing_status = 'parsed',
+                metadata_json = metadata_json || :metadata_patch
+            where id = :business_update_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+        {
+            "business_update_id": business_update_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "metadata_patch": {
+                "last_processed_job_id": str(job.id),
+                "last_processing_result": "llm_parsed",
+                "last_actions_created": len(created_actions),
+            },
+        },
+    )
+
+    return {
+        "handled": True,
+        "job_type": job.job_type,
+        "business_update_id": str(business_update_id),
+        "actions_created": len(created_actions),
+        "extracted_action_ids": [str(action_id) for action_id in created_actions],
+        "trace_created": True,
+        "model_name": node_config["model_name"],
+        "prompt_version": node_config["prompt_version"],
+    }
+
+
+def _resolve_business_update_id(job: JobClaim) -> UUID | None:
+    if job.entity_type == "business_update" and job.entity_id is not None:
+        return job.entity_id
+
+    payload_value = job.payload_json.get("business_update_id")
+    if not payload_value:
+        return None
+    return UUID(str(payload_value))
+
+
+def _get_business_update(db: Session, business_update_id: UUID) -> dict[str, Any]:
+    row = db.execute(
         text(
             """
             select
@@ -49,80 +204,9 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
             "workspace_id": DEFAULT_WORKSPACE_ID,
         },
     ).mappings().one_or_none()
-    if business_update is None:
+    if row is None:
         raise ValueError(f"Business update not found: {business_update_id}")
-
-    node_config = _get_default_node_config(db, "business_update_extractor")
-    input_json = {
-        "business_update_id": str(business_update["id"]),
-        "raw_text": business_update["raw_text"],
-        "input_type": business_update["input_type"],
-        "bound_seller_target_ids": business_update["bound_seller_target_ids_json"],
-        "bound_buyer_party_ids": business_update["bound_buyer_party_ids_json"],
-        "bound_buyer_intent_ids": business_update["bound_buyer_intent_ids_json"],
-        "bound_recommendation_session_id": (
-            str(business_update["bound_recommendation_session_id"])
-            if business_update["bound_recommendation_session_id"]
-            else None
-        ),
-    }
-    parsed_output_json = {
-        "actions": [],
-        "extraction_status": "placeholder",
-        "message": "Placeholder handler completed; real LLM extraction is not implemented yet.",
-    }
-    latency_ms = int((time.perf_counter() - started) * 1000)
-
-    _insert_placeholder_trace(
-        db,
-        job=job,
-        business_update_id=business_update_id,
-        node_config=node_config,
-        input_json=input_json,
-        parsed_output_json=parsed_output_json,
-        latency_ms=latency_ms,
-    )
-
-    db.execute(
-        text(
-            """
-            update business_update
-            set processing_status = 'parsed',
-                metadata_json = metadata_json || :metadata_patch
-            where id = :business_update_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
-            """
-        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
-        {
-            "business_update_id": business_update_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "metadata_patch": {
-                "last_processed_job_id": str(job.id),
-                "last_processing_result": "placeholder_parsed",
-            },
-        },
-    )
-
-    return {
-        "handled": True,
-        "job_type": job.job_type,
-        "business_update_id": str(business_update_id),
-        "actions_created": 0,
-        "trace_created": True,
-        "message": "Placeholder handler completed; real LLM extraction is not implemented yet.",
-    }
-
-
-def _resolve_business_update_id(job: JobClaim) -> UUID | None:
-    if job.entity_type == "business_update" and job.entity_id is not None:
-        return job.entity_id
-
-    payload_value = job.payload_json.get("business_update_id")
-    if not payload_value:
-        return None
-    return UUID(str(payload_value))
+    return dict(row)
 
 
 def _get_default_node_config(db: Session, node_name: str) -> dict[str, Any]:
@@ -132,10 +216,19 @@ def _get_default_node_config(db: Session, node_name: str) -> dict[str, Any]:
             select
               node.id as node_config_id,
               node.model_name,
+              node.temperature,
+              node.top_p,
+              node.max_tokens,
+              node.timeout_seconds,
+              node.response_format,
               provider.id as provider_config_id,
               provider.provider_name,
+              provider.base_url,
+              provider.api_key_secret_ref,
               prompt.id as prompt_template_id,
               prompt.version as prompt_version,
+              prompt.system_prompt,
+              prompt.user_prompt_template,
               prompt.output_schema_json
             from model_node_config node
             join model_provider_config provider
@@ -160,27 +253,314 @@ def _get_default_node_config(db: Session, node_name: str) -> dict[str, Any]:
         },
     ).mappings().one_or_none()
     if row is None:
-        return {
-            "node_config_id": None,
-            "model_name": "placeholder",
-            "provider_config_id": None,
-            "provider_name": "placeholder",
-            "prompt_template_id": None,
-            "prompt_version": "v0.1.0",
-            "output_schema_json": {},
-        }
-    return dict(row)
+        raise ValueError(f"Default model node is not configured: {node_name}")
+    config = dict(row)
+    if not config.get("base_url"):
+        raise ValueError(f"Provider base_url is not configured for node: {node_name}")
+    if not config.get("prompt_template_id"):
+        raise ValueError(f"Default prompt template is not configured for node: {node_name}")
+    return config
 
 
-def _insert_placeholder_trace(
+def _render_prompt_messages(
+    node_config: dict[str, Any],
+    variables: dict[str, Any],
+) -> list[dict[str, str]]:
+    system_prompt = render_template(node_config.get("system_prompt"), variables)
+    user_prompt = render_template(node_config.get("user_prompt_template"), variables)
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def _build_business_update_context(db: Session, business_update: dict[str, Any]) -> dict[str, Any]:
+    seller_target_ids = _uuid_list(business_update["bound_seller_target_ids_json"])
+    buyer_party_ids = _uuid_list(business_update["bound_buyer_party_ids_json"])
+    buyer_intent_ids = _uuid_list(business_update["bound_buyer_intent_ids_json"])
+    return {
+        "bound_seller_targets": _fetch_seller_targets(db, seller_target_ids),
+        "bound_buyer_parties": _fetch_buyer_parties(db, buyer_party_ids),
+        "bound_buyer_intents": _fetch_buyer_intents(db, buyer_intent_ids),
+        "instructions": {
+            "target_id_policy": (
+                "Use bound object IDs only when they clearly match; otherwise null."
+            ),
+            "review_policy": "All generated actions stay pending_review in this version.",
+        },
+    }
+
+
+def _fetch_seller_targets(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
+    if not ids:
+        return []
+    rows = db.execute(
+        text(
+            """
+            select
+              id, target_name, target_type, industry_primary, industry_secondary,
+              headquarter_province, headquarter_city, listed_status,
+              current_revenue_yuan, current_net_profit_yuan, valuation_yuan,
+              asking_price_yuan, pe_ratio, is_for_sale, can_control,
+              can_consolidate, business_summary, transaction_summary, risk_summary
+            from seller_target
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+              and id = any(:ids)
+            """
+        ),
+        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID, "ids": ids},
+    ).mappings().all()
+    return [_json_safe_dict(row) for row in rows]
+
+
+def _fetch_buyer_parties(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
+    if not ids:
+        return []
+    rows = db.execute(
+        text(
+            """
+            select
+              id, buyer_name, legal_name, buyer_type, listed_status,
+              region_province, region_city, main_business, profile_summary
+            from buyer_party
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+              and id = any(:ids)
+            """
+        ),
+        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID, "ids": ids},
+    ).mappings().all()
+    return [_json_safe_dict(row) for row in rows]
+
+
+def _fetch_buyer_intents(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
+    if not ids:
+        return []
+    rows = db.execute(
+        text(
+            """
+            select
+              id, buyer_party_id, intent_name, status, contact_name,
+              raw_requirement_text, intent_summary, industry_primary,
+              industry_secondary, region_scope_summary, min_revenue_yuan,
+              min_net_profit_yuan, max_pe, max_valuation_yuan,
+              requires_control, requires_consolidation,
+              accepts_minority_investment, preferred_listed_status,
+              transaction_type, negative_summary, preference_summary,
+              unknown_summary
+            from buyer_intent
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+              and id = any(:ids)
+            """
+        ),
+        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID, "ids": ids},
+    ).mappings().all()
+    return [_json_safe_dict(row) for row in rows]
+
+
+def _uuid_list(values: Any) -> list[UUID]:
+    if not isinstance(values, list):
+        return []
+    uuids: list[UUID] = []
+    for value in values:
+        try:
+            uuids.append(UUID(str(value)))
+        except (TypeError, ValueError):
+            continue
+    return uuids
+
+
+def _json_safe_dict(row: Any) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in dict(row).items():
+        if isinstance(value, UUID):
+            result[key] = str(value)
+        elif isinstance(value, Decimal):
+            result[key] = float(value)
+        else:
+            result[key] = value
+    return result
+
+
+def _validate_extractor_output(parsed_output_json: dict[str, Any] | None) -> dict[str, Any]:
+    if parsed_output_json is None:
+        return {"valid": False, "error": "LLM output is not a JSON object."}
+    actions = parsed_output_json.get("actions")
+    if not isinstance(actions, list):
+        return {"valid": False, "error": "LLM output must contain actions array."}
+    invalid_indexes: list[int] = []
+    for index, action in enumerate(actions):
+        if not isinstance(action, dict):
+            invalid_indexes.append(index)
+            continue
+        if action.get("action_type") not in ALLOWED_ACTION_TYPES:
+            invalid_indexes.append(index)
+            continue
+        if not isinstance(action.get("proposed_changes_json"), dict):
+            invalid_indexes.append(index)
+    return {
+        "valid": len(invalid_indexes) == 0,
+        "action_count": len(actions),
+        "invalid_indexes": invalid_indexes,
+        "error": "Some actions are invalid." if invalid_indexes else None,
+    }
+
+
+def _normalize_actions(parsed_output_json: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not parsed_output_json or not isinstance(parsed_output_json.get("actions"), list):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for action in parsed_output_json["actions"]:
+        if not isinstance(action, dict):
+            continue
+        action_type = action.get("action_type")
+        if action_type not in ALLOWED_ACTION_TYPES:
+            continue
+        proposed_changes = action.get("proposed_changes_json")
+        if not isinstance(proposed_changes, dict):
+            continue
+        target_entity_type = action.get("target_entity_type")
+        if target_entity_type not in ALLOWED_TARGET_ENTITY_TYPES:
+            target_entity_type = None
+        target_entity_id = _optional_uuid(action.get("target_entity_id"))
+        normalized.append(
+            {
+                "action_type": action_type,
+                "target_entity_type": target_entity_type,
+                "target_entity_id": target_entity_id,
+                "proposed_changes_json": proposed_changes,
+                "raw_evidence_text": action.get("raw_evidence_text"),
+                "confidence": _optional_decimal(action.get("confidence")),
+                "reason": action.get("reason"),
+                "raw_action": action,
+            }
+        )
+    return normalized
+
+
+def _insert_extracted_actions(
+    db: Session,
+    business_update_id: UUID,
+    actions: list[dict[str, Any]],
+    job_id: UUID,
+) -> list[UUID]:
+    action_ids: list[UUID] = []
+    for action in actions:
+        row = db.execute(
+            text(
+                """
+                insert into extracted_action (
+                  team_id, workspace_id, business_update_id,
+                  action_type, target_entity_type, target_entity_id,
+                  proposed_changes_json, raw_evidence_text, confidence,
+                  review_status, metadata_json
+                )
+                values (
+                  :team_id, :workspace_id, :business_update_id,
+                  :action_type, :target_entity_type, :target_entity_id,
+                  :proposed_changes_json, :raw_evidence_text, :confidence,
+                  'pending_review', :metadata_json
+                )
+                returning id
+                """
+            ).bindparams(
+                bindparam("proposed_changes_json", type_=JSONB),
+                bindparam("metadata_json", type_=JSONB),
+            ),
+            {
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+                "business_update_id": business_update_id,
+                "action_type": action["action_type"],
+                "target_entity_type": action["target_entity_type"],
+                "target_entity_id": action["target_entity_id"],
+                "proposed_changes_json": action["proposed_changes_json"],
+                "raw_evidence_text": action["raw_evidence_text"],
+                "confidence": action["confidence"],
+                "metadata_json": {
+                    "source": "business_update_extractor",
+                    "job_id": str(job_id),
+                    "reason": action.get("reason"),
+                    "raw_action": action.get("raw_action"),
+                },
+            },
+        ).mappings().one()
+        action_ids.append(row["id"])
+    return action_ids
+
+
+def _optional_uuid(value: Any) -> UUID | None:
+    if not value:
+        return None
+    try:
+        return UUID(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_decimal(value: Any) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
+
+
+def _mark_business_update_failed(
+    db: Session,
+    business_update_id: UUID,
+    job_id: UUID,
+    error_message: str,
+) -> None:
+    db.execute(
+        text(
+            """
+            update business_update
+            set processing_status = 'failed',
+                metadata_json = metadata_json || :metadata_patch
+            where id = :business_update_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+        {
+            "business_update_id": business_update_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "metadata_patch": {
+                "last_processed_job_id": str(job_id),
+                "last_processing_result": "failed",
+                "last_error_message": error_message,
+            },
+        },
+    )
+
+
+def _insert_llm_trace(
     db: Session,
     *,
     job: JobClaim,
     business_update_id: UUID,
     node_config: dict[str, Any],
+    status: str,
     input_json: dict[str, Any],
-    parsed_output_json: dict[str, Any],
+    prompt_messages_json: list[dict[str, str]],
+    raw_output_text: str | None,
+    parsed_output_json: dict[str, Any] | None,
+    schema_validation_json: dict[str, Any],
     latency_ms: int,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
 ) -> None:
     db.execute(
         text(
@@ -192,16 +572,20 @@ def _insert_placeholder_trace(
               provider_name, model_name, prompt_version, status,
               input_json, prompt_messages_json, raw_output_text,
               parsed_output_json, output_schema_json, schema_validation_json,
-              latency_ms, created_by, finished_at, metadata_json
+              error_code, error_message, latency_ms, prompt_tokens,
+              completion_tokens, total_tokens, created_by, finished_at,
+              metadata_json
             )
             values (
-              :team_id, :workspace_id, 'parser', 'business_update_extractor',
+              :team_id, :workspace_id, 'llm', 'business_update_extractor',
               :job_id, :correlation_id, 'business_update', :business_update_id,
               :provider_config_id, :node_config_id, :prompt_template_id,
-              :provider_name, :model_name, :prompt_version, 'succeeded',
+              :provider_name, :model_name, :prompt_version, :status,
               :input_json, :prompt_messages_json, :raw_output_text,
               :parsed_output_json, :output_schema_json, :schema_validation_json,
-              :latency_ms, :created_by, now(), :metadata_json
+              :error_code, :error_message, :latency_ms, :prompt_tokens,
+              :completion_tokens, :total_tokens, :created_by, now(),
+              :metadata_json
             )
             """
         ).bindparams(
@@ -224,35 +608,20 @@ def _insert_placeholder_trace(
             "provider_name": node_config["provider_name"],
             "model_name": node_config["model_name"],
             "prompt_version": node_config["prompt_version"],
+            "status": status,
             "input_json": input_json,
-            "prompt_messages_json": [
-                {
-                    "role": "system",
-                    "content": (
-                        "Placeholder trace only; real prompt rendering is not implemented yet."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": input_json.get("raw_text") or "",
-                },
-            ],
-            "raw_output_text": (
-                '{"actions":[],"extraction_status":"placeholder",'
-                '"message":"Placeholder handler completed; real LLM extraction is not '
-                'implemented yet."}'
-            ),
+            "prompt_messages_json": prompt_messages_json,
+            "raw_output_text": raw_output_text,
             "parsed_output_json": parsed_output_json,
             "output_schema_json": node_config["output_schema_json"] or {},
-            "schema_validation_json": {"valid": True, "placeholder": True},
+            "schema_validation_json": schema_validation_json,
+            "error_code": error_code,
+            "error_message": error_message,
             "latency_ms": latency_ms,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
             "created_by": DEFAULT_ADMIN_USER_ID,
-            "metadata_json": {
-                "source": "worker_placeholder_handler",
-                "warning": (
-                    "No extracted_action rows are created before real LLM extraction is "
-                    "implemented."
-                ),
-            },
+            "metadata_json": {"source": "business_update_extractor"},
         },
     )

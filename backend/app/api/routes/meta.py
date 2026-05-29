@@ -123,10 +123,26 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
         """
         select count(*)
         from prompt_template
-        where node_name in ('business_update_extractor', 'buyer_intent_parser')
-          and version = 'v0.1.0'
+        where (
+            (node_name = 'business_update_extractor' and version in ('v0.1.0', 'v0.2.0'))
+            or (node_name = 'buyer_intent_parser' and version = 'v0.1.0')
+          )
           and is_default = true
           and is_active = true
+        """,
+        enabled=table_checks["prompt_template"],
+    )
+    real_business_update_prompt = _row_exists(
+        db,
+        """
+        select exists(
+          select 1
+          from prompt_template
+          where node_name = 'business_update_extractor'
+            and version = 'v0.2.0'
+            and is_default = true
+            and is_active = true
+        )
         """,
         enabled=table_checks["prompt_template"],
     )
@@ -140,6 +156,7 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
         "default_llm_nodes": default_llm_nodes >= 4,
         "default_embedding_nodes": default_embedding_nodes >= 2,
         "default_prompts": default_prompts >= 2,
+        "real_business_update_prompt": real_business_update_prompt,
         "buyer_intent_update_allowed": buyer_intent_update_allowed,
         "buyer_intent_suggestion_removed": not buyer_intent_suggestion_allowed,
     }
@@ -150,6 +167,7 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
         and default_llm_nodes >= 4
         and default_embedding_nodes >= 2
         and default_prompts >= 2
+        and real_business_update_prompt
         and buyer_intent_update_allowed
         and not buyer_intent_suggestion_allowed
     )
