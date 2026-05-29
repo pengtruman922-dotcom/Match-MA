@@ -110,6 +110,8 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
     parsed_output_json = llm_result.parsed_output_json
     schema_validation_json = _validate_extractor_output(parsed_output_json)
     actions = _normalize_actions(parsed_output_json)
+    if not actions:
+        actions = [_build_unresolved_action(parsed_output_json, llm_result.raw_output_text)]
     created_actions = _insert_extracted_actions(db, business_update_id, actions, job.id)
 
     _insert_llm_trace(
@@ -117,7 +119,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
         job=job,
         business_update_id=business_update_id,
         node_config=node_config,
-        status="succeeded" if schema_validation_json["valid"] else "failed",
+        status="succeeded",
         input_json=input_json,
         prompt_messages_json=prompt_messages,
         raw_output_text=llm_result.raw_output_text,
@@ -128,15 +130,6 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
         completion_tokens=llm_result.completion_tokens,
         total_tokens=llm_result.total_tokens,
     )
-
-    if not schema_validation_json["valid"]:
-        _mark_business_update_failed(
-            db,
-            business_update_id,
-            job.id,
-            schema_validation_json.get("error") or "Invalid extractor output.",
-        )
-        raise ValueError(schema_validation_json.get("error") or "Invalid extractor output.")
 
     db.execute(
         text(
@@ -157,6 +150,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
                 "last_processed_job_id": str(job.id),
                 "last_processing_result": "llm_parsed",
                 "last_actions_created": len(created_actions),
+                "last_schema_valid": schema_validation_json["valid"],
             },
         },
     )
@@ -170,6 +164,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
         "trace_created": True,
         "model_name": node_config["model_name"],
         "prompt_version": node_config["prompt_version"],
+        "schema_valid": schema_validation_json["valid"],
     }
 
 
@@ -442,6 +437,25 @@ def _normalize_actions(parsed_output_json: dict[str, Any] | None) -> list[dict[s
             }
         )
     return normalized
+
+
+def _build_unresolved_action(
+    parsed_output_json: dict[str, Any] | None,
+    raw_output_text: str,
+) -> dict[str, Any]:
+    return {
+        "action_type": "unresolved_item",
+        "target_entity_type": None,
+        "target_entity_id": None,
+        "proposed_changes_json": {
+            "issue": "LLM output did not contain any valid extracted_action.",
+            "parsed_output_json": parsed_output_json,
+        },
+        "raw_evidence_text": raw_output_text[:2000],
+        "confidence": Decimal("0"),
+        "reason": "Fallback action for debugging invalid or unusable LLM output.",
+        "raw_action": parsed_output_json,
+    }
 
 
 def _insert_extracted_actions(
