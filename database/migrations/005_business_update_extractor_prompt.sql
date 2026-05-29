@@ -3,6 +3,14 @@
 
 begin;
 
+update prompt_template
+set is_default = false,
+    updated_at = now()
+where team_id = '00000000-0000-0000-0000-000000000001'
+  and workspace_id = '00000000-0000-0000-0000-000000000101'
+  and node_name = 'business_update_extractor'
+  and version <> 'v0.2.0';
+
 insert into prompt_template (
   id, team_id, workspace_id, node_name, version, name, description,
   system_prompt, user_prompt_template, output_schema_json,
@@ -85,16 +93,8 @@ on conflict (team_id, workspace_id, node_name, version) do update set
   template_engine = excluded.template_engine,
   variables_json = excluded.variables_json,
   is_active = excluded.is_active,
-  is_default = excluded.is_default,
+  is_default = true,
   metadata_json = excluded.metadata_json,
   updated_at = now();
-
-update prompt_template
-set is_default = false,
-    updated_at = now()
-where team_id = '00000000-0000-0000-0000-000000000001'
-  and workspace_id = '00000000-0000-0000-0000-000000000101'
-  and node_name = 'business_update_extractor'
-  and version <> 'v0.2.0';
 
 commit;
