@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
 from backend.app.ai.prompting import render_template
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+from backend.app.api.routes.extracted_actions import apply_seller_fact_update_action
 from backend.app.jobs.queue import JobClaim
 
 ALLOWED_ACTION_TYPES = {
@@ -349,6 +350,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
     if not actions:
         actions = [_build_unresolved_action(parsed_output_json, llm_result.raw_output_text)]
     created_actions = _insert_extracted_actions(db, business_update_id, actions, job.id)
+    auto_apply_results = _auto_apply_safe_actions(db, created_actions)
 
     _insert_llm_trace(
         db,
@@ -386,6 +388,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
                 "last_processed_job_id": str(job.id),
                 "last_processing_result": "llm_parsed",
                 "last_actions_created": len(created_actions),
+                "last_auto_applied_actions": len(auto_apply_results),
                 "last_schema_valid": schema_validation_json["valid"],
             },
         },
@@ -401,6 +404,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
         "model_name": node_config["model_name"],
         "prompt_version": node_config["prompt_version"],
         "schema_valid": schema_validation_json["valid"],
+        "auto_applied_actions": len(auto_apply_results),
     }
 
 
@@ -903,6 +907,53 @@ def _insert_extracted_actions(
         ).mappings().one()
         action_ids.append(row["id"])
     return action_ids
+
+
+def _auto_apply_safe_actions(db: Session, action_ids: list[UUID]) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for action_id in action_ids:
+        action = _get_extracted_action_for_auto_apply(db, action_id)
+        if not action or not _is_safe_seller_fact_update(action):
+            continue
+        result = apply_seller_fact_update_action(db, action, require_accepted=False)
+        results.append(result)
+    return results
+
+
+def _get_extracted_action_for_auto_apply(db: Session, action_id: UUID) -> dict[str, Any] | None:
+    row = db.execute(
+        text(
+            """
+            select
+              id, business_update_id, action_type, target_entity_type, target_entity_id,
+              proposed_changes_json, raw_evidence_text, confidence, review_status,
+              reviewed_by, reviewed_at::text as reviewed_at, applied_at::text as applied_at,
+              metadata_json, created_at::text as created_at
+            from extracted_action
+            where id = :action_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {
+            "action_id": action_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    return dict(row) if row else None
+
+
+def _is_safe_seller_fact_update(action: dict[str, Any]) -> bool:
+    if action["action_type"] != "seller_fact_update":
+        return False
+    if action["target_entity_type"] != "seller_target" or action["target_entity_id"] is None:
+        return False
+    if action["applied_at"] is not None:
+        return False
+    if action["review_status"] != "pending_review":
+        return False
+    return bool(action["proposed_changes_json"])
 
 
 def _optional_uuid(value: Any) -> UUID | None:

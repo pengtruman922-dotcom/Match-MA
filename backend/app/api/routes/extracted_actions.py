@@ -217,7 +217,17 @@ def update_extracted_action_review(
 @router.post("/extracted-actions/{extracted_action_id}/apply", response_model=ApplyActionOut)
 def apply_extracted_action(extracted_action_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
     action = _get_extracted_action_or_404(db, extracted_action_id)
+    result = apply_seller_fact_update_action(db, action, require_accepted=True)
+    db.commit()
+    return result
 
+
+def apply_seller_fact_update_action(
+    db: Session,
+    action: dict[str, Any],
+    *,
+    require_accepted: bool = True,
+) -> dict[str, Any]:
     if action["action_type"] != "seller_fact_update" or action["target_entity_type"] != "seller_target":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -227,7 +237,7 @@ def apply_extracted_action(extracted_action_id: UUID, db: Session = Depends(get_
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target_entity_id is required.")
     if action["applied_at"] is not None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Action has already been applied.")
-    if action["review_status"] not in {"accepted", "auto_accepted"}:
+    if require_accepted and action["review_status"] not in {"accepted", "auto_accepted"}:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Action must be accepted before apply.",
@@ -241,12 +251,11 @@ def apply_extracted_action(extracted_action_id: UUID, db: Session = Depends(get_
     original = _get_seller_target_snapshot_or_404(db, seller_target_id)
     diff = diff_payload(original, changes)
     if not diff:
-        _mark_action_applied(db, extracted_action_id)
+        _mark_action_applied(db, action["id"], review_status="auto_accepted")
         _refresh_business_update_status(db, action["business_update_id"])
-        db.commit()
         return {
             "status": "noop",
-            "extracted_action_id": extracted_action_id,
+            "extracted_action_id": action["id"],
             "business_update_id": action["business_update_id"],
             "entity_type": "seller_target",
             "entity_id": seller_target_id,
@@ -283,15 +292,14 @@ def apply_extracted_action(extracted_action_id: UUID, db: Session = Depends(get_
         diff=diff,
         source_type="extracted_action",
         business_update_id=action["business_update_id"],
-        extracted_action_id=extracted_action_id,
+        extracted_action_id=action["id"],
     )
-    _mark_action_applied(db, extracted_action_id)
+    _mark_action_applied(db, action["id"], review_status="auto_accepted" if not require_accepted else None)
     _refresh_business_update_status(db, action["business_update_id"])
-    db.commit()
 
     return {
         "status": "applied",
-        "extracted_action_id": extracted_action_id,
+        "extracted_action_id": action["id"],
         "business_update_id": action["business_update_id"],
         "entity_type": "seller_target",
         "entity_id": seller_target_id,
@@ -405,12 +413,20 @@ def _allowed_seller_target_changes(changes: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in changes.items() if key in allowed_fields}
 
 
-def _mark_action_applied(db: Session, extracted_action_id: UUID) -> None:
+def _mark_action_applied(
+    db: Session,
+    extracted_action_id: UUID,
+    *,
+    review_status: str | None = None,
+) -> None:
+    review_status_clause = ""
+    if review_status:
+        review_status_clause = ", review_status = :review_status, reviewed_by = :reviewed_by, reviewed_at = now()"
     db.execute(
         text(
-            """
+            f"""
             update extracted_action
-            set applied_at = now()
+            set applied_at = now(){review_status_clause}
             where id = :extracted_action_id
               and team_id = :team_id
               and workspace_id = :workspace_id
@@ -420,6 +436,8 @@ def _mark_action_applied(db: Session, extracted_action_id: UUID) -> None:
             "extracted_action_id": extracted_action_id,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
+            "review_status": review_status,
+            "reviewed_by": DEFAULT_ADMIN_USER_ID,
         },
     )
 
