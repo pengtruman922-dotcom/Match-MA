@@ -373,7 +373,17 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
         text(
             """
             update business_update
-            set processing_status = 'parsed',
+            set processing_status = case
+                  when :auto_applied_count > 0 and exists (
+                    select 1
+                    from extracted_action
+                    where business_update_id = :business_update_id
+                      and applied_at is null
+                      and review_status in ('pending_review', 'accepted', 'auto_accepted')
+                  ) then 'partially_applied'
+                  when :auto_applied_count > 0 then 'applied'
+                  else 'parsed'
+                end,
                 metadata_json = metadata_json || :metadata_patch
             where id = :business_update_id
               and team_id = :team_id
@@ -384,6 +394,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
             "business_update_id": business_update_id,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
+            "auto_applied_count": len(auto_apply_results),
             "metadata_patch": {
                 "last_processed_job_id": str(job.id),
                 "last_processing_result": "llm_parsed",
