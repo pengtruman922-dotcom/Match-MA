@@ -12,6 +12,10 @@ router = APIRouter(prefix="/meta", tags=["meta"])
 
 @router.get("/version")
 def version() -> dict[str, Any]:
+    return _version_payload()
+
+
+def _version_payload() -> dict[str, Any]:
     settings = get_settings()
     return {
         "app": settings.app_name,
@@ -190,6 +194,7 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
 
     return {
         "status": "ok" if ok else "degraded",
+        "version": _version_payload(),
         "checks": checks,
         "counts": {
             "active_providers": provider_counts,
