@@ -32,6 +32,133 @@ ALLOWED_TARGET_ENTITY_TYPES = {
     "buyer_seller_relation",
 }
 
+SELLER_TARGET_CHANGE_FIELDS = {
+    "target_name",
+    "industry_primary",
+    "industry_secondary",
+    "headquarter_province",
+    "headquarter_city",
+    "listed_status",
+    "current_revenue_yuan",
+    "current_net_profit_yuan",
+    "current_total_profit_yuan",
+    "valuation_yuan",
+    "asking_price_yuan",
+    "pe_ratio",
+    "is_for_sale",
+    "can_control",
+    "can_consolidate",
+    "accepts_minority_investment",
+    "transfer_ratio_min",
+    "transfer_ratio_max",
+    "transfer_ratio_text",
+    "transfer_flexibility_type",
+    "business_summary",
+    "transaction_summary",
+    "risk_summary",
+    "gap_summary",
+    "information_status",
+    "recommendation_status",
+}
+
+SELLER_TARGET_FIELD_ALIASES = {
+    "summary": "business_summary",
+    "target_summary": "business_summary",
+    "business": "business_summary",
+    "industry": "industry_secondary",
+    "location": "raw_region_text",
+    "province": "headquarter_province",
+    "city": "headquarter_city",
+    "revenue": "current_revenue_yuan",
+    "profit": "current_net_profit_yuan",
+    "net_profit": "current_net_profit_yuan",
+    "valuation": "valuation_yuan",
+    "asking_price": "asking_price_yuan",
+    "pe": "pe_ratio",
+    "pe_multiple": "pe_ratio",
+}
+
+BUYER_INTENT_CHANGE_FIELDS = {
+    "raw_requirement_text",
+    "intent_summary",
+    "industry_primary",
+    "industry_secondary",
+    "region_scope_summary",
+    "min_revenue_yuan",
+    "min_net_profit_yuan",
+    "max_pe",
+    "max_valuation_yuan",
+    "requires_control",
+    "requires_consolidation",
+    "accepts_minority_investment",
+    "desired_equity_ratio_min",
+    "desired_equity_ratio_max",
+    "equity_ratio_summary",
+    "equity_requirement_type",
+    "preferred_listed_status",
+    "transaction_type",
+    "negative_summary",
+    "priority_summary",
+    "preference_summary",
+    "unknown_summary",
+    "status",
+    "pause_reason",
+}
+
+BUYER_INTENT_FIELD_ALIASES = {
+    "requirement": "intent_summary",
+    "summary": "intent_summary",
+    "region": "region_scope_summary",
+    "min_profit": "min_net_profit_yuan",
+    "profit_min": "min_net_profit_yuan",
+    "max_valuation": "max_valuation_yuan",
+    "control": "requires_control",
+    "consolidation": "requires_consolidation",
+}
+
+BUYER_SELLER_RELATION_CHANGE_FIELDS = {
+    "status",
+    "status_reason",
+    "first_recommended_at",
+    "last_contact_at",
+    "last_event_at",
+    "last_event_summary",
+    "event_type",
+    "event_title",
+    "event_content",
+    "next_step",
+    "buyer_name",
+    "seller_target_name",
+    "feedback",
+    "recommendation_date",
+}
+
+BUYER_SELLER_RELATION_FIELD_ALIASES = {
+    "feedback": "last_event_summary",
+    "recommendation_date": "first_recommended_at",
+    "recommended_at": "first_recommended_at",
+    "event_summary": "last_event_summary",
+    "title": "event_title",
+    "content": "event_content",
+}
+
+NESTED_FIELD_ALIASES = {
+    ("finance", "profit"): "current_net_profit_yuan",
+    ("finance", "net_profit"): "current_net_profit_yuan",
+    ("finance", "revenue"): "current_revenue_yuan",
+    ("finance", "valuation"): "valuation_yuan",
+    ("finance", "asking_price"): "asking_price_yuan",
+    ("finance", "pe"): "pe_ratio",
+    ("deal", "can_control"): "can_control",
+    ("deal", "can_consolidate"): "can_consolidate",
+    ("deal", "is_for_sale"): "is_for_sale",
+    ("deal", "transfer_ratio_min"): "transfer_ratio_min",
+    ("deal", "transfer_ratio_max"): "transfer_ratio_max",
+    ("deal", "transfer_ratio_text"): "transfer_ratio_text",
+    ("risk", "summary"): "risk_summary",
+    ("risk", "risk_summary"): "risk_summary",
+}
+
 
 def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
     if job.job_type == "business_update_extract_actions":
@@ -424,19 +551,81 @@ def _normalize_actions(parsed_output_json: dict[str, Any] | None) -> list[dict[s
         if target_entity_type not in ALLOWED_TARGET_ENTITY_TYPES:
             target_entity_type = None
         target_entity_id = _optional_uuid(action.get("target_entity_id"))
+        normalized_changes, normalization_notes = _normalize_proposed_changes(
+            action_type,
+            proposed_changes,
+        )
         normalized.append(
             {
                 "action_type": action_type,
                 "target_entity_type": target_entity_type,
                 "target_entity_id": target_entity_id,
-                "proposed_changes_json": proposed_changes,
+                "proposed_changes_json": normalized_changes,
                 "raw_evidence_text": action.get("raw_evidence_text"),
                 "confidence": _optional_decimal(action.get("confidence")),
                 "reason": action.get("reason"),
                 "raw_action": action,
+                "normalization_notes": normalization_notes,
             }
         )
     return normalized
+
+
+def _normalize_proposed_changes(
+    action_type: str,
+    proposed_changes: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    if action_type == "seller_fact_update":
+        return _normalize_change_fields(
+            proposed_changes,
+            allowed_fields=SELLER_TARGET_CHANGE_FIELDS,
+            aliases=SELLER_TARGET_FIELD_ALIASES,
+            nested_aliases=NESTED_FIELD_ALIASES,
+        )
+    if action_type == "buyer_intent_update":
+        return _normalize_change_fields(
+            proposed_changes,
+            allowed_fields=BUYER_INTENT_CHANGE_FIELDS,
+            aliases=BUYER_INTENT_FIELD_ALIASES,
+        )
+    if action_type == "buyer_seller_relation_update":
+        return _normalize_change_fields(
+            proposed_changes,
+            allowed_fields=BUYER_SELLER_RELATION_CHANGE_FIELDS,
+            aliases=BUYER_SELLER_RELATION_FIELD_ALIASES,
+        )
+    return proposed_changes, []
+
+
+def _normalize_change_fields(
+    proposed_changes: dict[str, Any],
+    *,
+    allowed_fields: set[str],
+    aliases: dict[str, str],
+    nested_aliases: dict[tuple[str, str], str] | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    normalized: dict[str, Any] = {}
+    notes: list[str] = []
+
+    for key, value in proposed_changes.items():
+        if key in allowed_fields:
+            normalized[key] = value
+            continue
+
+        alias = aliases.get(key)
+        if alias and alias in allowed_fields:
+            normalized[alias] = value
+            notes.append(f"{key}->{alias}")
+            continue
+
+        if isinstance(value, dict) and nested_aliases:
+            for child_key, child_value in value.items():
+                nested_alias = nested_aliases.get((key, child_key))
+                if nested_alias and nested_alias in allowed_fields:
+                    normalized[nested_alias] = child_value
+                    notes.append(f"{key}.{child_key}->{nested_alias}")
+
+    return normalized, notes
 
 
 def _build_unresolved_action(
@@ -502,6 +691,7 @@ def _insert_extracted_actions(
                     "job_id": str(job_id),
                     "reason": action.get("reason"),
                     "raw_action": action.get("raw_action"),
+                    "normalization_notes": action.get("normalization_notes", []),
                 },
             },
         ).mappings().one()
