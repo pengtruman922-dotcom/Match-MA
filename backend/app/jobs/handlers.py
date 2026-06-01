@@ -142,6 +142,109 @@ BUYER_SELLER_RELATION_FIELD_ALIASES = {
     "content": "event_content",
 }
 
+SELLER_TARGET_ENUM_FIELDS = {
+    "listed_status": {"listed", "unlisted", "pre_ipo", "unknown"},
+    "is_for_sale": {"yes", "no", "unknown", "likely"},
+    "can_control": {"yes", "no", "unknown", "likely"},
+    "can_consolidate": {"yes", "no", "unknown", "likely"},
+    "accepts_minority_investment": {"yes", "no", "unknown", "likely"},
+    "transfer_flexibility_type": {
+        "control_available",
+        "consolidation_available",
+        "minority_available",
+        "full_sale_available",
+        "flexible",
+        "specific_range",
+        "unknown",
+    },
+    "information_status": {
+        "normal",
+        "insufficient",
+        "pending_review",
+        "parsing",
+        "researching",
+        "parse_failed",
+    },
+    "recommendation_status": {"recommendable", "not_recommendable"},
+}
+
+BUYER_INTENT_ENUM_FIELDS = {
+    "status": {"active", "paused"},
+    "requires_control": {"yes", "no", "unknown", "likely"},
+    "requires_consolidation": {"yes", "no", "unknown", "likely"},
+    "accepts_minority_investment": {"yes", "no", "unknown", "likely"},
+    "equity_requirement_type": {
+        "control_required",
+        "consolidation_required",
+        "minority_acceptable",
+        "minority_only",
+        "flexible",
+        "specific_range",
+        "unknown",
+    },
+    "preferred_listed_status": {"listed", "unlisted", "pre_ipo", "any", "unknown"},
+}
+
+BUYER_SELLER_RELATION_ENUM_FIELDS = {
+    "status": {
+        "recommended",
+        "interested",
+        "in_discussion",
+        "due_diligence",
+        "agreement",
+        "deal_closed",
+        "not_interested",
+        "paused",
+        "lost",
+    },
+    "event_type": {
+        "recommended",
+        "buyer_interested",
+        "buyer_not_interested",
+        "meeting",
+        "call",
+        "material_sent",
+        "due_diligence_started",
+        "agreement_discussion",
+        "deal_closed",
+        "paused",
+        "internal_note",
+        "other",
+    },
+}
+
+ENUM_VALUE_ALIASES = {
+    "是": "yes",
+    "否": "no",
+    "可": "yes",
+    "不可": "no",
+    "可以": "yes",
+    "不可以": "no",
+    "可能": "likely",
+    "不确定": "unknown",
+    "未知": "unknown",
+    "非上市": "unlisted",
+    "未上市": "unlisted",
+    "上市": "listed",
+    "推荐": "recommended",
+    "已推荐": "recommended",
+    "recommendation": "recommended",
+    "interested": "interested",
+    "初步感兴趣": "interested",
+    "感兴趣": "interested",
+    "沟通中": "in_discussion",
+    "初步沟通": "in_discussion",
+    "尽调": "due_diligence",
+    "due_diligence_started": "due_diligence_started",
+    "不感兴趣": "not_interested",
+    "暂停": "paused",
+    "暂不推进": "paused",
+    "失败": "lost",
+    "已成交": "deal_closed",
+    "推荐反馈": "other",
+    "recommendation_feedback": "other",
+}
+
 NESTED_FIELD_ALIASES = {
     ("finance", "profit"): "current_net_profit_yuan",
     ("finance", "net_profit"): "current_net_profit_yuan",
@@ -236,7 +339,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
 
     parsed_output_json = llm_result.parsed_output_json
     schema_validation_json = _validate_extractor_output(parsed_output_json)
-    actions = _normalize_actions(parsed_output_json)
+    actions = _normalize_actions(parsed_output_json, business_update)
     if not actions:
         actions = [_build_unresolved_action(parsed_output_json, llm_result.raw_output_text)]
     created_actions = _insert_extracted_actions(db, business_update_id, actions, job.id)
@@ -533,7 +636,10 @@ def _validate_extractor_output(parsed_output_json: dict[str, Any] | None) -> dic
     }
 
 
-def _normalize_actions(parsed_output_json: dict[str, Any] | None) -> list[dict[str, Any]]:
+def _normalize_actions(
+    parsed_output_json: dict[str, Any] | None,
+    business_update: dict[str, Any],
+) -> list[dict[str, Any]]:
     if not parsed_output_json or not isinstance(parsed_output_json.get("actions"), list):
         return []
 
@@ -555,6 +661,13 @@ def _normalize_actions(parsed_output_json: dict[str, Any] | None) -> list[dict[s
             action_type,
             proposed_changes,
         )
+        target_entity_type, target_entity_id, binding_notes = _normalize_action_target(
+            action_type,
+            target_entity_type,
+            target_entity_id,
+            business_update,
+        )
+        normalization_notes.extend(binding_notes)
         normalized.append(
             {
                 "action_type": action_type,
@@ -581,18 +694,21 @@ def _normalize_proposed_changes(
             allowed_fields=SELLER_TARGET_CHANGE_FIELDS,
             aliases=SELLER_TARGET_FIELD_ALIASES,
             nested_aliases=NESTED_FIELD_ALIASES,
+            enum_fields=SELLER_TARGET_ENUM_FIELDS,
         )
     if action_type == "buyer_intent_update":
         return _normalize_change_fields(
             proposed_changes,
             allowed_fields=BUYER_INTENT_CHANGE_FIELDS,
             aliases=BUYER_INTENT_FIELD_ALIASES,
+            enum_fields=BUYER_INTENT_ENUM_FIELDS,
         )
     if action_type == "buyer_seller_relation_update":
         return _normalize_change_fields(
             proposed_changes,
             allowed_fields=BUYER_SELLER_RELATION_CHANGE_FIELDS,
             aliases=BUYER_SELLER_RELATION_FIELD_ALIASES,
+            enum_fields=BUYER_SELLER_RELATION_ENUM_FIELDS,
         )
     return proposed_changes, []
 
@@ -603,18 +719,19 @@ def _normalize_change_fields(
     allowed_fields: set[str],
     aliases: dict[str, str],
     nested_aliases: dict[tuple[str, str], str] | None = None,
+    enum_fields: dict[str, set[str]] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     normalized: dict[str, Any] = {}
     notes: list[str] = []
 
     for key, value in proposed_changes.items():
         if key in allowed_fields:
-            normalized[key] = value
+            normalized[key] = _normalize_field_value(key, value, enum_fields, notes)
             continue
 
         alias = aliases.get(key)
         if alias and alias in allowed_fields:
-            normalized[alias] = value
+            normalized[alias] = _normalize_field_value(alias, value, enum_fields, notes)
             notes.append(f"{key}->{alias}")
             continue
 
@@ -622,10 +739,62 @@ def _normalize_change_fields(
             for child_key, child_value in value.items():
                 nested_alias = nested_aliases.get((key, child_key))
                 if nested_alias and nested_alias in allowed_fields:
-                    normalized[nested_alias] = child_value
+                    normalized[nested_alias] = _normalize_field_value(
+                        nested_alias,
+                        child_value,
+                        enum_fields,
+                        notes,
+                    )
                     notes.append(f"{key}.{child_key}->{nested_alias}")
 
     return normalized, notes
+
+
+def _normalize_field_value(
+    field: str,
+    value: Any,
+    enum_fields: dict[str, set[str]] | None,
+    notes: list[str],
+) -> Any:
+    if not enum_fields or field not in enum_fields:
+        return value
+
+    normalized = _normalize_enum_value(value)
+    allowed_values = enum_fields[field]
+    if normalized in allowed_values:
+        if normalized != value:
+            notes.append(f"{field}:{value}->{normalized}")
+        return normalized
+
+    notes.append(f"{field}:{value}->dropped_invalid_enum")
+    return value
+
+
+def _normalize_enum_value(value: Any) -> str:
+    normalized = str(value).strip().lower().replace(" ", "_").replace("-", "_")
+    return ENUM_VALUE_ALIASES.get(normalized, ENUM_VALUE_ALIASES.get(str(value).strip(), normalized))
+
+
+def _normalize_action_target(
+    action_type: str,
+    target_entity_type: str | None,
+    target_entity_id: UUID | None,
+    business_update: dict[str, Any],
+) -> tuple[str | None, UUID | None, list[str]]:
+    if target_entity_id is not None:
+        return target_entity_type, target_entity_id, []
+
+    if action_type == "seller_fact_update":
+        bound_ids = _uuid_list(business_update["bound_seller_target_ids_json"])
+        if len(bound_ids) == 1:
+            return "seller_target", bound_ids[0], ["target_entity_id<-single_bound_seller_target"]
+
+    if action_type == "buyer_intent_update":
+        bound_ids = _uuid_list(business_update["bound_buyer_intent_ids_json"])
+        if len(bound_ids) == 1:
+            return "buyer_intent", bound_ids[0], ["target_entity_id<-single_bound_buyer_intent"]
+
+    return target_entity_type, target_entity_id, []
 
 
 def _build_unresolved_action(
