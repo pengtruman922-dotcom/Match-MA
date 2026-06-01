@@ -217,7 +217,15 @@ def update_extracted_action_review(
 @router.post("/extracted-actions/{extracted_action_id}/apply", response_model=ApplyActionOut)
 def apply_extracted_action(extracted_action_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
     action = _get_extracted_action_or_404(db, extracted_action_id)
-    result = apply_seller_fact_update_action(db, action, require_accepted=True)
+    if action["action_type"] == "seller_fact_update":
+        result = apply_seller_fact_update_action(db, action, require_accepted=True)
+    elif action["action_type"] == "buyer_seller_relation_update":
+        result = apply_buyer_seller_relation_update_action(db, action, require_accepted=True)
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This action type is not supported by apply yet.",
+        )
     db.commit()
     return result
 
@@ -307,6 +315,93 @@ def apply_seller_fact_update_action(
     }
 
 
+def apply_buyer_seller_relation_update_action(
+    db: Session,
+    action: dict[str, Any],
+    *,
+    require_accepted: bool = True,
+) -> dict[str, Any]:
+    if action["action_type"] != "buyer_seller_relation_update":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only buyer_seller_relation_update actions are supported here.",
+        )
+    if action["applied_at"] is not None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Action has already been applied.")
+    if require_accepted and action["review_status"] not in {"accepted", "auto_accepted"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Action must be accepted before apply.",
+        )
+
+    changes = action["proposed_changes_json"]
+    buyer_intent_id = _required_uuid(changes.get("buyer_intent_id"), "buyer_intent_id")
+    seller_target_id = _required_uuid(changes.get("seller_target_id"), "seller_target_id")
+    buyer_party_id = _optional_uuid(changes.get("buyer_party_id")) or _get_buyer_party_id_for_intent(
+        db,
+        buyer_intent_id,
+    )
+    relation = _get_or_create_relation(db, buyer_intent_id, seller_target_id, buyer_party_id)
+
+    relation_updates = _allowed_relation_changes(changes)
+    relation_updates.setdefault("last_event_summary", _relation_event_content(changes, action))
+    relation_updates.setdefault("last_event_at", changes.get("last_event_at") or "now()")
+    if changes.get("event_type") == "recommended":
+        relation_updates.setdefault("first_recommended_at", changes.get("first_recommended_at") or "now()")
+
+    diff = diff_payload(relation, relation_updates)
+    if diff:
+        set_clauses: list[str] = []
+        params: dict[str, Any] = {
+            "relation_id": relation["id"],
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "updated_by": DEFAULT_ADMIN_USER_ID,
+        }
+        for field in diff:
+            if field in {"last_event_at", "first_recommended_at"} and relation_updates[field] == "now()":
+                set_clauses.append(f"{field} = now()")
+            else:
+                set_clauses.append(f"{field} = :{field}")
+                params[field] = relation_updates[field]
+        set_clauses.extend(["updated_at = now()", "updated_by = :updated_by"])
+        db.execute(
+            text(
+                f"""
+                update buyer_seller_relation
+                set {', '.join(set_clauses)}
+                where id = :relation_id
+                  and team_id = :team_id
+                  and workspace_id = :workspace_id
+                  and deleted_at is null
+                """
+            ),
+            params,
+        )
+        write_action_logs_for_diff(
+            db,
+            entity_type="buyer_seller_relation",
+            entity_id=relation["id"],
+            diff=diff,
+            source_type="extracted_action",
+            business_update_id=action["business_update_id"],
+            extracted_action_id=action["id"],
+        )
+
+    _insert_relation_event(db, action, relation["id"], buyer_intent_id, seller_target_id, buyer_party_id, changes)
+    _mark_action_applied(db, action["id"], review_status=None if require_accepted else "auto_accepted")
+    _refresh_business_update_status(db, action["business_update_id"])
+
+    return {
+        "status": "applied",
+        "extracted_action_id": action["id"],
+        "business_update_id": action["business_update_id"],
+        "entity_type": "buyer_seller_relation",
+        "entity_id": relation["id"],
+        "applied_fields": list(diff.keys()) + ["relation_event"],
+    }
+
+
 def _ensure_business_update_exists(db: Session, business_update_id: UUID) -> None:
     exists = db.execute(
         text(
@@ -388,6 +483,87 @@ def _get_seller_target_snapshot_or_404(db: Session, seller_target_id: UUID) -> d
     return dict(row)
 
 
+def _get_buyer_party_id_for_intent(db: Session, buyer_intent_id: UUID) -> UUID | None:
+    row = db.execute(
+        text(
+            """
+            select buyer_party_id
+            from buyer_intent
+            where id = :buyer_intent_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ),
+        {
+            "buyer_intent_id": buyer_intent_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Buyer intent not found.")
+    return row["buyer_party_id"]
+
+
+def _get_or_create_relation(
+    db: Session,
+    buyer_intent_id: UUID,
+    seller_target_id: UUID,
+    buyer_party_id: UUID | None,
+) -> dict[str, Any]:
+    existing = db.execute(
+        text(
+            """
+            select
+              id, status, status_reason, first_recommended_at, last_contact_at,
+              last_event_at, last_event_summary
+            from buyer_seller_relation
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and buyer_intent_id = :buyer_intent_id
+              and seller_target_id = :seller_target_id
+              and deleted_at is null
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "buyer_intent_id": buyer_intent_id,
+            "seller_target_id": seller_target_id,
+        },
+    ).mappings().one_or_none()
+    if existing:
+        return dict(existing)
+
+    row = db.execute(
+        text(
+            """
+            insert into buyer_seller_relation (
+              team_id, workspace_id, buyer_intent_id, buyer_party_id, seller_target_id,
+              status, created_by
+            )
+            values (
+              :team_id, :workspace_id, :buyer_intent_id, :buyer_party_id, :seller_target_id,
+              'recommended', :created_by
+            )
+            returning
+              id, status, status_reason, first_recommended_at, last_contact_at,
+              last_event_at, last_event_summary
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "buyer_intent_id": buyer_intent_id,
+            "buyer_party_id": buyer_party_id,
+            "seller_target_id": seller_target_id,
+            "created_by": DEFAULT_ADMIN_USER_ID,
+        },
+    ).mappings().one()
+    return dict(row)
+
+
 def _allowed_seller_target_changes(changes: dict[str, Any]) -> dict[str, Any]:
     allowed_fields = {
         "target_name",
@@ -411,6 +587,106 @@ def _allowed_seller_target_changes(changes: dict[str, Any]) -> dict[str, Any]:
         "risk_summary",
     }
     return {key: value for key, value in changes.items() if key in allowed_fields}
+
+
+def _allowed_relation_changes(changes: dict[str, Any]) -> dict[str, Any]:
+    allowed_fields = {
+        "status",
+        "status_reason",
+        "first_recommended_at",
+        "last_contact_at",
+        "last_event_at",
+        "last_event_summary",
+    }
+    return {key: value for key, value in changes.items() if key in allowed_fields}
+
+
+def _insert_relation_event(
+    db: Session,
+    action: dict[str, Any],
+    relation_id: UUID,
+    buyer_intent_id: UUID,
+    seller_target_id: UUID,
+    buyer_party_id: UUID | None,
+    changes: dict[str, Any],
+) -> None:
+    event_type = changes.get("event_type") or _event_type_from_relation_status(changes.get("status"))
+    db.execute(
+        text(
+            """
+            insert into relation_event (
+              team_id, workspace_id, relation_id, buyer_intent_id, buyer_party_id,
+              seller_target_id, event_type, event_time, title, content, next_step,
+              source_type, source_id, metadata_json, created_by
+            )
+            values (
+              :team_id, :workspace_id, :relation_id, :buyer_intent_id, :buyer_party_id,
+              :seller_target_id, :event_type, now(), :title, :content, :next_step,
+              'extracted_action', :source_id, :metadata_json, :created_by
+            )
+            """
+        ).bindparams(bindparam("metadata_json", type_=JSONB)),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "relation_id": relation_id,
+            "buyer_intent_id": buyer_intent_id,
+            "buyer_party_id": buyer_party_id,
+            "seller_target_id": seller_target_id,
+            "event_type": event_type,
+            "title": changes.get("event_title") or changes.get("status_reason"),
+            "content": _relation_event_content(changes, action),
+            "next_step": changes.get("next_step"),
+            "source_id": action["id"],
+            "metadata_json": {
+                "business_update_id": str(action["business_update_id"]),
+                "raw_evidence_text": action.get("raw_evidence_text"),
+            },
+            "created_by": DEFAULT_ADMIN_USER_ID,
+        },
+    )
+
+
+def _event_type_from_relation_status(status_value: Any) -> str:
+    if status_value == "recommended":
+        return "recommended"
+    if status_value == "interested":
+        return "buyer_interested"
+    if status_value == "not_interested":
+        return "buyer_not_interested"
+    if status_value == "due_diligence":
+        return "due_diligence_started"
+    if status_value == "deal_closed":
+        return "deal_closed"
+    if status_value == "paused":
+        return "paused"
+    return "other"
+
+
+def _relation_event_content(changes: dict[str, Any], action: dict[str, Any]) -> str:
+    return (
+        changes.get("event_content")
+        or changes.get("last_event_summary")
+        or changes.get("status_reason")
+        or action.get("raw_evidence_text")
+        or ""
+    )
+
+
+def _required_uuid(value: Any, field_name: str) -> UUID:
+    parsed = _optional_uuid(value)
+    if parsed is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"{field_name} is required.")
+    return parsed
+
+
+def _optional_uuid(value: Any) -> UUID | None:
+    if not value:
+        return None
+    try:
+        return UUID(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _mark_action_applied(
