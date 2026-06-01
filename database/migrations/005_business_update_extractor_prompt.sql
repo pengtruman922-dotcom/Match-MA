@@ -51,7 +51,7 @@ Rules:
 3. Use buyer_seller_relation_update for recommendation, in-talk, due diligence, terminated, or buyer feedback progress. If clearly not interested, also create buyer_intent_target_exclusion.
 4. Use seller_event or internal_note for process notes that should not update the current snapshot.
 5. Use unresolved_item when confidence is low, classification is unclear, or key target objects are missing.
-6. Normalize money amounts to CNY yuan numbers. Normalize percentages to numeric percentage values, e.g. 51 means 51%.
+6. Normalize money amounts to CNY yuan numbers. Normalize percentages to numeric percentage values, e.g. use 51 for a 51 percent share.
 7. If the input contains multiple independent matters, return multiple actions.',
   '{
     "type": "object",

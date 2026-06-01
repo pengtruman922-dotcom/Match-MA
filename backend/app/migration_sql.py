@@ -10,5 +10,33 @@ def load_migration_sql(name: str) -> str:
 
 
 def split_sql_statements(sql: str) -> list[str]:
-    return [statement.strip() for statement in sql.split(";") if statement.strip()]
+    statements: list[str] = []
+    current: list[str] = []
+    in_single_quote = False
+    index = 0
 
+    while index < len(sql):
+        character = sql[index]
+        current.append(character)
+
+        if character == "'":
+            next_character = sql[index + 1] if index + 1 < len(sql) else ""
+            if in_single_quote and next_character == "'":
+                current.append(next_character)
+                index += 2
+                continue
+            in_single_quote = not in_single_quote
+
+        if character == ";" and not in_single_quote:
+            statement = "".join(current).strip()
+            if statement:
+                statements.append(statement[:-1].strip())
+            current = []
+
+        index += 1
+
+    tail = "".join(current).strip()
+    if tail:
+        statements.append(tail)
+
+    return statements
