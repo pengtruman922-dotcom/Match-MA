@@ -117,6 +117,9 @@ BUYER_INTENT_FIELD_ALIASES = {
 }
 
 BUYER_SELLER_RELATION_CHANGE_FIELDS = {
+    "buyer_intent_id",
+    "buyer_party_id",
+    "seller_target_id",
     "status",
     "status_reason",
     "first_recommended_at",
@@ -232,8 +235,10 @@ ENUM_VALUE_ALIASES = {
     "interested": "interested",
     "初步感兴趣": "interested",
     "感兴趣": "interested",
+    "in_talk": "in_discussion",
     "沟通中": "in_discussion",
     "初步沟通": "in_discussion",
+    "推进中": "in_discussion",
     "尽调": "due_diligence",
     "due_diligence_started": "due_diligence_started",
     "不感兴趣": "not_interested",
@@ -243,6 +248,7 @@ ENUM_VALUE_ALIASES = {
     "已成交": "deal_closed",
     "推荐反馈": "other",
     "recommendation_feedback": "other",
+    "recommendation_negotiation": "other",
 }
 
 NESTED_FIELD_ALIASES = {
@@ -661,6 +667,12 @@ def _normalize_actions(
             action_type,
             proposed_changes,
         )
+        if action_type == "buyer_seller_relation_update":
+            relation_context_changes, relation_context_notes = _relation_context_changes(
+                business_update,
+            )
+            normalized_changes = {**relation_context_changes, **normalized_changes}
+            normalization_notes.extend(relation_context_notes)
         target_entity_type, target_entity_id, binding_notes = _normalize_action_target(
             action_type,
             target_entity_type,
@@ -794,7 +806,32 @@ def _normalize_action_target(
         if len(bound_ids) == 1:
             return "buyer_intent", bound_ids[0], ["target_entity_id<-single_bound_buyer_intent"]
 
+    if action_type == "buyer_seller_relation_update":
+        return "buyer_seller_relation", target_entity_id, []
+
     return target_entity_type, target_entity_id, []
+
+
+def _relation_context_changes(business_update: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    changes: dict[str, Any] = {}
+    notes: list[str] = []
+
+    seller_target_ids = _uuid_list(business_update["bound_seller_target_ids_json"])
+    if len(seller_target_ids) == 1:
+        changes["seller_target_id"] = str(seller_target_ids[0])
+        notes.append("seller_target_id<-single_bound_seller_target")
+
+    buyer_intent_ids = _uuid_list(business_update["bound_buyer_intent_ids_json"])
+    if len(buyer_intent_ids) == 1:
+        changes["buyer_intent_id"] = str(buyer_intent_ids[0])
+        notes.append("buyer_intent_id<-single_bound_buyer_intent")
+
+    buyer_party_ids = _uuid_list(business_update["bound_buyer_party_ids_json"])
+    if len(buyer_party_ids) == 1:
+        changes["buyer_party_id"] = str(buyer_party_ids[0])
+        notes.append("buyer_party_id<-single_bound_buyer_party")
+
+    return changes, notes
 
 
 def _build_unresolved_action(
