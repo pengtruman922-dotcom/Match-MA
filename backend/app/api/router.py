@@ -9,6 +9,7 @@ from backend.app.api.routes import (
     extracted_actions,
     health,
     meta,
+    model_config,
     recommendations,
     relations,
     search_docs,
@@ -20,6 +21,7 @@ from backend.app.api.routes import (
 api_router = APIRouter()
 api_router.include_router(health.router)
 api_router.include_router(meta.router)
+api_router.include_router(model_config.router)
 api_router.include_router(background_jobs.router)
 api_router.include_router(seller_targets.router)
 api_router.include_router(buyer_parties.router)
