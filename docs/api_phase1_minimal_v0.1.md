@@ -276,8 +276,16 @@ GET /api/v1/update-logs?entity_type=buyer_intent&entity_id={buyer_intent_id}
 说明：
 
 - 这是后续详情页“更新记录 tab”的基础接口。
-- 当前只支持 `seller_target / buyer_intent`。
-- 当前只读，不支持 rollback。
+- 当前支持 `seller_target / buyer_intent / buyer_party / buyer_seller_relation` 的更新记录查询。
+- 一期已支持白名单字段回退：
+
+```text
+POST /api/v1/update-logs/{log_id}/rollback
+POST /api/v1/update-logs/actions/{extracted_action_id}/rollback
+```
+
+- 回退会把字段恢复到 `old_value_json`，原日志写入 `rollback_at`，并新增一条 `source_type=rollback` 的日志。
+- 若当前字段值已被后续人工修改，默认返回 `409`；人工确认后可传 `{ "force": true }`。
 
 ---
 

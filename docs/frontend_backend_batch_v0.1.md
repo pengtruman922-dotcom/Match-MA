@@ -151,3 +151,20 @@ PATCH /api/v1/extracted-actions/{id}
 POST /api/v1/extracted-actions/{id}/apply
 POST /api/v1/business-updates/{id}/process
 ```
+
+## 6. 更新记录与回退
+
+```text
+GET /api/v1/update-logs?entity_type={entity_type}&entity_id={entity_id}
+POST /api/v1/update-logs/{log_id}/rollback
+POST /api/v1/update-logs/actions/{extracted_action_id}/rollback
+```
+
+回退接口用于“自动应用后复核”的闭环：
+
+- 单条回退按 `action_application_log` 把某个字段恢复到 `old_value_json`。
+- 按动作回退会回退同一 `extracted_action_id` 下所有仍可回退的字段，并把动作标记为 `rejected`。
+- 当前支持 `seller_target`、`buyer_intent`、`buyer_party`、`buyer_seller_relation` 的白名单字段。
+- 已回退的原日志会写入 `rollback_at`；系统同时插入一条 `source_type=rollback` 的新日志，便于前端展示“谁把什么改回去了”。
+- 若当前字段值已经不等于原日志的 `new_value_json`，接口默认返回 `409`，避免覆盖后续人工修改；确需覆盖时请求体传 `{ "force": true }`。
+- 标的和买家意向回退后会自动创建 search_doc / embedding 重建任务，保证推荐检索数据后续同步。
