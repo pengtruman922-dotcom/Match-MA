@@ -97,6 +97,12 @@ def get_debug_entity(entity_type: str, entity_id: UUID, db: Session = Depends(ge
         payload = get_recommendation_session_debug(entity_id, db)
     elif entity_type == "background_job":
         payload = _background_job_debug(db, entity_id)
+    elif entity_type == "seller_target":
+        payload = _business_object_debug(db, entity_type, entity_id)
+    elif entity_type == "buyer_intent":
+        payload = _business_object_debug(db, entity_type, entity_id)
+    elif entity_type == "buyer_party":
+        payload = _business_object_debug(db, entity_type, entity_id)
     elif entity_type == "model_node_config":
         payload = _model_node_debug(db, entity_id)
     elif entity_type == "recommendation_report":
@@ -308,6 +314,15 @@ def _debug_summary(entity_type: str, payload: dict[str, Any]) -> dict[str, Any]:
             "queue_name": job.get("queue_name"),
             "trace_count": len(payload.get("traces", [])),
         }
+    if entity_type in {"seller_target", "buyer_intent", "buyer_party"}:
+        entity = payload["entity"]
+        return {
+            "title": f"{entity_type}: {entity.get('name') or entity.get('title') or entity.get('id')}",
+            "status": entity.get("status") or entity.get("recommendation_status"),
+            "job_count": len(payload.get("jobs", [])),
+            "trace_count": len(payload.get("traces", [])),
+            "update_log_count": len(payload.get("application_logs", [])),
+        }
     if entity_type == "model_node_config":
         node = payload["node"]
         return {
@@ -327,6 +342,242 @@ def _debug_summary(entity_type: str, payload: dict[str, Any]) -> dict[str, Any]:
             "message_count": len(payload.get("messages", [])),
         }
     return {"title": entity_type}
+
+
+BUSINESS_OBJECT_SELECTS = {
+    "seller_target": """
+        select
+          id, target_name as name, target_name as title, target_type,
+          recommendation_status, information_status, industry_primary, industry_secondary,
+          headquarter_province, headquarter_city, listed_status,
+          current_revenue_yuan, current_net_profit_yuan, current_total_profit_yuan,
+          valuation_yuan, asking_price_yuan, pe_ratio, is_for_sale,
+          can_control, can_consolidate, accepts_minority_investment,
+          transfer_ratio_min, transfer_ratio_max, transfer_ratio_text,
+          transfer_flexibility_type, business_summary, transaction_summary,
+          risk_summary, gap_summary, created_at::text as created_at,
+          updated_at::text as updated_at, metadata_json
+        from seller_target
+        where id = :entity_id
+          and team_id = :team_id
+          and workspace_id = :workspace_id
+          and deleted_at is null
+    """,
+    "buyer_intent": """
+        select
+          id, intent_name as name, intent_name as title, status, buyer_party_id,
+          contact_name, raw_requirement_text, intent_summary, parsed_requirement_json,
+          industry_primary, industry_secondary, region_scope_summary,
+          region_constraints_json, min_revenue_yuan, min_net_profit_yuan,
+          min_total_profit_yuan, max_pe, max_valuation_yuan, market_cap_range_summary,
+          requires_control, requires_consolidation, accepts_minority_investment,
+          desired_equity_ratio_min, desired_equity_ratio_max, equity_ratio_summary,
+          equity_requirement_type, acceptable_control_paths_json, preferred_listed_status,
+          transaction_type, negative_summary, priority_summary, preference_summary,
+          unknown_summary, created_at::text as created_at, updated_at::text as updated_at,
+          metadata_json
+        from buyer_intent
+        where id = :entity_id
+          and team_id = :team_id
+          and workspace_id = :workspace_id
+          and deleted_at is null
+    """,
+    "buyer_party": """
+        select
+          id, buyer_name as name, buyer_name as title, legal_name, buyer_type,
+          status, listed_status, region_province, region_city, main_business,
+          profile_summary, contact_info_json, created_at::text as created_at,
+          updated_at::text as updated_at, metadata_json
+        from buyer_party
+        where id = :entity_id
+          and team_id = :team_id
+          and workspace_id = :workspace_id
+          and deleted_at is null
+    """,
+}
+
+
+def _business_object(db: Session, entity_type: str, entity_id: UUID) -> dict[str, Any]:
+    query = BUSINESS_OBJECT_SELECTS.get(entity_type)
+    if query is None:
+        raise HTTPException(status_code=400, detail=f"Unsupported business entity_type: {entity_type}")
+    row = db.execute(
+        text(query),
+        {"entity_id": entity_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    ).mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"{entity_type} not found.")
+    return dict(row)
+
+
+def _entity_jobs(db: Session, entity_type: str, entity_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            f"""
+            select {_background_job_select_columns()}
+            from background_job
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and entity_type = :entity_type
+              and entity_id = :entity_id
+            order by created_at desc
+            limit 100
+            """
+        ),
+        {
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _entity_traces(db: Session, entity_type: str, entity_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            f"""
+            select {_ai_trace_select_columns()}
+            from ai_trace
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and entity_type = :entity_type
+              and entity_id = :entity_id
+            order by started_at desc
+            limit 100
+            """
+        ),
+        {
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _entity_application_logs(db: Session, entity_type: str, entity_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              id, extracted_action_id, business_update_id, entity_type, entity_id,
+              field_path, old_value_json, new_value_json, source_type, source_id,
+              evidence_id, applied_by, applied_at::text as applied_at,
+              edited_before_apply, can_rollback, rollback_at::text as rollback_at,
+              metadata_json
+            from action_application_log
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and entity_type = :entity_type
+              and entity_id = :entity_id
+            order by applied_at desc
+            limit 100
+            """
+        ),
+        {
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _entity_relations(db: Session, entity_type: str, entity_id: UUID) -> list[dict[str, Any]]:
+    if entity_type == "seller_target":
+        where = "rel.seller_target_id = :entity_id"
+    elif entity_type == "buyer_intent":
+        where = "rel.buyer_intent_id = :entity_id"
+    else:
+        return []
+    rows = db.execute(
+        text(
+            f"""
+            select
+              rel.id, rel.buyer_intent_id, bi.intent_name as buyer_intent_name,
+              rel.buyer_party_id, bp.buyer_name, rel.seller_target_id,
+              st.target_name as seller_target_name, rel.status, rel.stage,
+              rel.last_event_at::text as last_event_at, rel.created_at::text as created_at,
+              rel.updated_at::text as updated_at, rel.metadata_json
+            from buyer_seller_relation rel
+            left join buyer_intent bi on bi.id = rel.buyer_intent_id
+            left join buyer_party bp on bp.id = rel.buyer_party_id
+            left join seller_target st on st.id = rel.seller_target_id
+            where rel.team_id = :team_id
+              and rel.workspace_id = :workspace_id
+              and {where}
+            order by coalesce(rel.last_event_at, rel.updated_at, rel.created_at) desc
+            limit 100
+            """
+        ),
+        {"entity_id": entity_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _entity_relation_events(db: Session, entity_type: str, entity_id: UUID) -> list[dict[str, Any]]:
+    if entity_type == "seller_target":
+        where = "event.seller_target_id = :entity_id"
+    elif entity_type == "buyer_intent":
+        where = "event.buyer_intent_id = :entity_id"
+    else:
+        return []
+    rows = db.execute(
+        text(
+            f"""
+            select
+              id, relation_id, buyer_intent_id, buyer_party_id, seller_target_id,
+              event_type, event_status, event_date, note, source_type, source_id,
+              created_by, created_at::text as created_at, metadata_json
+            from relation_event event
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and {where}
+            order by created_at desc
+            limit 100
+            """
+        ),
+        {"entity_id": entity_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _entity_search_doc(db: Session, entity_type: str, entity_id: UUID) -> dict[str, Any] | None:
+    if entity_type == "seller_target":
+        query = """
+            select id, seller_target_id as entity_id, doc_type, title, full_text,
+                   embedding_model, embedding_dim, source_version, updated_at::text as updated_at,
+                   embedding is not null as has_embedding
+            from seller_target_search_doc
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and seller_target_id = :entity_id
+            order by updated_at desc
+            limit 1
+        """
+    elif entity_type == "buyer_intent":
+        query = """
+            select id, buyer_intent_id as entity_id, title, full_text,
+                   embedding_model, embedding_dim, source_version, updated_at::text as updated_at,
+                   embedding is not null as has_embedding
+            from buyer_intent_search_doc
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and buyer_intent_id = :entity_id
+            order by updated_at desc
+            limit 1
+        """
+    else:
+        return None
+    row = db.execute(
+        text(query),
+        {"entity_id": entity_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    ).mappings().one_or_none()
+    return dict(row) if row else None
 
 
 def _background_job(db: Session, job_id: UUID) -> dict[str, Any]:
