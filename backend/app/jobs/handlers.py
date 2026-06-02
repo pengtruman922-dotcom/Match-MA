@@ -27,6 +27,7 @@ from backend.app.api.routes.extracted_actions import (
 from backend.app.jobs.queue import JobClaim
 from backend.app.services.search_docs import (
     create_embedding_job_for_search_doc,
+    create_search_doc_rebuild_job,
     rebuild_buyer_intent_search_doc,
     rebuild_seller_target_search_doc,
 )
