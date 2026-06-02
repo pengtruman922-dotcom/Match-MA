@@ -207,6 +207,40 @@ class RecommendationRerankJobOut(BaseModel):
     source: str
 
 
+class RecommendationSessionSummaryOut(BaseModel):
+    session: dict[str, Any]
+    display: dict[str, Any]
+    candidate_counts: dict[str, int]
+    latest_candidates_preview: list[RecommendationCandidateOut] = Field(default_factory=list)
+    candidate_source: str
+    rerank_status: dict[str, Any]
+    report_status: dict[str, Any]
+    selected_status: dict[str, Any]
+    activity: dict[str, Any]
+    debug_ref: dict[str, Any]
+
+
+class RecommendationPageOut(BaseModel):
+    recent_sessions: list[RecommendationSessionSummaryOut]
+    running_sessions: list[RecommendationSessionSummaryOut]
+    overview: dict[str, Any]
+    quick_actions: list[dict[str, Any]]
+    polling_hint: dict[str, Any]
+
+
+class RecommendationSessionStatusOut(BaseModel):
+    session: dict[str, Any]
+    display: dict[str, Any]
+    candidate_counts: dict[str, int]
+    latest_candidates_preview: list[RecommendationCandidateOut] = Field(default_factory=list)
+    candidate_source: str
+    rerank_status: dict[str, Any]
+    report_status: dict[str, Any]
+    selected_status: dict[str, Any]
+    activity: dict[str, Any]
+    debug_ref: dict[str, Any]
+
+
 @router.post("/candidates", response_model=RecommendationCandidateResponse)
 def generate_recommendation_candidates(
     payload: RecommendationCandidateRequest,
@@ -370,9 +404,56 @@ def list_recommendation_sessions(
     return [dict(row) for row in rows]
 
 
+@router.get("/page", response_model=RecommendationPageOut)
+def get_recommendation_page(
+    db: Session = Depends(get_db),
+    mode: str | None = None,
+    limit: int = Query(default=12, ge=1, le=50),
+) -> dict[str, Any]:
+    recent_rows = _list_recommendation_session_overview_rows(db, mode=mode, limit=limit, offset=0)
+    recent_summaries = [
+        _build_recommendation_session_summary(db, session=row, preview_limit=5) for row in recent_rows
+    ]
+
+    recent_ids = {str(summary["session"]["id"]) for summary in recent_summaries}
+    running_summaries = [
+        summary for summary in recent_summaries if _recommendation_session_is_processing(summary)
+    ]
+    for session_id in _list_running_recommendation_session_ids(db, limit=20):
+        if str(session_id) in recent_ids:
+            continue
+        row = _get_recommendation_session_overview_or_404(db, session_id)
+        if mode and row.get("mode") != mode:
+            continue
+        running_summaries.append(_build_recommendation_session_summary(db, session=row, preview_limit=5))
+
+    overview = _recommendation_page_overview(recent_summaries, running_summaries)
+    return {
+        "recent_sessions": recent_summaries,
+        "running_sessions": running_summaries,
+        "overview": overview,
+        "quick_actions": _recommendation_quick_actions(overview),
+        "polling_hint": {
+            "enabled": overview["running_session_count"] > 0,
+            "interval_ms": 3000,
+            "endpoint_template": "/api/v1/recommendations/sessions/{session_id}/status",
+        },
+    }
+
+
 @router.get("/sessions/{session_id}", response_model=RecommendationSessionOut)
 def get_recommendation_session(session_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
     return _get_recommendation_session_or_404(db, session_id)
+
+
+@router.get("/sessions/{session_id}/status", response_model=RecommendationSessionStatusOut)
+def get_recommendation_session_status(
+    session_id: UUID,
+    db: Session = Depends(get_db),
+    preview_limit: int = Query(default=8, ge=0, le=50),
+) -> dict[str, Any]:
+    session = _get_recommendation_session_overview_or_404(db, session_id)
+    return _build_recommendation_session_summary(db, session=session, preview_limit=preview_limit)
 
 
 @router.get("/sessions/{session_id}/bundle", response_model=RecommendationSessionBundleOut)
@@ -860,6 +941,420 @@ def list_recommendation_reports(
 ) -> list[dict[str, Any]]:
     _get_recommendation_session_or_404(db, session_id)
     return _list_recommendation_reports(db, session_id=session_id, limit=limit, offset=offset)
+
+
+def _list_recommendation_session_overview_rows(
+    db: Session,
+    *,
+    mode: str | None,
+    limit: int,
+    offset: int,
+) -> list[dict[str, Any]]:
+    where = ["rs.team_id = :team_id", "rs.workspace_id = :workspace_id", "rs.status <> 'archived'"]
+    params: dict[str, Any] = {
+        "team_id": DEFAULT_TEAM_ID,
+        "workspace_id": DEFAULT_WORKSPACE_ID,
+        "limit": limit,
+        "offset": offset,
+    }
+    if mode:
+        where.append("rs.mode = :mode")
+        params["mode"] = mode
+
+    rows = db.execute(
+        text(
+            f"""
+            select {_session_overview_select_columns()}
+            from recommendation_session rs
+            left join buyer_intent bi on bi.id = rs.buyer_intent_id
+            left join buyer_party bp on bp.id = coalesce(rs.buyer_party_id, bi.buyer_party_id)
+            left join seller_target st on st.id = rs.seller_target_id
+            where {' and '.join(where)}
+            order by rs.updated_at desc, rs.created_at desc
+            limit :limit offset :offset
+            """
+        ),
+        params,
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _get_recommendation_session_overview_or_404(db: Session, session_id: UUID) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            f"""
+            select {_session_overview_select_columns()}
+            from recommendation_session rs
+            left join buyer_intent bi on bi.id = rs.buyer_intent_id
+            left join buyer_party bp on bp.id = coalesce(rs.buyer_party_id, bi.buyer_party_id)
+            left join seller_target st on st.id = rs.seller_target_id
+            where rs.id = :session_id
+              and rs.team_id = :team_id
+              and rs.workspace_id = :workspace_id
+            """
+        ),
+        {
+            "session_id": session_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recommendation session not found.")
+    return dict(row)
+
+
+def _list_running_recommendation_session_ids(db: Session, *, limit: int) -> list[UUID]:
+    rows = db.execute(
+        text(
+            """
+            with running_jobs as (
+              select
+                case
+                  when job.job_type = 'recommendation_rerank'
+                    and job.entity_type = 'recommendation_session'
+                    then job.entity_id
+                  when job.payload_json ? 'session_id'
+                    and job.payload_json ->> 'session_id'
+                      ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+                    then nullif(job.payload_json ->> 'session_id', '')::uuid
+                  else null
+                end as session_id
+              from background_job job
+              where job.team_id = :team_id
+                and job.workspace_id = :workspace_id
+                and job.job_type in ('recommendation_rerank', 'recommendation_report_generate')
+                and job.status in ('queued', 'running', 'retry_waiting')
+            )
+            select distinct session_id
+            from running_jobs
+            where session_id is not null
+            order by session_id
+            limit :limit
+            """
+        ),
+        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID, "limit": limit},
+    ).mappings().all()
+    return [row["session_id"] for row in rows if row.get("session_id") is not None]
+
+
+def _build_recommendation_session_summary(
+    db: Session,
+    *,
+    session: dict[str, Any],
+    preview_limit: int,
+) -> dict[str, Any]:
+    session_id = session["id"]
+    messages = _list_recommendation_messages(db, session_id=session_id, limit=500, offset=0)
+    selected_items = _list_selected_items(
+        db,
+        session_id=session_id,
+        include_canceled=True,
+        limit=500,
+        offset=0,
+    )
+    reports = _list_recommendation_reports(db, session_id=session_id, limit=50, offset=0)
+    candidate_sets = _extract_recommendation_candidate_sets(messages)
+    initial_candidates = _enrich_candidates_with_selection(
+        candidate_sets["initial_candidates"],
+        selected_items,
+    )
+    reranked_candidates = _enrich_candidates_with_selection(
+        candidate_sets["reranked_candidates"],
+        selected_items,
+    )
+    latest_candidates = reranked_candidates or initial_candidates
+    candidate_source = "reranked_candidates" if reranked_candidates else (
+        "initial_candidates" if initial_candidates else "none"
+    )
+    rerank_job = _get_latest_recommendation_rerank_job(db, session_id=session_id)
+    rerank_status = _build_recommendation_rerank_status(
+        rerank_job=rerank_job,
+        reranked_candidates=reranked_candidates,
+        candidate_sets=candidate_sets,
+    )
+    report_jobs = _get_recommendation_report_jobs(db, session_id=session_id)
+    report_status = _build_recommendation_report_status(reports=reports, jobs=report_jobs)
+    selected_status = _build_recommendation_selected_status(selected_items)
+    activity = _build_recommendation_activity(
+        session=session,
+        messages=messages,
+        reports=reports,
+        rerank_status=rerank_status,
+        report_status=report_status,
+    )
+    return {
+        "session": session,
+        "display": _recommendation_session_display(session),
+        "candidate_counts": {
+            "initial": len(initial_candidates),
+            "reranked": len(reranked_candidates),
+            "latest": len(latest_candidates),
+        },
+        "latest_candidates_preview": latest_candidates[:preview_limit],
+        "candidate_source": candidate_source,
+        "rerank_status": rerank_status,
+        "report_status": report_status,
+        "selected_status": selected_status,
+        "activity": activity,
+        "debug_ref": {
+            "entity_type": "recommendation_session",
+            "entity_id": str(session_id),
+            "route": f"/debug/entities/recommendation_session/{session_id}",
+        },
+    }
+
+
+def _recommendation_session_display(session: dict[str, Any]) -> dict[str, Any]:
+    mode = session.get("mode")
+    if mode == "buyer_to_target":
+        title = session.get("buyer_intent_name") or session.get("buyer_name") or "买家找标的"
+        subtitle = session.get("buyer_name")
+        anchor = {"entity_type": "buyer_intent", "entity_id": _string_or_none(session.get("buyer_intent_id"))}
+        primary_action = "recommend_targets"
+    else:
+        title = session.get("seller_target_name") or "标的找买家"
+        subtitle = "推荐买家意向"
+        anchor = {"entity_type": "seller_target", "entity_id": _string_or_none(session.get("seller_target_id"))}
+        primary_action = "recommend_buyers"
+    return {
+        "title": title,
+        "subtitle": subtitle,
+        "mode_label": "买家找标的" if mode == "buyer_to_target" else "标的找买家",
+        "anchor": anchor,
+        "primary_action": primary_action,
+        "route": f"/recommendations/sessions/{session['id']}",
+    }
+
+
+def _recommendation_session_is_processing(summary: dict[str, Any]) -> bool:
+    return (
+        summary["rerank_status"].get("status") in {"queued", "running", "retry_waiting"}
+        or summary["report_status"].get("status") in {"queued", "running", "retry_waiting", "generating"}
+    )
+
+
+def _recommendation_page_overview(
+    recent_summaries: list[dict[str, Any]],
+    running_summaries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    failed_count = 0
+    generated_report_count = 0
+    selected_count = 0
+    for summary in recent_summaries:
+        if summary["rerank_status"].get("status") == "failed" or summary["report_status"].get("status") == "failed":
+            failed_count += 1
+        generated_report_count += int(summary["report_status"].get("generated_count") or 0)
+        selected_count += int(summary["selected_status"].get("active_count") or 0)
+    return {
+        "recent_session_count": len(recent_summaries),
+        "running_session_count": len(running_summaries),
+        "failed_session_count": failed_count,
+        "generated_report_count": generated_report_count,
+        "active_selected_item_count": selected_count,
+    }
+
+
+def _recommendation_quick_actions(overview: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "key": "start_buyer_to_target",
+            "label": "按买家找标的",
+            "action": "open_buyer_selector",
+            "route": None,
+            "badge_count": None,
+        },
+        {
+            "key": "start_target_to_buyer",
+            "label": "按标的找买家",
+            "action": "open_target_selector",
+            "route": None,
+            "badge_count": None,
+        },
+        {
+            "key": "review_running",
+            "label": "查看生成中",
+            "action": "filter_running_sessions",
+            "route": "/recommendations?status=running",
+            "badge_count": overview.get("running_session_count"),
+        },
+    ]
+
+
+def _build_recommendation_report_status(
+    *,
+    reports: list[dict[str, Any]],
+    jobs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    latest_report = reports[0] if reports else None
+    latest_job = jobs[0] if jobs else None
+    status_counts = _count_by_key(reports, "status")
+    job_status = latest_job.get("status") if latest_job else None
+    report_status = latest_report.get("status") if latest_report else None
+    running_statuses = {"queued", "running", "retry_waiting"}
+    if job_status in running_statuses or report_status == "generating":
+        aggregate_status = "generating"
+    elif job_status == "failed" or report_status == "failed":
+        aggregate_status = "failed"
+    elif status_counts.get("generated", 0) > 0:
+        aggregate_status = "generated"
+    else:
+        aggregate_status = "not_requested"
+    return {
+        "requested": bool(reports or jobs),
+        "status": aggregate_status,
+        "latest_report": _compact_recommendation_report(latest_report) if latest_report else None,
+        "latest_job": _compact_background_job(latest_job) if latest_job else None,
+        "total_count": len(reports),
+        "generated_count": int(status_counts.get("generated", 0)),
+        "generating_count": int(status_counts.get("generating", 0)),
+        "failed_count": int(status_counts.get("failed", 0)),
+        "archived_count": int(status_counts.get("archived", 0)),
+    }
+
+
+def _build_recommendation_selected_status(selected_items: list[dict[str, Any]]) -> dict[str, Any]:
+    active_items = [item for item in selected_items if item.get("canceled_at") is None]
+    return {
+        "active_count": len(active_items),
+        "canceled_count": len(selected_items) - len(active_items),
+        "latest_selected_at": active_items[0].get("selected_at") if active_items else None,
+        "latest_item": _compact_selected_item(active_items[0]) if active_items else None,
+    }
+
+
+def _build_recommendation_activity(
+    *,
+    session: dict[str, Any],
+    messages: list[dict[str, Any]],
+    reports: list[dict[str, Any]],
+    rerank_status: dict[str, Any],
+    report_status: dict[str, Any],
+) -> dict[str, Any]:
+    timestamps = [
+        session.get("updated_at"),
+        messages[-1].get("created_at") if messages else None,
+        reports[0].get("created_at") if reports else None,
+        rerank_status.get("finished_at") or rerank_status.get("started_at") or rerank_status.get("created_at"),
+        (report_status.get("latest_job") or {}).get("finished_at")
+        or (report_status.get("latest_job") or {}).get("started_at")
+        or (report_status.get("latest_job") or {}).get("created_at"),
+    ]
+    latest_activity_at = max([value for value in timestamps if value] or [None])
+    return {
+        "latest_activity_at": latest_activity_at,
+        "message_count": len(messages),
+        "report_count": len(reports),
+        "last_message": _compact_recommendation_message(messages[-1]) if messages else None,
+    }
+
+
+def _get_recommendation_report_jobs(db: Session, *, session_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              id, job_type, status, priority, queue_name, entity_type, entity_id,
+              result_json, error_code, error_message, attempt_count, max_attempts,
+              started_at::text as started_at, finished_at::text as finished_at,
+              created_at::text as created_at, updated_at::text as updated_at, metadata_json
+            from background_job
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and job_type = 'recommendation_report_generate'
+              and (
+                payload_json ->> 'session_id' = :session_id_text
+                or entity_id in (
+                  select id
+                  from recommendation_report
+                  where session_id = :session_id
+                    and team_id = :team_id
+                    and workspace_id = :workspace_id
+                )
+              )
+            order by created_at desc
+            limit 50
+            """
+        ),
+        {
+            "session_id": session_id,
+            "session_id_text": str(session_id),
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _compact_recommendation_report(report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": report.get("id"),
+        "session_id": report.get("session_id"),
+        "report_type": report.get("report_type"),
+        "title": report.get("title"),
+        "status": report.get("status"),
+        "generated_by_model": report.get("generated_by_model"),
+        "prompt_version": report.get("prompt_version"),
+        "created_at": report.get("created_at"),
+        "metadata_json": report.get("metadata_json"),
+    }
+
+
+def _compact_background_job(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": job.get("id"),
+        "job_type": job.get("job_type"),
+        "status": job.get("status"),
+        "queue_name": job.get("queue_name"),
+        "entity_type": job.get("entity_type"),
+        "entity_id": job.get("entity_id"),
+        "error_code": job.get("error_code"),
+        "error_message": job.get("error_message"),
+        "attempt_count": job.get("attempt_count"),
+        "max_attempts": job.get("max_attempts"),
+        "created_at": job.get("created_at"),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "updated_at": job.get("updated_at"),
+    }
+
+
+def _compact_selected_item(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": item.get("id"),
+        "seller_target_id": item.get("seller_target_id"),
+        "seller_target_name": item.get("seller_target_name"),
+        "buyer_intent_id": item.get("buyer_intent_id"),
+        "buyer_intent_name": item.get("buyer_intent_name"),
+        "buyer_party_id": item.get("buyer_party_id"),
+        "buyer_name": item.get("buyer_name"),
+        "recommendation_level": item.get("recommendation_level"),
+        "selected_at": item.get("selected_at"),
+    }
+
+
+def _compact_recommendation_message(message: dict[str, Any]) -> dict[str, Any]:
+    content = str(message.get("content") or "")
+    return {
+        "id": message.get("id"),
+        "role": message.get("role"),
+        "content_type": message.get("content_type"),
+        "content_preview": content[:160],
+        "metadata_json": message.get("metadata_json"),
+        "created_at": message.get("created_at"),
+    }
+
+
+def _count_by_key(items: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        value = str(item.get(key) or "unknown")
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _string_or_none(value: Any) -> str | None:
+    return str(value) if value is not None else None
 
 
 def _list_recommendation_messages(
@@ -2386,6 +2881,18 @@ def _session_select_columns() -> str:
       selected_count, report_count, anonymous_input_snapshot,
       initial_condition_snapshot_json, latest_condition_snapshot_json,
       created_at::text as created_at, updated_at::text as updated_at, metadata_json
+    """
+
+
+def _session_overview_select_columns() -> str:
+    return """
+      rs.id, rs.mode, rs.buyer_intent_id, rs.buyer_party_id, rs.seller_target_id, rs.status,
+      rs.selected_count, rs.report_count, rs.anonymous_input_snapshot,
+      rs.initial_condition_snapshot_json, rs.latest_condition_snapshot_json,
+      rs.created_at::text as created_at, rs.updated_at::text as updated_at, rs.metadata_json,
+      bi.intent_name as buyer_intent_name,
+      bp.buyer_name,
+      st.target_name as seller_target_name
     """
 
 

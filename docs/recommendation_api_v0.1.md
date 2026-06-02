@@ -20,12 +20,31 @@ Creates an optional `recommendation_session`, stores user/tool messages, and ret
 ### Session history
 
 - `GET /api/v1/recommendations/sessions`
+- `GET /api/v1/recommendations/page`
 - `GET /api/v1/recommendations/sessions/{session_id}`
+- `GET /api/v1/recommendations/sessions/{session_id}/status`
 - `GET /api/v1/recommendations/sessions/{session_id}/bundle`
 - `GET /api/v1/recommendations/sessions/{session_id}/messages`
 - `POST /api/v1/recommendations/sessions/{session_id}/messages`
 
 Use these for frontend session replay and recommendation chat history.
+
+The page endpoint is the recommended frontend entry for the recommendation page. It returns:
+
+- `recent_sessions`: latest active/completed sessions with display fields, candidate preview, rerank status, report status, selected-item status, and debug ref.
+- `running_sessions`: sessions with queued/running rerank or report jobs; use this to show the "generating" area even if the session is outside the normal recent list.
+- `overview`: counts for recent sessions, running sessions, failed sessions, generated reports, and active selected items.
+- `quick_actions`: frontend action metadata for "buyer to target", "target to buyer", and "view running".
+- `polling_hint`: when true, poll `GET /api/v1/recommendations/sessions/{session_id}/status`.
+
+The session status endpoint is the recommended polling target after candidate generation, rerank retry, selected item changes, and report generation jobs. It returns the same summary shape as one item in `recent_sessions`, including:
+
+- `candidate_counts` and `latest_candidates_preview`.
+- `candidate_source`: `reranked_candidates`, `initial_candidates`, or `none`.
+- `rerank_status`: async rerank job lifecycle and candidate count.
+- `report_status`: latest report, latest report job, and generated/generating/failed counts.
+- `selected_status`: active/canceled selected-item counts and latest selected item.
+- `debug_ref`: direct route to Debug Mode for the session.
 
 The bundle endpoint returns:
 
