@@ -464,7 +464,9 @@ def get_recommendation_page(
         "polling_hint": {
             "enabled": overview["running_session_count"] > 0,
             "interval_ms": 3000,
-            "endpoint_template": "/api/v1/recommendations/sessions/{session_id}/status",
+            "endpoint_template": "/api/v1/recommendations/sessions/{session_id}/page-state",
+            "status_endpoint_template": "/api/v1/recommendations/sessions/{session_id}/status",
+            "bundle_endpoint_template": "/api/v1/recommendations/sessions/{session_id}/bundle",
         },
     }
 

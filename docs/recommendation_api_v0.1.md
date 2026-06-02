@@ -37,7 +37,7 @@ The page endpoint is the recommended frontend entry for the recommendation page.
 - `running_sessions`: sessions with queued/running rerank or report jobs; use this to show the "generating" area even if the session is outside the normal recent list.
 - `overview`: counts for recent sessions, running sessions, failed sessions, generated reports, and active selected items.
 - `quick_actions`: frontend action metadata for "buyer to target", "target to buyer", and "view running".
-- `polling_hint`: when true, poll `GET /api/v1/recommendations/sessions/{session_id}/status`.
+- `polling_hint`: when true, prefer polling `GET /api/v1/recommendations/sessions/{session_id}/page-state`; status and bundle endpoint templates are also returned for lighter-weight fallbacks.
 
 
 `GET /api/v1/recommendations/sessions/recent` returns recent session summaries using the same summary shape as `/page`. It supports `mode`, `status=all|running|failed|generated|selected|idle`, `limit`, `offset`, and `preview_limit`, so the frontend can render a session drawer/history list without manually filtering `/sessions` plus status calls.
