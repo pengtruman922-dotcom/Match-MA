@@ -1,7 +1,7 @@
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -39,6 +39,18 @@ class DebugEntityOut(BaseModel):
     payload: dict[str, Any]
 
 
+class DebugCenterOut(BaseModel):
+    overview: dict[str, Any]
+    failed_jobs: list[dict[str, Any]]
+    running_jobs: list[dict[str, Any]]
+    recent_traces: list[dict[str, Any]]
+    failed_traces: list[dict[str, Any]]
+    recent_business_updates: list[dict[str, Any]]
+    recent_recommendation_sessions: list[dict[str, Any]]
+    model_node_test_failures: list[dict[str, Any]]
+    quick_actions: list[dict[str, Any]]
+
+
 @router.get("/business-updates/{business_update_id}", response_model=BusinessUpdateDebugOut)
 def get_business_update_debug(
     business_update_id: UUID,
@@ -55,6 +67,25 @@ def get_business_update_debug(
         "traces": traces,
         "actions": actions,
         "application_logs": application_logs,
+    }
+
+
+@router.get("/center", response_model=DebugCenterOut)
+def get_debug_center(
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    overview = _debug_center_overview(db)
+    return {
+        "overview": overview,
+        "failed_jobs": _debug_center_failed_jobs(db, limit),
+        "running_jobs": _debug_center_running_jobs(db, limit),
+        "recent_traces": _debug_center_recent_traces(db, limit),
+        "failed_traces": _debug_center_failed_traces(db, limit),
+        "recent_business_updates": _debug_center_recent_business_updates(db, limit),
+        "recent_recommendation_sessions": _debug_center_recent_recommendation_sessions(db, limit),
+        "model_node_test_failures": _debug_center_model_node_test_failures(db, limit),
+        "quick_actions": _debug_center_quick_actions(overview),
     }
 
 
@@ -400,6 +431,432 @@ def _model_node_traces(db: Session, node_id: UUID) -> list[dict[str, Any]]:
         },
     ).mappings().all()
     return [dict(row) for row in rows]
+
+
+def _debug_center_overview(db: Session) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            """
+            select
+              (select count(*) from background_job
+               where team_id = :team_id and workspace_id = :workspace_id
+                 and status = 'failed') as failed_job_count,
+              (select count(*) from background_job
+               where team_id = :team_id and workspace_id = :workspace_id
+                 and status = 'queued') as queued_job_count,
+              (select count(*) from background_job
+               where team_id = :team_id and workspace_id = :workspace_id
+                 and status = 'running') as running_job_count,
+              (select count(*) from background_job
+               where team_id = :team_id and workspace_id = :workspace_id
+                 and status = 'retry_waiting') as retry_waiting_job_count,
+              (select count(*) from ai_trace
+               where team_id = :team_id and workspace_id = :workspace_id
+                 and (status = 'failed' or error_code is not null)) as failed_trace_count,
+              (select count(*) from ai_trace
+               where team_id = :team_id and workspace_id = :workspace_id
+                 and started_at >= now() - interval '24 hours') as recent_trace_count,
+              (select count(*) from background_job
+               where team_id = :team_id and workspace_id = :workspace_id
+                 and job_type = 'model_node_test' and status = 'failed') as failed_model_node_test_count,
+              (select count(*) from business_update
+               where team_id = :team_id and workspace_id = :workspace_id
+                 and processing_status = 'failed') as failed_business_update_count,
+              (select count(*) from business_update
+               where team_id = :team_id and workspace_id = :workspace_id
+                 and created_at >= now() - interval '7 days') as recent_business_update_count,
+              (select count(*) from recommendation_session
+               where team_id = :team_id and workspace_id = :workspace_id
+                 and created_at >= now() - interval '7 days') as recent_recommendation_session_count,
+              now()::text as generated_at
+            """
+        ),
+        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    ).mappings().one()
+    overview = {key: int(value) if key.endswith("_count") else value for key, value in dict(row).items()}
+    overview["active_job_count"] = (
+        overview["queued_job_count"] + overview["running_job_count"] + overview["retry_waiting_job_count"]
+    )
+    overview["health_level"] = _debug_center_health_level(overview)
+    overview["mode"] = "debug_mode"
+    return overview
+
+
+def _debug_center_failed_jobs(db: Session, limit: int) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            f"""
+            select {_background_job_select_columns()}
+            from background_job
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and status = 'failed'
+            order by updated_at desc
+            limit :limit
+            """
+        ),
+        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID, "limit": limit},
+    ).mappings().all()
+    return [_compact_job_for_debug_center(dict(row)) for row in rows]
+
+
+def _debug_center_running_jobs(db: Session, limit: int) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            f"""
+            select {_background_job_select_columns()}
+            from background_job
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and status in ('queued', 'running', 'retry_waiting')
+            order by priority asc, run_after asc, created_at asc
+            limit :limit
+            """
+        ),
+        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID, "limit": limit},
+    ).mappings().all()
+    return [_compact_job_for_debug_center(dict(row)) for row in rows]
+
+
+def _debug_center_recent_traces(db: Session, limit: int) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            f"""
+            select {_ai_trace_select_columns()}
+            from ai_trace
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+            order by started_at desc
+            limit :limit
+            """
+        ),
+        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID, "limit": limit},
+    ).mappings().all()
+    return [_compact_trace_for_debug_center(dict(row)) for row in rows]
+
+
+def _debug_center_failed_traces(db: Session, limit: int) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            f"""
+            select {_ai_trace_select_columns()}
+            from ai_trace
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and (status = 'failed' or error_code is not null)
+            order by started_at desc
+            limit :limit
+            """
+        ),
+        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID, "limit": limit},
+    ).mappings().all()
+    return [_compact_trace_for_debug_center(dict(row)) for row in rows]
+
+
+def _debug_center_recent_business_updates(db: Session, limit: int) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              bu.id, bu.raw_text, bu.input_type, bu.processing_status,
+              bu.created_by, bu.created_at::text as created_at, bu.metadata_json,
+              (select count(*) from extracted_action a
+               where a.team_id = bu.team_id and a.workspace_id = bu.workspace_id
+                 and a.business_update_id = bu.id) as action_count,
+              (select count(*) from extracted_action a
+               where a.team_id = bu.team_id and a.workspace_id = bu.workspace_id
+                 and a.business_update_id = bu.id and a.review_status = 'pending_review') as pending_action_count,
+              (select count(*) from action_application_log log
+               where log.team_id = bu.team_id and log.workspace_id = bu.workspace_id
+                 and log.business_update_id = bu.id) as application_log_count,
+              (select count(*) from background_job job
+               where job.team_id = bu.team_id and job.workspace_id = bu.workspace_id
+                 and job.entity_type = 'business_update' and job.entity_id = bu.id) as job_count,
+              (select count(*) from background_job job
+               where job.team_id = bu.team_id and job.workspace_id = bu.workspace_id
+                 and job.entity_type = 'business_update' and job.entity_id = bu.id
+                 and job.status = 'failed') as failed_job_count,
+              (select count(*) from ai_trace trace
+               where trace.team_id = bu.team_id and trace.workspace_id = bu.workspace_id
+                 and trace.entity_type = 'business_update' and trace.entity_id = bu.id) as trace_count
+            from business_update bu
+            where bu.team_id = :team_id
+              and bu.workspace_id = :workspace_id
+            order by bu.created_at desc
+            limit :limit
+            """
+        ),
+        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID, "limit": limit},
+    ).mappings().all()
+    return [_compact_business_update_for_debug_center(dict(row)) for row in rows]
+
+
+def _debug_center_recent_recommendation_sessions(db: Session, limit: int) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              rs.id, rs.mode, rs.status, rs.selected_count, rs.report_count,
+              rs.buyer_intent_id, bi.intent_name as buyer_intent_name,
+              rs.buyer_party_id, bp.buyer_name,
+              rs.seller_target_id, st.target_name as seller_target_name,
+              rs.created_by, rs.created_at::text as created_at, rs.updated_at::text as updated_at,
+              (select count(*) from background_job job
+               where job.team_id = rs.team_id and job.workspace_id = rs.workspace_id
+                 and (
+                   job.payload_json ->> 'session_id' = rs.id::text
+                   or job.entity_id in (
+                     select report.id
+                     from recommendation_report report
+                     where report.team_id = rs.team_id and report.workspace_id = rs.workspace_id
+                       and report.session_id = rs.id
+                   )
+                 )) as job_count,
+              (select count(*) from background_job job
+               where job.team_id = rs.team_id and job.workspace_id = rs.workspace_id
+                 and job.status = 'failed'
+                 and (
+                   job.payload_json ->> 'session_id' = rs.id::text
+                   or job.entity_id in (
+                     select report.id
+                     from recommendation_report report
+                     where report.team_id = rs.team_id and report.workspace_id = rs.workspace_id
+                       and report.session_id = rs.id
+                   )
+                 )) as failed_job_count,
+              (select count(*) from ai_trace trace
+               where trace.team_id = rs.team_id and trace.workspace_id = rs.workspace_id
+                 and (
+                   trace.input_json ->> 'session_id' = rs.id::text
+                   or trace.entity_id in (
+                     select report.id
+                     from recommendation_report report
+                     where report.team_id = rs.team_id and report.workspace_id = rs.workspace_id
+                       and report.session_id = rs.id
+                   )
+                 )) as trace_count
+            from recommendation_session rs
+            left join buyer_intent bi on bi.id = rs.buyer_intent_id
+            left join buyer_party bp on bp.id = rs.buyer_party_id
+            left join seller_target st on st.id = rs.seller_target_id
+            where rs.team_id = :team_id
+              and rs.workspace_id = :workspace_id
+            order by rs.updated_at desc, rs.created_at desc
+            limit :limit
+            """
+        ),
+        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID, "limit": limit},
+    ).mappings().all()
+    return [_compact_recommendation_session_for_debug_center(dict(row)) for row in rows]
+
+
+def _debug_center_model_node_test_failures(db: Session, limit: int) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            f"""
+            select
+              {_background_job_select_columns("job")},
+              node.id as node_id, node.node_name, node.node_type, node.model_name,
+              provider.provider_name, provider.provider_type
+            from background_job job
+            left join model_node_config node
+              on node.id = job.entity_id
+             and job.entity_type = 'model_node_config'
+             and node.team_id = job.team_id
+             and node.workspace_id = job.workspace_id
+            left join model_provider_config provider on provider.id = node.provider_config_id
+            where job.team_id = :team_id
+              and job.workspace_id = :workspace_id
+              and job.job_type = 'model_node_test'
+              and job.status = 'failed'
+            order by job.updated_at desc
+            limit :limit
+            """
+        ),
+        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID, "limit": limit},
+    ).mappings().all()
+    return [_compact_model_node_test_failure_for_debug_center(dict(row)) for row in rows]
+
+
+def _debug_center_health_level(overview: dict[str, Any]) -> str:
+    if overview.get("failed_job_count", 0) or overview.get("failed_trace_count", 0):
+        return "error"
+    if overview.get("retry_waiting_job_count", 0) or overview.get("active_job_count", 0):
+        return "warning"
+    return "ok"
+
+
+def _debug_center_quick_actions(overview: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "key": "view_failed_jobs",
+            "label": "查看失败任务",
+            "route": "/debug?tab=failed_jobs",
+            "action": "filter_failed_jobs",
+            "badge_count": overview.get("failed_job_count"),
+        },
+        {
+            "key": "view_failed_traces",
+            "label": "查看失败 Trace",
+            "route": "/debug?tab=failed_traces",
+            "action": "filter_failed_traces",
+            "badge_count": overview.get("failed_trace_count"),
+        },
+        {
+            "key": "view_model_node_tests",
+            "label": "查看模型测试",
+            "route": "/settings?section=models",
+            "action": "open_model_node_tests",
+            "badge_count": overview.get("failed_model_node_test_count"),
+        },
+        {
+            "key": "open_workbench",
+            "label": "返回工作台",
+            "route": "/workbench",
+            "action": "open_workbench",
+            "badge_count": overview.get("active_job_count"),
+        },
+    ]
+
+
+def _compact_job_for_debug_center(job: dict[str, Any]) -> dict[str, Any]:
+    entity_type = job.get("entity_type")
+    entity_id = job.get("entity_id")
+    return {
+        "id": job["id"],
+        "title": f"{job.get('job_type')} / {job.get('queue_name')}",
+        "job_type": job.get("job_type"),
+        "status": job.get("status"),
+        "queue_name": job.get("queue_name"),
+        "priority": job.get("priority"),
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "error_code": job.get("error_code"),
+        "error_message": _truncate_debug_text(job.get("error_message"), 240),
+        "attempt_count": job.get("attempt_count"),
+        "max_attempts": job.get("max_attempts"),
+        "run_after": job.get("run_after"),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+        "debug_ref": _debug_ref("background_job", job["id"]),
+        "related_entity_ref": _debug_ref(entity_type, entity_id) if entity_type and entity_id else None,
+    }
+
+
+def _compact_trace_for_debug_center(trace: dict[str, Any]) -> dict[str, Any]:
+    job_id = trace.get("job_id")
+    entity_type = trace.get("entity_type")
+    entity_id = trace.get("entity_id")
+    return {
+        "id": trace["id"],
+        "title": f"{trace.get('node_name')} / {trace.get('trace_type')}",
+        "trace_type": trace.get("trace_type"),
+        "node_name": trace.get("node_name"),
+        "status": trace.get("status"),
+        "provider_name": trace.get("provider_name"),
+        "model_name": trace.get("model_name"),
+        "prompt_version": trace.get("prompt_version"),
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "job_id": job_id,
+        "error_code": trace.get("error_code"),
+        "error_message": _truncate_debug_text(trace.get("error_message"), 240),
+        "raw_output_preview": _truncate_debug_text(trace.get("raw_output_text"), 240),
+        "latency_ms": trace.get("latency_ms"),
+        "prompt_tokens": trace.get("prompt_tokens"),
+        "completion_tokens": trace.get("completion_tokens"),
+        "total_tokens": trace.get("total_tokens"),
+        "started_at": trace.get("started_at"),
+        "finished_at": trace.get("finished_at"),
+        "debug_ref": _debug_ref("background_job", job_id) if job_id else None,
+        "related_entity_ref": _debug_ref(entity_type, entity_id) if entity_type and entity_id else None,
+    }
+
+
+def _compact_business_update_for_debug_center(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "title": _truncate_debug_text(row.get("raw_text"), 80) or "业务更新",
+        "raw_text_preview": _truncate_debug_text(row.get("raw_text"), 240),
+        "input_type": row.get("input_type"),
+        "processing_status": row.get("processing_status"),
+        "action_count": int(row.get("action_count") or 0),
+        "pending_action_count": int(row.get("pending_action_count") or 0),
+        "application_log_count": int(row.get("application_log_count") or 0),
+        "job_count": int(row.get("job_count") or 0),
+        "failed_job_count": int(row.get("failed_job_count") or 0),
+        "trace_count": int(row.get("trace_count") or 0),
+        "created_at": row.get("created_at"),
+        "review_route": f"/updates/{row['id']}",
+        "debug_ref": _debug_ref("business_update", row["id"]),
+    }
+
+
+def _compact_recommendation_session_for_debug_center(row: dict[str, Any]) -> dict[str, Any]:
+    title_parts = [
+        row.get("buyer_intent_name") or row.get("buyer_name"),
+        row.get("seller_target_name"),
+    ]
+    title = " × ".join([part for part in title_parts if part]) or f"推荐会话 {row['id']}"
+    return {
+        "id": row["id"],
+        "title": _truncate_debug_text(title, 100),
+        "mode": row.get("mode"),
+        "status": row.get("status"),
+        "selected_count": int(row.get("selected_count") or 0),
+        "report_count": int(row.get("report_count") or 0),
+        "job_count": int(row.get("job_count") or 0),
+        "failed_job_count": int(row.get("failed_job_count") or 0),
+        "trace_count": int(row.get("trace_count") or 0),
+        "buyer_intent_id": row.get("buyer_intent_id"),
+        "buyer_intent_name": row.get("buyer_intent_name"),
+        "buyer_party_id": row.get("buyer_party_id"),
+        "buyer_name": row.get("buyer_name"),
+        "seller_target_id": row.get("seller_target_id"),
+        "seller_target_name": row.get("seller_target_name"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "status_route": f"/recommendations/sessions/{row['id']}",
+        "debug_ref": _debug_ref("recommendation_session", row["id"]),
+    }
+
+
+def _compact_model_node_test_failure_for_debug_center(row: dict[str, Any]) -> dict[str, Any]:
+    item = _compact_job_for_debug_center(row)
+    item.update(
+        {
+            "node_id": row.get("node_id"),
+            "node_name": row.get("node_name"),
+            "node_type": row.get("node_type"),
+            "model_name": row.get("model_name"),
+            "provider_name": row.get("provider_name"),
+            "provider_type": row.get("provider_type"),
+            "node_debug_ref": _debug_ref("model_node_config", row["node_id"]) if row.get("node_id") else None,
+        }
+    )
+    return item
+
+
+def _debug_ref(entity_type: str | None, entity_id: Any) -> dict[str, Any] | None:
+    if not entity_type or entity_id is None:
+        return None
+    entity_id_text = str(entity_id)
+    return {
+        "entity_type": entity_type,
+        "entity_id": entity_id_text,
+        "route": f"/debug/entities/{entity_type}/{entity_id_text}",
+    }
+
+
+def _truncate_debug_text(value: Any, max_length: int) -> str | None:
+    if value is None:
+        return None
+    text_value = str(value).strip()
+    if len(text_value) <= max_length:
+        return text_value
+    return text_value[: max_length - 1] + "…"
 
 
 def _background_job_select_columns(prefix: str | None = None) -> str:

@@ -60,6 +60,7 @@ GET /api/v1/buyer-intent-target-exclusions
 GET /api/v1/debug/business-updates/{business_update_id}
 GET /api/v1/debug/recommendation-sessions/{session_id}
 GET /api/v1/debug/entities/{entity_type}/{entity_id}
+GET /api/v1/debug/center
 ```
 
 `/debug/entities/{entity_type}/{entity_id}` 是统一入口，当前支持：
@@ -82,6 +83,16 @@ GET /api/v1/debug/entities/{entity_type}/{entity_id}
 后台任务 Debug 返回单个 job、同 job traces、同 correlation/entity 的 related_jobs。
 
 模型节点 Debug 返回单个 node、最近节点测试 jobs、节点相关 traces；用于设置页调试每个 LLM / embedding / rerank 节点。
+
+`/debug/center` 是 Debug Mode 首页聚合接口，前端不需要自行拼装任务、Trace、业务更新和推荐会话：
+
+- `overview`：失败任务、运行任务、失败 Trace、近 24 小时 Trace、近 7 天业务更新/推荐会话等计数，并带 `health_level`。
+- `failed_jobs` / `running_jobs`：后台任务卡片列表，带 `debug_ref` 和关联业务对象 `related_entity_ref`。
+- `recent_traces` / `failed_traces`：最近 AI Trace 和异常 Trace，包含模型、节点、token、延迟、原始输出预览。
+- `recent_business_updates`：最近业务更新的处理状态、动作数、应用日志数、任务数、Trace 数。
+- `recent_recommendation_sessions`：最近推荐会话的状态、已选数、报告数、任务数、Trace 数。
+- `model_node_test_failures`：模型节点测试失败列表，便于从设置页/Debug Mode 追踪某个节点。
+- `quick_actions`：前端右侧快捷入口配置。
 
 这些接口用于测试人员查看 LLM 原始输出、JSON、错误、应用日志和自动应用结果。
 
