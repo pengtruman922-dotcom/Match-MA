@@ -55,6 +55,24 @@ def test_debug_summary_supports_unified_entity_types() -> None:
     assert node_summary["job_count"] == 2
 
 
+def test_debug_summary_supports_recommendation_report() -> None:
+    summary = _debug_summary(
+        "recommendation_report",
+        {
+            "report": {"title": "买家推荐报告", "report_type": "internal_buyer_list", "status": "generated"},
+            "jobs": [{}],
+            "traces": [{}, {}],
+            "messages": [{}],
+        },
+    )
+
+    assert summary["title"] == "Recommendation report: 买家推荐报告"
+    assert summary["status"] == "generated"
+    assert summary["job_count"] == 1
+    assert summary["trace_count"] == 2
+    assert summary["message_count"] == 1
+
+
 def test_debug_center_health_level_prioritizes_failures() -> None:
     assert _debug_center_health_level({"failed_job_count": 1, "failed_trace_count": 0}) == "error"
     assert _debug_center_health_level({"failed_job_count": 0, "failed_trace_count": 1}) == "error"

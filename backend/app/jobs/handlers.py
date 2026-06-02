@@ -1855,15 +1855,21 @@ def _uuid_list(values: Any) -> list[UUID]:
 
 
 def _json_safe_dict(row: Any) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in dict(row).items():
-        if isinstance(value, UUID):
-            result[key] = str(value)
-        elif isinstance(value, Decimal):
-            result[key] = float(value)
-        else:
-            result[key] = value
-    return result
+    return _json_safe_value(dict(row))
+
+
+def _json_safe_value(value: Any) -> Any:
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, dict):
+        return {key: _json_safe_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe_value(item) for item in value]
+    return value
 
 
 def _json_dumps(value: dict[str, Any]) -> str:

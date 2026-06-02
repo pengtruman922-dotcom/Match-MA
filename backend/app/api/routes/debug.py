@@ -99,6 +99,8 @@ def get_debug_entity(entity_type: str, entity_id: UUID, db: Session = Depends(ge
         payload = _background_job_debug(db, entity_id)
     elif entity_type == "model_node_config":
         payload = _model_node_debug(db, entity_id)
+    elif entity_type == "recommendation_report":
+        payload = _recommendation_report_debug(db, entity_id)
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported debug entity_type: {entity_type}")
     return {
@@ -199,6 +201,32 @@ def _get_recommendation_session(db: Session, session_id: UUID) -> dict[str, Any]
     return dict(row)
 
 
+def _get_recommendation_report(db: Session, report_id: UUID) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            """
+            select
+              id, session_id, report_type, selected_item_ids_json, title,
+              markdown_content, file_path, file_format, status,
+              generated_by_model, prompt_version, created_by,
+              created_at::text as created_at, metadata_json
+            from recommendation_report
+            where id = :report_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {
+            "report_id": report_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Recommendation report not found.")
+    return dict(row)
+
+
 def _background_job_debug(db: Session, job_id: UUID) -> dict[str, Any]:
     job = _background_job(db, job_id)
     traces = _job_traces(db, job_id)
@@ -229,6 +257,27 @@ def _model_node_debug(db: Session, node_id: UUID) -> dict[str, Any]:
             "trace_count": len(traces),
             "latest_job_status": jobs[0]["status"] if jobs else None,
             "latest_trace_status": traces[0]["status"] if traces else None,
+        },
+    }
+
+
+def _recommendation_report_debug(db: Session, report_id: UUID) -> dict[str, Any]:
+    report = _get_recommendation_report(db, report_id)
+    jobs = _recommendation_report_jobs(db, report_id)
+    traces = _recommendation_report_traces(db, report_id)
+    messages = _recommendation_report_messages(db, report_id)
+    session = _get_recommendation_session(db, report["session_id"])
+    return {
+        "report": report,
+        "session": session,
+        "jobs": jobs,
+        "traces": traces,
+        "messages": messages,
+        "debug": {
+            "job_count": len(jobs),
+            "trace_count": len(traces),
+            "message_count": len(messages),
+            "session_debug_ref": _debug_ref("recommendation_session", report["session_id"]),
         },
     }
 
@@ -267,6 +316,15 @@ def _debug_summary(entity_type: str, payload: dict[str, Any]) -> dict[str, Any]:
             "node_type": node.get("node_type"),
             "job_count": len(payload.get("jobs", [])),
             "trace_count": len(payload.get("traces", [])),
+        }
+    if entity_type == "recommendation_report":
+        report = payload["report"]
+        return {
+            "title": f"Recommendation report: {report.get('title') or report.get('report_type')}",
+            "status": report.get("status"),
+            "job_count": len(payload.get("jobs", [])),
+            "trace_count": len(payload.get("traces", [])),
+            "message_count": len(payload.get("messages", [])),
         }
     return {"title": entity_type}
 
@@ -426,6 +484,82 @@ def _model_node_traces(db: Session, node_id: UUID) -> list[dict[str, Any]]:
         ),
         {
             "node_id": node_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _recommendation_report_jobs(db: Session, report_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            f"""
+            select {_background_job_select_columns()}
+            from background_job
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and (
+                (entity_type = 'recommendation_report' and entity_id = :report_id)
+                or payload_json ->> 'report_id' = :report_id_text
+              )
+            order by created_at desc
+            limit 50
+            """
+        ),
+        {
+            "report_id": report_id,
+            "report_id_text": str(report_id),
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _recommendation_report_traces(db: Session, report_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            f"""
+            select {_ai_trace_select_columns()}
+            from ai_trace
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and (
+                (entity_type = 'recommendation_report' and entity_id = :report_id)
+                or input_json ->> 'report_id' = :report_id_text
+              )
+            order by started_at desc
+            limit 100
+            """
+        ),
+        {
+            "report_id": report_id,
+            "report_id_text": str(report_id),
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _recommendation_report_messages(db: Session, report_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              id, session_id, role, content, content_type,
+              metadata_json, created_by, created_at::text as created_at
+            from recommendation_message
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and metadata_json ->> 'report_id' = :report_id_text
+            order by created_at desc
+            limit 50
+            """
+        ),
+        {
+            "report_id_text": str(report_id),
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
         },

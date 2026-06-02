@@ -69,6 +69,7 @@ GET /api/v1/debug/center
 - `recommendation_session`
 - `background_job`
 - `model_node_config`
+- `recommendation_report`
 
 业务更新 Debug 返回同一业务更新下的：
 
@@ -83,6 +84,8 @@ GET /api/v1/debug/center
 后台任务 Debug 返回单个 job、同 job traces、同 correlation/entity 的 related_jobs。
 
 模型节点 Debug 返回单个 node、最近节点测试 jobs、节点相关 traces；用于设置页调试每个 LLM / embedding / rerank 节点。
+
+推荐报告 Debug 返回单个 report、所属 session、报告生成 jobs、报告生成 traces、报告消息；用于定位“生成报告”按钮后的 LLM 输出、fallback 内容或错误。
 
 `/debug/center` 是 Debug Mode 首页聚合接口，前端不需要自行拼装任务、Trace、业务更新和推荐会话：
 
