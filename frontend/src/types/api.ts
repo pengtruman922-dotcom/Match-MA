@@ -360,6 +360,8 @@ export interface BusinessUpdateDebugBundle {
 
 export interface RecommendationSessionDebugBundle {
   session: Record<string, unknown>;
+  jobs: Record<string, unknown>[];
+  traces: Record<string, unknown>[];
   messages: Record<string, unknown>[];
   selected_items: Record<string, unknown>[];
   reports: Record<string, unknown>[];

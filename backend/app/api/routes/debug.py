@@ -22,6 +22,8 @@ class BusinessUpdateDebugOut(BaseModel):
 
 class RecommendationSessionDebugOut(BaseModel):
     session: dict[str, Any]
+    jobs: list[dict[str, Any]]
+    traces: list[dict[str, Any]]
     messages: list[dict[str, Any]]
     selected_items: list[dict[str, Any]]
     reports: list[dict[str, Any]]
@@ -55,6 +57,8 @@ def get_recommendation_session_debug(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     session = _get_recommendation_session(db, session_id)
+    jobs = _recommendation_jobs(db, session_id)
+    traces = _recommendation_traces(db, session_id)
     messages = _recommendation_messages(db, session_id)
     selected_items = _recommendation_selected_items(db, session_id)
     reports = _recommendation_reports(db, session_id)
@@ -62,6 +66,8 @@ def get_recommendation_session_debug(
     relation_events = _recommendation_relation_events(db, session_id)
     return {
         "session": session,
+        "jobs": jobs,
+        "traces": traces,
         "messages": messages,
         "selected_items": selected_items,
         "reports": reports,
@@ -69,6 +75,8 @@ def get_recommendation_session_debug(
         "relation_events": relation_events,
         "debug": {
             "message_count": len(messages),
+            "job_count": len(jobs),
+            "trace_count": len(traces),
             "selected_item_count": len(selected_items),
             "active_selected_item_count": len(
                 [item for item in selected_items if item.get("canceled_at") is None]
@@ -131,6 +139,83 @@ def _get_recommendation_session(db: Session, session_id: UUID) -> dict[str, Any]
     if row is None:
         raise HTTPException(status_code=404, detail="Recommendation session not found.")
     return dict(row)
+
+
+def _recommendation_jobs(db: Session, session_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              id, job_type, status, priority, queue_name, entity_type, entity_id,
+              idempotency_key, payload_json, result_json, error_code, error_message,
+              error_detail_json, attempt_count, max_attempts, run_after::text as run_after,
+              locked_by, locked_at::text as locked_at, started_at::text as started_at,
+              finished_at::text as finished_at, parent_job_id, correlation_id, created_by,
+              created_at::text as created_at, updated_at::text as updated_at, metadata_json
+            from background_job
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and (
+                payload_json ->> 'session_id' = :session_id_text
+                or entity_id in (
+                  select id
+                  from recommendation_report
+                  where session_id = :session_id
+                    and team_id = :team_id
+                    and workspace_id = :workspace_id
+                )
+              )
+            order by created_at desc
+            limit 100
+            """
+        ),
+        {
+            "session_id": session_id,
+            "session_id_text": str(session_id),
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _recommendation_traces(db: Session, session_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              id, trace_type, node_name, job_id, correlation_id, entity_type, entity_id,
+              provider_name, model_name, prompt_version, status,
+              input_json, prompt_messages_json, raw_output_text, parsed_output_json,
+              schema_validation_json, retrieval_output_json, tool_calls_json,
+              error_code, error_message, latency_ms, prompt_tokens, completion_tokens,
+              total_tokens, cost_json, started_at::text as started_at,
+              finished_at::text as finished_at, metadata_json
+            from ai_trace
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and (
+                input_json ->> 'session_id' = :session_id_text
+                or entity_id in (
+                  select id
+                  from recommendation_report
+                  where session_id = :session_id
+                    and team_id = :team_id
+                    and workspace_id = :workspace_id
+                )
+              )
+            order by started_at desc
+            limit 100
+            """
+        ),
+        {
+            "session_id": session_id,
+            "session_id_text": str(session_id),
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
 
 
 def _recommendation_messages(db: Session, session_id: UUID) -> list[dict[str, Any]]:

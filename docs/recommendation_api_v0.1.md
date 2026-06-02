@@ -49,7 +49,7 @@ Report v0 supports two modes: the synchronous endpoint creates a deterministic M
 
 `GET /api/v1/debug/recommendation-sessions/{session_id}`
 
-Returns the session, messages, selected items, reports, relations, relation events, and debug counters. Use this endpoint in frontend Debug Mode to inspect why a recommendation session produced a given shortlist/report and how selected items were synced to buyer-seller relations.
+Returns the session, jobs, traces, messages, selected items, reports, relations, relation events, and debug counters. Use this endpoint in frontend Debug Mode to inspect why a recommendation session produced a given shortlist/report and how selected items were synced to buyer-seller relations.
 
 ## Next Backlog
 
