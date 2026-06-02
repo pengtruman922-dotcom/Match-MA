@@ -930,7 +930,7 @@ def _build_recommendation_report_context(
 ) -> dict[str, Any]:
     return {
         "report": {
-            "id": report["id"],
+            "id": str(report["id"]),
             "report_type": report["report_type"],
             "title": report.get("title"),
         },
