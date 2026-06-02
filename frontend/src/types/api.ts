@@ -391,6 +391,40 @@ export interface RecommendationCandidateResponse {
   debug: Record<string, unknown>;
 }
 
+export interface RecommendationSession {
+  id: string;
+  mode: 'buyer_to_target' | 'target_to_buyer';
+  buyer_intent_id: string | null;
+  buyer_party_id: string | null;
+  seller_target_id: string | null;
+  status: string;
+  selected_count: number;
+  report_count: number;
+  anonymous_input_snapshot: string | null;
+  initial_condition_snapshot_json: Record<string, unknown>;
+  latest_condition_snapshot_json: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  metadata_json: Record<string, unknown>;
+}
+
+export interface RecommendationMessageCreate {
+  role?: 'user' | 'assistant' | 'system' | 'tool';
+  content: string;
+  content_type?: 'text' | 'json' | 'markdown';
+  metadata_json?: Record<string, unknown>;
+}
+
+export interface RecommendationMessage {
+  id: string;
+  session_id: string;
+  role: 'user' | 'assistant' | 'system' | 'tool';
+  content: string;
+  content_type: 'text' | 'json' | 'markdown';
+  metadata_json: Record<string, unknown>;
+  created_at: string;
+}
+
 export interface RecommendationSelectedItemCreate {
   mode: 'buyer_to_target' | 'target_to_buyer';
   seller_target_id?: string | null;
@@ -425,5 +459,28 @@ export interface RecommendationSelectedItem {
   evidence_snapshot_json: Record<string, unknown>;
   selected_at: string;
   canceled_at: string | null;
+  metadata_json: Record<string, unknown>;
+}
+
+export interface RecommendationReportCreate {
+  report_type?: 'buyer_facing_target_report' | 'internal_buyer_list';
+  selected_item_ids?: string[];
+  title?: string | null;
+  metadata_json?: Record<string, unknown>;
+}
+
+export interface RecommendationReport {
+  id: string;
+  session_id: string;
+  report_type: 'buyer_facing_target_report' | 'internal_buyer_list';
+  selected_item_ids_json: string[];
+  title: string | null;
+  markdown_content: string | null;
+  file_path: string | null;
+  file_format: 'markdown' | 'docx' | 'pdf' | null;
+  status: 'generating' | 'generated' | 'failed' | 'archived';
+  generated_by_model: string | null;
+  prompt_version: string | null;
+  created_at: string;
   metadata_json: Record<string, unknown>;
 }

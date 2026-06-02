@@ -120,6 +120,46 @@ class RecommendationSelectedItemOut(BaseModel):
     metadata_json: dict[str, Any]
 
 
+class RecommendationMessageCreate(BaseModel):
+    role: str = Field(default="user", pattern="^(user|assistant|system|tool)$")
+    content: str
+    content_type: str = Field(default="text", pattern="^(text|json|markdown)$")
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+
+
+class RecommendationMessageOut(BaseModel):
+    id: UUID
+    session_id: UUID
+    role: str
+    content: str
+    content_type: str
+    metadata_json: dict[str, Any]
+    created_at: str
+
+
+class RecommendationReportCreate(BaseModel):
+    report_type: str | None = Field(default=None, pattern="^(buyer_facing_target_report|internal_buyer_list)$")
+    selected_item_ids: list[UUID] | None = None
+    title: str | None = None
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+
+
+class RecommendationReportOut(BaseModel):
+    id: UUID
+    session_id: UUID
+    report_type: str
+    selected_item_ids_json: list[Any]
+    title: str | None
+    markdown_content: str | None
+    file_path: str | None
+    file_format: str | None
+    status: str
+    generated_by_model: str | None
+    prompt_version: str | None
+    created_at: str
+    metadata_json: dict[str, Any]
+
+
 @router.post("/candidates", response_model=RecommendationCandidateResponse)
 def generate_recommendation_candidates(
     payload: RecommendationCandidateRequest,
@@ -271,6 +311,77 @@ def get_recommendation_session(session_id: UUID, db: Session = Depends(get_db)) 
     return _get_recommendation_session_or_404(db, session_id)
 
 
+@router.get("/sessions/{session_id}/messages", response_model=list[RecommendationMessageOut])
+def list_recommendation_messages(
+    session_id: UUID,
+    db: Session = Depends(get_db),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
+    _get_recommendation_session_or_404(db, session_id)
+    rows = db.execute(
+        text(
+            f"""
+            select {_message_select_columns()}
+            from recommendation_message
+            where session_id = :session_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            order by created_at asc
+            limit :limit offset :offset
+            """
+        ),
+        {
+            "session_id": session_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "limit": limit,
+            "offset": offset,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+@router.post(
+    "/sessions/{session_id}/messages",
+    response_model=RecommendationMessageOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_recommendation_message(
+    session_id: UUID,
+    payload: RecommendationMessageCreate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    _get_recommendation_session_or_404(db, session_id)
+    row = db.execute(
+        _message_returning_statement(
+            """
+            insert into recommendation_message (
+              team_id, workspace_id, session_id, role, content,
+              content_type, metadata_json, created_by
+            )
+            values (
+              :team_id, :workspace_id, :session_id, :role, :content,
+              :content_type, :metadata_json, :created_by
+            )
+            """
+        ).bindparams(bindparam("metadata_json", type_=JSONB)),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "session_id": session_id,
+            "role": payload.role,
+            "content": payload.content,
+            "content_type": payload.content_type,
+            "metadata_json": payload.metadata_json,
+            "created_by": DEFAULT_ADMIN_USER_ID,
+        },
+    ).mappings().one()
+    _touch_recommendation_session(db, session_id)
+    db.commit()
+    return dict(row)
+
+
 @router.post(
     "/sessions/{session_id}/selected-items",
     response_model=RecommendationSelectedItemOut,
@@ -282,6 +393,15 @@ def create_selected_item(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     _get_recommendation_session_or_404(db, session_id)
+    existing = _get_active_selected_item_for_pair(
+        db,
+        session_id=session_id,
+        buyer_intent_id=payload.buyer_intent_id,
+        seller_target_id=payload.seller_target_id,
+    )
+    if existing is not None:
+        return existing
+
     row = db.execute(
         _selected_item_returning_statement(
             """
@@ -348,6 +468,57 @@ def create_selected_item(
     return selected_item
 
 
+@router.get("/selected-items", response_model=list[RecommendationSelectedItemOut])
+def list_all_selected_items(
+    db: Session = Depends(get_db),
+    session_id: UUID | None = None,
+    buyer_intent_id: UUID | None = None,
+    seller_target_id: UUID | None = None,
+    relation_id: UUID | None = None,
+    include_canceled: bool = Query(default=False),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
+    where = ["ri.team_id = :team_id", "ri.workspace_id = :workspace_id"]
+    params: dict[str, Any] = {
+        "team_id": DEFAULT_TEAM_ID,
+        "workspace_id": DEFAULT_WORKSPACE_ID,
+        "limit": limit,
+        "offset": offset,
+    }
+    if session_id:
+        where.append("ri.session_id = :session_id")
+        params["session_id"] = session_id
+    if buyer_intent_id:
+        where.append("ri.buyer_intent_id = :buyer_intent_id")
+        params["buyer_intent_id"] = buyer_intent_id
+    if seller_target_id:
+        where.append("ri.seller_target_id = :seller_target_id")
+        params["seller_target_id"] = seller_target_id
+    if relation_id:
+        where.append("ri.metadata_json ->> 'relation_id' = :relation_id")
+        params["relation_id"] = str(relation_id)
+    if not include_canceled:
+        where.append("ri.canceled_at is null")
+
+    rows = db.execute(
+        text(
+            f"""
+            select {_selected_item_select_columns()}
+            from recommendation_selected_item ri
+            left join seller_target st on st.id = ri.seller_target_id
+            left join buyer_intent bi on bi.id = ri.buyer_intent_id
+            left join buyer_party bp on bp.id = ri.buyer_party_id
+            where {' and '.join(where)}
+            order by ri.selected_at desc
+            limit :limit offset :offset
+            """
+        ),
+        params,
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
 @router.get("/sessions/{session_id}/selected-items", response_model=list[RecommendationSelectedItemOut])
 def list_selected_items(
     session_id: UUID,
@@ -379,6 +550,141 @@ def list_selected_items(
     return [dict(row) for row in rows]
 
 
+@router.post(
+    "/sessions/{session_id}/reports",
+    response_model=RecommendationReportOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_recommendation_report(
+    session_id: UUID,
+    payload: RecommendationReportCreate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    session = _get_recommendation_session_or_404(db, session_id)
+    selected_items = _list_selected_items_for_report(
+        db,
+        session_id=session_id,
+        selected_item_ids=payload.selected_item_ids,
+    )
+    if not selected_items:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one active selected item is required to generate a recommendation report.",
+        )
+
+    report_type = payload.report_type or _default_report_type(session["mode"])
+    title = payload.title or _default_report_title(session, selected_items, report_type)
+    markdown_content = _build_recommendation_report_markdown(
+        session=session,
+        selected_items=selected_items,
+        report_type=report_type,
+        title=title,
+    )
+    selected_item_ids_json = [str(item["id"]) for item in selected_items]
+    row = db.execute(
+        _report_returning_statement(
+            """
+            insert into recommendation_report (
+              team_id, workspace_id, session_id, report_type, selected_item_ids_json,
+              title, markdown_content, file_format, status,
+              generated_by_model, prompt_version, created_by, metadata_json
+            )
+            values (
+              :team_id, :workspace_id, :session_id, :report_type, :selected_item_ids_json,
+              :title, :markdown_content, 'markdown', 'generated',
+              :generated_by_model, :prompt_version, :created_by, :metadata_json
+            )
+            """
+        ).bindparams(
+            bindparam("selected_item_ids_json", type_=JSONB),
+            bindparam("metadata_json", type_=JSONB),
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "session_id": session_id,
+            "report_type": report_type,
+            "selected_item_ids_json": selected_item_ids_json,
+            "title": title,
+            "markdown_content": markdown_content,
+            "generated_by_model": "rule_template_v0",
+            "prompt_version": None,
+            "created_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_json": {
+                **payload.metadata_json,
+                "source": "recommendation_report_api",
+                "selected_item_count": len(selected_items),
+            },
+        },
+    ).mappings().one()
+    report = dict(row)
+    _insert_recommendation_message(
+        db,
+        session_id=session_id,
+        role="assistant",
+        content_type="markdown",
+        content=markdown_content,
+        metadata_json={"report_id": str(report["id"]), "message_type": "recommendation_report"},
+    )
+    _refresh_session_report_count(db, session_id)
+    db.commit()
+    return report
+
+
+@router.get("/sessions/{session_id}/reports", response_model=list[RecommendationReportOut])
+def list_recommendation_reports(
+    session_id: UUID,
+    db: Session = Depends(get_db),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
+    _get_recommendation_session_or_404(db, session_id)
+    rows = db.execute(
+        text(
+            f"""
+            select {_report_select_columns()}
+            from recommendation_report
+            where session_id = :session_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            order by created_at desc
+            limit :limit offset :offset
+            """
+        ),
+        {
+            "session_id": session_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "limit": limit,
+            "offset": offset,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+@router.get("/reports/{report_id}", response_model=RecommendationReportOut)
+def get_recommendation_report(report_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            f"""
+            select {_report_select_columns()}
+            from recommendation_report
+            where id = :report_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {
+            "report_id": report_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recommendation report not found.")
+    return dict(row)
+
+
 @router.post("/selected-items/{selected_item_id}/cancel", response_model=RecommendationSelectedItemOut)
 def cancel_selected_item(selected_item_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
     current = _get_selected_item_or_404(db, selected_item_id)
@@ -406,6 +712,157 @@ def cancel_selected_item(selected_item_id: UUID, db: Session = Depends(get_db)) 
     _refresh_session_selected_count(db, row["session_id"])
     db.commit()
     return dict(row)
+
+
+def _get_active_selected_item_for_pair(
+    db: Session,
+    *,
+    session_id: UUID,
+    buyer_intent_id: UUID | None,
+    seller_target_id: UUID | None,
+) -> dict[str, Any] | None:
+    if buyer_intent_id is None or seller_target_id is None:
+        return None
+    row = db.execute(
+        text(
+            f"""
+            select {_selected_item_select_columns()}
+            from recommendation_selected_item ri
+            left join seller_target st on st.id = ri.seller_target_id
+            left join buyer_intent bi on bi.id = ri.buyer_intent_id
+            left join buyer_party bp on bp.id = ri.buyer_party_id
+            where ri.session_id = :session_id
+              and ri.buyer_intent_id = :buyer_intent_id
+              and ri.seller_target_id = :seller_target_id
+              and ri.team_id = :team_id
+              and ri.workspace_id = :workspace_id
+              and ri.canceled_at is null
+            order by ri.selected_at desc
+            limit 1
+            """
+        ),
+        {
+            "session_id": session_id,
+            "buyer_intent_id": buyer_intent_id,
+            "seller_target_id": seller_target_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    return dict(row) if row else None
+
+
+def _list_selected_items_for_report(
+    db: Session,
+    *,
+    session_id: UUID,
+    selected_item_ids: list[UUID] | None,
+) -> list[dict[str, Any]]:
+    where = [
+        "ri.session_id = :session_id",
+        "ri.team_id = :team_id",
+        "ri.workspace_id = :workspace_id",
+        "ri.canceled_at is null",
+    ]
+    params: dict[str, Any] = {
+        "session_id": session_id,
+        "team_id": DEFAULT_TEAM_ID,
+        "workspace_id": DEFAULT_WORKSPACE_ID,
+    }
+    statement = text(
+        f"""
+        select {_selected_item_select_columns()}
+        from recommendation_selected_item ri
+        left join seller_target st on st.id = ri.seller_target_id
+        left join buyer_intent bi on bi.id = ri.buyer_intent_id
+        left join buyer_party bp on bp.id = ri.buyer_party_id
+        where {' and '.join(where)}
+        order by ri.rank_at_selection nulls last, ri.selected_at asc
+        """
+    )
+    if selected_item_ids is not None:
+        if not selected_item_ids:
+            return []
+        where.append("ri.id in :selected_item_ids")
+        params["selected_item_ids"] = tuple(selected_item_ids)
+        statement = text(
+            f"""
+            select {_selected_item_select_columns()}
+            from recommendation_selected_item ri
+            left join seller_target st on st.id = ri.seller_target_id
+            left join buyer_intent bi on bi.id = ri.buyer_intent_id
+            left join buyer_party bp on bp.id = ri.buyer_party_id
+            where {' and '.join(where)}
+            order by ri.rank_at_selection nulls last, ri.selected_at asc
+            """
+        ).bindparams(bindparam("selected_item_ids", expanding=True))
+
+    rows = db.execute(statement, params).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _default_report_type(mode: str) -> str:
+    if mode == "buyer_to_target":
+        return "buyer_facing_target_report"
+    return "internal_buyer_list"
+
+
+def _default_report_title(
+    session: dict[str, Any],
+    selected_items: list[dict[str, Any]],
+    report_type: str,
+) -> str:
+    if report_type == "buyer_facing_target_report":
+        anchor = selected_items[0].get("buyer_intent_name") or "买家意向"
+        return f"{anchor} - 推荐标的清单"
+    anchor = selected_items[0].get("seller_target_name") or "标的项目"
+    return f"{anchor} - 推荐买家意向清单"
+
+
+def _build_recommendation_report_markdown(
+    *,
+    session: dict[str, Any],
+    selected_items: list[dict[str, Any]],
+    report_type: str,
+    title: str,
+) -> str:
+    lines = [
+        f"# {title}",
+        "",
+        f"- 推荐会话：`{session['id']}`",
+        f"- 推荐方向：{session['mode']}",
+        f"- 报告类型：{report_type}",
+        f"- 已采用候选数：{len(selected_items)}",
+        "",
+        "## 推荐清单",
+        "",
+    ]
+    for index, item in enumerate(selected_items, start=1):
+        target_name = item.get("seller_target_name") or "未绑定标的"
+        intent_name = item.get("buyer_intent_name") or "未绑定意向"
+        buyer_name = item.get("buyer_name") or "未绑定买家"
+        level = item.get("recommendation_level") or "未评级"
+        lines.extend(
+            [
+                f"### {index}. {target_name} / {intent_name}",
+                "",
+                f"- 买家：{buyer_name}",
+                f"- 推荐等级：{level}",
+                f"- 匹配理由：{item.get('match_summary') or '暂无'}",
+                f"- 信息缺口：{item.get('gap_summary') or '暂无'}",
+                f"- 风险提示：{item.get('risk_summary') or '暂无'}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## 后续建议",
+            "",
+            "- 由业务人员复核推荐理由、信息缺口和风险提示。",
+            "- 复核通过后，可在买家-标的关系中继续记录推荐、反馈、尽调和终止等进展。",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _candidate_targets_for_intent(
@@ -827,6 +1284,7 @@ def _insert_recommendation_message(
     role: str,
     content_type: str,
     content: str | dict[str, Any],
+    metadata_json: dict[str, Any] | None = None,
 ) -> None:
     db.execute(
         text(
@@ -848,7 +1306,7 @@ def _insert_recommendation_message(
             "role": role,
             "content": content if isinstance(content, str) else _json_dumps(content),
             "content_type": content_type,
-            "metadata_json": {},
+            "metadata_json": metadata_json or {},
             "created_by": DEFAULT_ADMIN_USER_ID,
         },
     )
@@ -1173,6 +1631,42 @@ def _refresh_session_selected_count(db: Session, session_id: UUID) -> None:
     )
 
 
+def _refresh_session_report_count(db: Session, session_id: UUID) -> None:
+    db.execute(
+        text(
+            """
+            update recommendation_session
+            set report_count = (
+                  select count(*)
+                  from recommendation_report
+                  where session_id = :session_id
+                    and status <> 'archived'
+                ),
+                updated_at = now()
+            where id = :session_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {"session_id": session_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    )
+
+
+def _touch_recommendation_session(db: Session, session_id: UUID) -> None:
+    db.execute(
+        text(
+            """
+            update recommendation_session
+            set updated_at = now()
+            where id = :session_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {"session_id": session_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    )
+
+
 def _session_select_columns() -> str:
     return """
       id, mode, buyer_intent_id, buyer_party_id, seller_target_id, status,
@@ -1184,6 +1678,17 @@ def _session_select_columns() -> str:
 
 def _session_returning_statement(prefix_sql: str):
     return text(f"{prefix_sql} returning {_session_select_columns()}")
+
+
+def _message_select_columns() -> str:
+    return """
+      id, session_id, role, content, content_type,
+      metadata_json, created_at::text as created_at
+    """
+
+
+def _message_returning_statement(prefix_sql: str):
+    return text(f"{prefix_sql} returning {_message_select_columns()}")
 
 
 def _selected_item_select_columns() -> str:
@@ -1222,6 +1727,19 @@ def _selected_item_returning_statement(prefix_sql: str):
         left join buyer_party bp on bp.id = changed.buyer_party_id
         """
     )
+
+
+def _report_select_columns() -> str:
+    return """
+      id, session_id, report_type, selected_item_ids_json, title,
+      markdown_content, file_path, file_format, status,
+      generated_by_model, prompt_version,
+      created_at::text as created_at, metadata_json
+    """
+
+
+def _report_returning_statement(prefix_sql: str):
+    return text(f"{prefix_sql} returning {_report_select_columns()}")
 
 
 def _recommendation_level(score: float) -> str:

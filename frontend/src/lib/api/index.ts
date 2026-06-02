@@ -18,8 +18,13 @@ import type {
   RelationEvent,
   RecommendationCandidateRequest,
   RecommendationCandidateResponse,
+  RecommendationMessage,
+  RecommendationMessageCreate,
+  RecommendationReport,
+  RecommendationReportCreate,
   RecommendationSelectedItem,
   RecommendationSelectedItemCreate,
+  RecommendationSession,
   UpdateLog,
   WorkbenchData,
 } from '../../types/api';
@@ -161,13 +166,51 @@ export const recommendations = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+  sessions: (params?: {
+    mode?: 'buyer_to_target' | 'target_to_buyer';
+    buyer_intent_id?: string;
+    seller_target_id?: string;
+    limit?: number;
+    offset?: number;
+  }) => apiRequest<RecommendationSession[]>(`/recommendations/sessions${buildQuery(params || {})}`),
+  getSession: (sessionId: string) => apiRequest<RecommendationSession>(`/recommendations/sessions/${sessionId}`),
+  messages: (sessionId: string, params?: { limit?: number; offset?: number }) =>
+    apiRequest<RecommendationMessage[]>(
+      `/recommendations/sessions/${sessionId}/messages${buildQuery(params || {})}`,
+    ),
+  createMessage: (sessionId: string, data: RecommendationMessageCreate) =>
+    apiRequest<RecommendationMessage>(`/recommendations/sessions/${sessionId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
   selectItem: (sessionId: string, data: RecommendationSelectedItemCreate) =>
     apiRequest<RecommendationSelectedItem>(`/recommendations/sessions/${sessionId}/selected-items`, {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+  selectedItems: (params?: {
+    session_id?: string;
+    buyer_intent_id?: string;
+    seller_target_id?: string;
+    relation_id?: string;
+    include_canceled?: boolean;
+    limit?: number;
+    offset?: number;
+  }) => apiRequest<RecommendationSelectedItem[]>(`/recommendations/selected-items${buildQuery(params || {})}`),
+  sessionSelectedItems: (sessionId: string, params?: { include_canceled?: boolean }) =>
+    apiRequest<RecommendationSelectedItem[]>(
+      `/recommendations/sessions/${sessionId}/selected-items${buildQuery(params || {})}`,
+    ),
   cancelSelectedItem: (selectedItemId: string) =>
     apiRequest<RecommendationSelectedItem>(`/recommendations/selected-items/${selectedItemId}/cancel`, {
       method: 'POST',
     }),
+  createReport: (sessionId: string, data: RecommendationReportCreate = {}) =>
+    apiRequest<RecommendationReport>(`/recommendations/sessions/${sessionId}/reports`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  reports: (sessionId: string, params?: { limit?: number; offset?: number }) =>
+    apiRequest<RecommendationReport[]>(`/recommendations/sessions/${sessionId}/reports${buildQuery(params || {})}`),
+  getReport: (reportId: string) => apiRequest<RecommendationReport>(`/recommendations/reports/${reportId}`),
 };
