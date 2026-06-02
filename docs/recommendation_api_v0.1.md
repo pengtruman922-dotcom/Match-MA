@@ -52,6 +52,8 @@ Selecting the same active buyer-intent / seller-target pair within the same sess
 
 `POST /api/v1/recommendations/candidates` supports `enable_rerank` with default `true`. The API returns the rule plus embedding ranking immediately and, when a session is created, enqueues `recommendation_rerank` on the `rerank` queue. `match-ma-worker-rerank` consumes this queue and calls `recommendation_reranker` with model `qwen3-rerank`. The initial result is appended to `recommendation_message` as an `initial_candidates` tool message. The reranked result is appended as a `reranked_candidates` tool message and recorded in `ai_trace`.
 
+`POST /api/v1/recommendations/sessions/{session_id}/rerank-jobs` creates a new async rerank job for an existing session. If the request body does not provide `candidates`, the backend uses the session's `initial_candidates`; this is intended for "rerun after model config changed" and "retry failed rerank" flows. The response returns `job_id`, `queue_name = rerank`, `candidate_count`, and candidate source.
+
 Rerank nodes have no prompt template. Future admin settings should edit provider URL, key reference, model name, timeout, active/default flags, and metadata, but should not show prompt editing for `node_type = rerank`.
 
 ### Reports

@@ -1,6 +1,6 @@
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, model_validator
@@ -182,6 +182,19 @@ class RecommendationSessionBundleOut(BaseModel):
     selected_items: list[RecommendationSelectedItemOut]
     reports: list[RecommendationReportOut]
     debug: dict[str, Any]
+
+
+class RecommendationRerankJobCreate(BaseModel):
+    candidates: list[dict[str, Any]] | None = None
+    reason: str | None = Field(default=None, max_length=300)
+
+
+class RecommendationRerankJobOut(BaseModel):
+    job_id: UUID
+    job_status: str
+    queue_name: str
+    candidate_count: int
+    source: str
 
 
 @router.post("/candidates", response_model=RecommendationCandidateResponse)
@@ -407,6 +420,54 @@ def get_recommendation_session_bundle(
             "candidate_source": candidate_source,
             "engine_hint": "rule_sql_embedding_rerank_v0.3",
         },
+    }
+
+
+@router.post(
+    "/sessions/{session_id}/rerank-jobs",
+    response_model=RecommendationRerankJobOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_recommendation_rerank_job(
+    session_id: UUID,
+    payload: RecommendationRerankJobCreate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    session = _get_recommendation_session_or_404(db, session_id)
+    if session["mode"] not in {"buyer_to_target", "target_to_buyer"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported recommendation mode.")
+
+    anchor = _get_rerank_anchor_for_session(db, session)
+    messages = _list_recommendation_messages(db, session_id=session_id, limit=500, offset=0)
+    candidate_sets = _extract_recommendation_candidate_sets(messages)
+    candidates = _normalize_candidates(payload.candidates or candidate_sets["initial_candidates"])
+    source = "request" if payload.candidates is not None else "initial_candidates"
+    if len(candidates) < 2:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least two candidates are required to rerank a recommendation session.",
+        )
+
+    job_id = _enqueue_recommendation_rerank_job(
+        db,
+        session_id=session_id,
+        mode=str(session["mode"]),
+        anchor=anchor,
+        candidates=candidates,
+        idempotency_suffix=str(uuid4()),
+        metadata_json={
+            "source": "recommendation_rerank_job_api",
+            "rerank_reason": payload.reason,
+            "candidate_source": source,
+        },
+    )
+    db.commit()
+    return {
+        "job_id": job_id,
+        "job_status": "queued",
+        "queue_name": "rerank",
+        "candidate_count": len(candidates),
+        "source": source,
     }
 
 
@@ -1053,6 +1114,25 @@ def _build_recommendation_rerank_status(
         "error_code": rerank_job.get("error_code"),
         "error_message": rerank_job.get("error_message"),
     }
+
+
+def _get_rerank_anchor_for_session(db: Session, session: dict[str, Any]) -> dict[str, Any]:
+    if session["mode"] == "buyer_to_target":
+        buyer_intent_id = _optional_uuid(session.get("buyer_intent_id"))
+        if buyer_intent_id is not None:
+            return _get_buyer_intent_anchor(db, buyer_intent_id)
+    if session["mode"] == "target_to_buyer":
+        seller_target_id = _optional_uuid(session.get("seller_target_id"))
+        if seller_target_id is not None:
+            return _get_seller_target_anchor(db, seller_target_id)
+
+    snapshot = session.get("latest_condition_snapshot_json")
+    if isinstance(snapshot, dict) and snapshot:
+        return snapshot
+    snapshot = session.get("initial_condition_snapshot_json")
+    if isinstance(snapshot, dict) and snapshot:
+        return snapshot
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Recommendation session has no rerank anchor.")
 
 
 @router.get("/reports/{report_id}", response_model=RecommendationReportOut)
@@ -1997,8 +2077,14 @@ def _get_buyer_party_id_for_intent(db: Session, buyer_intent_id: UUID) -> UUID |
 def _optional_uuid_from_mapping(value: Any, key: str) -> UUID | None:
     if not isinstance(value, dict) or not value.get(key):
         return None
+    return _optional_uuid(value[key])
+
+
+def _optional_uuid(value: Any) -> UUID | None:
+    if not value:
+        return None
     try:
-        return UUID(str(value[key]))
+        return UUID(str(value))
     except (TypeError, ValueError):
         return None
 
@@ -2074,6 +2160,8 @@ def _enqueue_recommendation_rerank_job(
     mode: str,
     anchor: dict[str, Any],
     candidates: list[dict[str, Any]],
+    idempotency_suffix: str | None = None,
+    metadata_json: dict[str, Any] | None = None,
 ) -> UUID:
     payload = _json_loads(
         _json_dumps(
@@ -2109,10 +2197,14 @@ def _enqueue_recommendation_rerank_job(
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
             "session_id": session_id,
-            "idempotency_key": f"recommendation_rerank:{session_id}",
+            "idempotency_key": (
+                f"recommendation_rerank:{session_id}:{idempotency_suffix}"
+                if idempotency_suffix
+                else f"recommendation_rerank:{session_id}"
+            ),
             "payload_json": payload,
             "created_by": DEFAULT_ADMIN_USER_ID,
-            "metadata_json": {"source": "recommendation_candidate_api"},
+            "metadata_json": metadata_json or {"source": "recommendation_candidate_api"},
         },
     ).mappings().one()
     return row["id"]

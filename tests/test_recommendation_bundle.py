@@ -1,8 +1,10 @@
 ﻿from uuid import UUID
 
 from backend.app.api.routes.recommendations import (
+    _build_recommendation_rerank_status,
     _enrich_candidates_with_selection,
     _extract_recommendation_candidate_sets,
+    _optional_uuid,
 )
 
 
@@ -89,3 +91,23 @@ def test_enrich_candidates_with_active_selection() -> None:
     assert enriched[0]["selected"] is True
     assert enriched[0]["selected_item_id"] == UUID("00000000-0000-0000-0000-000000000004")
     assert enriched[0]["selected_at"] == "2026-06-02 10:02:00+00"
+
+
+def test_rerank_status_without_job_is_not_requested() -> None:
+    status = _build_recommendation_rerank_status(
+        rerank_job=None,
+        reranked_candidates=[],
+        candidate_sets={},
+    )
+
+    assert status["requested"] is False
+    assert status["status"] == "not_requested"
+    assert status["job_id"] is None
+
+
+def test_optional_uuid_accepts_uuid_and_string() -> None:
+    value = UUID(SELLER_TARGET_ID)
+
+    assert _optional_uuid(value) == value
+    assert _optional_uuid(SELLER_TARGET_ID) == value
+    assert _optional_uuid("not-a-uuid") is None
