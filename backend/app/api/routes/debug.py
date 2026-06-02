@@ -294,14 +294,17 @@ def _related_jobs(db: Session, job: dict[str, Any]) -> list[dict[str, Any]]:
               and workspace_id = :workspace_id
               and id <> :job_id
               and (
-                (:correlation_id is not null and correlation_id = :correlation_id)
+                (cast(:correlation_id as uuid) is not null and correlation_id = cast(:correlation_id as uuid))
                 or parent_job_id = :job_id
-                or (:parent_job_id is not null and parent_job_id = :parent_job_id)
+                or (
+                  cast(:parent_job_id as uuid) is not null
+                  and parent_job_id = cast(:parent_job_id as uuid)
+                )
                 or (
                   :entity_type is not null
-                  and :entity_id is not null
+                  and cast(:entity_id as uuid) is not null
                   and entity_type = :entity_type
-                  and entity_id = :entity_id
+                  and entity_id = cast(:entity_id as uuid)
                 )
               )
             order by created_at desc
