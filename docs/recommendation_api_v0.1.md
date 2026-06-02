@@ -5,9 +5,9 @@ This document records the first backend API surface for the recommendation workf
 ## Scope
 
 - Candidate generation remains `rule_sql_embedding_v0.2`: structured rule recall plus embedding similarity when both sides have search documents.
-- LLM rerank and LLM report writing are not enabled yet.
+- Candidate generation supports asynchronous qwen3-rerank reranking and LLM report writing.
 - Selected recommendation items are persisted and synchronized to `buyer_seller_relation` / `relation_event`.
-- Recommendation reports are generated as a deterministic Markdown skeleton first; later versions can replace this with `recommendation_report_writer`.
+- Recommendation reports support deterministic Markdown generation and asynchronous LLM generation through `recommendation_report_writer`.
 
 ## Endpoints
 
@@ -36,6 +36,12 @@ Use these for frontend session replay and recommendation chat history. The bundl
 
 Selecting the same active buyer-intent / seller-target pair within the same session is idempotent and returns the existing active selected item.
 
+### Rerank
+
+`POST /api/v1/recommendations/candidates` supports `enable_rerank` with default `true`. The API returns the rule plus embedding ranking immediately and, when a session is created, enqueues `recommendation_rerank` on the `rerank` queue. `match-ma-worker-rerank` consumes this queue and calls `recommendation_reranker` with model `qwen3-rerank`. The reranked result is appended to `recommendation_message` as a `reranked_candidates` tool message and recorded in `ai_trace`.
+
+Rerank nodes have no prompt template. Future admin settings should edit provider URL, key reference, model name, timeout, active/default flags, and metadata, but should not show prompt editing for `node_type = rerank`.
+
 ### Reports
 
 - `POST /api/v1/recommendations/sessions/{session_id}/reports`
@@ -53,5 +59,4 @@ Returns the session, jobs, traces, messages, selected items, reports, relations,
 
 ## Next Backlog
 
-- Add LLM reranker node and prompt.
 - Add frontend session drawer/history and report preview/download.

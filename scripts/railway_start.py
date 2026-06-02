@@ -17,6 +17,8 @@ def main() -> None:
         _exec([sys.executable, "-m", "backend.app.worker", "--queue", "llm", "--sleep", "2"])
     if role == "worker-embedding":
         _exec([sys.executable, "-m", "backend.app.worker", "--queue", "embedding", "--sleep", "2"])
+    if role == "worker-rerank":
+        _exec([sys.executable, "-m", "backend.app.worker", "--queue", "rerank", "--sleep", "2"])
     if role == "worker-ocr":
         _exec([sys.executable, "-m", "backend.app.worker", "--queue", "ocr", "--sleep", "2"])
 
@@ -38,6 +40,8 @@ def _infer_role(service_name_lower: str) -> str:
     # MATCH_MA_SERVICE_ROLE explicitly when config-as-code hides start command.
     if "worker" in service_name_lower and "embedding" in service_name_lower:
         return "worker-embedding"
+    if "worker" in service_name_lower and "rerank" in service_name_lower:
+        return "worker-rerank"
     if "worker" in service_name_lower and "ocr" in service_name_lower:
         return "worker-ocr"
     if "worker" in service_name_lower and "llm" in service_name_lower:

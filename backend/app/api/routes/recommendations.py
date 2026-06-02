@@ -20,6 +20,7 @@ class RecommendationCandidateRequest(BaseModel):
     seller_target_id: UUID | None = None
     limit: int = Field(default=20, ge=1, le=50)
     create_session: bool = True
+    enable_rerank: bool = True
     user_message: str | None = None
 
     @model_validator(mode="after")
@@ -198,6 +199,7 @@ def generate_recommendation_candidates(
         }
 
     session_id = None
+    rerank_job_id = None
     if payload.create_session:
         session_id = _create_recommendation_session(
             db,
@@ -218,6 +220,14 @@ def generate_recommendation_candidates(
                 "candidates": candidates,
             },
         )
+        if payload.enable_rerank and len(candidates) > 1:
+            rerank_job_id = _enqueue_recommendation_rerank_job(
+                db,
+                session_id=session_id,
+                mode=payload.mode,
+                anchor=anchor,
+                candidates=candidates,
+            )
         db.commit()
 
     embedding_used = _candidates_have_embedding(candidates)
@@ -226,11 +236,16 @@ def generate_recommendation_candidates(
         "mode": payload.mode,
         "candidates": candidates,
         "debug": {
-            "engine": "rule_sql_embedding_v0.2" if embedding_used else "rule_sql_v0.1",
-            "llm_rerank": False,
+            "engine": (
+                "rule_sql_embedding_rerank_v0.3"
+                if rerank_job_id
+                else ("rule_sql_embedding_v0.2" if embedding_used else "rule_sql_v0.1")
+            ),
+            "rerank": bool(rerank_job_id),
+            "rerank_job_id": str(rerank_job_id) if rerank_job_id else None,
             "embedding_similarity": embedding_used,
             "notes": [
-                "本版使用结构化规则召回；当双方 search_doc 都已有 embedding 时，叠加向量相似度加权排序。",
+                "Returns rule/embedding ranking first; rerank runs asynchronously and writes a reranked_candidates message.",
             ],
         },
     }
@@ -1844,6 +1859,81 @@ def _enqueue_recommendation_report_job(
     return row["id"]
 
 
+def _enqueue_recommendation_rerank_job(
+    db: Session,
+    *,
+    session_id: UUID,
+    mode: str,
+    anchor: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> UUID:
+    payload = _json_loads(
+        _json_dumps(
+            {
+                "session_id": session_id,
+                "mode": mode,
+                "query": _build_rerank_query(mode=mode, anchor=anchor),
+                "anchor": anchor,
+                "candidates": candidates,
+            }
+        )
+    )
+    row = db.execute(
+        text(
+            """
+            insert into background_job (
+              team_id, workspace_id, job_type, priority, queue_name,
+              entity_type, entity_id, idempotency_key, payload_json,
+              max_attempts, created_by, metadata_json
+            )
+            values (
+              :team_id, :workspace_id, 'recommendation_rerank', 110, 'rerank',
+              'recommendation_session', :session_id, :idempotency_key, :payload_json,
+              2, :created_by, :metadata_json
+            )
+            returning id
+            """
+        ).bindparams(
+            bindparam("payload_json", type_=JSONB),
+            bindparam("metadata_json", type_=JSONB),
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "session_id": session_id,
+            "idempotency_key": f"recommendation_rerank:{session_id}",
+            "payload_json": payload,
+            "created_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_json": {"source": "recommendation_candidate_api"},
+        },
+    ).mappings().one()
+    return row["id"]
+
+
+def _build_rerank_query(*, mode: str, anchor: dict[str, Any]) -> str:
+    if mode == "buyer_to_target":
+        parts = [
+            anchor.get("intent_name"),
+            anchor.get("buyer_name"),
+            anchor.get("industry_primary"),
+            anchor.get("industry_secondary"),
+            anchor.get("region_scope_summary"),
+            anchor.get("preference_summary"),
+            anchor.get("negative_summary"),
+        ]
+    else:
+        parts = [
+            anchor.get("target_name"),
+            anchor.get("industry_primary"),
+            anchor.get("industry_secondary"),
+            anchor.get("headquarter_province"),
+            anchor.get("headquarter_city"),
+            anchor.get("business_summary"),
+            anchor.get("risk_summary"),
+        ]
+    return "\n".join(str(part) for part in parts if part)
+
+
 def _refresh_session_report_count(db: Session, session_id: UUID) -> None:
     db.execute(
         text(
@@ -2031,3 +2121,10 @@ def _json_dumps(value: dict[str, Any]) -> str:
     import json
 
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _json_loads(value: str) -> dict[str, Any]:
+    import json
+
+    parsed = json.loads(value)
+    return parsed if isinstance(parsed, dict) else {}

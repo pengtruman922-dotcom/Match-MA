@@ -393,6 +393,7 @@ export interface RecommendationCandidateRequest {
   seller_target_id?: string;
   limit?: number;
   create_session?: boolean;
+  enable_rerank?: boolean;
   user_message?: string;
 }
 

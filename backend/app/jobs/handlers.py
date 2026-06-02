@@ -16,6 +16,7 @@ from backend.app.ai.embedding_client import (
 )
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
 from backend.app.ai.prompting import render_template
+from backend.app.ai.rerank_client import RerankCallError, call_dashscope_compatible_rerank
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.api.routes.extracted_actions import (
     apply_buyer_intent_target_exclusion_action,
@@ -296,6 +297,8 @@ def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
         return _handle_embedding_generate(db, job)
     if job.job_type == "recommendation_report_generate":
         return _handle_recommendation_report_generate(db, job)
+    if job.job_type == "recommendation_rerank":
+        return _handle_recommendation_rerank(db, job)
 
     return {
         "handled": False,
@@ -779,6 +782,105 @@ def _handle_recommendation_report_generate(db: Session, job: JobClaim) -> dict[s
     }
 
 
+def _handle_recommendation_rerank(db: Session, job: JobClaim) -> dict[str, object]:
+    session_id = _resolve_entity_id(job, expected_entity_type="recommendation_session")
+    if session_id is None:
+        raise ValueError("recommendation_rerank job requires a recommendation_session entity_id.")
+
+    mode = str(job.payload_json.get("mode") or "")
+    query = str(job.payload_json.get("query") or "").strip()
+    candidates = job.payload_json.get("candidates") or []
+    if mode not in {"buyer_to_target", "target_to_buyer"}:
+        raise ValueError("recommendation_rerank job requires mode buyer_to_target or target_to_buyer.")
+    if not isinstance(candidates, list) or len(candidates) < 2:
+        raise ValueError("recommendation_rerank job requires at least two candidates.")
+
+    node_config = _get_default_rerank_node_config(db, "recommendation_reranker")
+    documents = _build_rerank_documents(db, mode=mode, candidates=candidates)
+    input_json = {
+        "session_id": str(session_id),
+        "mode": mode,
+        "query": query,
+        "candidate_count": len(candidates),
+        "documents": [
+            {
+                "index": index,
+                "candidate_key": document["candidate_key"],
+                "text_preview": document["text"][:1000],
+            }
+            for index, document in enumerate(documents)
+        ],
+    }
+    started = time.perf_counter()
+    try:
+        rerank_result = call_dashscope_compatible_rerank(
+            base_url=node_config["base_url"],
+            api_key_secret_ref=node_config["api_key_secret_ref"],
+            model_name=node_config["model_name"],
+            query=query,
+            documents=[document["text"] for document in documents],
+            top_n=len(documents),
+            instruct="Rerank M&A recommendation candidates by fit with the buyer intent or target profile.",
+            timeout_seconds=node_config["timeout_seconds"] or 90,
+        )
+    except RerankCallError as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        _insert_rerank_trace(
+            db,
+            job=job,
+            session_id=session_id,
+            node_config=node_config,
+            status="failed",
+            input_json=input_json,
+            parsed_output_json=None,
+            latency_ms=latency_ms,
+            total_tokens=None,
+            error_code="rerank_call_failed",
+            error_message=str(exc),
+        )
+        raise
+
+    reranked_candidates = _apply_rerank_results_to_candidates(
+        candidates=candidates,
+        rerank_results=rerank_result.results,
+        model_name=rerank_result.model_name,
+    )
+    _insert_rerank_trace(
+        db,
+        job=job,
+        session_id=session_id,
+        node_config=node_config,
+        status="succeeded",
+        input_json=input_json,
+        parsed_output_json={
+            "model": rerank_result.model_name,
+            "results": [
+                {"index": item.index, "relevance_score": item.relevance_score}
+                for item in rerank_result.results
+            ],
+            "reranked_candidates": reranked_candidates,
+        },
+        latency_ms=rerank_result.latency_ms,
+        total_tokens=rerank_result.total_tokens,
+    )
+    _insert_recommendation_rerank_message(
+        db,
+        session_id=session_id,
+        job_id=job.id,
+        reranked_candidates=reranked_candidates,
+        model_name=rerank_result.model_name,
+    )
+    return {
+        "handled": True,
+        "job_type": job.job_type,
+        "session_id": str(session_id),
+        "model_name": rerank_result.model_name,
+        "candidate_count": len(candidates),
+        "reranked_count": len(reranked_candidates),
+        "trace_created": True,
+    }
+
+
 def _resolve_business_update_id(job: JobClaim) -> UUID | None:
     if job.entity_type == "business_update" and job.entity_id is not None:
         return job.entity_id
@@ -1082,6 +1184,184 @@ def _get_default_embedding_node_config(db: Session, node_name: str) -> dict[str,
     return config
 
 
+def _get_default_rerank_node_config(db: Session, node_name: str) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            """
+            select
+              node.id as node_config_id,
+              node.node_name,
+              node.model_name,
+              node.timeout_seconds,
+              provider.id as provider_config_id,
+              provider.provider_name,
+              provider.base_url,
+              provider.api_key_secret_ref
+            from model_node_config node
+            join model_provider_config provider
+              on provider.id = node.provider_config_id
+            where node.team_id = :team_id
+              and node.workspace_id = :workspace_id
+              and node.node_name = :node_name
+              and node.node_type = 'rerank'
+              and node.is_default = true
+              and node.is_active = true
+            limit 1
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "node_name": node_name,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        raise ValueError(f"Default rerank node is not configured: {node_name}")
+    config = dict(row)
+    if not config.get("base_url"):
+        raise ValueError(f"Provider base_url is not configured for node: {node_name}")
+    return config
+
+
+def _build_rerank_documents(
+    db: Session,
+    *,
+    mode: str,
+    candidates: list[Any],
+) -> list[dict[str, str]]:
+    documents: list[dict[str, str]] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_key = _candidate_key(candidate)
+        document_text = _get_candidate_search_doc_text(db, mode=mode, candidate=candidate)
+        if not document_text:
+            document_text = _candidate_fallback_text(candidate)
+        documents.append({"candidate_key": candidate_key, "text": document_text})
+    return documents
+
+
+def _get_candidate_search_doc_text(db: Session, *, mode: str, candidate: dict[str, Any]) -> str | None:
+    if mode == "buyer_to_target":
+        seller_target_id = _optional_uuid(candidate.get("seller_target_id"))
+        if not seller_target_id:
+            return None
+        row = db.execute(
+            text(
+                """
+                select full_text
+                from seller_target_search_doc
+                where seller_target_id = :seller_target_id
+                  and team_id = :team_id
+                  and workspace_id = :workspace_id
+                  and doc_type = 'profile'
+                order by updated_at desc
+                limit 1
+                """
+            ),
+            {
+                "seller_target_id": seller_target_id,
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+            },
+        ).mappings().one_or_none()
+    else:
+        buyer_intent_id = _optional_uuid(candidate.get("buyer_intent_id"))
+        if not buyer_intent_id:
+            return None
+        row = db.execute(
+            text(
+                """
+                select full_text
+                from buyer_intent_search_doc
+                where buyer_intent_id = :buyer_intent_id
+                  and team_id = :team_id
+                  and workspace_id = :workspace_id
+                order by updated_at desc
+                limit 1
+                """
+            ),
+            {
+                "buyer_intent_id": buyer_intent_id,
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+            },
+        ).mappings().one_or_none()
+    return str(row["full_text"]) if row and row["full_text"] else None
+
+
+def _candidate_fallback_text(candidate: dict[str, Any]) -> str:
+    parts = [
+        candidate.get("seller_target_name"),
+        candidate.get("buyer_intent_name"),
+        candidate.get("buyer_name"),
+        candidate.get("match_summary"),
+        candidate.get("gap_summary"),
+        candidate.get("risk_summary"),
+        candidate.get("evidence_json"),
+    ]
+    return "\n".join(str(part) for part in parts if part)
+
+
+def _candidate_key(candidate: dict[str, Any]) -> str:
+    return "|".join(
+        str(candidate.get(key) or "")
+        for key in ["mode", "buyer_intent_id", "seller_target_id"]
+    )
+
+
+def _apply_rerank_results_to_candidates(
+    *,
+    candidates: list[Any],
+    rerank_results: list[Any],
+    model_name: str,
+) -> list[dict[str, Any]]:
+    normalized_candidates = [dict(candidate) for candidate in candidates if isinstance(candidate, dict)]
+    score_by_index = {item.index: item.relevance_score for item in rerank_results}
+    output: list[dict[str, Any]] = []
+    for index, candidate in enumerate(normalized_candidates):
+        rerank_score = float(score_by_index.get(index, 0.0))
+        original_score = float(candidate.get("score") or 0)
+        rerank_boost = round(max(0.0, min(rerank_score, 1.0)) * 15, 2)
+        final_score = min(round(original_score + rerank_boost, 2), 100.0)
+        evidence_json = candidate.get("evidence_json") if isinstance(candidate.get("evidence_json"), dict) else {}
+        score_json = evidence_json.get("score") if isinstance(evidence_json.get("score"), dict) else {}
+        candidate["score"] = final_score
+        candidate["recommendation_level"] = _recommendation_level_from_score(final_score)
+        candidate["evidence_json"] = {
+            **evidence_json,
+            "score": {
+                **score_json,
+                "rerank_score": rerank_score,
+                "rerank_boost": rerank_boost,
+                "rerank_model": model_name,
+                "final_score": final_score,
+            },
+        }
+        output.append(candidate)
+    output.sort(
+        key=lambda item: (
+            item.get("evidence_json", {}).get("score", {}).get("rerank_score", 0),
+            item.get("score") or 0,
+        ),
+        reverse=True,
+    )
+    for rank, candidate in enumerate(output, start=1):
+        candidate["rank"] = rank
+        candidate["evidence_json"]["score"]["rerank_rank"] = rank
+    return output
+
+
+def _recommendation_level_from_score(score: float) -> str:
+    if score >= 80:
+        return "strong"
+    if score >= 60:
+        return "recommended"
+    if score >= 35:
+        return "possible"
+    return "weak"
+
+
 def _get_search_doc_for_embedding(
     db: Session,
     *,
@@ -1293,6 +1573,12 @@ def _json_safe_dict(row: Any) -> dict[str, Any]:
         else:
             result[key] = value
     return result
+
+
+def _json_dumps(value: dict[str, Any]) -> str:
+    import json
+
+    return json.dumps(value, ensure_ascii=False, default=str)
 
 
 def _validate_extractor_output(parsed_output_json: dict[str, Any] | None) -> dict[str, Any]:
@@ -1952,6 +2238,136 @@ def _insert_recommendation_report_llm_trace(
             "total_tokens": total_tokens,
             "created_by": DEFAULT_ADMIN_USER_ID,
             "metadata_json": {"source": "recommendation_report_generate"},
+        },
+    )
+
+
+def _insert_rerank_trace(
+    db: Session,
+    *,
+    job: JobClaim,
+    session_id: UUID,
+    node_config: dict[str, Any],
+    status: str,
+    input_json: dict[str, Any],
+    parsed_output_json: dict[str, Any] | None,
+    latency_ms: int,
+    total_tokens: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    db.execute(
+        text(
+            """
+            insert into ai_trace (
+              team_id, workspace_id, trace_type, node_name,
+              job_id, correlation_id, entity_type, entity_id,
+              provider_config_id, node_config_id,
+              provider_name, model_name, status,
+              input_json, parsed_output_json, schema_validation_json,
+              error_code, error_message, latency_ms, total_tokens,
+              created_by, finished_at, metadata_json
+            )
+            values (
+              :team_id, :workspace_id, 'rerank', 'recommendation_reranker',
+              :job_id, :correlation_id, 'recommendation_session', :session_id,
+              :provider_config_id, :node_config_id,
+              :provider_name, :model_name, :status,
+              :input_json, :parsed_output_json, :schema_validation_json,
+              :error_code, :error_message, :latency_ms, :total_tokens,
+              :created_by, now(), :metadata_json
+            )
+            """
+        ).bindparams(
+            bindparam("input_json", type_=JSONB),
+            bindparam("parsed_output_json", type_=JSONB),
+            bindparam("schema_validation_json", type_=JSONB),
+            bindparam("metadata_json", type_=JSONB),
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "job_id": job.id,
+            "correlation_id": job.correlation_id,
+            "session_id": session_id,
+            "provider_config_id": node_config["provider_config_id"],
+            "node_config_id": node_config["node_config_id"],
+            "provider_name": node_config["provider_name"],
+            "model_name": node_config["model_name"],
+            "status": status,
+            "input_json": input_json,
+            "parsed_output_json": parsed_output_json,
+            "schema_validation_json": {"valid": status == "succeeded"},
+            "error_code": error_code,
+            "error_message": error_message,
+            "latency_ms": latency_ms,
+            "total_tokens": total_tokens,
+            "created_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_json": {"source": "recommendation_rerank"},
+        },
+    )
+
+
+def _insert_recommendation_rerank_message(
+    db: Session,
+    *,
+    session_id: UUID,
+    job_id: UUID,
+    reranked_candidates: list[dict[str, Any]],
+    model_name: str,
+) -> None:
+    db.execute(
+        text(
+            """
+            insert into recommendation_message (
+              team_id, workspace_id, session_id, role, content,
+              content_type, metadata_json, created_by
+            )
+            values (
+              :team_id, :workspace_id, :session_id, 'tool', :content,
+              'json', :metadata_json, :created_by
+            )
+            """
+        ).bindparams(bindparam("metadata_json", type_=JSONB)),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "session_id": session_id,
+            "content": _json_dumps(
+                {
+                    "message_type": "reranked_candidates",
+                    "candidate_count": len(reranked_candidates),
+                    "candidates": reranked_candidates,
+                }
+            ),
+            "metadata_json": {
+                "job_id": str(job_id),
+                "message_type": "reranked_candidates",
+                "model_name": model_name,
+            },
+            "created_by": DEFAULT_ADMIN_USER_ID,
+        },
+    )
+    db.execute(
+        text(
+            """
+            update recommendation_session
+            set latest_condition_snapshot_json = latest_condition_snapshot_json || :metadata_patch,
+                updated_at = now()
+            where id = :session_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+        {
+            "session_id": session_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "metadata_patch": {
+                "last_rerank_job_id": str(job_id),
+                "last_rerank_model": model_name,
+                "last_reranked_candidate_count": len(reranked_candidates),
+            },
         },
     )
 
