@@ -16,6 +16,9 @@ import type {
   ExtractedAction,
   ExtractedActionCreate,
   RelationEvent,
+  RecommendationCandidateRequest,
+  RecommendationCandidateResponse,
+  RecommendationSelectedItemCreate,
   UpdateLog,
   WorkbenchData,
 } from '../../types/api';
@@ -149,4 +152,17 @@ export const workbench = {
 
 export const debugApi = {
   businessUpdate: (id: string) => apiRequest<BusinessUpdateDebugBundle>(`/debug/business-updates/${id}`),
+};
+
+export const recommendations = {
+  candidates: (data: RecommendationCandidateRequest) =>
+    apiRequest<RecommendationCandidateResponse>('/recommendations/candidates', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  selectItem: (sessionId: string, data: RecommendationSelectedItemCreate) =>
+    apiRequest<{ id: string }>(`/recommendations/sessions/${sessionId}/selected-items`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
 };

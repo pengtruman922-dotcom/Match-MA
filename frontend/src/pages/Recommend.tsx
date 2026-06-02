@@ -1,38 +1,42 @@
-import { useState, useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
-  Sparkles,
-  Send,
-  Plus,
-  CheckCircle2,
-  Building2,
-  MapPin,
-  TrendingUp,
-  Star,
-  Ban,
   ArrowRightLeft,
-  FileText,
+  Ban,
+  Building2,
+  CheckCircle2,
   Eye,
+  FileText,
   Info,
+  Loader2,
+  MapPin,
+  Plus,
+  Send,
+  Sparkles,
+  Star,
+  TrendingUp,
   X,
 } from 'lucide-react';
-import { sellerTargets, buyerIntents, buyerParties } from '../lib/api';
-import type { SellerTarget, BuyerIntent, BuyerParty } from '../types/api';
+import { buyerIntents, buyerParties, recommendations, sellerTargets } from '../lib/api';
+import type { BuyerIntent, BuyerParty, RecommendationCandidate, SellerTarget } from '../types/api';
 
 type Mode = 'buyer-to-target' | 'target-to-buyer';
 
 interface RecommendationItem {
   id: string;
+  sessionId: string | null;
+  mode: 'buyer_to_target' | 'target_to_buyer';
+  sellerTargetId: string | null;
+  buyerIntentId: string | null;
+  buyerPartyId: string | null;
   name: string;
   strength: string;
-  industry: string;
-  region: string;
-  profit: string;
-  pe: string;
   matchSummary: string;
   gapSummary: string;
-  contactHint: string;
+  riskSummary: string | null;
+  evidence: Record<string, unknown>;
   inShortlist: boolean;
+  persisted: boolean;
 }
 
 interface ChatMessage {
@@ -51,6 +55,8 @@ export default function Recommend() {
   const [inputValue, setInputValue] = useState('');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [conditionsOpen, setConditionsOpen] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [generationError, setGenerationError] = useState<string | null>(null);
 
   const [targetsList, setTargetsList] = useState<SellerTarget[]>([]);
   const [intentsList, setIntentsList] = useState<BuyerIntent[]>([]);
@@ -69,57 +75,59 @@ export default function Recommend() {
   useEffect(() => {
     if (initializedRef.current) return;
     if (mode === 'buyer-to-target' && selectedIntentId && intentsList.length > 0) {
-      const intent = intentsList.find((i) => i.id === selectedIntentId);
+      const intent = intentsList.find((item) => item.id === selectedIntentId);
       if (intent) {
         initializedRef.current = true;
-        const parts: string[] = [`已加载买家意向：${intent.intent_name}`];
-        if (intent.industry_primary) parts.push(`行业：${intent.industry_primary}`);
-        if (intent.region_scope_summary) parts.push(`地区：${intent.region_scope_summary}`);
-        if (intent.min_net_profit_yuan) parts.push(`最低利润：${(Number(intent.min_net_profit_yuan) / 10000).toFixed(0)}万`);
-        if (intent.max_pe) parts.push(`PE上限：${Number(intent.max_pe).toFixed(0)}`);
-        if (intent.requires_consolidation && intent.requires_consolidation !== 'unknown') {
-          parts.push(`并表要求：${intent.requires_consolidation === 'yes' ? '是' : '否'}`);
-        }
-        const guidanceLines = [
-          parts.join('\n'),
-          '',
-          '您可以：',
-          '- 直接发送"开始推荐"使用现有条件',
-          '- 输入补充条件覆盖或细化',
-          '- 输入"帮我总结当前条件"查看条件快照',
-        ].join('\n');
-        setChatMessages([{ role: 'system', content: guidanceLines }]);
+        setChatMessages([{ role: 'system', content: buildIntentGuidance(intent) }]);
       }
     } else if (mode === 'target-to-buyer' && selectedTargetId && targetsList.length > 0) {
-      const target = targetsList.find((t) => t.id === selectedTargetId);
+      const target = targetsList.find((item) => item.id === selectedTargetId);
       if (target) {
         initializedRef.current = true;
-        const parts: string[] = [`已加载标的：${target.target_name}`];
-        if (target.industry_primary) parts.push(`行业：${target.industry_primary}`);
-        if (target.headquarter_province) parts.push(`地区：${target.headquarter_province}${target.headquarter_city || ''}`);
-        if (target.current_net_profit_yuan) parts.push(`利润：${(Number(target.current_net_profit_yuan) / 10000).toFixed(0)}万`);
-        const guidanceLines = [
-          parts.join('\n'),
-          '',
-          '您可以：',
-          '- 直接发送"开始推荐"为该标的匹配买家意向',
-          '- 输入补充条件，例如"只看浙江买家"',
-        ].join('\n');
-        setChatMessages([{ role: 'system', content: guidanceLines }]);
+        setChatMessages([{ role: 'system', content: buildTargetGuidance(target) }]);
       }
     }
   }, [mode, selectedIntentId, selectedTargetId, intentsList, targetsList]);
 
-  const shortlistCount = items.filter((i) => i.inShortlist).length;
-  const selectedIntent = intentsList.find((i) => i.id === selectedIntentId);
-  const selectedTarget = targetsList.find((t) => t.id === selectedTargetId);
+  const shortlistCount = items.filter((item) => item.inShortlist).length;
+  const selectedIntent = intentsList.find((item) => item.id === selectedIntentId);
+  const selectedTarget = targetsList.find((item) => item.id === selectedTargetId);
   const intentParty = selectedIntent?.buyer_party_id
-    ? partiesList.find((p) => p.id === selectedIntent.buyer_party_id) ?? null
+    ? partiesList.find((party) => party.id === selectedIntent.buyer_party_id) ?? null
     : null;
 
-  function toggleShortlist(id: string) {
+  async function toggleShortlist(id: string) {
+    const item = items.find((candidate) => candidate.id === id);
+    if (!item) return;
+
+    if (!item.inShortlist && item.sessionId && !item.persisted) {
+      try {
+        await recommendations.selectItem(item.sessionId, {
+          mode: item.mode,
+          seller_target_id: item.sellerTargetId,
+          buyer_intent_id: item.buyerIntentId,
+          buyer_party_id: item.buyerPartyId,
+          rank_at_selection: items.findIndex((candidate) => candidate.id === id) + 1,
+          recommendation_level: levelToApi(item.strength),
+          match_summary: item.matchSummary,
+          risk_summary: item.riskSummary,
+          gap_summary: item.gapSummary,
+          reason_snapshot: item.matchSummary,
+          evidence_snapshot_json: item.evidence,
+        });
+        setItems((prev) =>
+          prev.map((candidate) =>
+            candidate.id === id ? { ...candidate, inShortlist: true, persisted: true } : candidate
+          )
+        );
+        return;
+      } catch (err) {
+        setGenerationError(err instanceof Error ? err.message : '加入推荐列表失败');
+      }
+    }
+
     setItems((prev) =>
-      prev.map((item) => (item.id === id ? { ...item, inShortlist: !item.inShortlist } : item))
+      prev.map((candidate) => (candidate.id === id ? { ...candidate, inShortlist: !candidate.inShortlist } : candidate))
     );
   }
 
@@ -129,11 +137,13 @@ export default function Recommend() {
     setChatMessages([]);
     setSelectedIntentId('');
     setSelectedTargetId('');
+    setGenerationError(null);
     initializedRef.current = false;
   }
 
   function handleSelectIntent(id: string) {
     setSelectedIntentId(id);
+    setItems([]);
     if (id !== selectedIntentId) {
       initializedRef.current = false;
       setChatMessages([]);
@@ -142,20 +152,57 @@ export default function Recommend() {
 
   function handleSelectTarget(id: string) {
     setSelectedTargetId(id);
+    setItems([]);
     if (id !== selectedTargetId) {
       initializedRef.current = false;
       setChatMessages([]);
     }
   }
 
-  function handleSend() {
-    if (!inputValue.trim()) return;
-    setChatMessages((prev) => [...prev, { role: 'user', content: inputValue }]);
-    setChatMessages((prev) => [
-      ...prev,
-      { role: 'system', content: '推荐引擎后端开发中，当前不可生成真实结果。已保存对话记录。' },
-    ]);
+  async function handleSend() {
+    const message = inputValue.trim();
+    if (!message) return;
+    setChatMessages((prev) => [...prev, { role: 'user', content: message }]);
     setInputValue('');
+    await generateCandidates(message);
+  }
+
+  async function generateCandidates(userMessage?: string) {
+    if (mode === 'buyer-to-target' && !selectedIntentId) {
+      setGenerationError('请先选择买家意向');
+      return;
+    }
+    if (mode === 'target-to-buyer' && !selectedTargetId) {
+      setGenerationError('请先选择标的');
+      return;
+    }
+
+    setGenerating(true);
+    setGenerationError(null);
+    try {
+      const response = await recommendations.candidates({
+        mode: mode === 'buyer-to-target' ? 'buyer_to_target' : 'target_to_buyer',
+        buyer_intent_id: mode === 'buyer-to-target' ? selectedIntentId : undefined,
+        seller_target_id: mode === 'target-to-buyer' ? selectedTargetId : undefined,
+        limit: 20,
+        create_session: true,
+        user_message: userMessage,
+      });
+      setItems(response.candidates.map((candidate) => mapCandidate(candidate, response.session_id)));
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          role: 'system',
+          content: `已生成 ${response.candidates.length} 个候选。本版使用结构化规则召回，后续会叠加 embedding 和 LLM rerank。`,
+        },
+      ]);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '生成推荐失败';
+      setGenerationError(message);
+      setChatMessages((prev) => [...prev, { role: 'system', content: `生成推荐失败：${message}` }]);
+    } finally {
+      setGenerating(false);
+    }
   }
 
   const objectLabel = mode === 'buyer-to-target'
@@ -164,7 +211,6 @@ export default function Recommend() {
 
   return (
     <div className="h-[calc(100vh-7rem)] flex flex-col">
-      {/* Top control bar */}
       <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
         <div className="flex items-center gap-3">
           <h1 className="text-lg font-semibold text-gray-900">智能推荐</h1>
@@ -215,44 +261,54 @@ export default function Recommend() {
         </div>
       </div>
 
-      {/* Object selector bar */}
       <div className="flex items-center gap-3 mb-3 bg-white border border-gray-200 px-4 py-2.5">
         <span className="text-xs text-gray-500">对象：</span>
         {mode === 'buyer-to-target' ? (
           <select
             value={selectedIntentId}
-            onChange={(e) => handleSelectIntent(e.target.value)}
+            onChange={(event) => handleSelectIntent(event.target.value)}
             className="text-sm border border-gray-200 px-2 py-1 bg-gray-50 focus:border-brand-500 outline-none min-w-[200px]"
           >
             <option value="">选择买家意向...</option>
-            {intentsList.map((i) => (
-              <option key={i.id} value={i.id}>{i.intent_name}</option>
+            {intentsList.map((intent) => (
+              <option key={intent.id} value={intent.id}>{intent.intent_name}</option>
             ))}
           </select>
         ) : (
           <select
             value={selectedTargetId}
-            onChange={(e) => handleSelectTarget(e.target.value)}
+            onChange={(event) => handleSelectTarget(event.target.value)}
             className="text-sm border border-gray-200 px-2 py-1 bg-gray-50 focus:border-brand-500 outline-none min-w-[200px]"
           >
             <option value="">选择标的...</option>
-            {targetsList.map((t) => (
-              <option key={t.id} value={t.id}>{t.target_name}</option>
+            {targetsList.map((target) => (
+              <option key={target.id} value={target.id}>{target.target_name}</option>
             ))}
           </select>
         )}
         <span className="text-sm text-gray-700">{objectLabel}</span>
+        <button
+          onClick={() => generateCandidates('开始推荐')}
+          disabled={generating || (mode === 'buyer-to-target' ? !selectedIntentId : !selectedTargetId)}
+          className="ml-auto inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-40"
+        >
+          {generating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+          开始推荐
+        </button>
       </div>
 
-      {/* Backend notice */}
-      <div className="mb-3 bg-amber-50 border border-amber-200 px-4 py-2 flex items-center gap-2">
-        <Info className="w-4 h-4 text-amber-600 shrink-0" />
-        <span className="text-xs text-amber-700">推荐引擎、LLM 意向解析、向量检索后端开发中。当前页面为交互框架，推荐结果待后端实现。</span>
+      <div className="mb-3 bg-emerald-50 border border-emerald-200 px-4 py-2 flex items-center gap-2">
+        <Info className="w-4 h-4 text-emerald-600 shrink-0" />
+        <span className="text-xs text-emerald-700">当前已接入后端规则候选召回和推荐会话保存；embedding/LLM rerank 会继续增强排序和解释。</span>
       </div>
 
-      {/* Two column layout: conversation + results */}
+      {generationError && (
+        <div className="mb-3 bg-red-50 border border-red-200 px-4 py-2 text-xs text-red-700">
+          {generationError}
+        </div>
+      )}
+
       <div className="flex-1 grid grid-cols-12 gap-4 min-h-0">
-        {/* Left: Conversation */}
         <div className="col-span-7 bg-white border border-gray-200 flex flex-col min-h-0">
           <div className="px-4 py-3 border-b border-gray-100">
             <h2 className="text-sm font-semibold text-gray-900">对话</h2>
@@ -260,44 +316,27 @@ export default function Recommend() {
           <div className="flex-1 overflow-y-auto p-4 space-y-3">
             {chatMessages.length === 0 && (
               <div className="border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
-                {mode === 'buyer-to-target' ? (
-                  <>
-                    <p className="font-medium text-gray-800 mb-1">
-                      {selectedIntent ? `已加载买家意向条件。` : '请选择买家意向或输入需求。'}
-                    </p>
-                    <p className="text-xs text-gray-500">您可以：</p>
-                    <ul className="text-xs text-gray-500 mt-1 space-y-0.5">
-                      <li>- 直接发送"开始推荐"使用现有条件</li>
-                      <li>- 输入补充条件覆盖或细化</li>
-                      <li>- 输入"帮我总结当前条件"查看条件快照</li>
-                    </ul>
-                  </>
-                ) : (
-                  <>
-                    <p className="font-medium text-gray-800 mb-1">
-                      {selectedTarget ? `已加载标的：${selectedTarget.target_name}` : '请选择标的项目。'}
-                    </p>
-                    <ul className="text-xs text-gray-500 mt-1 space-y-0.5">
-                      <li>- 直接发送"开始推荐"为该标的匹配买家意向</li>
-                      <li>- 输入补充条件，例如"只看浙江买家"</li>
-                    </ul>
-                  </>
-                )}
+                <p className="font-medium text-gray-800 mb-1">
+                  {mode === 'buyer-to-target'
+                    ? selectedIntent ? '已加载买家意向条件。' : '请选择买家意向或输入需求。'
+                    : selectedTarget ? `已加载标的：${selectedTarget.target_name}` : '请选择标的项目。'}
+                </p>
+                <p className="text-xs text-gray-500">可以直接点击“开始推荐”，也可以输入补充条件。</p>
               </div>
             )}
-            {chatMessages.map((msg, idx) => (
+            {chatMessages.map((message, index) => (
               <div
-                key={idx}
+                key={index}
                 className={
-                  msg.role === 'user'
+                  message.role === 'user'
                     ? 'border-l-2 border-l-brand-600 bg-brand-50 px-4 py-3'
                     : 'border border-gray-200 bg-white px-4 py-3'
                 }
               >
                 <span className="text-xs font-medium text-gray-500 mb-1 block">
-                  {msg.role === 'user' ? '用户' : '系统'}
+                  {message.role === 'user' ? '用户' : '系统'}
                 </span>
-                <p className="text-sm leading-relaxed text-gray-800 whitespace-pre-line">{msg.content}</p>
+                <p className="text-sm leading-relaxed text-gray-800 whitespace-pre-line">{message.content}</p>
               </div>
             ))}
           </div>
@@ -306,23 +345,22 @@ export default function Recommend() {
               <input
                 type="text"
                 value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                placeholder="继续输入..."
+                onChange={(event) => setInputValue(event.target.value)}
+                onKeyDown={(event) => event.key === 'Enter' && handleSend()}
+                placeholder="输入“开始推荐”或补充推荐条件..."
                 className="flex-1 px-4 py-2.5 text-sm outline-none placeholder:text-gray-400"
               />
               <button
                 onClick={handleSend}
                 className="mr-2 p-2 bg-brand-600 text-white hover:bg-brand-700 transition-colors disabled:opacity-40"
-                disabled={!inputValue.trim()}
+                disabled={!inputValue.trim() || generating}
               >
-                <Send className="w-4 h-4" />
+                {generating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
               </button>
             </div>
           </div>
         </div>
 
-        {/* Right: Results */}
         <div className="col-span-5 bg-white border border-gray-200 flex flex-col min-h-0">
           <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
             <h2 className="text-sm font-semibold text-gray-900">
@@ -335,16 +373,16 @@ export default function Recommend() {
           <div className="flex-1 overflow-y-auto p-3 space-y-3">
             {items.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full text-center px-6">
-                <Sparkles className="w-8 h-8 text-gray-300 mb-3" />
-                <p className="text-sm text-gray-400">暂无推荐结果</p>
-                <p className="text-xs text-gray-400 mt-1">选择对象并发送推荐请求后，结果将展示在此处</p>
+                {generating ? <Loader2 className="w-8 h-8 text-gray-300 mb-3 animate-spin" /> : <Sparkles className="w-8 h-8 text-gray-300 mb-3" />}
+                <p className="text-sm text-gray-400">{generating ? '正在生成推荐...' : '暂无推荐结果'}</p>
+                <p className="text-xs text-gray-400 mt-1">选择对象并发送推荐请求后，结果将展示在此</p>
               </div>
             ) : (
-              items.map((item, idx) => (
+              items.map((item, index) => (
                 <RecommendationCard
                   key={item.id}
                   item={item}
-                  index={idx + 1}
+                  index={index + 1}
                   onToggleShortlist={() => toggleShortlist(item.id)}
                 />
               ))
@@ -353,7 +391,6 @@ export default function Recommend() {
         </div>
       </div>
 
-      {/* Conditions Drawer */}
       {conditionsOpen && (
         <ConditionsDrawer
           mode={mode}
@@ -377,13 +414,7 @@ function RecommendationCard({
   onToggleShortlist: () => void;
 }) {
   return (
-    <div
-      className={`border transition-all ${
-        item.inShortlist
-          ? 'border-emerald-300 bg-emerald-50/50'
-          : 'border-gray-200 bg-white hover:border-brand-200'
-      }`}
-    >
+    <div className={`border transition-all ${item.inShortlist ? 'border-emerald-300 bg-emerald-50/50' : 'border-gray-200 bg-white hover:border-brand-200'}`}>
       <div className="p-3 space-y-2">
         <div className="flex items-start justify-between">
           <div className="flex items-center gap-2">
@@ -396,11 +427,9 @@ function RecommendationCard({
         </div>
 
         <div className="ml-6 text-xs text-gray-600 space-y-0.5">
-          <p>{item.industry} · {item.region} · 利润{item.profit}</p>
-          {item.pe && <p>PE{item.pe}</p>}
           {item.matchSummary && <p className="text-emerald-700">匹配：{item.matchSummary}</p>}
           {item.gapSummary && <p className="text-amber-700">缺口：{item.gapSummary}</p>}
-          {item.contactHint && <p className="text-gray-400">接触：{item.contactHint}</p>}
+          {item.riskSummary && <p className="text-gray-400">风险：{item.riskSummary}</p>}
         </div>
 
         <div className="ml-6">
@@ -410,10 +439,7 @@ function RecommendationCard({
                 <CheckCircle2 className="w-3 h-3" />
                 已加入推荐列表
               </span>
-              <button
-                onClick={onToggleShortlist}
-                className="text-xs text-gray-500 hover:text-red-600"
-              >
+              <button onClick={onToggleShortlist} className="text-xs text-gray-500 hover:text-red-600">
                 取消
               </button>
             </div>
@@ -477,11 +503,7 @@ function ConditionsDrawer({
                     )}
                   </div>
                 </Section>
-                {intent.preference_summary && (
-                  <Section label="Preference">
-                    <p className="text-sm text-gray-600">{intent.preference_summary}</p>
-                  </Section>
-                )}
+                {intent.preference_summary && <Section label="Preference"><p className="text-sm text-gray-600">{intent.preference_summary}</p></Section>}
                 {intent.negative_summary && (
                   <Section label="排除项">
                     <div className="flex items-center gap-2 text-sm text-gray-600">
@@ -490,11 +512,7 @@ function ConditionsDrawer({
                     </div>
                   </Section>
                 )}
-                {intent.unknown_summary && (
-                  <Section label="Unknown / 待确认">
-                    <p className="text-sm text-gray-600">{intent.unknown_summary}</p>
-                  </Section>
-                )}
+                {intent.unknown_summary && <Section label="Unknown / 待确认"><p className="text-sm text-gray-600">{intent.unknown_summary}</p></Section>}
               </>
             ) : (
               <p className="text-sm text-gray-400">未选择买家意向</p>
@@ -504,7 +522,7 @@ function ConditionsDrawer({
               <Section label="标的条件">
                 <div className="space-y-2">
                   {target.industry_primary && <ConditionRow icon={Building2} label="行业" value={target.industry_primary} />}
-                  {target.headquarter_province && <ConditionRow icon={MapPin} label="地区" value={`${target.headquarter_province} ${target.headquarter_city || ''}`} />}
+                  {target.headquarter_province && <ConditionRow icon={MapPin} label="区域" value={`${target.headquarter_province} ${target.headquarter_city || ''}`} />}
                   {target.current_net_profit_yuan && <ConditionRow icon={TrendingUp} label="利润" value={`${(Number(target.current_net_profit_yuan) / 10000).toFixed(0)}万`} />}
                   {target.pe_ratio && <ConditionRow icon={Star} label="PE" value={Number(target.pe_ratio).toFixed(1)} />}
                 </div>
@@ -536,4 +554,63 @@ function ConditionRow({ icon: Icon, label, value }: { icon: typeof Building2; la
       <span className="text-gray-800">{value}</span>
     </div>
   );
+}
+
+function buildIntentGuidance(intent: BuyerIntent): string {
+  const parts: string[] = [`已加载买家意向：${intent.intent_name}`];
+  if (intent.industry_primary) parts.push(`行业：${intent.industry_primary}`);
+  if (intent.region_scope_summary) parts.push(`地区：${intent.region_scope_summary}`);
+  if (intent.min_net_profit_yuan) parts.push(`最低利润：${(Number(intent.min_net_profit_yuan) / 10000).toFixed(0)}万`);
+  if (intent.max_pe) parts.push(`PE上限：${Number(intent.max_pe).toFixed(0)}`);
+  if (intent.requires_consolidation && intent.requires_consolidation !== 'unknown') {
+    parts.push(`并表要求：${intent.requires_consolidation === 'yes' ? '是' : '否'}`);
+  }
+  return [parts.join('\n'), '', '您可以：', '- 直接点击“开始推荐”使用现有条件', '- 输入补充条件覆盖或细化'].join('\n');
+}
+
+function buildTargetGuidance(target: SellerTarget): string {
+  const parts: string[] = [`已加载标的：${target.target_name}`];
+  if (target.industry_primary) parts.push(`行业：${target.industry_primary}`);
+  if (target.headquarter_province) parts.push(`地区：${target.headquarter_province}${target.headquarter_city || ''}`);
+  if (target.current_net_profit_yuan) parts.push(`利润：${(Number(target.current_net_profit_yuan) / 10000).toFixed(0)}万`);
+  return [parts.join('\n'), '', '您可以：', '- 直接点击“开始推荐”为该标的匹配买家意向', '- 输入补充条件，例如“只看浙江买家”'].join('\n');
+}
+
+function mapCandidate(candidate: RecommendationCandidate, sessionId: string | null): RecommendationItem {
+  const targetName = candidate.seller_target_name || '未命名标的';
+  const intentName = candidate.buyer_intent_name || '未命名意向';
+  const isBuyerMode = candidate.mode === 'buyer_to_target';
+  return {
+    id: `${candidate.mode}:${candidate.seller_target_id || ''}:${candidate.buyer_intent_id || ''}`,
+    sessionId,
+    mode: candidate.mode,
+    sellerTargetId: candidate.seller_target_id,
+    buyerIntentId: candidate.buyer_intent_id,
+    buyerPartyId: candidate.buyer_party_id,
+    name: isBuyerMode ? targetName : `${candidate.buyer_name || '未绑定买家'} / ${intentName}`,
+    strength: levelLabel(candidate.recommendation_level, candidate.score),
+    matchSummary: candidate.match_summary,
+    gapSummary: candidate.gap_summary || '',
+    riskSummary: candidate.risk_summary,
+    evidence: candidate.evidence_json,
+    inShortlist: false,
+    persisted: false,
+  };
+}
+
+function levelLabel(level: RecommendationCandidate['recommendation_level'], score: number): string {
+  const labels: Record<RecommendationCandidate['recommendation_level'], string> = {
+    strong: '强推荐',
+    recommended: '推荐',
+    possible: '可关注',
+    weak: '弱匹配',
+  };
+  return `${labels[level]} ${Math.round(score)}`;
+}
+
+function levelToApi(label: string): RecommendationCandidate['recommendation_level'] {
+  if (label.includes('强推荐')) return 'strong';
+  if (label.includes('可关注')) return 'possible';
+  if (label.includes('弱匹配')) return 'weak';
+  return 'recommended';
 }

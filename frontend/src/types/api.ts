@@ -357,3 +357,51 @@ export interface BusinessUpdateDebugBundle {
   actions: ExtractedAction[];
   application_logs: UpdateLog[];
 }
+
+export interface RecommendationCandidate {
+  rank: number;
+  mode: 'buyer_to_target' | 'target_to_buyer';
+  seller_target_id: string | null;
+  seller_target_name: string | null;
+  buyer_intent_id: string | null;
+  buyer_intent_name: string | null;
+  buyer_party_id: string | null;
+  buyer_name: string | null;
+  score: number;
+  recommendation_level: 'strong' | 'recommended' | 'possible' | 'weak';
+  match_summary: string;
+  gap_summary: string | null;
+  risk_summary: string | null;
+  evidence_json: Record<string, unknown>;
+}
+
+export interface RecommendationCandidateRequest {
+  mode: 'buyer_to_target' | 'target_to_buyer';
+  buyer_intent_id?: string;
+  seller_target_id?: string;
+  limit?: number;
+  create_session?: boolean;
+  user_message?: string;
+}
+
+export interface RecommendationCandidateResponse {
+  session_id: string | null;
+  mode: 'buyer_to_target' | 'target_to_buyer';
+  candidates: RecommendationCandidate[];
+  debug: Record<string, unknown>;
+}
+
+export interface RecommendationSelectedItemCreate {
+  mode: 'buyer_to_target' | 'target_to_buyer';
+  seller_target_id?: string | null;
+  buyer_intent_id?: string | null;
+  buyer_party_id?: string | null;
+  rank_at_selection?: number;
+  recommendation_level?: 'strong' | 'recommended' | 'possible' | 'weak';
+  match_summary?: string | null;
+  risk_summary?: string | null;
+  gap_summary?: string | null;
+  reason_snapshot?: string | null;
+  evidence_snapshot_json?: Record<string, unknown>;
+  metadata_json?: Record<string, unknown>;
+}

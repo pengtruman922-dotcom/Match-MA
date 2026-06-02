@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.api.routes.utils import diff_payload, write_action_logs_for_diff
 from backend.app.db import get_db
+from backend.app.services.search_docs import create_search_doc_rebuild_job
 
 router = APIRouter(tags=["extracted-actions"])
 
@@ -306,6 +307,12 @@ def apply_seller_fact_update_action(
         business_update_id=action["business_update_id"],
         extracted_action_id=action["id"],
     )
+    create_search_doc_rebuild_job(
+        db,
+        entity_type="seller_target",
+        entity_id=seller_target_id,
+        source="seller_fact_update_apply",
+    )
     _mark_action_applied(db, action["id"], review_status="auto_accepted" if not require_accepted else None)
     _refresh_business_update_status(db, action["business_update_id"])
 
@@ -401,6 +408,12 @@ def apply_buyer_intent_update_action(
         source_type="extracted_action",
         business_update_id=action["business_update_id"],
         extracted_action_id=action["id"],
+    )
+    create_search_doc_rebuild_job(
+        db,
+        entity_type="buyer_intent",
+        entity_id=buyer_intent_id,
+        source="buyer_intent_update_apply",
     )
     _mark_action_applied(db, action["id"], review_status="auto_accepted" if not require_accepted else None)
     _refresh_business_update_status(db, action["business_update_id"])

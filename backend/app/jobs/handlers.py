@@ -9,6 +9,11 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
+from backend.app.ai.embedding_client import (
+    EmbeddingCallError,
+    call_openai_compatible_embedding,
+    embedding_to_pgvector_literal,
+)
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
 from backend.app.ai.prompting import render_template
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
@@ -19,6 +24,11 @@ from backend.app.api.routes.extracted_actions import (
     apply_seller_fact_update_action,
 )
 from backend.app.jobs.queue import JobClaim
+from backend.app.services.search_docs import (
+    create_embedding_job_for_search_doc,
+    rebuild_buyer_intent_search_doc,
+    rebuild_seller_target_search_doc,
+)
 
 ALLOWED_ACTION_TYPES = {
     "seller_fact_update",
@@ -278,6 +288,12 @@ NESTED_FIELD_ALIASES = {
 def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
     if job.job_type == "business_update_extract_actions":
         return _handle_business_update_extract_actions(db, job)
+    if job.job_type == "seller_search_doc_rebuild":
+        return _handle_seller_search_doc_rebuild(db, job)
+    if job.job_type == "buyer_intent_search_doc_rebuild":
+        return _handle_buyer_intent_search_doc_rebuild(db, job)
+    if job.job_type == "embedding_generate":
+        return _handle_embedding_generate(db, job)
 
     return {
         "handled": False,
@@ -424,11 +440,176 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
     }
 
 
+def _handle_seller_search_doc_rebuild(db: Session, job: JobClaim) -> dict[str, object]:
+    seller_target_id = _resolve_entity_id(job, expected_entity_type="seller_target")
+    if seller_target_id is None:
+        raise ValueError("seller_search_doc_rebuild job requires a seller_target entity_id.")
+
+    result = rebuild_seller_target_search_doc(db, seller_target_id)
+    embedding_job_id = create_embedding_job_for_search_doc(
+        db,
+        owner_job_id=job.id,
+        entity_type="seller_target",
+        entity_id=seller_target_id,
+        search_doc_id=result["search_doc_id"],
+    )
+    return {
+        "handled": True,
+        "job_type": job.job_type,
+        "seller_target_id": str(seller_target_id),
+        "search_doc_id": str(result["search_doc_id"]),
+        "source_version": result["source_version"],
+        "full_text_length": len(result["full_text"] or ""),
+        "embedding_job_id": str(embedding_job_id),
+    }
+
+
+def _handle_buyer_intent_search_doc_rebuild(db: Session, job: JobClaim) -> dict[str, object]:
+    buyer_intent_id = _resolve_entity_id(job, expected_entity_type="buyer_intent")
+    if buyer_intent_id is None:
+        raise ValueError("buyer_intent_search_doc_rebuild job requires a buyer_intent entity_id.")
+
+    result = rebuild_buyer_intent_search_doc(db, buyer_intent_id)
+    embedding_job_id = create_embedding_job_for_search_doc(
+        db,
+        owner_job_id=job.id,
+        entity_type="buyer_intent",
+        entity_id=buyer_intent_id,
+        search_doc_id=result["search_doc_id"],
+    )
+    return {
+        "handled": True,
+        "job_type": job.job_type,
+        "buyer_intent_id": str(buyer_intent_id),
+        "search_doc_id": str(result["search_doc_id"]),
+        "source_version": result["source_version"],
+        "full_text_length": len(result["full_text"] or ""),
+        "embedding_job_id": str(embedding_job_id),
+    }
+
+
+def _handle_embedding_generate(db: Session, job: JobClaim) -> dict[str, object]:
+    entity_type = str(job.payload_json.get("entity_type") or job.entity_type or "")
+    if entity_type not in {"seller_target", "buyer_intent"}:
+        raise ValueError("embedding_generate supports seller_target or buyer_intent only.")
+
+    entity_id = _resolve_entity_id(job, expected_entity_type=entity_type)
+    if entity_id is None:
+        raise ValueError("embedding_generate job requires entity_id.")
+
+    search_doc_id = _optional_uuid(job.payload_json.get("search_doc_id"))
+    search_doc = _get_search_doc_for_embedding(
+        db,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        search_doc_id=search_doc_id,
+    )
+    full_text = search_doc.get("full_text") or ""
+    node_name = "embedding_seller_doc" if entity_type == "seller_target" else "embedding_buyer_intent"
+    node_config = _get_default_embedding_node_config(db, node_name)
+    input_json = {
+        "entity_type": entity_type,
+        "entity_id": str(entity_id),
+        "search_doc_id": str(search_doc["id"]),
+        "text": full_text,
+    }
+
+    if not full_text.strip():
+        _insert_embedding_trace(
+            db,
+            job=job,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            node_config=node_config,
+            status="skipped",
+            input_json=input_json,
+            parsed_output_json={"reason": "empty_search_doc"},
+            latency_ms=0,
+        )
+        return {
+            "handled": True,
+            "job_type": job.job_type,
+            "status": "skipped",
+            "reason": "empty_search_doc",
+            "entity_type": entity_type,
+            "entity_id": str(entity_id),
+            "search_doc_id": str(search_doc["id"]),
+        }
+
+    try:
+        embedding_result = call_openai_compatible_embedding(
+            base_url=node_config["base_url"],
+            api_key_secret_ref=node_config["api_key_secret_ref"],
+            model_name=node_config["model_name"],
+            input_text=full_text,
+            dimensions=node_config["embedding_dimension"],
+            timeout_seconds=node_config["timeout_seconds"] or 60,
+        )
+    except EmbeddingCallError as exc:
+        _insert_embedding_trace(
+            db,
+            job=job,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            node_config=node_config,
+            status="failed",
+            input_json=input_json,
+            parsed_output_json=None,
+            latency_ms=0,
+            error_code="embedding_call_failed",
+            error_message=str(exc),
+        )
+        raise
+
+    _update_search_doc_embedding(
+        db,
+        entity_type=entity_type,
+        search_doc_id=search_doc["id"],
+        embedding=embedding_result.embedding,
+        model_name=node_config["model_name"],
+    )
+    _insert_embedding_trace(
+        db,
+        job=job,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        node_config=node_config,
+        status="succeeded",
+        input_json=input_json,
+        parsed_output_json={
+            "search_doc_id": str(search_doc["id"]),
+            "embedding_dimension": len(embedding_result.embedding),
+            "embedding_model": node_config["model_name"],
+        },
+        latency_ms=embedding_result.latency_ms,
+        prompt_tokens=embedding_result.prompt_tokens,
+        total_tokens=embedding_result.total_tokens,
+    )
+    return {
+        "handled": True,
+        "job_type": job.job_type,
+        "entity_type": entity_type,
+        "entity_id": str(entity_id),
+        "search_doc_id": str(search_doc["id"]),
+        "embedding_model": node_config["model_name"],
+        "embedding_dimension": len(embedding_result.embedding),
+    }
+
+
 def _resolve_business_update_id(job: JobClaim) -> UUID | None:
     if job.entity_type == "business_update" and job.entity_id is not None:
         return job.entity_id
 
     payload_value = job.payload_json.get("business_update_id")
+    if not payload_value:
+        return None
+    return UUID(str(payload_value))
+
+
+def _resolve_entity_id(job: JobClaim, *, expected_entity_type: str) -> UUID | None:
+    if job.entity_type == expected_entity_type and job.entity_id is not None:
+        return job.entity_id
+    payload_value = job.payload_json.get(f"{expected_entity_type}_id") or job.payload_json.get("entity_id")
     if not payload_value:
         return None
     return UUID(str(payload_value))
@@ -466,6 +647,7 @@ def _get_default_node_config(db: Session, node_name: str) -> dict[str, Any]:
             """
             select
               node.id as node_config_id,
+              node.node_name,
               node.model_name,
               node.temperature,
               node.top_p,
@@ -511,6 +693,136 @@ def _get_default_node_config(db: Session, node_name: str) -> dict[str, Any]:
     if not config.get("prompt_template_id"):
         raise ValueError(f"Default prompt template is not configured for node: {node_name}")
     return config
+
+
+def _get_default_embedding_node_config(db: Session, node_name: str) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            """
+            select
+              node.id as node_config_id,
+              node.node_name,
+              node.model_name,
+              node.timeout_seconds,
+              node.embedding_dimension,
+              provider.id as provider_config_id,
+              provider.provider_name,
+              provider.base_url,
+              provider.api_key_secret_ref
+            from model_node_config node
+            join model_provider_config provider
+              on provider.id = node.provider_config_id
+            where node.team_id = :team_id
+              and node.workspace_id = :workspace_id
+              and node.node_name = :node_name
+              and node.node_type = 'embedding'
+              and node.is_default = true
+              and node.is_active = true
+            limit 1
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "node_name": node_name,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        raise ValueError(f"Default embedding node is not configured: {node_name}")
+    config = dict(row)
+    if not config.get("base_url"):
+        raise ValueError(f"Provider base_url is not configured for node: {node_name}")
+    if not config.get("embedding_dimension"):
+        raise ValueError(f"Embedding dimension is not configured for node: {node_name}")
+    return config
+
+
+def _get_search_doc_for_embedding(
+    db: Session,
+    *,
+    entity_type: str,
+    entity_id: UUID,
+    search_doc_id: UUID | None,
+) -> dict[str, Any]:
+    if entity_type == "seller_target":
+        where = "id = :search_doc_id" if search_doc_id else "seller_target_id = :entity_id and doc_type = 'profile'"
+        params = {
+            "search_doc_id": search_doc_id,
+            "entity_id": entity_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        }
+        row = db.execute(
+            text(
+                f"""
+                select id, seller_target_id as entity_id, full_text
+                from seller_target_search_doc
+                where {where}
+                  and team_id = :team_id
+                  and workspace_id = :workspace_id
+                limit 1
+                """
+            ),
+            params,
+        ).mappings().one_or_none()
+    else:
+        where = "id = :search_doc_id" if search_doc_id else "buyer_intent_id = :entity_id"
+        params = {
+            "search_doc_id": search_doc_id,
+            "entity_id": entity_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        }
+        row = db.execute(
+            text(
+                f"""
+                select id, buyer_intent_id as entity_id, full_text
+                from buyer_intent_search_doc
+                where {where}
+                  and team_id = :team_id
+                  and workspace_id = :workspace_id
+                limit 1
+                """
+            ),
+            params,
+        ).mappings().one_or_none()
+
+    if row is None:
+        raise ValueError(f"Search doc not found for {entity_type}: {entity_id}")
+    return dict(row)
+
+
+def _update_search_doc_embedding(
+    db: Session,
+    *,
+    entity_type: str,
+    search_doc_id: UUID,
+    embedding: list[float],
+    model_name: str,
+) -> None:
+    table_name = "seller_target_search_doc" if entity_type == "seller_target" else "buyer_intent_search_doc"
+    db.execute(
+        text(
+            f"""
+            update {table_name}
+            set embedding = cast(:embedding as vector),
+                embedding_model = :model_name,
+                embedding_dim = :embedding_dim,
+                updated_at = now()
+            where id = :search_doc_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {
+            "embedding": embedding_to_pgvector_literal(embedding),
+            "model_name": model_name,
+            "embedding_dim": len(embedding),
+            "search_doc_id": search_doc_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )
 
 
 def _render_prompt_messages(
@@ -1126,5 +1438,80 @@ def _insert_llm_trace(
             "total_tokens": total_tokens,
             "created_by": DEFAULT_ADMIN_USER_ID,
             "metadata_json": {"source": "business_update_extractor"},
+        },
+    )
+
+
+def _insert_embedding_trace(
+    db: Session,
+    *,
+    job: JobClaim,
+    entity_type: str,
+    entity_id: UUID,
+    node_config: dict[str, Any],
+    status: str,
+    input_json: dict[str, Any],
+    parsed_output_json: dict[str, Any] | None,
+    latency_ms: int,
+    prompt_tokens: int | None = None,
+    total_tokens: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    db.execute(
+        text(
+            """
+            insert into ai_trace (
+              team_id, workspace_id, trace_type, node_name,
+              job_id, correlation_id, entity_type, entity_id,
+              provider_config_id, node_config_id,
+              provider_name, model_name, status,
+              input_json, parsed_output_json, schema_validation_json,
+              error_code, error_message, latency_ms, prompt_tokens,
+              total_tokens, created_by, finished_at, metadata_json
+            )
+            values (
+              :team_id, :workspace_id, 'embedding', :node_name,
+              :job_id, :correlation_id, :entity_type, :entity_id,
+              :provider_config_id, :node_config_id,
+              :provider_name, :model_name, :status,
+              :input_json, :parsed_output_json, :schema_validation_json,
+              :error_code, :error_message, :latency_ms, :prompt_tokens,
+              :total_tokens, :created_by, now(), :metadata_json
+            )
+            """
+        ).bindparams(
+            bindparam("input_json", type_=JSONB),
+            bindparam("parsed_output_json", type_=JSONB),
+            bindparam("schema_validation_json", type_=JSONB),
+            bindparam("metadata_json", type_=JSONB),
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "node_name": node_config["node_name"],
+            "job_id": job.id,
+            "correlation_id": job.correlation_id,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "provider_config_id": node_config["provider_config_id"],
+            "node_config_id": node_config["node_config_id"],
+            "provider_name": node_config["provider_name"],
+            "model_name": node_config["model_name"],
+            "status": status,
+            "input_json": {
+                **input_json,
+                "text_preview": (input_json.get("text") or "")[:1000],
+                "text": None,
+            },
+            "parsed_output_json": parsed_output_json,
+            "schema_validation_json": {"valid": status in {"succeeded", "skipped"}},
+            "error_code": error_code,
+            "error_message": error_message,
+            "latency_ms": latency_ms,
+            "prompt_tokens": prompt_tokens,
+            "total_tokens": total_tokens,
+            "created_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_json": {"source": "embedding_generate"},
         },
     )
