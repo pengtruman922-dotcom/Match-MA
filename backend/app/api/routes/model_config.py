@@ -8,6 +8,9 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
+from backend.app.ai.embedding_client import EmbeddingCallError, call_openai_compatible_embedding
+from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
+from backend.app.ai.rerank_client import RerankCallError, call_dashscope_compatible_rerank
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 
@@ -19,6 +22,8 @@ NODE_TYPES = {"llm", "embedding", "ocr", "rerank", "research", "parser"}
 OUTPUT_MODES = {"text", "json", "embedding", "file", "mixed"}
 TEMPLATE_ENGINES = {"jinja", "plain", "custom"}
 PROMPT_EDITABLE_NODE_TYPES = {"llm", "parser", "research"}
+TESTABLE_NODE_TYPES = {"llm", "parser", "research", "embedding", "rerank"}
+CHAT_NODE_TYPES = {"llm", "parser", "research"}
 
 
 class ProviderCreate(BaseModel):
@@ -174,6 +179,30 @@ class PromptOut(BaseModel):
     metadata_json: dict[str, Any]
 
 
+class NodeTestCreate(BaseModel):
+    input_text: str | None = Field(default=None, max_length=4000)
+    messages: list[dict[str, str]] | None = None
+    query: str | None = Field(default=None, max_length=2000)
+    documents: list[str] | None = None
+    top_n: int | None = Field(default=None, ge=1, le=20)
+    timeout_seconds: int | None = Field(default=None, ge=1, le=300)
+
+
+class NodeTestOut(BaseModel):
+    node_id: UUID
+    node_name: str
+    node_type: str
+    provider_name: str | None
+    model_name: str
+    status: str
+    trace_id: UUID | None
+    latency_ms: int | None
+    output_json: dict[str, Any]
+    raw_output_text: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+
+
 @router.get("/capabilities")
 def get_model_config_capabilities() -> dict[str, Any]:
     return {
@@ -183,10 +212,12 @@ def get_model_config_capabilities() -> dict[str, Any]:
                 "provider_editable": True,
                 "model_editable": True,
                 "key_ref_editable": True,
+                "test_supported": node_type in TESTABLE_NODE_TYPES,
             }
             for node_type in sorted(NODE_TYPES)
         },
         "prompt_editable_node_types": sorted(PROMPT_EDITABLE_NODE_TYPES),
+        "testable_node_types": sorted(TESTABLE_NODE_TYPES),
         "provider_types": sorted(PROVIDER_TYPES),
         "auth_types": sorted(AUTH_TYPES),
         "output_modes": sorted(OUTPUT_MODES),
@@ -358,6 +389,14 @@ def get_node(node_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
     return _get_node_or_404(db, node_id)
 
 
+@router.post("/nodes/{node_id}/test", response_model=NodeTestOut)
+def test_node(node_id: UUID, payload: NodeTestCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
+    node = _get_node_or_404(db, node_id)
+    result = _run_node_test(db, node=node, payload=payload)
+    db.commit()
+    return result
+
+
 @router.patch("/nodes/{node_id}", response_model=NodeOut)
 def update_node(node_id: UUID, payload: NodeUpdate, db: Session = Depends(get_db)) -> dict[str, Any]:
     current = _get_node_or_404(db, node_id)
@@ -504,6 +543,392 @@ def _clear_default_node(db: Session, node_name: str) -> None:
 
 def _clear_default_prompt(db: Session, node_name: str) -> None:
     db.execute(text("update prompt_template set is_default = false where team_id = :team_id and workspace_id = :workspace_id and node_name = :node_name"), {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID, "node_name": node_name})
+
+
+def _run_node_test(db: Session, *, node: dict[str, Any], payload: NodeTestCreate) -> dict[str, Any]:
+    node_type = str(node["node_type"])
+    if node_type == "ocr":
+        return _skipped_node_test(node, reason="OCR node test is not implemented in v0.1.")
+    if node_type not in TESTABLE_NODE_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Node test is not supported for node_type={node_type}.",
+        )
+    if not node.get("is_active"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Inactive nodes cannot be tested.")
+    if not node.get("base_url"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Provider base_url is required.")
+
+    if node_type in CHAT_NODE_TYPES:
+        return _run_chat_node_test(db, node=node, payload=payload)
+    if node_type == "embedding":
+        return _run_embedding_node_test(db, node=node, payload=payload)
+    if node_type == "rerank":
+        return _run_rerank_node_test(db, node=node, payload=payload)
+
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported node_type={node_type}.")
+
+
+def _run_chat_node_test(
+    db: Session,
+    *,
+    node: dict[str, Any],
+    payload: NodeTestCreate,
+) -> dict[str, Any]:
+    trace_type = "llm" if node["node_type"] == "llm" else str(node["node_type"])
+    messages = payload.messages or _default_chat_test_messages(node, payload.input_text)
+    input_json = {
+        "node_id": str(node["id"]),
+        "node_name": node["node_name"],
+        "node_type": node["node_type"],
+        "messages": _redact_message_text(messages),
+    }
+    try:
+        result = call_openai_compatible_chat(
+            base_url=str(node["base_url"]),
+            api_key_secret_ref=node.get("api_key_secret_ref"),
+            model_name=str(node["model_name"]),
+            messages=messages,
+            temperature=node.get("temperature"),
+            top_p=node.get("top_p"),
+            max_tokens=int(node["max_tokens"]) if node.get("max_tokens") is not None else 64,
+            timeout_seconds=payload.timeout_seconds or int(node["timeout_seconds"]),
+            response_format=node.get("response_format"),
+        )
+    except LlmCallError as exc:
+        trace_id = _insert_node_test_trace(
+            db,
+            node=node,
+            trace_type=trace_type,
+            status_value="failed",
+            input_json=input_json,
+            prompt_messages_json=messages,
+            raw_output_text=None,
+            parsed_output_json=None,
+            latency_ms=None,
+            error_code="llm_test_failed",
+            error_message=str(exc),
+        )
+        return _node_test_response(
+            node,
+            status_value="failed",
+            trace_id=trace_id,
+            latency_ms=None,
+            output_json={},
+            error_code="llm_test_failed",
+            error_message=str(exc),
+        )
+
+    output_json = {
+        "parsed_output_json": result.parsed_output_json,
+        "raw_output_preview": result.raw_output_text[:1000],
+        "prompt_tokens": result.prompt_tokens,
+        "completion_tokens": result.completion_tokens,
+        "total_tokens": result.total_tokens,
+    }
+    trace_id = _insert_node_test_trace(
+        db,
+        node=node,
+        trace_type=trace_type,
+        status_value="succeeded",
+        input_json=input_json,
+        prompt_messages_json=messages,
+        raw_output_text=result.raw_output_text,
+        parsed_output_json=result.parsed_output_json,
+        latency_ms=result.latency_ms,
+        prompt_tokens=result.prompt_tokens,
+        completion_tokens=result.completion_tokens,
+        total_tokens=result.total_tokens,
+    )
+    return _node_test_response(
+        node,
+        status_value="succeeded",
+        trace_id=trace_id,
+        latency_ms=result.latency_ms,
+        output_json=output_json,
+        raw_output_text=result.raw_output_text,
+    )
+
+
+def _run_embedding_node_test(
+    db: Session,
+    *,
+    node: dict[str, Any],
+    payload: NodeTestCreate,
+) -> dict[str, Any]:
+    input_text = payload.input_text or "Match-MA embedding connectivity test."
+    input_json = {
+        "node_id": str(node["id"]),
+        "node_name": node["node_name"],
+        "node_type": node["node_type"],
+        "input_preview": input_text[:500],
+    }
+    try:
+        result = call_openai_compatible_embedding(
+            base_url=str(node["base_url"]),
+            api_key_secret_ref=node.get("api_key_secret_ref"),
+            model_name=str(node["model_name"]),
+            input_text=input_text,
+            dimensions=node.get("embedding_dimension"),
+            timeout_seconds=payload.timeout_seconds or int(node["timeout_seconds"]),
+        )
+    except EmbeddingCallError as exc:
+        trace_id = _insert_node_test_trace(
+            db,
+            node=node,
+            trace_type="embedding",
+            status_value="failed",
+            input_json=input_json,
+            parsed_output_json=None,
+            latency_ms=None,
+            error_code="embedding_test_failed",
+            error_message=str(exc),
+        )
+        return _node_test_response(
+            node,
+            status_value="failed",
+            trace_id=trace_id,
+            latency_ms=None,
+            output_json={},
+            error_code="embedding_test_failed",
+            error_message=str(exc),
+        )
+
+    output_json = {
+        "embedding_dimension": len(result.embedding),
+        "embedding_preview": result.embedding[:8],
+        "prompt_tokens": result.prompt_tokens,
+        "total_tokens": result.total_tokens,
+    }
+    trace_id = _insert_node_test_trace(
+        db,
+        node=node,
+        trace_type="embedding",
+        status_value="succeeded",
+        input_json=input_json,
+        parsed_output_json=output_json,
+        latency_ms=result.latency_ms,
+        prompt_tokens=result.prompt_tokens,
+        total_tokens=result.total_tokens,
+    )
+    return _node_test_response(
+        node,
+        status_value="succeeded",
+        trace_id=trace_id,
+        latency_ms=result.latency_ms,
+        output_json=output_json,
+    )
+
+
+def _run_rerank_node_test(
+    db: Session,
+    *,
+    node: dict[str, Any],
+    payload: NodeTestCreate,
+) -> dict[str, Any]:
+    query = payload.query or payload.input_text or "Which target best matches healthcare growth capital?"
+    documents = payload.documents or [
+        "Healthcare target with stable net profit and consolidation potential.",
+        "Consumer retail business with limited strategic fit.",
+    ]
+    input_json = {
+        "node_id": str(node["id"]),
+        "node_name": node["node_name"],
+        "node_type": node["node_type"],
+        "query_preview": query[:500],
+        "document_count": len(documents),
+        "document_previews": [document[:300] for document in documents[:5]],
+    }
+    try:
+        result = call_dashscope_compatible_rerank(
+            base_url=str(node["base_url"]),
+            api_key_secret_ref=node.get("api_key_secret_ref"),
+            model_name=str(node["model_name"]),
+            query=query,
+            documents=documents,
+            top_n=payload.top_n or min(len(documents), 5),
+            instruct="Connectivity test for Match-MA rerank node.",
+            timeout_seconds=payload.timeout_seconds or int(node["timeout_seconds"]),
+        )
+    except RerankCallError as exc:
+        trace_id = _insert_node_test_trace(
+            db,
+            node=node,
+            trace_type="rerank",
+            status_value="failed",
+            input_json=input_json,
+            parsed_output_json=None,
+            latency_ms=None,
+            error_code="rerank_test_failed",
+            error_message=str(exc),
+        )
+        return _node_test_response(
+            node,
+            status_value="failed",
+            trace_id=trace_id,
+            latency_ms=None,
+            output_json={},
+            error_code="rerank_test_failed",
+            error_message=str(exc),
+        )
+
+    output_json = {
+        "model": result.model_name,
+        "results": [
+            {"index": item.index, "relevance_score": item.relevance_score}
+            for item in result.results
+        ],
+        "total_tokens": result.total_tokens,
+    }
+    trace_id = _insert_node_test_trace(
+        db,
+        node=node,
+        trace_type="rerank",
+        status_value="succeeded",
+        input_json=input_json,
+        parsed_output_json=output_json,
+        latency_ms=result.latency_ms,
+        total_tokens=result.total_tokens,
+    )
+    return _node_test_response(
+        node,
+        status_value="succeeded",
+        trace_id=trace_id,
+        latency_ms=result.latency_ms,
+        output_json=output_json,
+    )
+
+
+def _insert_node_test_trace(
+    db: Session,
+    *,
+    node: dict[str, Any],
+    trace_type: str,
+    status_value: str,
+    input_json: dict[str, Any],
+    prompt_messages_json: list[dict[str, str]] | None = None,
+    raw_output_text: str | None = None,
+    parsed_output_json: dict[str, Any] | None = None,
+    latency_ms: int | None = None,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> UUID:
+    row = db.execute(
+        text(
+            """
+            insert into ai_trace (
+              team_id, workspace_id, trace_type, node_name,
+              provider_config_id, node_config_id, provider_name, model_name,
+              status, input_json, prompt_messages_json, raw_output_text,
+              parsed_output_json, schema_validation_json,
+              error_code, error_message, latency_ms, prompt_tokens,
+              completion_tokens, total_tokens, finished_at, created_by, metadata_json
+            )
+            values (
+              :team_id, :workspace_id, :trace_type, :node_name,
+              :provider_config_id, :node_config_id, :provider_name, :model_name,
+              :status_value, :input_json, :prompt_messages_json, :raw_output_text,
+              :parsed_output_json, :schema_validation_json,
+              :error_code, :error_message, :latency_ms, :prompt_tokens,
+              :completion_tokens, :total_tokens, now(), :created_by, :metadata_json
+            )
+            returning id
+            """
+        ).bindparams(
+            bindparam("input_json", type_=JSONB),
+            bindparam("prompt_messages_json", type_=JSONB),
+            bindparam("parsed_output_json", type_=JSONB),
+            bindparam("schema_validation_json", type_=JSONB),
+            bindparam("metadata_json", type_=JSONB),
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "trace_type": trace_type,
+            "node_name": node["node_name"],
+            "provider_config_id": node.get("provider_config_id"),
+            "node_config_id": node["id"],
+            "provider_name": node.get("provider_name"),
+            "model_name": node["model_name"],
+            "status_value": status_value,
+            "input_json": input_json,
+            "prompt_messages_json": prompt_messages_json or [],
+            "raw_output_text": raw_output_text,
+            "parsed_output_json": parsed_output_json,
+            "schema_validation_json": {"valid": status_value == "succeeded"},
+            "error_code": error_code,
+            "error_message": error_message,
+            "latency_ms": latency_ms,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "created_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_json": {"source": "model_config_node_test"},
+        },
+    ).mappings().one()
+    return row["id"]
+
+
+def _node_test_response(
+    node: dict[str, Any],
+    *,
+    status_value: str,
+    trace_id: UUID | None,
+    latency_ms: int | None,
+    output_json: dict[str, Any],
+    raw_output_text: str | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "node_id": node["id"],
+        "node_name": node["node_name"],
+        "node_type": node["node_type"],
+        "provider_name": node.get("provider_name"),
+        "model_name": node["model_name"],
+        "status": status_value,
+        "trace_id": trace_id,
+        "latency_ms": latency_ms,
+        "output_json": output_json,
+        "raw_output_text": raw_output_text,
+        "error_code": error_code,
+        "error_message": error_message,
+    }
+
+
+def _skipped_node_test(node: dict[str, Any], *, reason: str) -> dict[str, Any]:
+    return _node_test_response(
+        node,
+        status_value="skipped",
+        trace_id=None,
+        latency_ms=None,
+        output_json={"reason": reason},
+    )
+
+
+def _default_chat_test_messages(node: dict[str, Any], input_text: str | None) -> list[dict[str, str]]:
+    if node.get("response_format") == "json_object":
+        return [
+            {"role": "system", "content": "You are a concise API connectivity tester. Output JSON only."},
+            {"role": "user", "content": input_text or 'Return {"status":"ok"}.'},
+        ]
+    return [
+        {"role": "system", "content": "You are a concise API connectivity tester."},
+        {"role": "user", "content": input_text or "Return exactly: ok"},
+    ]
+
+
+def _redact_message_text(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [
+        {
+            "role": str(message.get("role") or ""),
+            "content_preview": str(message.get("content") or "")[:300],
+        }
+        for message in messages
+    ]
 
 
 def _get_provider_or_404(db: Session, provider_id: UUID) -> dict[str, Any]:

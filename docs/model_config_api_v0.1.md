@@ -31,10 +31,12 @@ Returns allowed provider types, auth types, output modes, template engines, and 
 - `GET /api/v1/model-config/nodes`
 - `POST /api/v1/model-config/nodes`
 - `GET /api/v1/model-config/nodes/{node_id}`
+- `POST /api/v1/model-config/nodes/{node_id}/test`
 - `PATCH /api/v1/model-config/nodes/{node_id}`
 - `DELETE /api/v1/model-config/nodes/{node_id}`
 
 Each node response includes `prompt_editable` so the frontend can decide whether to show the prompt editor.
+The capability endpoint also includes `test_supported` so the frontend can decide whether to show a "test node" action.
 
 Current important nodes:
 
@@ -43,6 +45,14 @@ Current important nodes:
 - `recommendation_reranker`: rerank node, prompt not editable, model `qwen3-rerank`.
 - `embedding_seller_doc`: embedding node, prompt not editable.
 - `embedding_buyer_intent`: embedding node, prompt not editable.
+
+`POST /nodes/{node_id}/test` runs a lightweight connectivity test and writes an `ai_trace` row with `metadata_json.source = model_config_node_test`.
+
+- LLM / parser / research nodes call the chat endpoint with the provided `messages` or `input_text`.
+- Embedding nodes call the embedding endpoint and return dimension plus a short vector preview.
+- Rerank nodes call the rerank endpoint and return sorted relevance results.
+- OCR nodes return `skipped` in v0.1 because OCR execution is not implemented yet.
+- Raw API keys are never accepted or returned; the test uses `api_key_secret_ref` to read server-side environment variables.
 
 ## Prompt endpoints
 
