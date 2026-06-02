@@ -24,6 +24,7 @@ import type {
   RecommendationReportCreate,
   RecommendationSelectedItem,
   RecommendationSelectedItemCreate,
+  RecommendationSessionDebugBundle,
   RecommendationSession,
   RecommendationSessionBundle,
   UpdateLog,
@@ -159,6 +160,8 @@ export const workbench = {
 
 export const debugApi = {
   businessUpdate: (id: string) => apiRequest<BusinessUpdateDebugBundle>(`/debug/business-updates/${id}`),
+  recommendationSession: (id: string) =>
+    apiRequest<RecommendationSessionDebugBundle>(`/debug/recommendation-sessions/${id}`),
 };
 
 export const recommendations = {

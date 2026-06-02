@@ -358,6 +358,16 @@ export interface BusinessUpdateDebugBundle {
   application_logs: UpdateLog[];
 }
 
+export interface RecommendationSessionDebugBundle {
+  session: Record<string, unknown>;
+  messages: Record<string, unknown>[];
+  selected_items: Record<string, unknown>[];
+  reports: Record<string, unknown>[];
+  relations: Record<string, unknown>[];
+  relation_events: Record<string, unknown>[];
+  debug: Record<string, unknown>;
+}
+
 export interface RecommendationCandidate {
   rank: number;
   mode: 'buyer_to_target' | 'target_to_buyer';

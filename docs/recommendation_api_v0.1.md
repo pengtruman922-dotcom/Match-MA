@@ -44,6 +44,12 @@ Selecting the same active buyer-intent / seller-target pair within the same sess
 
 Report v0 uses selected items to create a Markdown report and inserts it as an assistant message in the session history.
 
+## Debug Mode
+
+`GET /api/v1/debug/recommendation-sessions/{session_id}`
+
+Returns the session, messages, selected items, reports, relations, relation events, and debug counters. Use this endpoint in frontend Debug Mode to inspect why a recommendation session produced a given shortlist/report and how selected items were synced to buyer-seller relations.
+
 ## Next Backlog
 
 - Add LLM reranker node and prompt.

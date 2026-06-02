@@ -20,6 +20,16 @@ class BusinessUpdateDebugOut(BaseModel):
     application_logs: list[dict[str, Any]]
 
 
+class RecommendationSessionDebugOut(BaseModel):
+    session: dict[str, Any]
+    messages: list[dict[str, Any]]
+    selected_items: list[dict[str, Any]]
+    reports: list[dict[str, Any]]
+    relations: list[dict[str, Any]]
+    relation_events: list[dict[str, Any]]
+    debug: dict[str, Any]
+
+
 @router.get("/business-updates/{business_update_id}", response_model=BusinessUpdateDebugOut)
 def get_business_update_debug(
     business_update_id: UUID,
@@ -36,6 +46,37 @@ def get_business_update_debug(
         "traces": traces,
         "actions": actions,
         "application_logs": application_logs,
+    }
+
+
+@router.get("/recommendation-sessions/{session_id}", response_model=RecommendationSessionDebugOut)
+def get_recommendation_session_debug(
+    session_id: UUID,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    session = _get_recommendation_session(db, session_id)
+    messages = _recommendation_messages(db, session_id)
+    selected_items = _recommendation_selected_items(db, session_id)
+    reports = _recommendation_reports(db, session_id)
+    relations = _recommendation_relations(db, session_id)
+    relation_events = _recommendation_relation_events(db, session_id)
+    return {
+        "session": session,
+        "messages": messages,
+        "selected_items": selected_items,
+        "reports": reports,
+        "relations": relations,
+        "relation_events": relation_events,
+        "debug": {
+            "message_count": len(messages),
+            "selected_item_count": len(selected_items),
+            "active_selected_item_count": len(
+                [item for item in selected_items if item.get("canceled_at") is None]
+            ),
+            "report_count": len(reports),
+            "relation_count": len(relations),
+            "relation_event_count": len(relation_events),
+        },
     }
 
 
@@ -63,6 +104,181 @@ def _get_business_update(db: Session, business_update_id: UUID) -> dict[str, Any
     if row is None:
         raise HTTPException(status_code=404, detail="Business update not found.")
     return dict(row)
+
+
+def _get_recommendation_session(db: Session, session_id: UUID) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            """
+            select
+              id, mode, buyer_intent_id, buyer_party_id, seller_target_id,
+              status, selected_count, report_count, anonymous_input_snapshot,
+              initial_condition_snapshot_json, latest_condition_snapshot_json,
+              created_by, created_at::text as created_at, updated_at::text as updated_at,
+              archived_at::text as archived_at, metadata_json
+            from recommendation_session
+            where id = :session_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {
+            "session_id": session_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Recommendation session not found.")
+    return dict(row)
+
+
+def _recommendation_messages(db: Session, session_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              id, session_id, role, content, content_type,
+              metadata_json, created_by, created_at::text as created_at
+            from recommendation_message
+            where session_id = :session_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            order by created_at asc
+            limit 500
+            """
+        ),
+        {
+            "session_id": session_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _recommendation_selected_items(db: Session, session_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              ri.id, ri.session_id, ri.mode,
+              ri.seller_target_id, st.target_name as seller_target_name,
+              ri.buyer_intent_id, bi.intent_name as buyer_intent_name,
+              ri.buyer_party_id, bp.buyer_name,
+              ri.rank_at_selection, ri.recommendation_level, ri.match_summary,
+              ri.risk_summary, ri.gap_summary, ri.reason_snapshot,
+              ri.evidence_snapshot_json, ri.selected_by,
+              ri.selected_at::text as selected_at, ri.canceled_by,
+              ri.canceled_at::text as canceled_at, ri.metadata_json
+            from recommendation_selected_item ri
+            left join seller_target st on st.id = ri.seller_target_id
+            left join buyer_intent bi on bi.id = ri.buyer_intent_id
+            left join buyer_party bp on bp.id = ri.buyer_party_id
+            where ri.session_id = :session_id
+              and ri.team_id = :team_id
+              and ri.workspace_id = :workspace_id
+            order by ri.selected_at desc
+            limit 500
+            """
+        ),
+        {
+            "session_id": session_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _recommendation_reports(db: Session, session_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              id, session_id, report_type, selected_item_ids_json, title,
+              markdown_content, file_path, file_format, status,
+              generated_by_model, prompt_version, created_by,
+              created_at::text as created_at, metadata_json
+            from recommendation_report
+            where session_id = :session_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            order by created_at desc
+            limit 100
+            """
+        ),
+        {
+            "session_id": session_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _recommendation_relations(db: Session, session_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              id, buyer_intent_id, buyer_party_id, seller_target_id,
+              status, last_event_at::text as last_event_at,
+              last_event_summary, first_recommended_at::text as first_recommended_at,
+              created_from_session_id, created_at::text as created_at,
+              updated_at::text as updated_at, metadata_json
+            from buyer_seller_relation
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+              and (
+                created_from_session_id = :session_id
+                or metadata_json ->> 'last_recommendation_session_id' = :session_id_text
+                or exists (
+                  select 1
+                  from recommendation_selected_item ri
+                  where ri.session_id = :session_id
+                    and ri.metadata_json ->> 'relation_id' = buyer_seller_relation.id::text
+                )
+              )
+            order by updated_at desc
+            limit 100
+            """
+        ),
+        {
+            "session_id": session_id,
+            "session_id_text": str(session_id),
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _recommendation_relation_events(db: Session, session_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              id, relation_id, buyer_intent_id, buyer_party_id, seller_target_id,
+              event_type, event_time::text as event_time, title, content,
+              source_type, source_id, metadata_json, created_by,
+              created_at::text as created_at
+            from relation_event
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and metadata_json ->> 'recommendation_session_id' = :session_id_text
+            order by event_time desc
+            limit 200
+            """
+        ),
+        {
+            "session_id_text": str(session_id),
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
 
 
 def _jobs(db: Session, business_update_id: UUID) -> list[dict[str, Any]]:
