@@ -219,8 +219,12 @@ def apply_extracted_action(extracted_action_id: UUID, db: Session = Depends(get_
     action = _get_extracted_action_or_404(db, extracted_action_id)
     if action["action_type"] == "seller_fact_update":
         result = apply_seller_fact_update_action(db, action, require_accepted=True)
+    elif action["action_type"] == "buyer_intent_update":
+        result = apply_buyer_intent_update_action(db, action, require_accepted=True)
     elif action["action_type"] == "buyer_seller_relation_update":
         result = apply_buyer_seller_relation_update_action(db, action, require_accepted=True)
+    elif action["action_type"] == "buyer_intent_target_exclusion":
+        result = apply_buyer_intent_target_exclusion_action(db, action, require_accepted=True)
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -315,6 +319,102 @@ def apply_seller_fact_update_action(
     }
 
 
+def apply_buyer_intent_update_action(
+    db: Session,
+    action: dict[str, Any],
+    *,
+    require_accepted: bool = True,
+) -> dict[str, Any]:
+    if action["action_type"] != "buyer_intent_update" or action["target_entity_type"] != "buyer_intent":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only buyer_intent_update actions targeting buyer_intent are supported now.",
+        )
+    if action["target_entity_id"] is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target_entity_id is required.")
+    if action["applied_at"] is not None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Action has already been applied.")
+    if require_accepted and action["review_status"] not in {"accepted", "auto_accepted"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Action must be accepted before apply.",
+        )
+
+    changes = _allowed_buyer_intent_changes(action["proposed_changes_json"])
+    if not changes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No supported changes to apply.")
+
+    buyer_intent_id = action["target_entity_id"]
+    original = _get_buyer_intent_snapshot_or_404(db, buyer_intent_id)
+    diff = diff_payload(original, changes)
+    if not diff:
+        _mark_action_applied(db, action["id"], review_status="auto_accepted" if not require_accepted else None)
+        _refresh_business_update_status(db, action["business_update_id"])
+        return {
+            "status": "noop",
+            "extracted_action_id": action["id"],
+            "business_update_id": action["business_update_id"],
+            "entity_type": "buyer_intent",
+            "entity_id": buyer_intent_id,
+            "applied_fields": [],
+        }
+
+    set_clauses = [f"{field} = :{field}" for field in diff]
+    set_clauses.extend(["updated_at = now()", "updated_by = :updated_by"])
+
+    update_statement = text(
+        f"""
+            update buyer_intent
+            set {', '.join(set_clauses)}
+            where id = :buyer_intent_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+    )
+    json_fields = {
+        "contact_info_json",
+        "parsed_requirement_json",
+        "region_constraints_json",
+        "acceptable_control_paths_json",
+    }
+    bind_params = [bindparam(field, type_=JSONB) for field in diff if field in json_fields]
+    if bind_params:
+        update_statement = update_statement.bindparams(*bind_params)
+
+    db.execute(
+        update_statement,
+        {
+            **{field: changes[field] for field in diff},
+            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "buyer_intent_id": buyer_intent_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )
+
+    write_action_logs_for_diff(
+        db,
+        entity_type="buyer_intent",
+        entity_id=buyer_intent_id,
+        diff=diff,
+        source_type="extracted_action",
+        business_update_id=action["business_update_id"],
+        extracted_action_id=action["id"],
+    )
+    _mark_action_applied(db, action["id"], review_status="auto_accepted" if not require_accepted else None)
+    _refresh_business_update_status(db, action["business_update_id"])
+
+    return {
+        "status": "applied",
+        "extracted_action_id": action["id"],
+        "business_update_id": action["business_update_id"],
+        "entity_type": "buyer_intent",
+        "entity_id": buyer_intent_id,
+        "applied_fields": list(diff.keys()),
+    }
+
+
 def apply_buyer_seller_relation_update_action(
     db: Session,
     action: dict[str, Any],
@@ -402,6 +502,103 @@ def apply_buyer_seller_relation_update_action(
     }
 
 
+def apply_buyer_intent_target_exclusion_action(
+    db: Session,
+    action: dict[str, Any],
+    *,
+    require_accepted: bool = True,
+) -> dict[str, Any]:
+    if action["action_type"] != "buyer_intent_target_exclusion":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only buyer_intent_target_exclusion actions are supported here.",
+        )
+    if action["applied_at"] is not None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Action has already been applied.")
+    if require_accepted and action["review_status"] not in {"accepted", "auto_accepted"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Action must be accepted before apply.",
+        )
+
+    changes = action["proposed_changes_json"]
+    buyer_intent_id = _required_uuid(changes.get("buyer_intent_id") or action["target_entity_id"], "buyer_intent_id")
+    seller_target_id = _required_uuid(changes.get("seller_target_id"), "seller_target_id")
+    buyer_party_id = _optional_uuid(changes.get("buyer_party_id")) or _get_buyer_party_id_for_intent(
+        db,
+        buyer_intent_id,
+    )
+    reason = (
+        changes.get("reason")
+        or changes.get("exclusion_reason")
+        or action.get("raw_evidence_text")
+        or "Marked as excluded by extracted action."
+    )
+    relation_id = _optional_uuid(changes.get("source_relation_id"))
+
+    row = db.execute(
+        text(
+            """
+            insert into buyer_intent_target_exclusion (
+              team_id, workspace_id, buyer_intent_id, buyer_party_id, seller_target_id,
+              reason, source_relation_id, source_update_id, created_by
+            )
+            values (
+              :team_id, :workspace_id, :buyer_intent_id, :buyer_party_id, :seller_target_id,
+              :reason, :source_relation_id, :source_update_id, :created_by
+            )
+            on conflict (team_id, buyer_intent_id, seller_target_id)
+              where active = true and canceled_at is null
+            do update set
+              buyer_party_id = excluded.buyer_party_id,
+              reason = excluded.reason,
+              source_relation_id = coalesce(excluded.source_relation_id, buyer_intent_target_exclusion.source_relation_id),
+              source_update_id = excluded.source_update_id
+            returning id
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "buyer_intent_id": buyer_intent_id,
+            "buyer_party_id": buyer_party_id,
+            "seller_target_id": seller_target_id,
+            "reason": reason,
+            "source_relation_id": relation_id,
+            "source_update_id": action["business_update_id"],
+            "created_by": DEFAULT_ADMIN_USER_ID,
+        },
+    ).mappings().one()
+
+    relation_action = {
+        **action,
+        "action_type": "buyer_seller_relation_update",
+        "proposed_changes_json": {
+            "buyer_intent_id": str(buyer_intent_id),
+            "buyer_party_id": str(buyer_party_id) if buyer_party_id else None,
+            "seller_target_id": str(seller_target_id),
+            "status": "not_interested",
+            "status_reason": reason,
+            "event_type": "buyer_not_interested",
+            "event_content": reason,
+        },
+        "applied_at": None,
+        "review_status": "auto_accepted",
+    }
+    apply_buyer_seller_relation_update_action(db, relation_action, require_accepted=True)
+    _mark_action_applied(db, action["id"], review_status=None if require_accepted else "auto_accepted")
+    _refresh_business_update_status(db, action["business_update_id"])
+
+    return {
+        "status": "applied",
+        "extracted_action_id": action["id"],
+        "business_update_id": action["business_update_id"],
+        "entity_type": "buyer_intent_target_exclusion",
+        "entity_id": row["id"],
+        "applied_fields": ["buyer_intent_target_exclusion", "relation.status", "relation_event"],
+    }
+
+
 def _ensure_business_update_exists(db: Session, business_update_id: UUID) -> None:
     exists = db.execute(
         text(
@@ -461,9 +658,12 @@ def _get_seller_target_snapshot_or_404(db: Session, seller_target_id: UUID) -> d
               target_name, industry_primary, industry_secondary,
               headquarter_province, headquarter_city, listed_status,
               current_revenue_yuan, current_net_profit_yuan, valuation_yuan,
-              asking_price_yuan, pe_ratio, is_for_sale, can_control, can_consolidate,
+              current_total_profit_yuan, asking_price_yuan, pe_ratio,
+              is_for_sale, can_control, can_consolidate, accepts_minority_investment,
+              transfer_ratio_min, transfer_ratio_max, transfer_ratio_text,
+              transfer_flexibility_type,
               recommendation_status, information_status,
-              business_summary, transaction_summary, risk_summary
+              business_summary, transaction_summary, risk_summary, gap_summary
             from seller_target
             where id = :seller_target_id
               and team_id = :team_id
@@ -480,6 +680,40 @@ def _get_seller_target_snapshot_or_404(db: Session, seller_target_id: UUID) -> d
 
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Seller target not found.")
+    return dict(row)
+
+
+def _get_buyer_intent_snapshot_or_404(db: Session, buyer_intent_id: UUID) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            """
+            select
+              intent_name, status, pause_reason, contact_name, contact_info_json,
+              raw_requirement_text, intent_summary, parsed_requirement_json,
+              industry_primary, industry_secondary, region_scope_summary,
+              region_constraints_json, min_revenue_yuan, min_net_profit_yuan,
+              min_total_profit_yuan, max_pe, max_valuation_yuan, market_cap_range_summary,
+              requires_control, requires_consolidation, accepts_minority_investment,
+              desired_equity_ratio_min, desired_equity_ratio_max, equity_ratio_summary,
+              equity_requirement_type, acceptable_control_paths_json,
+              preferred_listed_status, transaction_type, negative_summary,
+              priority_summary, preference_summary, unknown_summary
+            from buyer_intent
+            where id = :buyer_intent_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ),
+        {
+            "buyer_intent_id": buyer_intent_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Buyer intent not found.")
     return dict(row)
 
 
@@ -574,17 +808,62 @@ def _allowed_seller_target_changes(changes: dict[str, Any]) -> dict[str, Any]:
         "listed_status",
         "current_revenue_yuan",
         "current_net_profit_yuan",
+        "current_total_profit_yuan",
         "valuation_yuan",
         "asking_price_yuan",
         "pe_ratio",
         "is_for_sale",
         "can_control",
         "can_consolidate",
+        "accepts_minority_investment",
+        "transfer_ratio_min",
+        "transfer_ratio_max",
+        "transfer_ratio_text",
+        "transfer_flexibility_type",
         "recommendation_status",
         "information_status",
         "business_summary",
         "transaction_summary",
         "risk_summary",
+        "gap_summary",
+    }
+    return {key: value for key, value in changes.items() if key in allowed_fields}
+
+
+def _allowed_buyer_intent_changes(changes: dict[str, Any]) -> dict[str, Any]:
+    allowed_fields = {
+        "intent_name",
+        "status",
+        "pause_reason",
+        "contact_name",
+        "contact_info_json",
+        "raw_requirement_text",
+        "intent_summary",
+        "parsed_requirement_json",
+        "industry_primary",
+        "industry_secondary",
+        "region_scope_summary",
+        "region_constraints_json",
+        "min_revenue_yuan",
+        "min_net_profit_yuan",
+        "min_total_profit_yuan",
+        "max_pe",
+        "max_valuation_yuan",
+        "market_cap_range_summary",
+        "requires_control",
+        "requires_consolidation",
+        "accepts_minority_investment",
+        "desired_equity_ratio_min",
+        "desired_equity_ratio_max",
+        "equity_ratio_summary",
+        "equity_requirement_type",
+        "acceptable_control_paths_json",
+        "preferred_listed_status",
+        "transaction_type",
+        "negative_summary",
+        "priority_summary",
+        "preference_summary",
+        "unknown_summary",
     }
     return {key: value for key, value in changes.items() if key in allowed_fields}
 

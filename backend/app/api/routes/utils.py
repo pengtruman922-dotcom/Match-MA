@@ -1,4 +1,5 @@
 from decimal import Decimal
+from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
@@ -14,6 +15,8 @@ def json_safe(value: Any) -> Any:
         return str(value)
     if isinstance(value, UUID):
         return str(value)
+    if isinstance(value, datetime | date):
+        return value.isoformat()
     return value
 
 

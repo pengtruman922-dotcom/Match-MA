@@ -12,7 +12,12 @@ from sqlalchemy.orm import Session
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
 from backend.app.ai.prompting import render_template
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
-from backend.app.api.routes.extracted_actions import apply_seller_fact_update_action
+from backend.app.api.routes.extracted_actions import (
+    apply_buyer_intent_target_exclusion_action,
+    apply_buyer_intent_update_action,
+    apply_buyer_seller_relation_update_action,
+    apply_seller_fact_update_action,
+)
 from backend.app.jobs.queue import JobClaim
 
 ALLOWED_ACTION_TYPES = {
@@ -532,7 +537,7 @@ def _build_business_update_context(db: Session, business_update: dict[str, Any])
             "target_id_policy": (
                 "Use bound object IDs only when they clearly match; otherwise null."
             ),
-            "review_policy": "All generated actions stay pending_review in this version.",
+            "review_policy": "Safe actions are auto-applied first, then remain visible for review and rollback.",
         },
     }
 
@@ -682,7 +687,7 @@ def _normalize_actions(
             action_type,
             proposed_changes,
         )
-        if action_type == "buyer_seller_relation_update":
+        if action_type in {"buyer_seller_relation_update", "buyer_intent_target_exclusion"}:
             relation_context_changes, relation_context_notes = _relation_context_changes(
                 business_update,
             )
@@ -924,10 +929,11 @@ def _auto_apply_safe_actions(db: Session, action_ids: list[UUID]) -> list[dict[s
     results: list[dict[str, Any]] = []
     for action_id in action_ids:
         action = _get_extracted_action_for_auto_apply(db, action_id)
-        if not action or not _is_safe_seller_fact_update(action):
+        if not action or not _is_safe_auto_apply_action(action):
             continue
-        result = apply_seller_fact_update_action(db, action, require_accepted=False)
-        results.append(result)
+        result = _apply_auto_action(db, action)
+        if result:
+            results.append(result)
     return results
 
 
@@ -955,16 +961,41 @@ def _get_extracted_action_for_auto_apply(db: Session, action_id: UUID) -> dict[s
     return dict(row) if row else None
 
 
-def _is_safe_seller_fact_update(action: dict[str, Any]) -> bool:
-    if action["action_type"] != "seller_fact_update":
-        return False
-    if action["target_entity_type"] != "seller_target" or action["target_entity_id"] is None:
-        return False
+def _apply_auto_action(db: Session, action: dict[str, Any]) -> dict[str, Any] | None:
+    if action["action_type"] == "seller_fact_update":
+        return apply_seller_fact_update_action(db, action, require_accepted=False)
+    if action["action_type"] == "buyer_intent_update":
+        return apply_buyer_intent_update_action(db, action, require_accepted=False)
+    if action["action_type"] == "buyer_seller_relation_update":
+        return apply_buyer_seller_relation_update_action(db, action, require_accepted=False)
+    if action["action_type"] == "buyer_intent_target_exclusion":
+        return apply_buyer_intent_target_exclusion_action(db, action, require_accepted=False)
+    return None
+
+
+def _is_safe_auto_apply_action(action: dict[str, Any]) -> bool:
     if action["applied_at"] is not None:
         return False
     if action["review_status"] != "pending_review":
         return False
-    return bool(action["proposed_changes_json"])
+    if not action["proposed_changes_json"]:
+        return False
+
+    if action["action_type"] == "seller_fact_update":
+        return action["target_entity_type"] == "seller_target" and action["target_entity_id"] is not None
+
+    if action["action_type"] == "buyer_intent_update":
+        return action["target_entity_type"] == "buyer_intent" and action["target_entity_id"] is not None
+
+    if action["action_type"] == "buyer_seller_relation_update":
+        changes = action["proposed_changes_json"]
+        return bool(changes.get("buyer_intent_id") and changes.get("seller_target_id"))
+
+    if action["action_type"] == "buyer_intent_target_exclusion":
+        changes = action["proposed_changes_json"]
+        return bool((changes.get("buyer_intent_id") or action["target_entity_id"]) and changes.get("seller_target_id"))
+
+    return False
 
 
 def _optional_uuid(value: Any) -> UUID | None:
