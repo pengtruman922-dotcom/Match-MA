@@ -169,40 +169,48 @@ POST /api/v1/update-logs/actions/{extracted_action_id}/rollback
 - 若当前字段值已经不等于原日志的 `new_value_json`，接口默认返回 `409`，避免覆盖后续人工修改；确需覆盖时请求体传 `{ "force": true }`。
 - 标的和买家意向回退后会自动创建 search_doc / embedding 重建任务，保证推荐检索数据后续同步。
 
-## 7. ??????? / ????
+## 7. Buyer Intent / Seller Target Parse
 
 ```text
 POST /api/v1/buyer-intents/{buyer_intent_id}/parse
 GET /api/v1/buyer-intents/{buyer_intent_id}/parse-status
+POST /api/v1/seller-targets/{seller_target_id}/parse
+GET /api/v1/seller-targets/{seller_target_id}/parse-status
 ```
 
-??????????????????? `buyer_intent_parser`????? `buyer_intent` ???????????/????????????
+### Buyer intent parse
 
-`POST /parse` ????
+`POST /api/v1/buyer-intents/{buyer_intent_id}/parse` parses natural-language buyer requirements into standard `buyer_intent` fields.
+
+Request example:
 
 ```json
 {
-  "raw_requirement_text": "???????????????????2000?????PE???13?????????????",
+  "raw_requirement_text": "Unlisted healthcare company in Zhejiang, net profit above CNY 20m, PE no more than 13, consolidation required, Yangtze River Delta acceptable.",
   "force": false
 }
 ```
 
-- `raw_requirement_text` ?????????? `buyer_intent.raw_requirement_text`?
-- `force=false` ?????? queued / running / retry_waiting ? `buyer_intent_parse` job???????? job?
-- ?????????? `job_type=buyer_intent_parse`?`queue_name=llm`?`entity_type=buyer_intent`?
-- Worker ?????? `ai_trace`?`action_application_log`???????? search_doc / embedding ???
+- If `raw_requirement_text` is empty, backend falls back to `buyer_intent.raw_requirement_text`.
+- If `force=false` and a queued/running/retry_waiting `buyer_intent_parse` job exists, backend returns that existing job.
+- Worker writes `ai_trace`, auto-applies fields, writes `action_application_log`, and triggers buyer intent search_doc / embedding rebuild.
+- `GET /parse-status` returns the current `buyer_intent`, latest_job, latest_trace, recent_update_logs, and debug_ref.
 
-`GET /parse-status` ???
+### Seller target parse
 
-- `buyer_intent`??????????
-- `latest_job`???????????????result_json ? Debug ???
-- `latest_trace`????? `buyer_intent_parser` Trace???????????? JSON?schema ???token ????
-- `recent_update_logs`????????????????????????AI ?????????????
-- `debug_ref`??? Debug Mode ???
+`POST /api/v1/seller-targets/{seller_target_id}/parse` parses natural-language target descriptions or attachment summaries into standard `seller_target` fields.
 
-?????
+Request example:
 
-- ??/???????????????????????AI ??????
-- ??????? `parse-status`?? `buyer_intent` ????/?????
-- Debug Mode ????? `latest_trace.raw_output_preview`?`parsed_output_json` ? `schema_validation_json`?
-- ?????????????????/????????????? rollback ???????
+```json
+{
+  "raw_target_text": "Hangzhou medical device company, unlisted, net profit about CNY 25m, valuation about CNY 320m, PE about 12.8, control stake negotiable, consolidation possible, minority investment also negotiable.",
+  "force": false
+}
+```
+
+- If `raw_target_text` is empty, backend falls back to target name, business summary, transaction summary, and risk summary.
+- If `force=false` and a queued/running/retry_waiting `seller_target_parse` job exists, backend returns that existing job.
+- Worker writes `ai_trace`, auto-applies fields, writes `action_application_log`, and triggers seller search_doc / embedding rebuild.
+- `GET /parse-status` returns the current `seller_target`, latest_job, latest_trace, recent_update_logs, and debug_ref.
+- Frontend can use `latest_trace.raw_output_preview`, `parsed_output_json`, and `schema_validation_json` for Debug Mode, and `recent_update_logs` to display AI-applied field changes and rollback entry points.

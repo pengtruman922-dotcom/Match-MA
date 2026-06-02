@@ -111,6 +111,10 @@ Current default Prompt baseline:
 
 - `business_update_extractor`: `v0.3.0`, JSON action extraction for business updates.
 - `buyer_intent_parser`: `v0.2.0`, JSON field extraction for buyer intent parsing.
+- `seller_target_parser`: `v0.1.0`, JSON field extraction for seller target parsing.
 - `recommendation_report_writer`: `v0.1.0`, Markdown report writing.
 
 `buyer_intent_parser` is an LLM node with editable prompt. It expects `raw_requirement_text` and `buyer_profile_json`, and returns a top-level `fields` object. The worker auto-applies supported fields to `buyer_intent` and records field-level logs.
+
+
+`seller_target_parser` is an LLM node with editable prompt. It expects `raw_target_text` and `target_context_json`, returns a top-level `fields` object, auto-applies supported fields to `seller_target`, records field-level logs, and triggers seller search_doc / embedding rebuild.

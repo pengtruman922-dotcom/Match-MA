@@ -1,4 +1,4 @@
-﻿# Match-MA Background Job API and Worker v0.1
+# Match-MA Background Job API and Worker v0.1
 
 日期：2026-05-28
 状态：已实现第一版 Worker + business_update 占位处理器
@@ -116,6 +116,25 @@ POST /api/v1/business-updates/{business_update_id}/process
 }
 ```
 
+
+### 3.1 Object Parse APIs
+
+Buyer intent parse:
+
+```text
+POST /api/v1/buyer-intents/{buyer_intent_id}/parse
+GET /api/v1/buyer-intents/{buyer_intent_id}/parse-status
+```
+
+Seller target parse:
+
+```text
+POST /api/v1/seller-targets/{seller_target_id}/parse
+GET /api/v1/seller-targets/{seller_target_id}/parse-status
+```
+
+Both parse APIs use the same flow: API creates a background job, Worker calls LLM, supported fields are auto-applied, action_application_log and ai_trace are written, and search_doc rebuild is triggered.
+
 ---
 
 ## 4. Worker
@@ -143,13 +162,14 @@ python -m backend.app.worker --queue llm --sleep 2
 3. 调用对应 handler。
 4. 标记为 `succeeded`。
 
-### 4.3 ??? job handlers
+### 4.3 Current job handlers
 
-?? Worker ???????????????
+Worker currently supports these business jobs:
 
 ```text
 business_update_extract_actions -> llm queue, node_name=business_update_extractor
 buyer_intent_parse -> llm queue, node_name=buyer_intent_parser
+seller_target_parse -> llm queue, node_name=seller_target_parser
 seller_search_doc_rebuild -> embedding queue fan-out
 buyer_intent_search_doc_rebuild -> embedding queue fan-out
 embedding_generate -> embedding queue, node_name=*_embedding
@@ -158,31 +178,42 @@ recommendation_report_generate -> llm queue, node_name=recommendation_report_wri
 model_node_test -> llm / embedding / rerank queue by node type
 ```
 
-`business_update_extract_actions` ????? LLM???????? `extracted_action`?????????????/???????? `action_application_log`?
+`business_update_extract_actions` calls LLM, extracts `extracted_action` rows from business updates, auto-applies safe actions, and writes `action_application_log`.
 
-`buyer_intent_parse` ????? LLM????????????? `buyer_intent` ?????
+`buyer_intent_parse` calls LLM and parses natural-language buyer requirements into `buyer_intent` fields.
 
-1. ?? `buyer_intent.raw_requirement_text` ????????
-2. ?? `buyer_intent_parser` ?? Prompt?
-3. ?? LLM????? `{"fields": {...}}` JSON?
-4. ?????????PE??????????/??/??????????????????????? JSON?
-5. ???? `buyer_intent` ?????
-6. ????????? `action_application_log`?`source_type = buyer_intent_parse`?
-7. ?? `buyer_intent_search_doc_rebuild`????? search_doc / embedding?
-8. ?? `ai_trace`?Debug Mode ?????????? JSON?????????
+1. Use request `raw_requirement_text`, or fall back to `buyer_intent.raw_requirement_text`.
+2. Use the default `buyer_intent_parser` node and prompt.
+3. Expect LLM JSON output in the shape `{"fields": {...}}`.
+4. Normalize money, PE, percentages, yes/no-like fields, listed status, and equity requirement fields.
+5. Auto-update the `buyer_intent` snapshot.
+6. Write one `action_application_log` row per field change with `source_type = buyer_intent_parse`.
+7. Create `buyer_intent_search_doc_rebuild`; embedding workers refresh search_doc / embedding.
+8. Write `ai_trace`; Debug Mode can inspect raw JSON, schema validation, tokens, latency, and errors.
 
-?? result_json ???
+`seller_target_parse` calls LLM and parses natural-language seller target descriptions into `seller_target` fields.
+
+1. Use request `raw_target_text`, or fall back to target name, business summary, transaction summary, and risk summary.
+2. Use the default `seller_target_parser` node and prompt.
+3. Expect LLM JSON output in the shape `{"fields": {...}}`.
+4. Normalize money, percentages, yes/no-like fields, listed status, and transfer flexibility.
+5. Auto-update the `seller_target` snapshot.
+6. Write one `action_application_log` row per field change with `source_type = seller_target_parse`.
+7. Create `seller_search_doc_rebuild`; embedding workers refresh search_doc / embedding.
+8. Write `ai_trace`; Debug Mode can inspect raw JSON, schema validation, tokens, latency, and errors.
+
+Example result_json:
 
 ```json
 {
   "handled": true,
-  "job_type": "buyer_intent_parse",
-  "buyer_intent_id": "uuid",
-  "applied_fields": ["intent_summary", "min_net_profit_yuan", "requires_consolidation"],
+  "job_type": "seller_target_parse",
+  "seller_target_id": "uuid",
+  "applied_fields": ["business_summary", "current_net_profit_yuan", "can_consolidate"],
   "field_count": 3,
   "trace_created": true,
   "model_name": "qwen3.6-flash",
-  "prompt_version": "v0.2.0",
+  "prompt_version": "v0.1.0",
   "schema_valid": true
 }
 ```
