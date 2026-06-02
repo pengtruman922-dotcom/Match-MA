@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
@@ -250,6 +251,54 @@ def _background_job_debug(db: Session, job_id: UUID) -> dict[str, Any]:
     }
 
 
+def _business_object_debug(db: Session, entity_type: str, entity_id: UUID) -> dict[str, Any]:
+    errors: dict[str, str] = {}
+    try:
+        entity = _business_object(db, entity_type, entity_id)
+    except SQLAlchemyError as exc:
+        entity = _minimal_business_object(db, entity_type, entity_id)
+        errors["entity_detail"] = _truncate_debug_text(str(exc), 500) or "SQL error"
+
+    jobs = _safe_debug_query(errors, "jobs", lambda: _entity_jobs(db, entity_type, entity_id), [])
+    traces = _safe_debug_query(errors, "traces", lambda: _entity_traces(db, entity_type, entity_id), [])
+    application_logs = _safe_debug_query(
+        errors,
+        "application_logs",
+        lambda: _entity_application_logs(db, entity_type, entity_id),
+        [],
+    )
+    relations = []
+    relation_events = []
+    search_doc = None
+    if entity_type in {"seller_target", "buyer_intent"}:
+        relations = _safe_debug_query(errors, "relations", lambda: _entity_relations(db, entity_type, entity_id), [])
+        relation_events = _safe_debug_query(
+            errors,
+            "relation_events",
+            lambda: _entity_relation_events(db, entity_type, entity_id),
+            [],
+        )
+        search_doc = _safe_debug_query(errors, "search_doc", lambda: _entity_search_doc(db, entity_type, entity_id), None)
+    return {
+        "entity": entity,
+        "jobs": jobs,
+        "traces": traces,
+        "application_logs": application_logs,
+        "relations": relations,
+        "relation_events": relation_events,
+        "search_doc": search_doc,
+        "debug": {
+            "job_count": len(jobs),
+            "trace_count": len(traces),
+            "update_log_count": len(application_logs),
+            "relation_count": len(relations),
+            "relation_event_count": len(relation_events),
+            "has_search_doc": search_doc is not None,
+            "optional_query_errors": errors,
+        },
+    }
+
+
 def _model_node_debug(db: Session, node_id: UUID) -> dict[str, Any]:
     node = _model_node(db, node_id)
     jobs = _model_node_jobs(db, node_id)
@@ -344,6 +393,51 @@ def _debug_summary(entity_type: str, payload: dict[str, Any]) -> dict[str, Any]:
     return {"title": entity_type}
 
 
+def _safe_debug_query(
+    errors: dict[str, str],
+    key: str,
+    query_fn: Any,
+    fallback: Any,
+) -> Any:
+    try:
+        return query_fn()
+    except SQLAlchemyError as exc:
+        errors[key] = _truncate_debug_text(str(exc), 500) or "SQL error"
+        return fallback
+
+
+MINIMAL_BUSINESS_OBJECT_SELECTS = {
+    "seller_target": """
+        select id, target_name as name, target_name as title,
+               recommendation_status, information_status,
+               updated_at::text as updated_at
+        from seller_target
+        where id = :entity_id
+          and team_id = :team_id
+          and workspace_id = :workspace_id
+          and deleted_at is null
+    """,
+    "buyer_intent": """
+        select id, intent_name as name, intent_name as title, status,
+               updated_at::text as updated_at
+        from buyer_intent
+        where id = :entity_id
+          and team_id = :team_id
+          and workspace_id = :workspace_id
+          and deleted_at is null
+    """,
+    "buyer_party": """
+        select id, buyer_name as name, buyer_name as title, status,
+               updated_at::text as updated_at
+        from buyer_party
+        where id = :entity_id
+          and team_id = :team_id
+          and workspace_id = :workspace_id
+          and deleted_at is null
+    """,
+}
+
+
 BUSINESS_OBJECT_SELECTS = {
     "seller_target": """
         select
@@ -399,6 +493,19 @@ BUSINESS_OBJECT_SELECTS = {
 
 def _business_object(db: Session, entity_type: str, entity_id: UUID) -> dict[str, Any]:
     query = BUSINESS_OBJECT_SELECTS.get(entity_type)
+    if query is None:
+        raise HTTPException(status_code=400, detail=f"Unsupported business entity_type: {entity_type}")
+    row = db.execute(
+        text(query),
+        {"entity_id": entity_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    ).mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"{entity_type} not found.")
+    return dict(row)
+
+
+def _minimal_business_object(db: Session, entity_type: str, entity_id: UUID) -> dict[str, Any]:
+    query = MINIMAL_BUSINESS_OBJECT_SELECTS.get(entity_type)
     if query is None:
         raise HTTPException(status_code=400, detail=f"Unsupported business entity_type: {entity_type}")
     row = db.execute(
