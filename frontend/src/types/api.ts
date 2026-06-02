@@ -484,3 +484,17 @@ export interface RecommendationReport {
   created_at: string;
   metadata_json: Record<string, unknown>;
 }
+
+export interface RecommendationSessionBundle {
+  session: RecommendationSession;
+  messages: RecommendationMessage[];
+  selected_items: RecommendationSelectedItem[];
+  reports: RecommendationReport[];
+  debug: {
+    selected_count: number;
+    canceled_selected_count: number;
+    message_count: number;
+    report_count: number;
+    engine_hint: string;
+  };
+}

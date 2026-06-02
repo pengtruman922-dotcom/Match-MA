@@ -25,6 +25,7 @@ import type {
   RecommendationSelectedItem,
   RecommendationSelectedItemCreate,
   RecommendationSession,
+  RecommendationSessionBundle,
   UpdateLog,
   WorkbenchData,
 } from '../../types/api';
@@ -174,6 +175,10 @@ export const recommendations = {
     offset?: number;
   }) => apiRequest<RecommendationSession[]>(`/recommendations/sessions${buildQuery(params || {})}`),
   getSession: (sessionId: string) => apiRequest<RecommendationSession>(`/recommendations/sessions/${sessionId}`),
+  bundle: (sessionId: string, params?: { include_canceled?: boolean }) =>
+    apiRequest<RecommendationSessionBundle>(
+      `/recommendations/sessions/${sessionId}/bundle${buildQuery(params || {})}`,
+    ),
   messages: (sessionId: string, params?: { limit?: number; offset?: number }) =>
     apiRequest<RecommendationMessage[]>(
       `/recommendations/sessions/${sessionId}/messages${buildQuery(params || {})}`,

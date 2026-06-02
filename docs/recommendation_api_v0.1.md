@@ -21,10 +21,11 @@ Creates an optional `recommendation_session`, stores user/tool messages, and ret
 
 - `GET /api/v1/recommendations/sessions`
 - `GET /api/v1/recommendations/sessions/{session_id}`
+- `GET /api/v1/recommendations/sessions/{session_id}/bundle`
 - `GET /api/v1/recommendations/sessions/{session_id}/messages`
 - `POST /api/v1/recommendations/sessions/{session_id}/messages`
 
-Use these for frontend session replay and recommendation chat history.
+Use these for frontend session replay and recommendation chat history. The bundle endpoint returns session, messages, selected items, reports, and debug counters in one response.
 
 ### Selected items
 

@@ -160,6 +160,14 @@ class RecommendationReportOut(BaseModel):
     metadata_json: dict[str, Any]
 
 
+class RecommendationSessionBundleOut(BaseModel):
+    session: RecommendationSessionOut
+    messages: list[RecommendationMessageOut]
+    selected_items: list[RecommendationSelectedItemOut]
+    reports: list[RecommendationReportOut]
+    debug: dict[str, Any]
+
+
 @router.post("/candidates", response_model=RecommendationCandidateResponse)
 def generate_recommendation_candidates(
     payload: RecommendationCandidateRequest,
@@ -311,6 +319,37 @@ def get_recommendation_session(session_id: UUID, db: Session = Depends(get_db)) 
     return _get_recommendation_session_or_404(db, session_id)
 
 
+@router.get("/sessions/{session_id}/bundle", response_model=RecommendationSessionBundleOut)
+def get_recommendation_session_bundle(
+    session_id: UUID,
+    db: Session = Depends(get_db),
+    include_canceled: bool = Query(default=True),
+) -> dict[str, Any]:
+    session = _get_recommendation_session_or_404(db, session_id)
+    messages = _list_recommendation_messages(db, session_id=session_id, limit=500, offset=0)
+    selected_items = _list_selected_items(
+        db,
+        session_id=session_id,
+        include_canceled=include_canceled,
+        limit=500,
+        offset=0,
+    )
+    reports = _list_recommendation_reports(db, session_id=session_id, limit=100, offset=0)
+    return {
+        "session": session,
+        "messages": messages,
+        "selected_items": selected_items,
+        "reports": reports,
+        "debug": {
+            "selected_count": len([item for item in selected_items if item.get("canceled_at") is None]),
+            "canceled_selected_count": len([item for item in selected_items if item.get("canceled_at") is not None]),
+            "message_count": len(messages),
+            "report_count": len(reports),
+            "engine_hint": "rule_sql_embedding_v0.2",
+        },
+    }
+
+
 @router.get("/sessions/{session_id}/messages", response_model=list[RecommendationMessageOut])
 def list_recommendation_messages(
     session_id: UUID,
@@ -319,27 +358,7 @@ def list_recommendation_messages(
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     _get_recommendation_session_or_404(db, session_id)
-    rows = db.execute(
-        text(
-            f"""
-            select {_message_select_columns()}
-            from recommendation_message
-            where session_id = :session_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
-            order by created_at asc
-            limit :limit offset :offset
-            """
-        ),
-        {
-            "session_id": session_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "limit": limit,
-            "offset": offset,
-        },
-    ).mappings().all()
-    return [dict(row) for row in rows]
+    return _list_recommendation_messages(db, session_id=session_id, limit=limit, offset=offset)
 
 
 @router.post(
@@ -526,28 +545,13 @@ def list_selected_items(
     include_canceled: bool = Query(default=False),
 ) -> list[dict[str, Any]]:
     _get_recommendation_session_or_404(db, session_id)
-    where = ["ri.session_id = :session_id", "ri.team_id = :team_id", "ri.workspace_id = :workspace_id"]
-    if not include_canceled:
-        where.append("ri.canceled_at is null")
-    rows = db.execute(
-        text(
-            f"""
-            select {_selected_item_select_columns()}
-            from recommendation_selected_item ri
-            left join seller_target st on st.id = ri.seller_target_id
-            left join buyer_intent bi on bi.id = ri.buyer_intent_id
-            left join buyer_party bp on bp.id = ri.buyer_party_id
-            where {' and '.join(where)}
-            order by ri.selected_at desc
-            """
-        ),
-        {
-            "session_id": session_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
-    ).mappings().all()
-    return [dict(row) for row in rows]
+    return _list_selected_items(
+        db,
+        session_id=session_id,
+        include_canceled=include_canceled,
+        limit=500,
+        offset=0,
+    )
 
 
 @router.post(
@@ -639,6 +643,81 @@ def list_recommendation_reports(
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     _get_recommendation_session_or_404(db, session_id)
+    return _list_recommendation_reports(db, session_id=session_id, limit=limit, offset=offset)
+
+
+def _list_recommendation_messages(
+    db: Session,
+    *,
+    session_id: UUID,
+    limit: int,
+    offset: int,
+) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            f"""
+            select {_message_select_columns()}
+            from recommendation_message
+            where session_id = :session_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            order by created_at asc
+            limit :limit offset :offset
+            """
+        ),
+        {
+            "session_id": session_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "limit": limit,
+            "offset": offset,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _list_selected_items(
+    db: Session,
+    *,
+    session_id: UUID,
+    include_canceled: bool,
+    limit: int,
+    offset: int,
+) -> list[dict[str, Any]]:
+    where = ["ri.session_id = :session_id", "ri.team_id = :team_id", "ri.workspace_id = :workspace_id"]
+    if not include_canceled:
+        where.append("ri.canceled_at is null")
+    rows = db.execute(
+        text(
+            f"""
+            select {_selected_item_select_columns()}
+            from recommendation_selected_item ri
+            left join seller_target st on st.id = ri.seller_target_id
+            left join buyer_intent bi on bi.id = ri.buyer_intent_id
+            left join buyer_party bp on bp.id = ri.buyer_party_id
+            where {' and '.join(where)}
+            order by ri.selected_at desc
+            limit :limit offset :offset
+            """
+        ),
+        {
+            "session_id": session_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "limit": limit,
+            "offset": offset,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _list_recommendation_reports(
+    db: Session,
+    *,
+    session_id: UUID,
+    limit: int,
+    offset: int,
+) -> list[dict[str, Any]]:
     rows = db.execute(
         text(
             f"""
