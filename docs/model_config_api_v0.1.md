@@ -104,3 +104,13 @@ Creating or updating a prompt for `embedding`, `rerank`, or `ocr` nodes is rejec
 ## Security note
 
 The frontend must never collect or display raw provider keys in this version. Users should configure real keys in Railway variables and use `api_key_secret_ref` such as `ALIYUN_API_KEY` in this API.
+
+## Default prompt versions
+
+Current default Prompt baseline:
+
+- `business_update_extractor`: `v0.3.0`, JSON action extraction for business updates.
+- `buyer_intent_parser`: `v0.2.0`, JSON field extraction for buyer intent parsing.
+- `recommendation_report_writer`: `v0.1.0`, Markdown report writing.
+
+`buyer_intent_parser` is an LLM node with editable prompt. It expects `raw_requirement_text` and `buyer_profile_json`, and returns a top-level `fields` object. The worker auto-applies supported fields to `buyer_intent` and records field-level logs.

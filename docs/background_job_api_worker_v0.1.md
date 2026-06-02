@@ -143,41 +143,48 @@ python -m backend.app.worker --queue llm --sleep 2
 3. 调用对应 handler。
 4. 标记为 `succeeded`。
 
-### 4.3 business_update_extract_actions 占位处理器
+### 4.3 ??? job handlers
 
-当前已实现第一个业务 handler：
+?? Worker ???????????????
 
 ```text
-business_update_extract_actions
+business_update_extract_actions -> llm queue, node_name=business_update_extractor
+buyer_intent_parse -> llm queue, node_name=buyer_intent_parser
+seller_search_doc_rebuild -> embedding queue fan-out
+buyer_intent_search_doc_rebuild -> embedding queue fan-out
+embedding_generate -> embedding queue, node_name=*_embedding
+recommendation_rerank -> rerank queue, node_name=recommendation_reranker
+recommendation_report_generate -> llm queue, node_name=recommendation_report_writer
+model_node_test -> llm / embedding / rerank queue by node type
 ```
 
-它暂不调用真实 LLM，行为是：
+`business_update_extract_actions` ????? LLM???????? `extracted_action`?????????????/???????? `action_application_log`?
 
-1. 读取 `business_update` 原始输入和绑定对象。
-2. 写入一条 `ai_trace`，`node_name = business_update_extractor`，`trace_type = parser`。
-3. `parsed_output_json.actions = []`，明确标记 `extraction_status = placeholder`。
-4. 将 `business_update.processing_status` 更新为 `parsed`。
-5. 不创建 `extracted_action`，避免在真实抽取上线前产生误导性动作。
+`buyer_intent_parse` ????? LLM????????????? `buyer_intent` ?????
 
-当前 result_json 类似：
+1. ?? `buyer_intent.raw_requirement_text` ????????
+2. ?? `buyer_intent_parser` ?? Prompt?
+3. ?? LLM????? `{"fields": {...}}` JSON?
+4. ?????????PE??????????/??/??????????????????????? JSON?
+5. ???? `buyer_intent` ?????
+6. ????????? `action_application_log`?`source_type = buyer_intent_parse`?
+7. ?? `buyer_intent_search_doc_rebuild`????? search_doc / embedding?
+8. ?? `ai_trace`?Debug Mode ?????????? JSON?????????
+
+?? result_json ???
 
 ```json
 {
   "handled": true,
-  "job_type": "business_update_extract_actions",
-  "business_update_id": "uuid",
-  "actions_created": 0,
+  "job_type": "buyer_intent_parse",
+  "buyer_intent_id": "uuid",
+  "applied_fields": ["intent_summary", "min_net_profit_yuan", "requires_consolidation"],
+  "field_count": 3,
   "trace_created": true,
-  "message": "Placeholder handler completed; real LLM extraction is not implemented yet."
+  "model_name": "qwen3.6-flash",
+  "prompt_version": "v0.2.0",
+  "schema_valid": true
 }
-```
-
-后续会把不同 job_type 路由到真实 handler，例如：
-
-```text
-business_update_extract_actions -> real LLM extractor
-buyer_intent_parse -> LLM parser
-embedding_generate -> embedding service
 ```
 
 ---
@@ -197,5 +204,6 @@ python -m backend.app.worker --queue llm --sleep 2
 ```text
 python -m backend.app.worker --queue llm
 python -m backend.app.worker --queue embedding
+python -m backend.app.worker --queue rerank
 python -m backend.app.worker --queue ocr
 ```

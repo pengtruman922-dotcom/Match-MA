@@ -289,6 +289,8 @@ NESTED_FIELD_ALIASES = {
 def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
     if job.job_type == "business_update_extract_actions":
         return _handle_business_update_extract_actions(db, job)
+    if job.job_type == "buyer_intent_parse":
+        return _handle_buyer_intent_parse(db, job)
     if job.job_type == "seller_search_doc_rebuild":
         return _handle_seller_search_doc_rebuild(db, job)
     if job.job_type == "buyer_intent_search_doc_rebuild":
@@ -306,6 +308,104 @@ def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
         "handled": False,
         "job_type": job.job_type,
         "message": "No real job handler is implemented for this job type yet.",
+    }
+
+
+def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
+    buyer_intent_id = _resolve_entity_id(job, expected_entity_type="buyer_intent")
+    if buyer_intent_id is None:
+        raise ValueError("buyer_intent_parse job requires a buyer_intent entity_id.")
+
+    buyer_intent = _get_buyer_intent_for_parse(db, buyer_intent_id)
+    buyer_profile_json = _build_buyer_profile_context(db, buyer_intent)
+    raw_requirement_text = str(job.payload_json.get("raw_requirement_text") or buyer_intent.get("raw_requirement_text") or "")
+    if not raw_requirement_text.strip():
+        raise ValueError("buyer_intent_parse job requires raw_requirement_text.")
+
+    node_config = _get_default_node_config(db, "buyer_intent_parser")
+    prompt_messages = _render_prompt_messages(
+        node_config,
+        {
+            "raw_requirement_text": raw_requirement_text,
+            "buyer_profile_json": buyer_profile_json,
+        },
+    )
+    input_json = {
+        "buyer_intent_id": str(buyer_intent_id),
+        "raw_requirement_text": raw_requirement_text,
+        "buyer_profile_json": buyer_profile_json,
+    }
+
+    started = time.perf_counter()
+    try:
+        llm_result = call_openai_compatible_chat(
+            base_url=node_config["base_url"],
+            api_key_secret_ref=node_config["api_key_secret_ref"],
+            model_name=node_config["model_name"],
+            messages=prompt_messages,
+            temperature=node_config["temperature"],
+            top_p=node_config["top_p"],
+            max_tokens=node_config["max_tokens"],
+            timeout_seconds=node_config["timeout_seconds"] or 90,
+            response_format=node_config["response_format"],
+        )
+    except LlmCallError as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        _insert_buyer_intent_parse_trace(
+            db,
+            job=job,
+            buyer_intent_id=buyer_intent_id,
+            node_config=node_config,
+            status="failed",
+            input_json=input_json,
+            prompt_messages_json=prompt_messages,
+            raw_output_text=None,
+            parsed_output_json=None,
+            schema_validation_json={"valid": False, "error": str(exc)},
+            latency_ms=latency_ms,
+            error_code="llm_call_failed",
+            error_message=str(exc),
+        )
+        raise
+
+    parsed_output_json = llm_result.parsed_output_json
+    schema_validation_json = _validate_buyer_intent_parse_output(parsed_output_json)
+    changes, normalization_notes = _normalize_buyer_intent_parse_changes(parsed_output_json, raw_requirement_text)
+    applied_fields: list[str] = []
+    if schema_validation_json["valid"] and changes:
+        applied_fields = _apply_buyer_intent_parse_changes(db, buyer_intent, changes, job.id, normalization_notes)
+
+    _insert_buyer_intent_parse_trace(
+        db,
+        job=job,
+        buyer_intent_id=buyer_intent_id,
+        node_config=node_config,
+        status="succeeded" if schema_validation_json["valid"] else "failed",
+        input_json=input_json,
+        prompt_messages_json=prompt_messages,
+        raw_output_text=llm_result.raw_output_text,
+        parsed_output_json=parsed_output_json,
+        schema_validation_json=schema_validation_json,
+        latency_ms=llm_result.latency_ms,
+        prompt_tokens=llm_result.prompt_tokens,
+        completion_tokens=llm_result.completion_tokens,
+        total_tokens=llm_result.total_tokens,
+        error_code=None if schema_validation_json["valid"] else "schema_validation_failed",
+        error_message=schema_validation_json.get("error"),
+    )
+    if not schema_validation_json["valid"]:
+        raise ValueError(schema_validation_json.get("error") or "Buyer intent parser output is invalid.")
+
+    return {
+        "handled": True,
+        "job_type": job.job_type,
+        "buyer_intent_id": str(buyer_intent_id),
+        "applied_fields": applied_fields,
+        "field_count": len(applied_fields),
+        "trace_created": True,
+        "model_name": node_config["model_name"],
+        "prompt_version": node_config["prompt_version"],
+        "schema_valid": schema_validation_json["valid"],
     }
 
 
@@ -1172,6 +1272,54 @@ def _get_business_update(db: Session, business_update_id: UUID) -> dict[str, Any
     return dict(row)
 
 
+def _get_buyer_intent_for_parse(db: Session, buyer_intent_id: UUID) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            """
+            select
+              id, buyer_party_id, intent_name, status, pause_reason, contact_name,
+              contact_info_json, raw_requirement_text, intent_summary, parsed_requirement_json,
+              industry_primary, industry_secondary, region_scope_summary,
+              region_constraints_json, min_revenue_yuan, min_net_profit_yuan,
+              min_total_profit_yuan, max_pe, max_valuation_yuan, market_cap_range_summary,
+              requires_control, requires_consolidation, accepts_minority_investment,
+              desired_equity_ratio_min, desired_equity_ratio_max, equity_ratio_summary,
+              equity_requirement_type, acceptable_control_paths_json,
+              preferred_listed_status, transaction_type, negative_summary,
+              priority_summary, preference_summary, unknown_summary
+            from buyer_intent
+            where id = :buyer_intent_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ),
+        {
+            "buyer_intent_id": buyer_intent_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        raise ValueError(f"Buyer intent not found: {buyer_intent_id}")
+    return _json_safe_dict(row)
+
+
+def _build_buyer_profile_context(db: Session, buyer_intent: dict[str, Any]) -> dict[str, Any]:
+    buyer_party = None
+    if buyer_intent.get("buyer_party_id"):
+        buyer_party = _get_buyer_party(db, UUID(str(buyer_intent["buyer_party_id"])))
+    return {
+        "buyer_party": buyer_party,
+        "current_intent": buyer_intent,
+        "instructions": {
+            "apply_policy": "Parser output is automatically applied to the bound buyer_intent and remains reviewable in update logs.",
+            "money_unit": "Use CNY yuan numbers.",
+            "percentage_unit": "Use numeric percentage values, e.g. 51 means 51 percent.",
+        },
+    }
+
+
 def _get_recommendation_report_for_job(db: Session, report_id: UUID) -> dict[str, Any]:
     row = db.execute(
         text(
@@ -1902,6 +2050,274 @@ def _validate_extractor_output(parsed_output_json: dict[str, Any] | None) -> dic
     }
 
 
+BUYER_INTENT_PARSE_FIELDS = {
+    "intent_name",
+    "raw_requirement_text",
+    "intent_summary",
+    "parsed_requirement_json",
+    "industry_primary",
+    "industry_secondary",
+    "region_scope_summary",
+    "region_constraints_json",
+    "min_revenue_yuan",
+    "min_net_profit_yuan",
+    "min_total_profit_yuan",
+    "max_pe",
+    "max_valuation_yuan",
+    "market_cap_range_summary",
+    "requires_control",
+    "requires_consolidation",
+    "accepts_minority_investment",
+    "desired_equity_ratio_min",
+    "desired_equity_ratio_max",
+    "equity_ratio_summary",
+    "equity_requirement_type",
+    "acceptable_control_paths_json",
+    "preferred_listed_status",
+    "transaction_type",
+    "negative_summary",
+    "priority_summary",
+    "preference_summary",
+    "unknown_summary",
+}
+
+BUYER_INTENT_PARSE_JSON_FIELDS = {
+    "parsed_requirement_json",
+    "region_constraints_json",
+    "acceptable_control_paths_json",
+}
+
+BUYER_INTENT_PARSE_NUMERIC_FIELDS = {
+    "min_revenue_yuan",
+    "min_net_profit_yuan",
+    "min_total_profit_yuan",
+    "max_pe",
+    "max_valuation_yuan",
+    "desired_equity_ratio_min",
+    "desired_equity_ratio_max",
+}
+
+YES_NO_LIKE_FIELDS = {
+    "requires_control",
+    "requires_consolidation",
+    "accepts_minority_investment",
+}
+
+BUYER_INTENT_TEXT_LIMITS = {
+    "intent_name": 300,
+}
+
+
+
+def _validate_buyer_intent_parse_output(parsed_output_json: dict[str, Any] | None) -> dict[str, Any]:
+    if parsed_output_json is None:
+        return {"valid": False, "error": "LLM output is not a JSON object."}
+    if "fields" in parsed_output_json and not isinstance(parsed_output_json["fields"], dict):
+        return {"valid": False, "error": "Buyer intent parser output field 'fields' must be an object."}
+    candidate = parsed_output_json.get("fields", parsed_output_json)
+    if not isinstance(candidate, dict):
+        return {"valid": False, "error": "Buyer intent parser output must be an object."}
+    allowed_count = len([key for key in candidate if key in BUYER_INTENT_PARSE_FIELDS])
+    return {
+        "valid": allowed_count > 0,
+        "field_count": allowed_count,
+        "error": None if allowed_count > 0 else "Buyer intent parser output has no supported fields.",
+    }
+
+
+def _normalize_buyer_intent_parse_changes(
+    parsed_output_json: dict[str, Any] | None,
+    raw_requirement_text: str,
+) -> tuple[dict[str, Any], list[str]]:
+    if not parsed_output_json:
+        return {}, []
+    candidate = parsed_output_json.get("fields", parsed_output_json)
+    if not isinstance(candidate, dict):
+        return {}, []
+
+    notes: list[str] = []
+    changes: dict[str, Any] = {}
+    for key, value in candidate.items():
+        if key not in BUYER_INTENT_PARSE_FIELDS:
+            notes.append(f"ignored_unsupported_field:{key}")
+            continue
+        if key in BUYER_INTENT_PARSE_NUMERIC_FIELDS:
+            changes[key] = _optional_decimal(value)
+            continue
+        if key in YES_NO_LIKE_FIELDS:
+            changes[key] = _normalize_yes_no_like(value)
+            continue
+        if key == "preferred_listed_status":
+            changes[key] = _normalize_listed_status(value)
+            continue
+        if key == "equity_requirement_type":
+            changes[key] = _normalize_equity_requirement_type(value)
+            continue
+        if key in BUYER_INTENT_PARSE_JSON_FIELDS:
+            changes[key] = value if isinstance(value, (list, dict)) else []
+            continue
+        text_value = str(value).strip() if value is not None else None
+        if text_value and key in BUYER_INTENT_TEXT_LIMITS:
+            text_value = text_value[: BUYER_INTENT_TEXT_LIMITS[key]]
+        changes[key] = text_value
+
+    changes.setdefault("raw_requirement_text", raw_requirement_text)
+    if "parsed_requirement_json" not in changes:
+        changes["parsed_requirement_json"] = {
+            "source": "buyer_intent_parser",
+            "raw_requirement_text": raw_requirement_text,
+            "llm_fields": parsed_output_json,
+        }
+    return {key: value for key, value in changes.items() if value is not None}, notes
+
+
+def _apply_buyer_intent_parse_changes(
+    db: Session,
+    buyer_intent: dict[str, Any],
+    changes: dict[str, Any],
+    job_id: UUID,
+    normalization_notes: list[str],
+) -> list[str]:
+    diff = _diff_json_safe(buyer_intent, changes)
+    if not diff:
+        return []
+
+    set_clauses = [f"{field} = :{field}" for field in diff]
+    set_clauses.extend(["updated_at = now()", "updated_by = :updated_by"])
+    statement = text(
+        f"""
+        update buyer_intent
+        set {', '.join(set_clauses)}
+        where id = :buyer_intent_id
+          and team_id = :team_id
+          and workspace_id = :workspace_id
+          and deleted_at is null
+        """
+    )
+    bind_params = [bindparam(field, type_=JSONB) for field in diff if field in BUYER_INTENT_PARSE_JSON_FIELDS]
+    if bind_params:
+        statement = statement.bindparams(*bind_params)
+    db.execute(
+        statement,
+        {
+            **{field: changes[field] for field in diff},
+            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "buyer_intent_id": buyer_intent["id"],
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )
+    _write_buyer_intent_parse_logs(db, buyer_intent, changes, diff, job_id, normalization_notes)
+    create_search_doc_rebuild_job(
+        db,
+        entity_type="buyer_intent",
+        entity_id=UUID(str(buyer_intent["id"])),
+        source="buyer_intent_parse",
+    )
+    return list(diff.keys())
+
+
+def _write_buyer_intent_parse_logs(
+    db: Session,
+    buyer_intent: dict[str, Any],
+    changes: dict[str, Any],
+    diff: dict[str, tuple[Any, Any]],
+    job_id: UUID,
+    normalization_notes: list[str],
+) -> None:
+    for field_path, (old_value, new_value) in diff.items():
+        db.execute(
+            text(
+                """
+                insert into action_application_log (
+                  team_id, workspace_id, entity_type, entity_id, field_path,
+                  old_value_json, new_value_json, source_type, source_id,
+                  applied_by, edited_before_apply, metadata_json
+                )
+                values (
+                  :team_id, :workspace_id, 'buyer_intent', :buyer_intent_id, :field_path,
+                  :old_value_json, :new_value_json, 'buyer_intent_parse', :job_id,
+                  :applied_by, false, :metadata_json
+                )
+                """
+            ).bindparams(
+                bindparam("old_value_json", type_=JSONB),
+                bindparam("new_value_json", type_=JSONB),
+                bindparam("metadata_json", type_=JSONB),
+            ),
+            {
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+                "buyer_intent_id": buyer_intent["id"],
+                "field_path": field_path,
+                "old_value_json": _json_safe_value(old_value),
+                "new_value_json": _json_safe_value(new_value),
+                "job_id": job_id,
+                "applied_by": DEFAULT_ADMIN_USER_ID,
+                "metadata_json": {
+                    "source": "buyer_intent_parser",
+                    "normalization_notes": normalization_notes,
+                    "proposed_value": _json_safe_value(changes.get(field_path)),
+                },
+            },
+        )
+
+
+def _diff_json_safe(original: dict[str, Any], changes: dict[str, Any]) -> dict[str, tuple[Any, Any]]:
+    diff: dict[str, tuple[Any, Any]] = {}
+    for key, new_value in changes.items():
+        old_value = original.get(key)
+        if _json_safe_value(old_value) != _json_safe_value(new_value):
+            diff[key] = (old_value, new_value)
+    return diff
+
+
+def _normalize_yes_no_like(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"yes", "true", "1", "是", "需要", "要求", "必须", "likely"}:
+        return "likely" if normalized == "likely" else "yes"
+    if normalized in {"no", "false", "0", "否", "不需要", "不要求"}:
+        return "no"
+    return "unknown"
+
+
+def _normalize_listed_status(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"listed", "上市", "已上市"}:
+        return "listed"
+    if normalized in {"unlisted", "非上市", "未上市"}:
+        return "unlisted"
+    if normalized in {"pre_ipo", "pre-ipo", "拟上市"}:
+        return "pre_ipo"
+    if normalized in {"any", "不限", "均可"}:
+        return "any"
+    return "unknown"
+
+
+def _normalize_equity_requirement_type(value: Any) -> str | None:
+    normalized = str(value or "").strip().lower()
+    allowed = {
+        "control_required",
+        "consolidation_required",
+        "minority_acceptable",
+        "minority_only",
+        "flexible",
+        "specific_range",
+        "unknown",
+    }
+    if normalized in allowed:
+        return normalized
+    if "并表" in normalized:
+        return "consolidation_required"
+    if "控股" in normalized or "控制" in normalized:
+        return "control_required"
+    if "参股" in normalized or "少数" in normalized:
+        return "minority_acceptable"
+    if "灵活" in normalized or "可谈" in normalized:
+        return "flexible"
+    return None
+
+
 def _normalize_actions(
     parsed_output_json: dict[str, Any] | None,
     business_update: dict[str, Any],
@@ -2366,6 +2782,90 @@ def _insert_llm_trace(
             "total_tokens": total_tokens,
             "created_by": DEFAULT_ADMIN_USER_ID,
             "metadata_json": {"source": "business_update_extractor"},
+        },
+    )
+
+
+def _insert_buyer_intent_parse_trace(
+    db: Session,
+    *,
+    job: JobClaim,
+    buyer_intent_id: UUID,
+    node_config: dict[str, Any],
+    status: str,
+    input_json: dict[str, Any],
+    prompt_messages_json: list[dict[str, str]],
+    raw_output_text: str | None,
+    parsed_output_json: dict[str, Any] | None,
+    schema_validation_json: dict[str, Any],
+    latency_ms: int,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    db.execute(
+        text(
+            """
+            insert into ai_trace (
+              team_id, workspace_id, trace_type, node_name,
+              job_id, correlation_id, entity_type, entity_id,
+              provider_config_id, node_config_id, prompt_template_id,
+              provider_name, model_name, prompt_version, status,
+              input_json, prompt_messages_json, raw_output_text,
+              parsed_output_json, output_schema_json, schema_validation_json,
+              error_code, error_message, latency_ms, prompt_tokens,
+              completion_tokens, total_tokens, created_by, finished_at,
+              metadata_json
+            )
+            values (
+              :team_id, :workspace_id, 'llm', 'buyer_intent_parser',
+              :job_id, :correlation_id, 'buyer_intent', :buyer_intent_id,
+              :provider_config_id, :node_config_id, :prompt_template_id,
+              :provider_name, :model_name, :prompt_version, :status,
+              :input_json, :prompt_messages_json, :raw_output_text,
+              :parsed_output_json, :output_schema_json, :schema_validation_json,
+              :error_code, :error_message, :latency_ms, :prompt_tokens,
+              :completion_tokens, :total_tokens, :created_by, now(),
+              :metadata_json
+            )
+            """
+        ).bindparams(
+            bindparam("input_json", type_=JSONB),
+            bindparam("prompt_messages_json", type_=JSONB),
+            bindparam("parsed_output_json", type_=JSONB),
+            bindparam("output_schema_json", type_=JSONB),
+            bindparam("schema_validation_json", type_=JSONB),
+            bindparam("metadata_json", type_=JSONB),
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "job_id": job.id,
+            "correlation_id": job.correlation_id,
+            "buyer_intent_id": buyer_intent_id,
+            "provider_config_id": node_config["provider_config_id"],
+            "node_config_id": node_config["node_config_id"],
+            "prompt_template_id": node_config["prompt_template_id"],
+            "provider_name": node_config["provider_name"],
+            "model_name": node_config["model_name"],
+            "prompt_version": node_config["prompt_version"],
+            "status": status,
+            "input_json": input_json,
+            "prompt_messages_json": prompt_messages_json,
+            "raw_output_text": raw_output_text,
+            "parsed_output_json": parsed_output_json,
+            "output_schema_json": node_config["output_schema_json"] or {},
+            "schema_validation_json": schema_validation_json,
+            "error_code": error_code,
+            "error_message": error_message,
+            "latency_ms": latency_ms,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "created_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_json": {"source": "buyer_intent_parser"},
         },
     )
 
