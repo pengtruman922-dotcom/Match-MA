@@ -165,16 +165,17 @@ def generate_recommendation_candidates(
         )
         db.commit()
 
+    embedding_used = _candidates_have_embedding(candidates)
     return {
         "session_id": session_id,
         "mode": payload.mode,
         "candidates": candidates,
         "debug": {
-            "engine": "rule_sql_v0.1",
+            "engine": "rule_sql_embedding_v0.2" if embedding_used else "rule_sql_v0.1",
             "llm_rerank": False,
-            "embedding_similarity": False,
+            "embedding_similarity": embedding_used,
             "notes": [
-                "本版先做结构化规则候选召回；embedding 生成和向量召回已由 search_doc/embedding job 链路预留。",
+                "本版使用结构化规则召回；当双方 search_doc 都已有 embedding 时，叠加向量相似度加权排序。",
             ],
         },
     }
@@ -408,6 +409,11 @@ def _candidate_targets_for_intent(
               st.risk_summary,
               st.gap_summary,
               st.business_summary,
+              case
+                when std.embedding is not null and bid.embedding is not null
+                then 1 - (std.embedding <=> bid.embedding)
+                else null
+              end as embedding_similarity,
               exists(
                 select 1
                 from buyer_intent_target_exclusion x
@@ -417,6 +423,11 @@ def _candidate_targets_for_intent(
                   and x.canceled_at is null
               ) as is_excluded
             from seller_target st
+            left join seller_target_search_doc std
+              on std.seller_target_id = st.id
+             and std.doc_type = 'profile'
+            left join buyer_intent_search_doc bid
+              on bid.buyer_intent_id = :buyer_intent_id
             where st.team_id = :team_id
               and st.workspace_id = :workspace_id
               and st.deleted_at is null
@@ -442,7 +453,9 @@ def _candidate_targets_for_intent(
         item = dict(row)
         if item.pop("is_excluded"):
             continue
-        score, evidence, gaps = _score_target_against_intent(item, intent)
+        rule_score, evidence, gaps = _score_target_against_intent(item, intent)
+        embedding_similarity = _optional_float(item.get("embedding_similarity"))
+        score, embedding_boost = _apply_embedding_score(rule_score, evidence, embedding_similarity)
         if score < 10:
             continue
         candidates.append(
@@ -460,7 +473,16 @@ def _candidate_targets_for_intent(
                 "match_summary": _summary_text(evidence, fallback="具备初步匹配基础"),
                 "gap_summary": _summary_text(gaps) if gaps else None,
                 "risk_summary": item.get("risk_summary") or item.get("gap_summary"),
-                "evidence_json": {"matches": evidence, "gaps": gaps},
+                "evidence_json": {
+                    "matches": evidence,
+                    "gaps": gaps,
+                    "score": {
+                        "rule_score": rule_score,
+                        "embedding_similarity": embedding_similarity,
+                        "embedding_boost": embedding_boost,
+                        "final_score": score,
+                    },
+                },
             }
         )
 
@@ -495,6 +517,11 @@ def _candidate_intents_for_target(
               bi.preferred_listed_status,
               bi.negative_summary,
               bi.preference_summary,
+              case
+                when bid.embedding is not null and std.embedding is not null
+                then 1 - (bid.embedding <=> std.embedding)
+                else null
+              end as embedding_similarity,
               exists(
                 select 1
                 from buyer_intent_target_exclusion x
@@ -505,6 +532,11 @@ def _candidate_intents_for_target(
               ) as is_excluded
             from buyer_intent bi
             left join buyer_party bp on bp.id = bi.buyer_party_id
+            left join buyer_intent_search_doc bid
+              on bid.buyer_intent_id = bi.id
+            left join seller_target_search_doc std
+              on std.seller_target_id = :seller_target_id
+             and std.doc_type = 'profile'
             where bi.team_id = :team_id
               and bi.workspace_id = :workspace_id
               and bi.deleted_at is null
@@ -529,7 +561,9 @@ def _candidate_intents_for_target(
         item = dict(row)
         if item.pop("is_excluded"):
             continue
-        score, evidence, gaps = _score_target_against_intent(target, item)
+        rule_score, evidence, gaps = _score_target_against_intent(target, item)
+        embedding_similarity = _optional_float(item.get("embedding_similarity"))
+        score, embedding_boost = _apply_embedding_score(rule_score, evidence, embedding_similarity)
         if score < 10:
             continue
         candidates.append(
@@ -547,7 +581,16 @@ def _candidate_intents_for_target(
                 "match_summary": _summary_text(evidence, fallback="具备初步匹配基础"),
                 "gap_summary": _summary_text(gaps) if gaps else None,
                 "risk_summary": target.get("risk_summary") or target.get("gap_summary"),
-                "evidence_json": {"matches": evidence, "gaps": gaps},
+                "evidence_json": {
+                    "matches": evidence,
+                    "gaps": gaps,
+                    "score": {
+                        "rule_score": rule_score,
+                        "embedding_similarity": embedding_similarity,
+                        "embedding_boost": embedding_boost,
+                        "final_score": score,
+                    },
+                },
             }
         )
 
@@ -919,8 +962,39 @@ def _summary_text(items: list[str], *, fallback: str | None = None) -> str | Non
     return fallback
 
 
+def _apply_embedding_score(
+    rule_score: float,
+    evidence: list[str],
+    embedding_similarity: float | None,
+) -> tuple[float, float | None]:
+    if embedding_similarity is None:
+        return min(rule_score, 100.0), None
+
+    normalized_similarity = max(0.0, min(float(embedding_similarity), 1.0))
+    boost = round(normalized_similarity * 10, 2)
+    evidence.append(f"语义相似度：{normalized_similarity:.2f}")
+    return min(rule_score + boost, 100.0), boost
+
+
+def _candidates_have_embedding(candidates: list[dict[str, Any]]) -> bool:
+    for candidate in candidates:
+        score_json = candidate.get("evidence_json", {}).get("score", {})
+        if score_json.get("embedding_similarity") is not None:
+            return True
+    return False
+
+
 def _yes_like(value: Any) -> bool:
     return str(value or "").lower() in {"yes", "likely", "true", "1"}
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _optional_decimal(value: Any) -> Decimal | None:

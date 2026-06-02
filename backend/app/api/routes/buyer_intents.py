@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.api.routes.utils import diff_payload, write_action_log, write_action_logs_for_diff
 from backend.app.db import get_db
+from backend.app.services.search_docs import create_search_doc_rebuild_job
 
 router = APIRouter(prefix="/buyer-intents", tags=["buyer-intents"])
 
@@ -126,6 +127,12 @@ def create_buyer_intent(payload: BuyerIntentCreate, db: Session = Depends(get_db
         ),
         _buyer_intent_params(payload),
     ).mappings().one()
+    create_search_doc_rebuild_job(
+        db,
+        entity_type="buyer_intent",
+        entity_id=row["id"],
+        source="buyer_intent_create",
+    )
     db.commit()
     return dict(row)
 
@@ -235,6 +242,12 @@ def update_buyer_intent(
         entity_type="buyer_intent",
         entity_id=buyer_intent_id,
         diff=diff,
+    )
+    create_search_doc_rebuild_job(
+        db,
+        entity_type="buyer_intent",
+        entity_id=buyer_intent_id,
+        source="buyer_intent_update",
     )
 
     db.commit()

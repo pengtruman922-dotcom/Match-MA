@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.api.routes.utils import diff_payload, write_action_log, write_action_logs_for_diff
 from backend.app.db import get_db
+from backend.app.services.search_docs import create_search_doc_rebuild_job
 
 router = APIRouter(prefix="/seller-targets", tags=["seller-targets"])
 
@@ -119,6 +120,12 @@ def create_seller_target(payload: SellerTargetCreate, db: Session = Depends(get_
         ),
         _seller_target_params(payload),
     ).mappings().one()
+    create_search_doc_rebuild_job(
+        db,
+        entity_type="seller_target",
+        entity_id=row["id"],
+        source="seller_target_create",
+    )
     db.commit()
     return dict(row)
 
@@ -224,6 +231,12 @@ def update_seller_target(
         entity_type="seller_target",
         entity_id=seller_target_id,
         diff=diff,
+    )
+    create_search_doc_rebuild_job(
+        db,
+        entity_type="seller_target",
+        entity_id=seller_target_id,
+        source="seller_target_update",
     )
 
     db.commit()

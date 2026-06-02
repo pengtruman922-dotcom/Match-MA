@@ -49,6 +49,13 @@ class SearchDocJobOut(BaseModel):
     entity_id: UUID
 
 
+class SearchDocBulkJobOut(BaseModel):
+    entity_type: str
+    requested_count: int
+    job_count: int
+    jobs: list[SearchDocJobOut]
+
+
 @router.get("/search-docs/seller-targets/{seller_target_id}", response_model=SearchDocOut)
 def get_seller_target_search_doc(seller_target_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
     row = db.execute(
@@ -155,6 +162,99 @@ def rebuild_buyer_intent_search_doc_now(
         "source_version": result["source_version"],
         "full_text_length": len(result["full_text"] or ""),
         "embedding_job_id": embedding_job_id,
+    }
+
+
+@router.post("/search-docs/jobs/seller-targets/rebuild", response_model=SearchDocBulkJobOut)
+def create_seller_target_search_doc_jobs(
+    db: Session = Depends(get_db),
+    limit: int = Query(default=200, ge=1, le=1000),
+    include_embedded: bool = Query(default=False),
+) -> dict[str, Any]:
+    rows = db.execute(
+        text(
+            f"""
+            select st.id
+            from seller_target st
+            left join seller_target_search_doc sd
+              on sd.seller_target_id = st.id
+             and sd.doc_type = 'profile'
+            where st.team_id = :team_id
+              and st.workspace_id = :workspace_id
+              and st.deleted_at is null
+              and st.recommendation_status = 'recommendable'
+              {'and (sd.id is null or sd.embedding is null)' if not include_embedded else ''}
+            order by st.updated_at desc
+            limit :limit
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "limit": limit,
+        },
+    ).mappings().all()
+    jobs = [
+        create_search_doc_rebuild_job(
+            db,
+            entity_type="seller_target",
+            entity_id=row["id"],
+            source="bulk_seller_target_search_doc_rebuild",
+        )
+        for row in rows
+    ]
+    db.commit()
+    return {
+        "entity_type": "seller_target",
+        "requested_count": len(rows),
+        "job_count": len(jobs),
+        "jobs": jobs,
+    }
+
+
+@router.post("/search-docs/jobs/buyer-intents/rebuild", response_model=SearchDocBulkJobOut)
+def create_buyer_intent_search_doc_jobs(
+    db: Session = Depends(get_db),
+    limit: int = Query(default=200, ge=1, le=1000),
+    include_embedded: bool = Query(default=False),
+) -> dict[str, Any]:
+    rows = db.execute(
+        text(
+            f"""
+            select bi.id
+            from buyer_intent bi
+            left join buyer_intent_search_doc bd
+              on bd.buyer_intent_id = bi.id
+            where bi.team_id = :team_id
+              and bi.workspace_id = :workspace_id
+              and bi.deleted_at is null
+              and bi.status = 'active'
+              {'and (bd.id is null or bd.embedding is null)' if not include_embedded else ''}
+            order by bi.updated_at desc
+            limit :limit
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "limit": limit,
+        },
+    ).mappings().all()
+    jobs = [
+        create_search_doc_rebuild_job(
+            db,
+            entity_type="buyer_intent",
+            entity_id=row["id"],
+            source="bulk_buyer_intent_search_doc_rebuild",
+        )
+        for row in rows
+    ]
+    db.commit()
+    return {
+        "entity_type": "buyer_intent",
+        "requested_count": len(rows),
+        "job_count": len(jobs),
+        "jobs": jobs,
     }
 
 
