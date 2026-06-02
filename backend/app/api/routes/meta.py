@@ -121,6 +121,20 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
         select count(*)
         from model_node_config
         where model_name = 'qwen3.6-flash'
+          and node_type = 'llm'
+          and is_default = true
+          and is_active = true
+        """,
+        enabled=table_checks["model_node_config"],
+    )
+    default_rerank_nodes = _count_by_query(
+        db,
+        """
+        select count(*)
+        from model_node_config
+        where node_name = 'recommendation_reranker'
+          and node_type = 'rerank'
+          and model_name = 'qwen3-rerank'
           and is_default = true
           and is_active = true
         """,
@@ -173,7 +187,8 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
     checks = {
         "tables": table_checks,
         "default_provider": default_provider,
-        "default_llm_nodes": default_llm_nodes >= 4,
+        "default_llm_nodes": default_llm_nodes >= 3,
+        "default_rerank_nodes": default_rerank_nodes >= 1,
         "default_embedding_nodes": default_embedding_nodes >= 2,
         "default_prompts": default_prompts >= 2,
         "real_business_update_prompt": real_business_update_prompt,
@@ -184,7 +199,8 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
     ok = (
         all(table_checks.values())
         and default_provider
-        and default_llm_nodes >= 4
+        and default_llm_nodes >= 3
+        and default_rerank_nodes >= 1
         and default_embedding_nodes >= 2
         and default_prompts >= 2
         and real_business_update_prompt
@@ -201,6 +217,7 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
             "active_nodes": node_counts,
             "active_prompts": prompt_counts,
             "default_llm_nodes": default_llm_nodes,
+            "default_rerank_nodes": default_rerank_nodes,
             "default_embedding_nodes": default_embedding_nodes,
             "default_prompts": default_prompts,
         },
