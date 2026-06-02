@@ -47,6 +47,9 @@ class RecommendationCandidateOut(BaseModel):
     gap_summary: str | None
     risk_summary: str | None
     evidence_json: dict[str, Any]
+    selected: bool = False
+    selected_item_id: UUID | None = None
+    selected_at: str | None = None
 
 
 class RecommendationCandidateResponse(BaseModel):
@@ -171,6 +174,11 @@ class RecommendationReportJobOut(BaseModel):
 class RecommendationSessionBundleOut(BaseModel):
     session: RecommendationSessionOut
     messages: list[RecommendationMessageOut]
+    initial_candidates: list[RecommendationCandidateOut] = Field(default_factory=list)
+    reranked_candidates: list[RecommendationCandidateOut] = Field(default_factory=list)
+    latest_candidates: list[RecommendationCandidateOut] = Field(default_factory=list)
+    candidate_source: str = "none"
+    rerank_status: dict[str, Any] = Field(default_factory=dict)
     selected_items: list[RecommendationSelectedItemOut]
     reports: list[RecommendationReportOut]
     debug: dict[str, Any]
@@ -215,10 +223,12 @@ def generate_recommendation_candidates(
             role="tool",
             content_type="json",
             content={
+                "message_type": "initial_candidates",
                 "mode": payload.mode,
                 "candidate_count": len(candidates),
                 "candidates": candidates,
             },
+            metadata_json={"message_type": "initial_candidates"},
         )
         if payload.enable_rerank and len(candidates) > 1:
             rerank_job_id = _enqueue_recommendation_rerank_job(
@@ -357,9 +367,33 @@ def get_recommendation_session_bundle(
         offset=0,
     )
     reports = _list_recommendation_reports(db, session_id=session_id, limit=100, offset=0)
+    candidate_sets = _extract_recommendation_candidate_sets(messages)
+    initial_candidates = _enrich_candidates_with_selection(
+        candidate_sets["initial_candidates"],
+        selected_items,
+    )
+    reranked_candidates = _enrich_candidates_with_selection(
+        candidate_sets["reranked_candidates"],
+        selected_items,
+    )
+    latest_candidates = reranked_candidates or initial_candidates
+    candidate_source = "reranked_candidates" if reranked_candidates else (
+        "initial_candidates" if initial_candidates else "none"
+    )
+    rerank_job = _get_latest_recommendation_rerank_job(db, session_id=session_id)
+    rerank_status = _build_recommendation_rerank_status(
+        rerank_job=rerank_job,
+        reranked_candidates=reranked_candidates,
+        candidate_sets=candidate_sets,
+    )
     return {
         "session": session,
         "messages": messages,
+        "initial_candidates": initial_candidates,
+        "reranked_candidates": reranked_candidates,
+        "latest_candidates": latest_candidates,
+        "candidate_source": candidate_source,
+        "rerank_status": rerank_status,
         "selected_items": selected_items,
         "reports": reports,
         "debug": {
@@ -367,7 +401,11 @@ def get_recommendation_session_bundle(
             "canceled_selected_count": len([item for item in selected_items if item.get("canceled_at") is not None]),
             "message_count": len(messages),
             "report_count": len(reports),
-            "engine_hint": "rule_sql_embedding_v0.2",
+            "initial_candidate_count": len(initial_candidates),
+            "reranked_candidate_count": len(reranked_candidates),
+            "latest_candidate_count": len(latest_candidates),
+            "candidate_source": candidate_source,
+            "engine_hint": "rule_sql_embedding_rerank_v0.3",
         },
     }
 
@@ -845,6 +883,176 @@ def _list_recommendation_reports(
         },
     ).mappings().all()
     return [dict(row) for row in rows]
+
+
+def _extract_recommendation_candidate_sets(
+    messages: list[dict[str, Any]],
+) -> dict[str, Any]:
+    initial_candidates: list[dict[str, Any]] = []
+    reranked_candidates: list[dict[str, Any]] = []
+    initial_message_id: str | None = None
+    reranked_message_id: str | None = None
+    reranked_at: str | None = None
+
+    for message in messages:
+        if message.get("content_type") != "json":
+            continue
+
+        content = _json_loads(message.get("content") or "{}")
+        metadata = message.get("metadata_json") if isinstance(message.get("metadata_json"), dict) else {}
+        message_type = str(
+            metadata.get("message_type")
+            or content.get("message_type")
+            or _infer_recommendation_candidate_message_type(content)
+            or ""
+        )
+        candidates = content.get("candidates")
+        if not isinstance(candidates, list):
+            continue
+
+        if message_type == "reranked_candidates":
+            reranked_candidates = _normalize_candidates(candidates)
+            reranked_message_id = str(message["id"])
+            reranked_at = message.get("created_at")
+        elif message_type == "initial_candidates":
+            initial_candidates = _normalize_candidates(candidates)
+            initial_message_id = str(message["id"])
+
+    return {
+        "initial_candidates": initial_candidates,
+        "reranked_candidates": reranked_candidates,
+        "initial_message_id": initial_message_id,
+        "reranked_message_id": reranked_message_id,
+        "reranked_at": reranked_at,
+    }
+
+
+def _infer_recommendation_candidate_message_type(content: dict[str, Any]) -> str | None:
+    candidates = content.get("candidates")
+    if not isinstance(candidates, list):
+        return None
+    if not candidates:
+        return "initial_candidates"
+
+    has_rerank_score = any(
+        isinstance(candidate, dict)
+        and isinstance(candidate.get("evidence_json"), dict)
+        and isinstance(candidate["evidence_json"].get("score"), dict)
+        and candidate["evidence_json"]["score"].get("rerank_score") is not None
+        for candidate in candidates
+    )
+    return "reranked_candidates" if has_rerank_score else "initial_candidates"
+
+
+def _normalize_candidates(candidates: list[Any]) -> list[dict[str, Any]]:
+    normalized_candidates: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            normalized_candidates.append(dict(candidate))
+    return normalized_candidates
+
+
+def _enrich_candidates_with_selection(
+    candidates: list[dict[str, Any]],
+    selected_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    selected_by_pair = {
+        _candidate_pair_key(selected_item): selected_item
+        for selected_item in selected_items
+        if selected_item.get("canceled_at") is None
+    }
+    enriched: list[dict[str, Any]] = []
+    for candidate in candidates:
+        item = dict(candidate)
+        selected_item = selected_by_pair.get(_candidate_pair_key(item))
+        if selected_item is not None:
+            item["selected"] = True
+            item["selected_item_id"] = selected_item.get("id")
+            item["selected_at"] = selected_item.get("selected_at")
+        else:
+            item["selected"] = False
+            item["selected_item_id"] = None
+            item["selected_at"] = None
+        enriched.append(item)
+    return enriched
+
+
+def _candidate_pair_key(item: dict[str, Any]) -> tuple[str | None, str | None]:
+    seller_target_id = item.get("seller_target_id")
+    buyer_intent_id = item.get("buyer_intent_id")
+    return (
+        str(seller_target_id) if seller_target_id else None,
+        str(buyer_intent_id) if buyer_intent_id else None,
+    )
+
+
+def _get_latest_recommendation_rerank_job(
+    db: Session,
+    *,
+    session_id: UUID,
+) -> dict[str, Any] | None:
+    row = db.execute(
+        text(
+            """
+            select
+              id, status, queue_name, error_code, error_message,
+              attempt_count, max_attempts, run_after::text as run_after,
+              started_at::text as started_at, finished_at::text as finished_at,
+              created_at::text as created_at, updated_at::text as updated_at,
+              result_json, metadata_json
+            from background_job
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and job_type = 'recommendation_rerank'
+              and entity_type = 'recommendation_session'
+              and entity_id = :session_id
+            order by created_at desc
+            limit 1
+            """
+        ),
+        {
+            "session_id": session_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    return dict(row) if row is not None else None
+
+
+def _build_recommendation_rerank_status(
+    *,
+    rerank_job: dict[str, Any] | None,
+    reranked_candidates: list[dict[str, Any]],
+    candidate_sets: dict[str, Any],
+) -> dict[str, Any]:
+    if rerank_job is None:
+        return {
+            "requested": False,
+            "status": "not_requested",
+            "job_id": None,
+            "queue_name": None,
+            "candidate_count": 0,
+            "reranked_at": None,
+            "error_code": None,
+            "error_message": None,
+        }
+
+    return {
+        "requested": True,
+        "status": rerank_job.get("status"),
+        "job_id": str(rerank_job["id"]),
+        "queue_name": rerank_job.get("queue_name"),
+        "candidate_count": len(reranked_candidates),
+        "message_id": candidate_sets.get("reranked_message_id"),
+        "reranked_at": candidate_sets.get("reranked_at") or rerank_job.get("finished_at"),
+        "created_at": rerank_job.get("created_at"),
+        "started_at": rerank_job.get("started_at"),
+        "finished_at": rerank_job.get("finished_at"),
+        "attempt_count": rerank_job.get("attempt_count"),
+        "max_attempts": rerank_job.get("max_attempts"),
+        "error_code": rerank_job.get("error_code"),
+        "error_message": rerank_job.get("error_message"),
+    }
 
 
 @router.get("/reports/{report_id}", response_model=RecommendationReportOut)
@@ -2126,5 +2334,8 @@ def _json_dumps(value: dict[str, Any]) -> str:
 def _json_loads(value: str) -> dict[str, Any]:
     import json
 
-    parsed = json.loads(value)
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return {}
     return parsed if isinstance(parsed, dict) else {}

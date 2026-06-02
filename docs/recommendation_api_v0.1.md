@@ -25,7 +25,19 @@ Creates an optional `recommendation_session`, stores user/tool messages, and ret
 - `GET /api/v1/recommendations/sessions/{session_id}/messages`
 - `POST /api/v1/recommendations/sessions/{session_id}/messages`
 
-Use these for frontend session replay and recommendation chat history. The bundle endpoint returns session, messages, selected items, reports, and debug counters in one response.
+Use these for frontend session replay and recommendation chat history.
+
+The bundle endpoint returns:
+
+- `initial_candidates`: the first rule/embedding candidate list written by candidate generation.
+- `reranked_candidates`: the latest async rerank candidate list written by `match-ma-worker-rerank`.
+- `latest_candidates`: frontend-ready candidate list; uses `reranked_candidates` when available, otherwise falls back to `initial_candidates`.
+- `candidate_source`: `reranked_candidates`, `initial_candidates`, or `none`.
+- `rerank_status`: job status, job id, queue name, timestamps, candidate count, and rerank error details.
+- `selected_items` plus candidate-level `selected`, `selected_item_id`, and `selected_at`.
+- `messages`, `reports`, and debug counters.
+
+Frontend recommendation cards should render `latest_candidates` and poll this bundle until `rerank_status.status` is `succeeded`, `failed`, or `cancelled`.
 
 ### Selected items
 
@@ -38,7 +50,7 @@ Selecting the same active buyer-intent / seller-target pair within the same sess
 
 ### Rerank
 
-`POST /api/v1/recommendations/candidates` supports `enable_rerank` with default `true`. The API returns the rule plus embedding ranking immediately and, when a session is created, enqueues `recommendation_rerank` on the `rerank` queue. `match-ma-worker-rerank` consumes this queue and calls `recommendation_reranker` with model `qwen3-rerank`. The reranked result is appended to `recommendation_message` as a `reranked_candidates` tool message and recorded in `ai_trace`.
+`POST /api/v1/recommendations/candidates` supports `enable_rerank` with default `true`. The API returns the rule plus embedding ranking immediately and, when a session is created, enqueues `recommendation_rerank` on the `rerank` queue. `match-ma-worker-rerank` consumes this queue and calls `recommendation_reranker` with model `qwen3-rerank`. The initial result is appended to `recommendation_message` as an `initial_candidates` tool message. The reranked result is appended as a `reranked_candidates` tool message and recorded in `ai_trace`.
 
 Rerank nodes have no prompt template. Future admin settings should edit provider URL, key reference, model name, timeout, active/default flags, and metadata, but should not show prompt editing for `node_type = rerank`.
 
