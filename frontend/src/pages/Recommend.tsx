@@ -37,6 +37,7 @@ interface RecommendationItem {
   evidence: Record<string, unknown>;
   inShortlist: boolean;
   persisted: boolean;
+  selectedItemId: string | null;
 }
 
 interface ChatMessage {
@@ -102,7 +103,7 @@ export default function Recommend() {
 
     if (!item.inShortlist && item.sessionId && !item.persisted) {
       try {
-        await recommendations.selectItem(item.sessionId, {
+        const selectedItem = await recommendations.selectItem(item.sessionId, {
           mode: item.mode,
           seller_target_id: item.sellerTargetId,
           buyer_intent_id: item.buyerIntentId,
@@ -117,7 +118,9 @@ export default function Recommend() {
         });
         setItems((prev) =>
           prev.map((candidate) =>
-            candidate.id === id ? { ...candidate, inShortlist: true, persisted: true } : candidate
+            candidate.id === id
+              ? { ...candidate, inShortlist: true, persisted: true, selectedItemId: selectedItem.id }
+              : candidate
           )
         );
         return;
@@ -126,8 +129,23 @@ export default function Recommend() {
       }
     }
 
+    if (item.inShortlist && item.persisted && item.selectedItemId) {
+      try {
+        await recommendations.cancelSelectedItem(item.selectedItemId);
+      } catch (err) {
+        setGenerationError(err instanceof Error ? err.message : '?????????');
+        return;
+      }
+    }
+
     setItems((prev) =>
-      prev.map((candidate) => (candidate.id === id ? { ...candidate, inShortlist: !candidate.inShortlist } : candidate))
+      prev.map((candidate) => {
+        if (candidate.id !== id) return candidate;
+        if (item.inShortlist && item.persisted) {
+          return { ...candidate, inShortlist: false, persisted: false, selectedItemId: null };
+        }
+        return { ...candidate, inShortlist: !candidate.inShortlist };
+      })
     );
   }
 
@@ -595,6 +613,7 @@ function mapCandidate(candidate: RecommendationCandidate, sessionId: string | nu
     evidence: candidate.evidence_json,
     inShortlist: false,
     persisted: false,
+    selectedItemId: null,
   };
 }
 

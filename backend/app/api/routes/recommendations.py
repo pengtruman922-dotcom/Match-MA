@@ -321,9 +321,31 @@ def create_selected_item(
             "metadata_json": payload.metadata_json,
         },
     ).mappings().one()
+    selected_item = dict(row)
+    relation_id = _sync_selected_item_to_relation(db, selected_item)
+    if relation_id:
+        metadata_patch = {"relation_id": str(relation_id)}
+        db.execute(
+            text(
+                """
+                update recommendation_selected_item
+                set metadata_json = metadata_json || :metadata_patch
+                where id = :selected_item_id
+                  and team_id = :team_id
+                  and workspace_id = :workspace_id
+                """
+            ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+            {
+                "selected_item_id": selected_item["id"],
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+                "metadata_patch": metadata_patch,
+            },
+        )
+        selected_item["metadata_json"] = {**selected_item["metadata_json"], **metadata_patch}
     _refresh_session_selected_count(db, session_id)
     db.commit()
-    return dict(row)
+    return selected_item
 
 
 @router.get("/sessions/{session_id}/selected-items", response_model=list[RecommendationSelectedItemOut])
@@ -380,6 +402,7 @@ def cancel_selected_item(selected_item_id: UUID, db: Session = Depends(get_db)) 
             "canceled_by": DEFAULT_ADMIN_USER_ID,
         },
     ).mappings().one()
+    _insert_selected_item_cancel_event(db, dict(row))
     _refresh_session_selected_count(db, row["session_id"])
     db.commit()
     return dict(row)
@@ -872,6 +895,261 @@ def _get_selected_item_or_404(db: Session, selected_item_id: UUID) -> dict[str, 
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Selected item not found.")
     return dict(row)
+
+
+def _sync_selected_item_to_relation(db: Session, selected_item: dict[str, Any]) -> UUID | None:
+    buyer_intent_id = selected_item.get("buyer_intent_id")
+    seller_target_id = selected_item.get("seller_target_id")
+    if not buyer_intent_id or not seller_target_id:
+        return None
+
+    buyer_party_id = selected_item.get("buyer_party_id") or _get_buyer_party_id_for_intent(db, buyer_intent_id)
+    relation = _get_or_create_recommendation_relation(
+        db,
+        buyer_intent_id=buyer_intent_id,
+        seller_target_id=seller_target_id,
+        buyer_party_id=buyer_party_id,
+        session_id=selected_item["session_id"],
+    )
+    content = _summary_text(
+        [
+            selected_item.get("match_summary") or "",
+            selected_item.get("gap_summary") or "",
+            selected_item.get("risk_summary") or "",
+        ]
+    )
+    _insert_recommendation_relation_event(
+        db,
+        relation_id=relation["id"],
+        buyer_intent_id=buyer_intent_id,
+        buyer_party_id=buyer_party_id,
+        seller_target_id=seller_target_id,
+        event_type="recommended",
+        title="加入推荐列表",
+        content=content or "用户将该候选加入推荐列表。",
+        source_id=selected_item["id"],
+        metadata_json={
+            "recommendation_session_id": str(selected_item["session_id"]),
+            "rank_at_selection": selected_item.get("rank_at_selection"),
+            "recommendation_level": selected_item.get("recommendation_level"),
+            "evidence_snapshot_json": selected_item.get("evidence_snapshot_json") or {},
+        },
+    )
+    db.execute(
+        text(
+            """
+            update buyer_seller_relation
+            set first_recommended_at = coalesce(first_recommended_at, now()),
+                last_event_at = now(),
+                last_event_summary = :last_event_summary,
+                updated_at = now(),
+                updated_by = :updated_by,
+                metadata_json = metadata_json || :metadata_patch
+            where id = :relation_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+        {
+            "relation_id": relation["id"],
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "last_event_summary": content or "加入推荐列表",
+            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_patch": {"last_recommendation_selected_item_id": str(selected_item["id"])},
+        },
+    )
+    return relation["id"]
+
+
+def _insert_selected_item_cancel_event(db: Session, selected_item: dict[str, Any]) -> None:
+    relation_id = _optional_uuid_from_mapping(selected_item.get("metadata_json"), "relation_id")
+    buyer_intent_id = selected_item.get("buyer_intent_id")
+    seller_target_id = selected_item.get("seller_target_id")
+    if relation_id is None and buyer_intent_id and seller_target_id:
+        relation = _get_existing_recommendation_relation(db, buyer_intent_id, seller_target_id)
+        relation_id = relation["id"] if relation else None
+    if relation_id is None or not buyer_intent_id or not seller_target_id:
+        return
+
+    buyer_party_id = selected_item.get("buyer_party_id") or _get_buyer_party_id_for_intent(db, buyer_intent_id)
+    _insert_recommendation_relation_event(
+        db,
+        relation_id=relation_id,
+        buyer_intent_id=buyer_intent_id,
+        buyer_party_id=buyer_party_id,
+        seller_target_id=seller_target_id,
+        event_type="internal_note",
+        title="取消推荐列表项",
+        content="用户从推荐列表中取消了该候选。",
+        source_id=selected_item["id"],
+        metadata_json={"recommendation_session_id": str(selected_item["session_id"])},
+    )
+    db.execute(
+        text(
+            """
+            update buyer_seller_relation
+            set last_event_at = now(),
+                last_event_summary = '取消推荐列表项',
+                updated_at = now(),
+                updated_by = :updated_by
+            where id = :relation_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {
+            "relation_id": relation_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "updated_by": DEFAULT_ADMIN_USER_ID,
+        },
+    )
+
+
+def _get_or_create_recommendation_relation(
+    db: Session,
+    *,
+    buyer_intent_id: UUID,
+    seller_target_id: UUID,
+    buyer_party_id: UUID | None,
+    session_id: UUID,
+) -> dict[str, Any]:
+    existing = _get_existing_recommendation_relation(db, buyer_intent_id, seller_target_id)
+    if existing:
+        return existing
+
+    row = db.execute(
+        text(
+            """
+            insert into buyer_seller_relation (
+              team_id, workspace_id, buyer_intent_id, buyer_party_id,
+              seller_target_id, status, first_recommended_at,
+              created_from_session_id, created_by, updated_by, metadata_json
+            )
+            values (
+              :team_id, :workspace_id, :buyer_intent_id, :buyer_party_id,
+              :seller_target_id, 'recommended', now(),
+              :session_id, :created_by, :updated_by, :metadata_json
+            )
+            returning id, status
+            """
+        ).bindparams(bindparam("metadata_json", type_=JSONB)),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "buyer_intent_id": buyer_intent_id,
+            "buyer_party_id": buyer_party_id,
+            "seller_target_id": seller_target_id,
+            "session_id": session_id,
+            "created_by": DEFAULT_ADMIN_USER_ID,
+            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_json": {"source": "recommendation_selected_item"},
+        },
+    ).mappings().one()
+    return dict(row)
+
+
+def _get_existing_recommendation_relation(
+    db: Session,
+    buyer_intent_id: UUID,
+    seller_target_id: UUID,
+) -> dict[str, Any] | None:
+    row = db.execute(
+        text(
+            """
+            select id, status
+            from buyer_seller_relation
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and buyer_intent_id = :buyer_intent_id
+              and seller_target_id = :seller_target_id
+              and deleted_at is null
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "buyer_intent_id": buyer_intent_id,
+            "seller_target_id": seller_target_id,
+        },
+    ).mappings().one_or_none()
+    return dict(row) if row else None
+
+
+def _insert_recommendation_relation_event(
+    db: Session,
+    *,
+    relation_id: UUID,
+    buyer_intent_id: UUID,
+    buyer_party_id: UUID | None,
+    seller_target_id: UUID,
+    event_type: str,
+    title: str,
+    content: str,
+    source_id: UUID,
+    metadata_json: dict[str, Any],
+) -> None:
+    db.execute(
+        text(
+            """
+            insert into relation_event (
+              team_id, workspace_id, relation_id, buyer_intent_id, buyer_party_id,
+              seller_target_id, event_type, event_time, title, content,
+              source_type, source_id, metadata_json, created_by
+            )
+            values (
+              :team_id, :workspace_id, :relation_id, :buyer_intent_id, :buyer_party_id,
+              :seller_target_id, :event_type, now(), :title, :content,
+              'recommendation_selected_item', :source_id, :metadata_json, :created_by
+            )
+            """
+        ).bindparams(bindparam("metadata_json", type_=JSONB)),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "relation_id": relation_id,
+            "buyer_intent_id": buyer_intent_id,
+            "buyer_party_id": buyer_party_id,
+            "seller_target_id": seller_target_id,
+            "event_type": event_type,
+            "title": title,
+            "content": content,
+            "source_id": source_id,
+            "metadata_json": metadata_json,
+            "created_by": DEFAULT_ADMIN_USER_ID,
+        },
+    )
+
+
+def _get_buyer_party_id_for_intent(db: Session, buyer_intent_id: UUID) -> UUID | None:
+    row = db.execute(
+        text(
+            """
+            select buyer_party_id
+            from buyer_intent
+            where id = :buyer_intent_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ),
+        {
+            "buyer_intent_id": buyer_intent_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    return row["buyer_party_id"] if row else None
+
+
+def _optional_uuid_from_mapping(value: Any, key: str) -> UUID | None:
+    if not isinstance(value, dict) or not value.get(key):
+        return None
+    try:
+        return UUID(str(value[key]))
+    except (TypeError, ValueError):
+        return None
 
 
 def _refresh_session_selected_count(db: Session, session_id: UUID) -> None:

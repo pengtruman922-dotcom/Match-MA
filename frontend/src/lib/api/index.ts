@@ -18,6 +18,7 @@ import type {
   RelationEvent,
   RecommendationCandidateRequest,
   RecommendationCandidateResponse,
+  RecommendationSelectedItem,
   RecommendationSelectedItemCreate,
   UpdateLog,
   WorkbenchData,
@@ -161,8 +162,12 @@ export const recommendations = {
       body: JSON.stringify(data),
     }),
   selectItem: (sessionId: string, data: RecommendationSelectedItemCreate) =>
-    apiRequest<{ id: string }>(`/recommendations/sessions/${sessionId}/selected-items`, {
+    apiRequest<RecommendationSelectedItem>(`/recommendations/sessions/${sessionId}/selected-items`, {
       method: 'POST',
       body: JSON.stringify(data),
+    }),
+  cancelSelectedItem: (selectedItemId: string) =>
+    apiRequest<RecommendationSelectedItem>(`/recommendations/selected-items/${selectedItemId}/cancel`, {
+      method: 'POST',
     }),
 };
