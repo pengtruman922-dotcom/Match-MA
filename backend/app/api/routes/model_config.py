@@ -1,6 +1,6 @@
 
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -203,6 +203,15 @@ class NodeTestOut(BaseModel):
     error_message: str | None = None
 
 
+class NodeTestJobOut(BaseModel):
+    job_id: UUID
+    job_status: str
+    queue_name: str
+    node_id: UUID
+    node_name: str
+    node_type: str
+
+
 @router.get("/capabilities")
 def get_model_config_capabilities() -> dict[str, Any]:
     return {
@@ -397,6 +406,64 @@ def test_node(node_id: UUID, payload: NodeTestCreate, db: Session = Depends(get_
     return result
 
 
+@router.post("/nodes/{node_id}/test-jobs", response_model=NodeTestJobOut, status_code=status.HTTP_201_CREATED)
+def create_node_test_job(
+    node_id: UUID,
+    payload: NodeTestCreate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    node = _get_node_or_404(db, node_id)
+    queue_name = _queue_name_for_node_test(str(node["node_type"]))
+    row = db.execute(
+        text(
+            """
+            insert into background_job (
+              team_id, workspace_id, job_type, priority, queue_name,
+              entity_type, entity_id, idempotency_key, payload_json,
+              max_attempts, created_by, metadata_json
+            )
+            values (
+              :team_id, :workspace_id, 'model_node_test', 90, :queue_name,
+              'model_node_config', :node_id, :idempotency_key, :payload_json,
+              1, :created_by, :metadata_json
+            )
+            returning id
+            """
+        ).bindparams(
+            bindparam("payload_json", type_=JSONB),
+            bindparam("metadata_json", type_=JSONB),
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "queue_name": queue_name,
+            "node_id": node_id,
+            "idempotency_key": f"model_node_test:{node_id}:{uuid4()}",
+            "payload_json": {
+                **payload.model_dump(exclude_none=True),
+                "node_id": str(node_id),
+                "node_name": node["node_name"],
+                "node_type": node["node_type"],
+            },
+            "created_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_json": {
+                "source": "model_config_node_test_job_api",
+                "node_name": node["node_name"],
+                "node_type": node["node_type"],
+            },
+        },
+    ).mappings().one()
+    db.commit()
+    return {
+        "job_id": row["id"],
+        "job_status": "queued",
+        "queue_name": queue_name,
+        "node_id": node_id,
+        "node_name": node["node_name"],
+        "node_type": node["node_type"],
+    }
+
+
 @router.patch("/nodes/{node_id}", response_model=NodeOut)
 def update_node(node_id: UUID, payload: NodeUpdate, db: Session = Depends(get_db)) -> dict[str, Any]:
     current = _get_node_or_404(db, node_id)
@@ -531,6 +598,21 @@ def _validate_prompt_payload(db: Session, node_name: str, template_engine: str |
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Default model node not found for prompt.")
     if node["node_type"] not in PROMPT_EDITABLE_NODE_TYPES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Prompt editing is disabled for node_type={node['node_type']}.")
+
+
+def _queue_name_for_node_test(node_type: str) -> str:
+    if node_type in CHAT_NODE_TYPES:
+        return "llm"
+    if node_type == "embedding":
+        return "embedding"
+    if node_type == "rerank":
+        return "rerank"
+    if node_type == "ocr":
+        return "ocr"
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=f"Node test job is not supported for node_type={node_type}.",
+    )
 
 
 def _clear_default_provider(db: Session) -> None:

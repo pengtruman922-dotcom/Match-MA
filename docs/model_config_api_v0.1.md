@@ -32,6 +32,7 @@ Returns allowed provider types, auth types, output modes, template engines, and 
 - `POST /api/v1/model-config/nodes`
 - `GET /api/v1/model-config/nodes/{node_id}`
 - `POST /api/v1/model-config/nodes/{node_id}/test`
+- `POST /api/v1/model-config/nodes/{node_id}/test-jobs`
 - `PATCH /api/v1/model-config/nodes/{node_id}`
 - `DELETE /api/v1/model-config/nodes/{node_id}`
 
@@ -46,13 +47,20 @@ Current important nodes:
 - `embedding_seller_doc`: embedding node, prompt not editable.
 - `embedding_buyer_intent`: embedding node, prompt not editable.
 
-`POST /nodes/{node_id}/test` runs a lightweight connectivity test and writes an `ai_trace` row with `metadata_json.source = model_config_node_test`.
+`POST /nodes/{node_id}/test` runs a lightweight synchronous connectivity test in the API service and writes an `ai_trace` row with `metadata_json.source = model_config_node_test`.
+
+`POST /nodes/{node_id}/test-jobs` is the production-preferred test path. It creates a `model_node_test` background job and routes it to the right worker queue:
+
+- LLM / parser / research -> `llm`
+- Embedding -> `embedding`
+- Rerank -> `rerank`
+- OCR -> `ocr`
 
 - LLM / parser / research nodes call the chat endpoint with the provided `messages` or `input_text`.
 - Embedding nodes call the embedding endpoint and return dimension plus a short vector preview.
 - Rerank nodes call the rerank endpoint and return sorted relevance results.
 - OCR nodes return `skipped` in v0.1 because OCR execution is not implemented yet.
-- Raw API keys are never accepted or returned; the test uses `api_key_secret_ref` to read server-side environment variables.
+- Raw API keys are never accepted or returned; tests use `api_key_secret_ref` to read server-side environment variables. Because production keys are configured on worker services, frontend should call `test-jobs`, then poll `/api/v1/background-jobs/{job_id}` and `/api/v1/background-jobs/{job_id}/traces`.
 
 ## Prompt endpoints
 

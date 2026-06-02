@@ -299,6 +299,8 @@ def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
         return _handle_recommendation_report_generate(db, job)
     if job.job_type == "recommendation_rerank":
         return _handle_recommendation_rerank(db, job)
+    if job.job_type == "model_node_test":
+        return _handle_model_node_test(db, job)
 
     return {
         "handled": False,
@@ -881,6 +883,250 @@ def _handle_recommendation_rerank(db: Session, job: JobClaim) -> dict[str, objec
     }
 
 
+def _handle_model_node_test(db: Session, job: JobClaim) -> dict[str, object]:
+    node_id = _resolve_entity_id(job, expected_entity_type="model_node_config")
+    if node_id is None:
+        node_id = _optional_uuid(job.payload_json.get("node_id"))
+    if node_id is None:
+        raise ValueError("model_node_test job requires a model_node_config entity_id.")
+
+    node_config = _get_model_node_config_by_id(db, node_id)
+    node_type = str(node_config["node_type"])
+    if node_type in {"llm", "parser", "research"}:
+        return _handle_model_chat_node_test(db, job=job, node_config=node_config)
+    if node_type == "embedding":
+        return _handle_model_embedding_node_test(db, job=job, node_config=node_config)
+    if node_type == "rerank":
+        return _handle_model_rerank_node_test(db, job=job, node_config=node_config)
+    if node_type == "ocr":
+        input_json = _model_node_test_input_json(job, node_config)
+        _insert_model_node_test_trace(
+            db,
+            job=job,
+            node_config=node_config,
+            trace_type="ocr",
+            status="skipped",
+            input_json=input_json,
+            parsed_output_json={"reason": "OCR node test is not implemented in v0.1."},
+            latency_ms=0,
+        )
+        return {
+            "handled": True,
+            "job_type": job.job_type,
+            "node_id": str(node_id),
+            "node_name": node_config["node_name"],
+            "node_type": node_type,
+            "status": "skipped",
+            "trace_created": True,
+        }
+    raise ValueError(f"Unsupported model_node_test node_type: {node_type}")
+
+
+def _handle_model_chat_node_test(
+    db: Session,
+    *,
+    job: JobClaim,
+    node_config: dict[str, Any],
+) -> dict[str, object]:
+    messages = _model_node_test_messages(job, node_config)
+    trace_type = "llm" if node_config["node_type"] == "llm" else str(node_config["node_type"])
+    input_json = _model_node_test_input_json(
+        job,
+        node_config,
+        extra={"messages": _redact_test_messages(messages)},
+    )
+    started = time.perf_counter()
+    try:
+        result = call_openai_compatible_chat(
+            base_url=node_config["base_url"],
+            api_key_secret_ref=node_config["api_key_secret_ref"],
+            model_name=node_config["model_name"],
+            messages=messages,
+            temperature=node_config.get("temperature"),
+            top_p=node_config.get("top_p"),
+            max_tokens=node_config.get("max_tokens") or 64,
+            timeout_seconds=int(job.payload_json.get("timeout_seconds") or node_config["timeout_seconds"]),
+            response_format=node_config.get("response_format"),
+        )
+    except LlmCallError as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        _insert_model_node_test_trace(
+            db,
+            job=job,
+            node_config=node_config,
+            trace_type=trace_type,
+            status="failed",
+            input_json=input_json,
+            prompt_messages_json=messages,
+            parsed_output_json=None,
+            raw_output_text=None,
+            latency_ms=latency_ms,
+            error_code="llm_test_failed",
+            error_message=str(exc),
+        )
+        raise
+
+    output_json = {
+        "parsed_output_json": result.parsed_output_json,
+        "raw_output_preview": result.raw_output_text[:1000],
+        "prompt_tokens": result.prompt_tokens,
+        "completion_tokens": result.completion_tokens,
+        "total_tokens": result.total_tokens,
+    }
+    _insert_model_node_test_trace(
+        db,
+        job=job,
+        node_config=node_config,
+        trace_type=trace_type,
+        status="succeeded",
+        input_json=input_json,
+        prompt_messages_json=messages,
+        parsed_output_json=output_json,
+        raw_output_text=result.raw_output_text,
+        latency_ms=result.latency_ms,
+        prompt_tokens=result.prompt_tokens,
+        completion_tokens=result.completion_tokens,
+        total_tokens=result.total_tokens,
+    )
+    return _model_node_test_result(job, node_config, "succeeded", output_json, result.latency_ms)
+
+
+def _handle_model_embedding_node_test(
+    db: Session,
+    *,
+    job: JobClaim,
+    node_config: dict[str, Any],
+) -> dict[str, object]:
+    input_text = str(job.payload_json.get("input_text") or "Match-MA embedding connectivity test.")
+    input_json = _model_node_test_input_json(
+        job,
+        node_config,
+        extra={"input_preview": input_text[:500]},
+    )
+    started = time.perf_counter()
+    try:
+        result = call_openai_compatible_embedding(
+            base_url=node_config["base_url"],
+            api_key_secret_ref=node_config["api_key_secret_ref"],
+            model_name=node_config["model_name"],
+            input_text=input_text,
+            dimensions=node_config.get("embedding_dimension"),
+            timeout_seconds=int(job.payload_json.get("timeout_seconds") or node_config["timeout_seconds"]),
+        )
+    except EmbeddingCallError as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        _insert_model_node_test_trace(
+            db,
+            job=job,
+            node_config=node_config,
+            trace_type="embedding",
+            status="failed",
+            input_json=input_json,
+            parsed_output_json=None,
+            latency_ms=latency_ms,
+            error_code="embedding_test_failed",
+            error_message=str(exc),
+        )
+        raise
+
+    output_json = {
+        "embedding_dimension": len(result.embedding),
+        "embedding_preview": result.embedding[:8],
+        "prompt_tokens": result.prompt_tokens,
+        "total_tokens": result.total_tokens,
+    }
+    _insert_model_node_test_trace(
+        db,
+        job=job,
+        node_config=node_config,
+        trace_type="embedding",
+        status="succeeded",
+        input_json=input_json,
+        parsed_output_json=output_json,
+        latency_ms=result.latency_ms,
+        prompt_tokens=result.prompt_tokens,
+        total_tokens=result.total_tokens,
+    )
+    return _model_node_test_result(job, node_config, "succeeded", output_json, result.latency_ms)
+
+
+def _handle_model_rerank_node_test(
+    db: Session,
+    *,
+    job: JobClaim,
+    node_config: dict[str, Any],
+) -> dict[str, object]:
+    query = str(
+        job.payload_json.get("query")
+        or job.payload_json.get("input_text")
+        or "Which target best matches healthcare growth capital?"
+    )
+    documents = job.payload_json.get("documents")
+    if not isinstance(documents, list) or not documents:
+        documents = [
+            "Healthcare target with stable net profit and consolidation potential.",
+            "Consumer retail business with limited strategic fit.",
+        ]
+    documents = [str(document) for document in documents]
+    input_json = _model_node_test_input_json(
+        job,
+        node_config,
+        extra={
+            "query_preview": query[:500],
+            "document_count": len(documents),
+            "document_previews": [document[:300] for document in documents[:5]],
+        },
+    )
+    started = time.perf_counter()
+    try:
+        result = call_dashscope_compatible_rerank(
+            base_url=node_config["base_url"],
+            api_key_secret_ref=node_config["api_key_secret_ref"],
+            model_name=node_config["model_name"],
+            query=query,
+            documents=documents,
+            top_n=int(job.payload_json.get("top_n") or min(len(documents), 5)),
+            instruct="Connectivity test for Match-MA rerank node.",
+            timeout_seconds=int(job.payload_json.get("timeout_seconds") or node_config["timeout_seconds"]),
+        )
+    except RerankCallError as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        _insert_model_node_test_trace(
+            db,
+            job=job,
+            node_config=node_config,
+            trace_type="rerank",
+            status="failed",
+            input_json=input_json,
+            parsed_output_json=None,
+            latency_ms=latency_ms,
+            error_code="rerank_test_failed",
+            error_message=str(exc),
+        )
+        raise
+
+    output_json = {
+        "model": result.model_name,
+        "results": [
+            {"index": item.index, "relevance_score": item.relevance_score}
+            for item in result.results
+        ],
+        "total_tokens": result.total_tokens,
+    }
+    _insert_model_node_test_trace(
+        db,
+        job=job,
+        node_config=node_config,
+        trace_type="rerank",
+        status="succeeded",
+        input_json=input_json,
+        parsed_output_json=output_json,
+        latency_ms=result.latency_ms,
+        total_tokens=result.total_tokens,
+    )
+    return _model_node_test_result(job, node_config, "succeeded", output_json, result.latency_ms)
+
+
 def _resolve_business_update_id(job: JobClaim) -> UUID | None:
     if job.entity_type == "business_update" and job.entity_id is not None:
         return job.entity_id
@@ -1220,6 +1466,51 @@ def _get_default_rerank_node_config(db: Session, node_name: str) -> dict[str, An
     config = dict(row)
     if not config.get("base_url"):
         raise ValueError(f"Provider base_url is not configured for node: {node_name}")
+    return config
+
+
+def _get_model_node_config_by_id(db: Session, node_id: UUID) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            """
+            select
+              node.id as node_config_id,
+              node.node_name,
+              node.node_type,
+              node.model_name,
+              node.temperature,
+              node.top_p,
+              node.max_tokens,
+              node.timeout_seconds,
+              node.response_format,
+              node.embedding_dimension,
+              provider.id as provider_config_id,
+              provider.provider_name,
+              provider.base_url,
+              provider.api_key_secret_ref
+            from model_node_config node
+            join model_provider_config provider
+              on provider.id = node.provider_config_id
+            where node.team_id = :team_id
+              and node.workspace_id = :workspace_id
+              and node.id = :node_id
+              and node.is_active = true
+            limit 1
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "node_id": node_id,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        raise ValueError(f"Model node is not configured or inactive: {node_id}")
+    config = dict(row)
+    if not config.get("base_url"):
+        raise ValueError(f"Provider base_url is not configured for node: {config['node_name']}")
+    if config.get("node_type") == "embedding" and not config.get("embedding_dimension"):
+        raise ValueError(f"Embedding dimension is not configured for node: {config['node_name']}")
     return config
 
 
@@ -2370,6 +2661,155 @@ def _insert_recommendation_rerank_message(
             },
         },
     )
+
+
+def _insert_model_node_test_trace(
+    db: Session,
+    *,
+    job: JobClaim,
+    node_config: dict[str, Any],
+    trace_type: str,
+    status: str,
+    input_json: dict[str, Any],
+    prompt_messages_json: list[dict[str, str]] | None = None,
+    raw_output_text: str | None = None,
+    parsed_output_json: dict[str, Any] | None = None,
+    latency_ms: int | None = None,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    db.execute(
+        text(
+            """
+            insert into ai_trace (
+              team_id, workspace_id, trace_type, node_name,
+              job_id, correlation_id, entity_type, entity_id,
+              provider_config_id, node_config_id,
+              provider_name, model_name, status,
+              input_json, prompt_messages_json, raw_output_text,
+              parsed_output_json, schema_validation_json,
+              error_code, error_message, latency_ms, prompt_tokens,
+              completion_tokens, total_tokens, created_by, finished_at, metadata_json
+            )
+            values (
+              :team_id, :workspace_id, :trace_type, :node_name,
+              :job_id, :correlation_id, 'model_node_config', :node_config_id,
+              :provider_config_id, :node_config_id,
+              :provider_name, :model_name, :status,
+              :input_json, :prompt_messages_json, :raw_output_text,
+              :parsed_output_json, :schema_validation_json,
+              :error_code, :error_message, :latency_ms, :prompt_tokens,
+              :completion_tokens, :total_tokens, :created_by, now(), :metadata_json
+            )
+            """
+        ).bindparams(
+            bindparam("input_json", type_=JSONB),
+            bindparam("prompt_messages_json", type_=JSONB),
+            bindparam("parsed_output_json", type_=JSONB),
+            bindparam("schema_validation_json", type_=JSONB),
+            bindparam("metadata_json", type_=JSONB),
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "trace_type": trace_type,
+            "node_name": node_config["node_name"],
+            "job_id": job.id,
+            "correlation_id": job.correlation_id,
+            "node_config_id": node_config["node_config_id"],
+            "provider_config_id": node_config["provider_config_id"],
+            "provider_name": node_config["provider_name"],
+            "model_name": node_config["model_name"],
+            "status": status,
+            "input_json": input_json,
+            "prompt_messages_json": prompt_messages_json or [],
+            "raw_output_text": raw_output_text,
+            "parsed_output_json": parsed_output_json,
+            "schema_validation_json": {"valid": status in {"succeeded", "skipped"}},
+            "error_code": error_code,
+            "error_message": error_message,
+            "latency_ms": latency_ms,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "created_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_json": {"source": "model_node_test"},
+        },
+    )
+
+
+def _model_node_test_messages(job: JobClaim, node_config: dict[str, Any]) -> list[dict[str, str]]:
+    messages = job.payload_json.get("messages")
+    if isinstance(messages, list) and messages:
+        output: list[dict[str, str]] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "user")
+            content = str(message.get("content") or "")
+            if role in {"system", "user", "assistant", "tool"} and content:
+                output.append({"role": role, "content": content})
+        if output:
+            return output
+
+    input_text = str(job.payload_json.get("input_text") or "")
+    if node_config.get("response_format") == "json_object":
+        return [
+            {"role": "system", "content": "You are a concise API connectivity tester. Output JSON only."},
+            {"role": "user", "content": input_text or 'Return {"status":"ok"}.'},
+        ]
+    return [
+        {"role": "system", "content": "You are a concise API connectivity tester."},
+        {"role": "user", "content": input_text or "Return exactly: ok"},
+    ]
+
+
+def _model_node_test_input_json(
+    job: JobClaim,
+    node_config: dict[str, Any],
+    *,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "job_id": str(job.id),
+        "node_config_id": str(node_config["node_config_id"]),
+        "node_name": node_config["node_name"],
+        "node_type": node_config["node_type"],
+        **(extra or {}),
+    }
+
+
+def _model_node_test_result(
+    job: JobClaim,
+    node_config: dict[str, Any],
+    status: str,
+    output_json: dict[str, Any],
+    latency_ms: int | None,
+) -> dict[str, object]:
+    return {
+        "handled": True,
+        "job_type": job.job_type,
+        "node_id": str(node_config["node_config_id"]),
+        "node_name": node_config["node_name"],
+        "node_type": node_config["node_type"],
+        "status": status,
+        "latency_ms": latency_ms,
+        "output_json": output_json,
+        "trace_created": True,
+    }
+
+
+def _redact_test_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [
+        {
+            "role": str(message.get("role") or ""),
+            "content_preview": str(message.get("content") or "")[:300],
+        }
+        for message in messages
+    ]
 
 
 def _insert_embedding_trace(

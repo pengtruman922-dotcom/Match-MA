@@ -1,4 +1,8 @@
-﻿from backend.app.api.routes.model_config import _default_chat_test_messages, get_model_config_capabilities
+﻿from backend.app.api.routes.model_config import (
+    _default_chat_test_messages,
+    _queue_name_for_node_test,
+    get_model_config_capabilities,
+)
 
 
 def test_capabilities_expose_prompt_and_test_support() -> None:
@@ -19,3 +23,12 @@ def test_json_chat_node_default_test_message_returns_json_instruction() -> None:
 
     assert "JSON only" in messages[0]["content"]
     assert '{"status":"ok"}' in messages[1]["content"]
+
+
+def test_queue_name_for_node_test_routes_by_node_type() -> None:
+    assert _queue_name_for_node_test("llm") == "llm"
+    assert _queue_name_for_node_test("parser") == "llm"
+    assert _queue_name_for_node_test("research") == "llm"
+    assert _queue_name_for_node_test("embedding") == "embedding"
+    assert _queue_name_for_node_test("rerank") == "rerank"
+    assert _queue_name_for_node_test("ocr") == "ocr"
