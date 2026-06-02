@@ -126,3 +126,28 @@ frontend/src/types/api.ts
 2. `POST /business-updates/{id}/process`
 
 这符合“一录入即进入 AI 拆解，用户后续复核”的一期口径。
+
+## 5. 业务更新复核页
+
+```text
+GET /api/v1/business-updates/{business_update_id}/review-page
+```
+
+前端 `/updates/:id` 优先使用该聚合接口，返回：
+
+- `business_update`：原始录入文本、处理状态、绑定对象、文本预览。
+- `overview`：动作数、待复核数、自动应用数、应用日志数、失败任务/Trace 数，`mode` 固定为 `auto_apply_then_review`。
+- `action_groups`：按“标的更新 / 买家意向更新 / 关系跟进 / 异常备注”分组后的复核卡片。
+- `actions`：完整动作列表，包含 `target_ref`、`target_display`、`change_preview`、`can_accept`、`can_reject`、`can_apply`。
+- `application_logs`：自动应用或人工应用后的字段级变更记录，用于展示“已改了什么”和后续回退入口。
+- `jobs` / `traces`：当前业务更新相关后台任务和 AI Trace 的轻量卡片。
+- `bound_entities`：当前业务更新和动作涉及的标的、买家、意向、关系、推荐会话摘要。
+- `quick_actions`：重新解析、聚焦待复核、查看 Debug。
+
+该接口不替代动作操作接口；前端仍使用：
+
+```text
+PATCH /api/v1/extracted-actions/{id}
+POST /api/v1/extracted-actions/{id}/apply
+POST /api/v1/business-updates/{id}/process
+```

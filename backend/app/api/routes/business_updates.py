@@ -44,6 +44,19 @@ class BusinessUpdateProcessOut(BaseModel):
     business_update_id: UUID
 
 
+class BusinessUpdateReviewPageOut(BaseModel):
+    business_update: dict[str, Any]
+    overview: dict[str, Any]
+    action_groups: list[dict[str, Any]]
+    actions: list[dict[str, Any]]
+    application_logs: list[dict[str, Any]]
+    jobs: list[dict[str, Any]]
+    traces: list[dict[str, Any]]
+    bound_entities: dict[str, Any]
+    quick_actions: list[dict[str, Any]]
+    debug_ref: dict[str, Any]
+
+
 @router.post("", response_model=BusinessUpdateOut, status_code=status.HTTP_201_CREATED)
 def create_business_update(
     payload: BusinessUpdateCreate,
@@ -264,6 +277,41 @@ def get_business_update(
     return dict(row)
 
 
+@router.get("/{business_update_id}/review-page", response_model=BusinessUpdateReviewPageOut)
+def get_business_update_review_page(
+    business_update_id: UUID,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    business_update = get_business_update(business_update_id, db)
+    actions = _review_page_actions(db, business_update_id)
+    application_logs = _review_page_application_logs(db, business_update_id)
+    jobs = _review_page_jobs(db, business_update_id)
+    traces = _review_page_traces(db, business_update_id)
+    bound_entities = _review_page_bound_entities(db, business_update, actions)
+    logs_by_action = _logs_by_action(application_logs)
+    target_snapshots = _review_target_snapshots(bound_entities)
+    enriched_actions = [
+        _enrich_review_action(action, logs_by_action.get(str(action["id"]), []), target_snapshots)
+        for action in actions
+    ]
+    overview = _review_page_overview(business_update, enriched_actions, application_logs, jobs, traces)
+    return {
+        "business_update": {
+            **business_update,
+            "raw_text_preview": _truncate_review_text(business_update.get("raw_text"), 240),
+        },
+        "overview": overview,
+        "action_groups": _review_action_groups(enriched_actions),
+        "actions": enriched_actions,
+        "application_logs": application_logs,
+        "jobs": [_compact_review_job(job) for job in jobs],
+        "traces": [_compact_review_trace(trace) for trace in traces],
+        "bound_entities": bound_entities,
+        "quick_actions": _review_page_quick_actions(business_update, overview),
+        "debug_ref": _debug_ref("business_update", business_update_id),
+    }
+
+
 def _ensure_business_update_exists(db: Session, business_update_id: UUID) -> None:
     row = db.execute(
         text(
@@ -283,3 +331,745 @@ def _ensure_business_update_exists(db: Session, business_update_id: UUID) -> Non
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Business update not found.")
+
+
+def _review_page_actions(db: Session, business_update_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              a.id, a.business_update_id, a.action_type, a.target_entity_type, a.target_entity_id,
+              a.proposed_changes_json, a.raw_evidence_text, a.confidence, a.review_status,
+              a.reviewed_by, a.reviewed_at::text as reviewed_at, a.applied_at::text as applied_at,
+              a.metadata_json, a.created_at::text as created_at,
+              st.target_name as seller_target_name,
+              bi.intent_name as buyer_intent_name,
+              bp.buyer_name
+            from extracted_action a
+            left join seller_target st
+              on st.id = a.target_entity_id and a.target_entity_type = 'seller_target'
+            left join buyer_intent bi
+              on bi.id = a.target_entity_id and a.target_entity_type = 'buyer_intent'
+            left join buyer_party bp
+              on bp.id = a.target_entity_id and a.target_entity_type = 'buyer_party'
+            where a.business_update_id = :business_update_id
+              and a.team_id = :team_id
+              and a.workspace_id = :workspace_id
+            order by a.created_at desc
+            limit 200
+            """
+        ),
+        {
+            "business_update_id": business_update_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _review_page_application_logs(db: Session, business_update_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              log.id, log.extracted_action_id, log.business_update_id,
+              log.entity_type, log.entity_id, log.field_path,
+              log.old_value_json, log.new_value_json,
+              log.source_type, log.source_id, log.evidence_id,
+              log.applied_by, log.applied_at::text as applied_at,
+              log.edited_before_apply, log.can_rollback,
+              log.rollback_at::text as rollback_at,
+              log.metadata_json,
+              st.target_name as seller_target_name,
+              bi.intent_name as buyer_intent_name,
+              bp.buyer_name
+            from action_application_log log
+            left join seller_target st
+              on st.id = log.entity_id and log.entity_type = 'seller_target'
+            left join buyer_intent bi
+              on bi.id = log.entity_id and log.entity_type = 'buyer_intent'
+            left join buyer_party bp
+              on bp.id = log.entity_id and log.entity_type = 'buyer_party'
+            where log.business_update_id = :business_update_id
+              and log.team_id = :team_id
+              and log.workspace_id = :workspace_id
+            order by log.applied_at desc
+            limit 500
+            """
+        ),
+        {
+            "business_update_id": business_update_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [_enrich_application_log(dict(row)) for row in rows]
+
+
+def _review_page_jobs(db: Session, business_update_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              id, job_type, status, priority, queue_name, entity_type, entity_id,
+              idempotency_key, payload_json, result_json, error_code, error_message,
+              error_detail_json, attempt_count, max_attempts, run_after::text as run_after,
+              locked_by, locked_at::text as locked_at, started_at::text as started_at,
+              finished_at::text as finished_at, parent_job_id, correlation_id, created_by,
+              created_at::text as created_at, updated_at::text as updated_at, metadata_json
+            from background_job
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and entity_type = 'business_update'
+              and entity_id = :business_update_id
+            order by created_at desc
+            limit 100
+            """
+        ),
+        {
+            "business_update_id": business_update_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _review_page_traces(db: Session, business_update_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              trace.id, trace.trace_type, trace.node_name, trace.job_id, trace.correlation_id,
+              trace.entity_type, trace.entity_id, trace.provider_name, trace.model_name,
+              trace.prompt_version, trace.status, trace.input_json, trace.raw_output_text,
+              trace.parsed_output_json, trace.schema_validation_json, trace.error_code,
+              trace.error_message, trace.latency_ms, trace.prompt_tokens, trace.completion_tokens,
+              trace.total_tokens, trace.started_at::text as started_at,
+              trace.finished_at::text as finished_at, trace.metadata_json
+            from ai_trace trace
+            where trace.team_id = :team_id
+              and trace.workspace_id = :workspace_id
+              and (
+                (trace.entity_type = 'business_update' and trace.entity_id = :business_update_id)
+                or trace.job_id in (
+                  select id
+                  from background_job
+                  where team_id = :team_id
+                    and workspace_id = :workspace_id
+                    and entity_type = 'business_update'
+                    and entity_id = :business_update_id
+                )
+              )
+            order by trace.started_at desc
+            limit 100
+            """
+        ),
+        {
+            "business_update_id": business_update_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _review_page_bound_entities(
+    db: Session,
+    business_update: dict[str, Any],
+    actions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    seller_target_ids = _collect_entity_ids(
+        business_update.get("bound_seller_target_ids_json"),
+        actions,
+        target_entity_type="seller_target",
+        proposed_change_keys=["seller_target_id"],
+    )
+    buyer_intent_ids = _collect_entity_ids(
+        business_update.get("bound_buyer_intent_ids_json"),
+        actions,
+        target_entity_type="buyer_intent",
+        proposed_change_keys=["buyer_intent_id"],
+    )
+    buyer_party_ids = _collect_entity_ids(
+        business_update.get("bound_buyer_party_ids_json"),
+        actions,
+        target_entity_type="buyer_party",
+        proposed_change_keys=["buyer_party_id"],
+    )
+    relation_ids = _collect_entity_ids(
+        [],
+        actions,
+        target_entity_type="buyer_seller_relation",
+        proposed_change_keys=["relation_id", "source_relation_id"],
+    )
+    return {
+        "seller_targets": _seller_targets_by_ids(db, seller_target_ids),
+        "buyer_intents": _buyer_intents_by_ids(db, buyer_intent_ids),
+        "buyer_parties": _buyer_parties_by_ids(db, buyer_party_ids),
+        "relations": _relations_by_ids(db, relation_ids),
+        "recommendation_session": _recommendation_session_summary(
+            db,
+            business_update.get("bound_recommendation_session_id"),
+        ),
+    }
+
+
+def _seller_targets_by_ids(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
+    if not ids:
+        return []
+    rows = db.execute(
+        text(
+            """
+            select
+              id, target_name, target_type, industry_primary, industry_secondary,
+              headquarter_province, headquarter_city, listed_status,
+              current_revenue_yuan, current_net_profit_yuan, current_total_profit_yuan,
+              valuation_yuan, asking_price_yuan, pe_ratio, is_for_sale,
+              can_control, can_consolidate, accepts_minority_investment,
+              transfer_ratio_min, transfer_ratio_max, transfer_ratio_text,
+              transfer_flexibility_type, recommendation_status, information_status,
+              business_summary, transaction_summary, risk_summary, gap_summary,
+              updated_at::text as updated_at
+            from seller_target
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+              and id in :ids
+            order by target_name asc
+            """
+        ).bindparams(bindparam("ids", expanding=True)),
+        {"ids": tuple(ids), "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _buyer_intents_by_ids(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
+    if not ids:
+        return []
+    rows = db.execute(
+        text(
+            """
+            select
+              bi.id, bi.buyer_party_id, bp.buyer_name, bi.intent_name, bi.status,
+              bi.pause_reason, bi.contact_name, bi.raw_requirement_text,
+              bi.intent_summary, bi.industry_primary, bi.industry_secondary,
+              bi.region_scope_summary, bi.min_revenue_yuan, bi.min_net_profit_yuan,
+              bi.min_total_profit_yuan, bi.max_pe, bi.max_valuation_yuan,
+              bi.requires_control, bi.requires_consolidation, bi.accepts_minority_investment,
+              bi.desired_equity_ratio_min, bi.desired_equity_ratio_max,
+              bi.equity_ratio_summary, bi.equity_requirement_type,
+              bi.preferred_listed_status, bi.transaction_type,
+              bi.negative_summary, bi.priority_summary, bi.preference_summary,
+              bi.unknown_summary, bi.updated_at::text as updated_at
+            from buyer_intent bi
+            left join buyer_party bp on bp.id = bi.buyer_party_id
+            where bi.team_id = :team_id
+              and bi.workspace_id = :workspace_id
+              and bi.deleted_at is null
+              and bi.id in :ids
+            order by bi.intent_name asc
+            """
+        ).bindparams(bindparam("ids", expanding=True)),
+        {"ids": tuple(ids), "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _buyer_parties_by_ids(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
+    if not ids:
+        return []
+    rows = db.execute(
+        text(
+            """
+            select
+              id, buyer_name, buyer_type, group_name, listed_status,
+              region_province, region_city, main_business,
+              capital_strength_summary, profile_summary, status,
+              updated_at::text as updated_at
+            from buyer_party
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+              and id in :ids
+            order by buyer_name asc
+            """
+        ).bindparams(bindparam("ids", expanding=True)),
+        {"ids": tuple(ids), "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _relations_by_ids(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
+    if not ids:
+        return []
+    rows = db.execute(
+        text(
+            """
+            select
+              r.id, r.buyer_intent_id, bi.intent_name,
+              r.buyer_party_id, bp.buyer_name,
+              r.seller_target_id, st.target_name,
+              r.status, r.status_reason, r.first_recommended_at::text as first_recommended_at,
+              r.last_contact_at::text as last_contact_at, r.last_event_at::text as last_event_at,
+              r.last_event_summary, r.updated_at::text as updated_at
+            from buyer_seller_relation r
+            join buyer_intent bi on bi.id = r.buyer_intent_id
+            join seller_target st on st.id = r.seller_target_id
+            left join buyer_party bp on bp.id = r.buyer_party_id
+            where r.team_id = :team_id
+              and r.workspace_id = :workspace_id
+              and r.deleted_at is null
+              and r.id in :ids
+            order by r.updated_at desc
+            """
+        ).bindparams(bindparam("ids", expanding=True)),
+        {"ids": tuple(ids), "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _recommendation_session_summary(db: Session, session_id: Any) -> dict[str, Any] | None:
+    parsed_id = _optional_uuid(session_id)
+    if parsed_id is None:
+        return None
+    row = db.execute(
+        text(
+            """
+            select
+              rs.id, rs.mode, rs.status, rs.selected_count, rs.report_count,
+              rs.buyer_intent_id, bi.intent_name as buyer_intent_name,
+              rs.buyer_party_id, bp.buyer_name,
+              rs.seller_target_id, st.target_name as seller_target_name,
+              rs.created_at::text as created_at, rs.updated_at::text as updated_at
+            from recommendation_session rs
+            left join buyer_intent bi on bi.id = rs.buyer_intent_id
+            left join buyer_party bp on bp.id = rs.buyer_party_id
+            left join seller_target st on st.id = rs.seller_target_id
+            where rs.team_id = :team_id
+              and rs.workspace_id = :workspace_id
+              and rs.id = :session_id
+            """
+        ),
+        {"session_id": parsed_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    ).mappings().one_or_none()
+    if row is None:
+        return None
+    result = dict(row)
+    result["debug_ref"] = _debug_ref("recommendation_session", result["id"])
+    return result
+
+
+REVIEW_GROUP_LABELS = {
+    "seller_update": "标的更新",
+    "buyer_intent_update": "买家意向更新",
+    "relation_progress": "关系/跟进",
+    "exception": "异常/备注",
+}
+
+ACTION_LABELS = {
+    "seller_fact_update": "标的字段更新",
+    "seller_event": "标的事件",
+    "buyer_intent_update": "买家意向更新",
+    "buyer_seller_relation_update": "关系进展更新",
+    "buyer_intent_target_exclusion": "买家排除标的",
+    "buyer_level_blacklist_suggestion": "买家级黑名单建议",
+    "internal_note": "内部备注",
+    "unresolved_item": "待人工判断",
+}
+
+REVIEW_STATUS_LABELS = {
+    "pending_review": "待复核",
+    "accepted": "已接受",
+    "rejected": "已拒绝",
+    "auto_accepted": "已自动应用，待复核",
+    "ignored": "已忽略",
+}
+
+APPLY_SUPPORTED_ACTION_TYPES = {
+    "seller_fact_update",
+    "buyer_intent_update",
+    "buyer_seller_relation_update",
+    "buyer_intent_target_exclusion",
+}
+
+
+def _enrich_review_action(
+    action: dict[str, Any],
+    logs: list[dict[str, Any]],
+    target_snapshots: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    group_key = _review_action_group_key(action)
+    action_type = action["action_type"]
+    target_ref = _action_target_ref(action)
+    target_snapshot = target_snapshots.get(_target_snapshot_key(target_ref.get("entity_type"), target_ref.get("entity_id")))
+    apply_supported = action_type in APPLY_SUPPORTED_ACTION_TYPES
+    applied_fields = [log["field_path"] for log in logs]
+    return {
+        **action,
+        "action_label": ACTION_LABELS.get(action_type, action_type),
+        "review_status_label": REVIEW_STATUS_LABELS.get(action["review_status"], action["review_status"]),
+        "group_key": group_key,
+        "group_label": REVIEW_GROUP_LABELS[group_key],
+        "priority": _review_action_priority(action),
+        "target_display": _action_target_display(action, target_snapshot),
+        "target_ref": target_ref,
+        "change_preview": _action_change_preview(action, logs, target_snapshot),
+        "application_logs": logs,
+        "application_log_count": len(logs),
+        "applied_fields": applied_fields,
+        "is_auto_applied": action["review_status"] == "auto_accepted" and action["applied_at"] is not None,
+        "apply_supported": apply_supported,
+        "can_accept": action["review_status"] == "pending_review",
+        "can_reject": action["review_status"] in {"pending_review", "auto_accepted"},
+        "can_apply": apply_supported
+        and action["applied_at"] is None
+        and action["review_status"] in {"accepted", "auto_accepted"},
+        "review_route": f"/updates/{action['business_update_id']}?action={action['id']}",
+        "debug_ref": _debug_ref("business_update", action["business_update_id"]),
+    }
+
+
+def _review_action_group_key(action: dict[str, Any]) -> str:
+    action_type = action.get("action_type")
+    target_type = action.get("target_entity_type")
+    if action_type in {"seller_fact_update", "seller_event"} or target_type == "seller_target":
+        return "seller_update"
+    if action_type == "buyer_intent_update" or target_type == "buyer_intent":
+        return "buyer_intent_update"
+    if action_type in {"buyer_seller_relation_update", "buyer_intent_target_exclusion"}:
+        return "relation_progress"
+    return "exception"
+
+
+def _review_action_priority(action: dict[str, Any]) -> str:
+    confidence = _optional_float(action.get("confidence"))
+    if action.get("action_type") == "unresolved_item" or confidence is None:
+        return "high"
+    if confidence < 0.6:
+        return "high"
+    if confidence < 0.8:
+        return "medium"
+    return "normal"
+
+
+def _review_action_groups(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    for key, label in REVIEW_GROUP_LABELS.items():
+        items = [action for action in actions if action["group_key"] == key]
+        if not items:
+            continue
+        groups.append(
+            {
+                "key": key,
+                "label": label,
+                "count": len(items),
+                "pending_count": len([item for item in items if item["review_status"] == "pending_review"]),
+                "auto_applied_count": len([item for item in items if item["is_auto_applied"]]),
+                "high_priority_count": len([item for item in items if item["priority"] == "high"]),
+                "items": items,
+            }
+        )
+    return groups
+
+
+def _action_change_preview(
+    action: dict[str, Any],
+    logs: list[dict[str, Any]],
+    target_snapshot: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if logs:
+        return [
+            {
+                "field_path": log["field_path"],
+                "old_value": log.get("old_value_json"),
+                "new_value": log.get("new_value_json"),
+                "source": "application_log",
+                "can_rollback": log.get("can_rollback") and log.get("rollback_at") is None,
+            }
+            for log in logs[:50]
+        ]
+
+    changes = action.get("proposed_changes_json") or {}
+    if not isinstance(changes, dict):
+        return []
+    preview: list[dict[str, Any]] = []
+    for key, value in list(changes.items())[:50]:
+        preview.append(
+            {
+                "field_path": key,
+                "old_value": target_snapshot.get(key) if target_snapshot else None,
+                "new_value": value,
+                "source": "proposed_changes",
+                "can_rollback": False,
+            }
+        )
+    return preview
+
+
+def _review_page_overview(
+    business_update: dict[str, Any],
+    actions: list[dict[str, Any]],
+    application_logs: list[dict[str, Any]],
+    jobs: list[dict[str, Any]],
+    traces: list[dict[str, Any]],
+) -> dict[str, Any]:
+    pending_count = len([action for action in actions if action["review_status"] == "pending_review"])
+    auto_applied_count = len([action for action in actions if action["is_auto_applied"]])
+    applied_action_count = len([action for action in actions if action["applied_at"] is not None])
+    failed_job_count = len([job for job in jobs if job["status"] == "failed"])
+    running_job_count = len([job for job in jobs if job["status"] in {"queued", "running", "retry_waiting"}])
+    failed_trace_count = len([trace for trace in traces if trace["status"] == "failed" or trace.get("error_code")])
+    return {
+        "processing_status": business_update["processing_status"],
+        "action_count": len(actions),
+        "pending_review_count": pending_count,
+        "auto_applied_count": auto_applied_count,
+        "applied_action_count": applied_action_count,
+        "application_log_count": len(application_logs),
+        "failed_job_count": failed_job_count,
+        "running_job_count": running_job_count,
+        "trace_count": len(traces),
+        "failed_trace_count": failed_trace_count,
+        "mode": "auto_apply_then_review",
+        "needs_review": pending_count > 0 or auto_applied_count > 0 or failed_job_count > 0 or failed_trace_count > 0,
+    }
+
+
+def _review_page_quick_actions(business_update: dict[str, Any], overview: dict[str, Any]) -> list[dict[str, Any]]:
+    business_update_id = business_update["id"]
+    return [
+        {
+            "key": "rerun_extraction",
+            "label": "重新解析",
+            "route": None,
+            "action": "process_business_update",
+            "enabled": business_update["processing_status"] in {"pending", "failed", "parsed", "partially_applied"},
+            "badge_count": None,
+        },
+        {
+            "key": "review_pending",
+            "label": "复核待处理",
+            "route": f"/updates/{business_update_id}",
+            "action": "focus_pending_actions",
+            "enabled": overview["pending_review_count"] > 0,
+            "badge_count": overview["pending_review_count"],
+        },
+        {
+            "key": "inspect_debug",
+            "label": "查看 Debug",
+            "route": f"/debug/entities/business_update/{business_update_id}",
+            "action": "open_debug_entity",
+            "enabled": True,
+            "badge_count": overview["failed_job_count"] + overview["failed_trace_count"],
+        },
+    ]
+
+
+def _logs_by_action(logs: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for log in logs:
+        if log.get("extracted_action_id") is None:
+            continue
+        grouped.setdefault(str(log["extracted_action_id"]), []).append(log)
+    return grouped
+
+
+def _review_target_snapshots(bound_entities: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    snapshots: dict[str, dict[str, Any]] = {}
+    for entity_type, collection_key in [
+        ("seller_target", "seller_targets"),
+        ("buyer_intent", "buyer_intents"),
+        ("buyer_party", "buyer_parties"),
+        ("buyer_seller_relation", "relations"),
+    ]:
+        for item in bound_entities.get(collection_key, []):
+            snapshots[_target_snapshot_key(entity_type, item["id"])] = item
+    return snapshots
+
+
+def _action_target_ref(action: dict[str, Any]) -> dict[str, Any]:
+    target_entity_type = action.get("target_entity_type")
+    target_entity_id = action.get("target_entity_id")
+    if target_entity_type and target_entity_id:
+        return _entity_ref(target_entity_type, target_entity_id)
+    changes = action.get("proposed_changes_json") or {}
+    if isinstance(changes, dict):
+        for entity_type, key in [
+            ("seller_target", "seller_target_id"),
+            ("buyer_intent", "buyer_intent_id"),
+            ("buyer_party", "buyer_party_id"),
+            ("buyer_seller_relation", "relation_id"),
+        ]:
+            entity_id = _optional_uuid(changes.get(key))
+            if entity_id:
+                return _entity_ref(entity_type, entity_id)
+    return {"entity_type": None, "entity_id": None, "route": None, "debug_ref": None}
+
+
+def _action_target_display(action: dict[str, Any], target_snapshot: dict[str, Any] | None) -> str:
+    if action.get("seller_target_name"):
+        return action["seller_target_name"]
+    if action.get("buyer_intent_name"):
+        return action["buyer_intent_name"]
+    if action.get("buyer_name"):
+        return action["buyer_name"]
+    if target_snapshot:
+        return (
+            target_snapshot.get("target_name")
+            or target_snapshot.get("intent_name")
+            or target_snapshot.get("buyer_name")
+            or target_snapshot.get("last_event_summary")
+            or "已绑定对象"
+        )
+    return action.get("target_entity_type") or "未绑定对象"
+
+
+def _enrich_application_log(log: dict[str, Any]) -> dict[str, Any]:
+    target_display = (
+        log.get("seller_target_name")
+        or log.get("buyer_intent_name")
+        or log.get("buyer_name")
+        or log.get("entity_type")
+    )
+    return {
+        **log,
+        "target_display": target_display,
+        "can_rollback_now": bool(log.get("can_rollback")) and log.get("rollback_at") is None,
+        "debug_ref": _debug_ref("business_update", log["business_update_id"]),
+    }
+
+
+def _compact_review_job(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": job["id"],
+        "job_type": job["job_type"],
+        "status": job["status"],
+        "queue_name": job["queue_name"],
+        "attempt_count": job["attempt_count"],
+        "max_attempts": job["max_attempts"],
+        "error_code": job.get("error_code"),
+        "error_message": _truncate_review_text(job.get("error_message"), 240),
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "debug_ref": _debug_ref("background_job", job["id"]),
+    }
+
+
+def _compact_review_trace(trace: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": trace["id"],
+        "trace_type": trace["trace_type"],
+        "node_name": trace["node_name"],
+        "status": trace["status"],
+        "provider_name": trace.get("provider_name"),
+        "model_name": trace.get("model_name"),
+        "prompt_version": trace.get("prompt_version"),
+        "job_id": trace.get("job_id"),
+        "error_code": trace.get("error_code"),
+        "error_message": _truncate_review_text(trace.get("error_message"), 240),
+        "raw_output_preview": _truncate_review_text(trace.get("raw_output_text"), 600),
+        "parsed_output_json": trace.get("parsed_output_json"),
+        "schema_validation_json": trace.get("schema_validation_json"),
+        "latency_ms": trace.get("latency_ms"),
+        "prompt_tokens": trace.get("prompt_tokens"),
+        "completion_tokens": trace.get("completion_tokens"),
+        "total_tokens": trace.get("total_tokens"),
+        "started_at": trace.get("started_at"),
+        "finished_at": trace.get("finished_at"),
+        "debug_ref": _debug_ref("background_job", trace["job_id"]) if trace.get("job_id") else None,
+    }
+
+
+def _collect_entity_ids(
+    seed_values: Any,
+    actions: list[dict[str, Any]],
+    *,
+    target_entity_type: str,
+    proposed_change_keys: list[str],
+) -> list[UUID]:
+    ids: list[UUID] = []
+    for value in seed_values if isinstance(seed_values, list) else []:
+        parsed = _optional_uuid(value)
+        if parsed and parsed not in ids:
+            ids.append(parsed)
+    for action in actions:
+        if action.get("target_entity_type") == target_entity_type:
+            parsed = _optional_uuid(action.get("target_entity_id"))
+            if parsed and parsed not in ids:
+                ids.append(parsed)
+        changes = action.get("proposed_changes_json") or {}
+        if not isinstance(changes, dict):
+            continue
+        for key in proposed_change_keys:
+            parsed = _optional_uuid(changes.get(key))
+            if parsed and parsed not in ids:
+                ids.append(parsed)
+    return ids
+
+
+def _target_snapshot_key(entity_type: Any, entity_id: Any) -> str:
+    return f"{entity_type}:{entity_id}"
+
+
+def _debug_ref(entity_type: str, entity_id: Any) -> dict[str, str]:
+    entity_id_text = str(entity_id)
+    return {
+        "entity_type": entity_type,
+        "entity_id": entity_id_text,
+        "route": f"/debug/entities/{entity_type}/{entity_id_text}",
+    }
+
+
+def _entity_ref(entity_type: str, entity_id: Any) -> dict[str, Any]:
+    entity_id_text = str(entity_id)
+    route_map = {
+        "seller_target": f"/targets/{entity_id_text}",
+        "buyer_intent": f"/buyer-intents/{entity_id_text}",
+        "buyer_party": f"/buyers/{entity_id_text}",
+        "buyer_seller_relation": f"/relations/{entity_id_text}",
+        "recommendation_session": f"/recommendations/sessions/{entity_id_text}",
+    }
+    debug_supported = {
+        "business_update",
+        "background_job",
+        "model_node_config",
+        "recommendation_session",
+        "recommendation_report",
+    }
+    return {
+        "entity_type": entity_type,
+        "entity_id": entity_id_text,
+        "route": route_map.get(entity_type),
+        "debug_ref": _debug_ref(entity_type, entity_id_text) if entity_type in debug_supported else None,
+    }
+
+
+def _truncate_review_text(value: Any, max_length: int) -> str | None:
+    if value is None:
+        return None
+    text_value = str(value).strip()
+    if len(text_value) <= max_length:
+        return text_value
+    return text_value[: max_length - 1] + "…"
+
+
+def _optional_uuid(value: Any) -> UUID | None:
+    if not value:
+        return None
+    try:
+        return UUID(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
