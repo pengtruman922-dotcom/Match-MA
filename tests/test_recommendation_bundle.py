@@ -5,6 +5,7 @@ from backend.app.api.routes.recommendations import (
     _enrich_candidates_with_selection,
     _extract_recommendation_candidate_sets,
     _optional_uuid,
+    _with_frontend_candidate_fields,
 )
 
 
@@ -71,9 +72,15 @@ def test_extract_candidate_sets_infers_legacy_rerank_message() -> None:
 def test_enrich_candidates_with_active_selection() -> None:
     candidates = [
         {
+            "mode": "buyer_to_target",
             "seller_target_id": SELLER_TARGET_ID,
+            "seller_target_name": "浙江医疗器械标的",
             "buyer_intent_id": BUYER_INTENT_ID,
+            "buyer_intent_name": "医药健康并表需求",
+            "buyer_name": None,
             "score": 75,
+            "recommendation_level": "recommended",
+            "evidence_json": {"score": {"final_score": 75}},
         }
     ]
     selected_items = [
@@ -91,6 +98,38 @@ def test_enrich_candidates_with_active_selection() -> None:
     assert enriched[0]["selected"] is True
     assert enriched[0]["selected_item_id"] == UUID("00000000-0000-0000-0000-000000000004")
     assert enriched[0]["selected_at"] == "2026-06-02 10:02:00+00"
+    assert enriched[0]["display_title"] == "浙江医疗器械标的"
+    assert enriched[0]["card_json"]["action_label"] == "add_target_to_recommendation"
+
+
+def test_frontend_candidate_fields_include_score_breakdown() -> None:
+    candidate = _with_frontend_candidate_fields(
+        {
+            "mode": "buyer_to_target",
+            "seller_target_id": SELLER_TARGET_ID,
+            "seller_target_name": "浙江医疗器械标的",
+            "buyer_intent_id": BUYER_INTENT_ID,
+            "buyer_intent_name": "医药健康并表需求",
+            "score": 90,
+            "recommendation_level": "strong",
+            "selected": False,
+            "evidence_json": {
+                "score": {
+                    "rule_score": 80,
+                    "embedding_similarity": 0.8,
+                    "rerank_score": 0.9,
+                    "final_score": 90,
+                }
+            },
+        }
+    )
+
+    assert candidate["primary_entity_type"] == "seller_target"
+    assert candidate["display_title"] == "浙江医疗器械标的"
+    assert candidate["display_subtitle"] == "医药健康并表需求"
+    assert candidate["score_breakdown"]["rule_score"] == 80
+    assert "embedding" in candidate["display_badges"]
+    assert "reranked" in candidate["display_badges"]
 
 
 def test_rerank_status_without_job_is_not_requested() -> None:

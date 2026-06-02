@@ -33,6 +33,8 @@ Returns allowed provider types, auth types, output modes, template engines, and 
 - `GET /api/v1/model-config/nodes/{node_id}`
 - `POST /api/v1/model-config/nodes/{node_id}/test`
 - `POST /api/v1/model-config/nodes/{node_id}/test-jobs`
+- `GET /api/v1/model-config/nodes/{node_id}/test-jobs`
+- `GET /api/v1/model-config/node-test-jobs/{job_id}`
 - `PATCH /api/v1/model-config/nodes/{node_id}`
 - `DELETE /api/v1/model-config/nodes/{node_id}`
 
@@ -61,6 +63,13 @@ Current important nodes:
 - Rerank nodes call the rerank endpoint and return sorted relevance results.
 - OCR nodes return `skipped` in v0.1 because OCR execution is not implemented yet.
 - Raw API keys are never accepted or returned; tests use `api_key_secret_ref` to read server-side environment variables. Because production keys are configured on worker services, frontend should call `test-jobs`, then poll `/api/v1/background-jobs/{job_id}` and `/api/v1/background-jobs/{job_id}/traces`.
+
+For Settings UI, prefer these model-config scoped record endpoints:
+
+- `GET /nodes/{node_id}/test-jobs`: recent tests for one node.
+- `GET /node-test-jobs/{job_id}`: one test record with job summary and traces.
+
+Each record includes `job_status`, `queue_name`, `node_name`, `node_type`, `provider_name`, `model_name`, `latency_ms`, `output_json`, `error_code`, `error_message`, `latest_trace`, and `traces`.
 
 ## Prompt endpoints
 

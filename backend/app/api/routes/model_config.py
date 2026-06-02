@@ -212,6 +212,48 @@ class NodeTestJobOut(BaseModel):
     node_type: str
 
 
+class NodeTestTraceOut(BaseModel):
+    id: UUID
+    trace_type: str
+    node_name: str
+    status: str
+    provider_name: str | None
+    model_name: str | None
+    latency_ms: int | None
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    total_tokens: int | None
+    error_code: str | None
+    error_message: str | None
+    parsed_output_json: dict[str, Any] | None
+    schema_validation_json: dict[str, Any]
+    started_at: str
+    finished_at: str | None
+    metadata_json: dict[str, Any]
+
+
+class NodeTestRecordOut(BaseModel):
+    job_id: UUID
+    job_status: str
+    queue_name: str
+    node_id: UUID
+    node_name: str
+    node_type: str
+    provider_name: str | None
+    model_name: str | None
+    latency_ms: int | None
+    output_json: dict[str, Any] | None
+    error_code: str | None
+    error_message: str | None
+    created_at: str
+    started_at: str | None
+    finished_at: str | None
+    result_json: dict[str, Any]
+    metadata_json: dict[str, Any]
+    latest_trace: NodeTestTraceOut | None
+    traces: list[NodeTestTraceOut] = Field(default_factory=list)
+
+
 @router.get("/capabilities")
 def get_model_config_capabilities() -> dict[str, Any]:
     return {
@@ -464,6 +506,24 @@ def create_node_test_job(
     }
 
 
+@router.get("/nodes/{node_id}/test-jobs", response_model=list[NodeTestRecordOut])
+def list_node_test_jobs(
+    node_id: UUID,
+    db: Session = Depends(get_db),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
+    _get_node_or_404(db, node_id)
+    jobs = _list_node_test_job_rows(db, node_id=node_id, limit=limit, offset=offset)
+    return [_node_test_record_from_job(db, job) for job in jobs]
+
+
+@router.get("/node-test-jobs/{job_id}", response_model=NodeTestRecordOut)
+def get_node_test_job(job_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+    job = _get_node_test_job_or_404(db, job_id)
+    return _node_test_record_from_job(db, job)
+
+
 @router.patch("/nodes/{node_id}", response_model=NodeOut)
 def update_node(node_id: UUID, payload: NodeUpdate, db: Session = Depends(get_db)) -> dict[str, Any]:
     current = _get_node_or_404(db, node_id)
@@ -613,6 +673,112 @@ def _queue_name_for_node_test(node_type: str) -> str:
         status_code=status.HTTP_400_BAD_REQUEST,
         detail=f"Node test job is not supported for node_type={node_type}.",
     )
+
+
+def _list_node_test_job_rows(
+    db: Session,
+    *,
+    node_id: UUID,
+    limit: int,
+    offset: int,
+) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            f"""
+            select {_node_test_job_select_columns()}
+            from background_job job
+            join model_node_config node on node.id = job.entity_id
+            left join model_provider_config provider on provider.id = node.provider_config_id
+            where job.team_id = :team_id
+              and job.workspace_id = :workspace_id
+              and job.job_type = 'model_node_test'
+              and job.entity_type = 'model_node_config'
+              and job.entity_id = :node_id
+            order by job.created_at desc
+            limit :limit offset :offset
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "node_id": node_id,
+            "limit": limit,
+            "offset": offset,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _get_node_test_job_or_404(db: Session, job_id: UUID) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            f"""
+            select {_node_test_job_select_columns()}
+            from background_job job
+            join model_node_config node on node.id = job.entity_id
+            left join model_provider_config provider on provider.id = node.provider_config_id
+            where job.id = :job_id
+              and job.team_id = :team_id
+              and job.workspace_id = :workspace_id
+              and job.job_type = 'model_node_test'
+              and job.entity_type = 'model_node_config'
+            """
+        ),
+        {
+            "job_id": job_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model node test job not found.")
+    return dict(row)
+
+
+def _node_test_record_from_job(db: Session, job: dict[str, Any]) -> dict[str, Any]:
+    traces = _list_node_test_traces(db, job_id=job["job_id"])
+    latest_trace = traces[0] if traces else None
+    result_json = job.get("result_json") if isinstance(job.get("result_json"), dict) else {}
+    output_json = result_json.get("output_json") if isinstance(result_json.get("output_json"), dict) else None
+    latency_ms = result_json.get("latency_ms") if result_json.get("latency_ms") is not None else None
+    if latest_trace is not None and latency_ms is None:
+        latency_ms = latest_trace.get("latency_ms")
+    return {
+        **job,
+        "latency_ms": latency_ms,
+        "output_json": output_json,
+        "latest_trace": latest_trace,
+        "traces": traces,
+    }
+
+
+def _list_node_test_traces(db: Session, *, job_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              id, trace_type, node_name, status,
+              provider_name, model_name, latency_ms,
+              prompt_tokens, completion_tokens, total_tokens,
+              error_code, error_message, parsed_output_json,
+              schema_validation_json, started_at::text as started_at,
+              finished_at::text as finished_at, metadata_json
+            from ai_trace
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and job_id = :job_id
+              and metadata_json ->> 'source' in ('model_node_test', 'model_config_node_test')
+            order by started_at desc
+            limit 20
+            """
+        ),
+        {
+            "job_id": job_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
 
 
 def _clear_default_provider(db: Session) -> None:
@@ -1090,6 +1256,26 @@ def _node_select_columns() -> str:
       node.embedding_dimension, node.is_active, node.is_default,
       node.created_at::text as created_at, node.updated_at::text as updated_at,
       node.metadata_json
+    """
+
+
+def _node_test_job_select_columns() -> str:
+    return """
+      job.id as job_id,
+      job.status as job_status,
+      job.queue_name,
+      node.id as node_id,
+      node.node_name,
+      node.node_type,
+      provider.provider_name,
+      node.model_name,
+      job.result_json,
+      job.error_code,
+      job.error_message,
+      job.created_at::text as created_at,
+      job.started_at::text as started_at,
+      job.finished_at::text as finished_at,
+      job.metadata_json
     """
 
 

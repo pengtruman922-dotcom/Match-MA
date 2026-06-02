@@ -1,5 +1,6 @@
 ﻿from backend.app.api.routes.model_config import (
     _default_chat_test_messages,
+    _node_test_record_from_job,
     _queue_name_for_node_test,
     get_model_config_capabilities,
 )
@@ -32,3 +33,22 @@ def test_queue_name_for_node_test_routes_by_node_type() -> None:
     assert _queue_name_for_node_test("embedding") == "embedding"
     assert _queue_name_for_node_test("rerank") == "rerank"
     assert _queue_name_for_node_test("ocr") == "ocr"
+
+
+def test_node_test_record_prefers_result_latency_and_output(monkeypatch) -> None:
+    def fake_traces(_db, *, job_id):
+        assert str(job_id) == "00000000-0000-0000-0000-000000000001"
+        return [{"latency_ms": 200, "status": "succeeded"}]
+
+    monkeypatch.setattr("backend.app.api.routes.model_config._list_node_test_traces", fake_traces)
+    record = _node_test_record_from_job(
+        None,
+        {
+            "job_id": "00000000-0000-0000-0000-000000000001",
+            "result_json": {"latency_ms": 100, "output_json": {"ok": True}},
+        },
+    )
+
+    assert record["latency_ms"] == 100
+    assert record["output_json"] == {"ok": True}
+    assert record["latest_trace"] == {"latency_ms": 200, "status": "succeeded"}

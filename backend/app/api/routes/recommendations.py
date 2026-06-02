@@ -50,6 +50,16 @@ class RecommendationCandidateOut(BaseModel):
     selected: bool = False
     selected_item_id: UUID | None = None
     selected_at: str | None = None
+    primary_entity_type: str | None = None
+    primary_entity_id: UUID | None = None
+    counterpart_entity_type: str | None = None
+    counterpart_entity_id: UUID | None = None
+    display_title: str | None = None
+    display_subtitle: str | None = None
+    display_meta: list[str] = Field(default_factory=list)
+    display_badges: list[str] = Field(default_factory=list)
+    score_breakdown: dict[str, Any] = Field(default_factory=dict)
+    card_json: dict[str, Any] = Field(default_factory=dict)
 
 
 class RecommendationCandidateResponse(BaseModel):
@@ -218,6 +228,7 @@ def generate_recommendation_candidates(
             "buyer_party_id": None,
             "seller_target_id": payload.seller_target_id,
         }
+    candidates = _enrich_candidates_for_frontend(candidates)
 
     session_id = None
     rerank_job_id = None
@@ -1034,8 +1045,107 @@ def _enrich_candidates_with_selection(
             item["selected"] = False
             item["selected_item_id"] = None
             item["selected_at"] = None
-        enriched.append(item)
+        enriched.append(_with_frontend_candidate_fields(item))
     return enriched
+
+
+def _enrich_candidates_for_frontend(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_with_frontend_candidate_fields(candidate) for candidate in candidates]
+
+
+def _with_frontend_candidate_fields(candidate: dict[str, Any]) -> dict[str, Any]:
+    item = dict(candidate)
+    mode = str(item.get("mode") or "")
+    if mode == "buyer_to_target":
+        primary_entity_type = "seller_target"
+        primary_entity_id = item.get("seller_target_id")
+        counterpart_entity_type = "buyer_intent"
+        counterpart_entity_id = item.get("buyer_intent_id")
+        title = item.get("seller_target_name")
+        subtitle = _join_display_parts([item.get("buyer_intent_name"), item.get("buyer_name")])
+        action_label = "add_target_to_recommendation"
+    else:
+        primary_entity_type = "buyer_intent"
+        primary_entity_id = item.get("buyer_intent_id")
+        counterpart_entity_type = "seller_target"
+        counterpart_entity_id = item.get("seller_target_id")
+        title = item.get("buyer_intent_name") or item.get("buyer_name")
+        subtitle = _join_display_parts([item.get("buyer_name"), item.get("seller_target_name")])
+        action_label = "add_buyer_to_recommendation"
+
+    score_breakdown = _candidate_score_breakdown(item)
+    display_meta = _candidate_display_meta(item, score_breakdown)
+    display_badges = _candidate_display_badges(item, score_breakdown)
+    item.update(
+        {
+            "primary_entity_type": primary_entity_type,
+            "primary_entity_id": primary_entity_id,
+            "counterpart_entity_type": counterpart_entity_type,
+            "counterpart_entity_id": counterpart_entity_id,
+            "display_title": title,
+            "display_subtitle": subtitle,
+            "display_meta": display_meta,
+            "display_badges": display_badges,
+            "score_breakdown": score_breakdown,
+            "card_json": {
+                "title": title,
+                "subtitle": subtitle,
+                "meta": display_meta,
+                "badges": display_badges,
+                "score": item.get("score"),
+                "recommendation_level": item.get("recommendation_level"),
+                "selected": bool(item.get("selected")),
+                "action_label": action_label,
+                "primary_entity_type": primary_entity_type,
+                "primary_entity_id": str(primary_entity_id) if primary_entity_id else None,
+                "counterpart_entity_type": counterpart_entity_type,
+                "counterpart_entity_id": str(counterpart_entity_id) if counterpart_entity_id else None,
+            },
+        }
+    )
+    return item
+
+
+def _candidate_score_breakdown(candidate: dict[str, Any]) -> dict[str, Any]:
+    evidence_json = candidate.get("evidence_json") if isinstance(candidate.get("evidence_json"), dict) else {}
+    score_json = evidence_json.get("score") if isinstance(evidence_json.get("score"), dict) else {}
+    return {
+        "rule_score": score_json.get("rule_score"),
+        "embedding_similarity": score_json.get("embedding_similarity"),
+        "embedding_boost": score_json.get("embedding_boost"),
+        "rerank_score": score_json.get("rerank_score"),
+        "rerank_boost": score_json.get("rerank_boost"),
+        "rerank_model": score_json.get("rerank_model"),
+        "final_score": score_json.get("final_score") or candidate.get("score"),
+    }
+
+
+def _candidate_display_meta(candidate: dict[str, Any], score_breakdown: dict[str, Any]) -> list[str]:
+    meta = [
+        f"score {candidate.get('score')}",
+        f"level {candidate.get('recommendation_level')}",
+    ]
+    if score_breakdown.get("embedding_similarity") is not None:
+        meta.append(f"embedding {float(score_breakdown['embedding_similarity']):.2f}")
+    if score_breakdown.get("rerank_score") is not None:
+        meta.append(f"rerank {float(score_breakdown['rerank_score']):.2f}")
+    return [item for item in meta if item and not item.endswith("None")]
+
+
+def _candidate_display_badges(candidate: dict[str, Any], score_breakdown: dict[str, Any]) -> list[str]:
+    badges = [str(candidate.get("recommendation_level") or "unrated")]
+    if score_breakdown.get("embedding_similarity") is not None:
+        badges.append("embedding")
+    if score_breakdown.get("rerank_score") is not None:
+        badges.append("reranked")
+    if candidate.get("selected"):
+        badges.append("selected")
+    return badges
+
+
+def _join_display_parts(parts: list[Any]) -> str | None:
+    values = [str(part) for part in parts if part]
+    return " / ".join(values) if values else None
 
 
 def _candidate_pair_key(item: dict[str, Any]) -> tuple[str | None, str | None]:

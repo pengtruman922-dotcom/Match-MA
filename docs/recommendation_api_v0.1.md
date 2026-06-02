@@ -39,6 +39,16 @@ The bundle endpoint returns:
 
 Frontend recommendation cards should render `latest_candidates` and poll this bundle until `rerank_status.status` is `succeeded`, `failed`, or `cancelled`.
 
+Each candidate includes frontend-ready card fields:
+
+- `primary_entity_type`, `primary_entity_id`: the entity represented by the card.
+- `counterpart_entity_type`, `counterpart_entity_id`: the anchor/counterparty entity for this recommendation.
+- `display_title`, `display_subtitle`: direct card title/subtitle.
+- `display_meta`, `display_badges`: compact labels for score, level, embedding, rerank, and selection state.
+- `score_breakdown`: rule score, embedding similarity/boost, rerank score/boost/model, and final score.
+- `card_json`: compact one-object summary for quick rendering.
+- `selected`, `selected_item_id`, `selected_at`: active recommendation-list selection state.
+
 ### Selected items
 
 - `POST /api/v1/recommendations/sessions/{session_id}/selected-items`
