@@ -202,9 +202,9 @@ function ActionCard({ action, onUpdated }: { action: ExtractedAction; onUpdated:
             )}
             {(action.review_status === 'accepted' || action.review_status === 'auto_accepted') &&
               !action.applied_at &&
-              action.action_type === 'seller_fact_update' && (
+              isSupportedApplyType(action.action_type) && (
               <button onClick={handleApply} disabled={applying} className="text-xs px-2 py-1 bg-brand-50 text-brand-700 border border-brand-200 hover:bg-brand-100 flex items-center gap-1 disabled:opacity-50">
-                <Play className="w-3 h-3" /> {applying ? '应用中...' : '应用到标的'}
+                <Play className="w-3 h-3" /> {applying ? '应用中...' : applyButtonLabel(action.action_type)}
               </button>
             )}
             {action.applied_at && (
@@ -217,6 +217,26 @@ function ActionCard({ action, onUpdated }: { action: ExtractedAction; onUpdated:
       )}
     </div>
   );
+}
+
+
+function isSupportedApplyType(type: string): boolean {
+  return [
+    'seller_fact_update',
+    'buyer_intent_update',
+    'buyer_seller_relation_update',
+    'buyer_intent_target_exclusion',
+  ].includes(type);
+}
+
+function applyButtonLabel(type: string): string {
+  const labels: Record<string, string> = {
+    seller_fact_update: '应用到标的',
+    buyer_intent_update: '应用到买家意向',
+    buyer_seller_relation_update: '应用到关系/跟进',
+    buyer_intent_target_exclusion: '应用排除规则',
+  };
+  return labels[type] || '应用';
 }
 
 function ProcessingBadge({ status }: { status: string }) {
@@ -237,8 +257,10 @@ function ActionTypeBadge({ type }: { type: string }) {
     seller_event: '标的事件',
     buyer_seller_relation_update: '关系更新',
     buyer_intent_target_exclusion: '排除标的',
-    buyer_intent_update_suggestion: '意向建议',
+    buyer_intent_update: '买家意向更新',
+    buyer_level_blacklist_suggestion: '买家级黑名单建议',
     internal_note: '内部备注',
+    unresolved_item: '待澄清事项',
   };
   return <span className="text-xs px-1.5 py-0.5 bg-gray-100 text-gray-700 font-medium">{labels[type] || type}</span>;
 }

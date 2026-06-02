@@ -167,6 +167,7 @@ export interface BusinessUpdateCreate {
   raw_text: string;
   input_type?: string;
   bound_seller_target_ids?: string[];
+  bound_buyer_party_ids?: string[];
   bound_buyer_intent_ids?: string[];
   metadata_json?: Record<string, unknown>;
 }

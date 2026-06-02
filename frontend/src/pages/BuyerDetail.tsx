@@ -5,6 +5,7 @@ import {
   Sparkles,
   MessageSquarePlus,
   Clock,
+  Search as SearchIcon,
   X,
   Building2,
   MapPin,
@@ -13,8 +14,8 @@ import {
   CheckCircle2,
   Ban,
 } from 'lucide-react';
-import { buyerParties, updateLogs } from '../lib/api';
-import type { BuyerParty, BuyerIntent, UpdateLog } from '../types/api';
+import { buyerParties, relations, updateLogs } from '../lib/api';
+import type { BuyerParty, BuyerIntent, BuyerSellerRelation, RelationEvent, UpdateLog } from '../types/api';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
 
 type Tab = 'info' | 'intents' | 'relations' | 'history';
@@ -26,6 +27,8 @@ export default function BuyerDetail() {
   const [party, setParty] = useState<BuyerParty | null>(null);
   const [intents, setIntents] = useState<BuyerIntent[]>([]);
   const [logs, setLogs] = useState<UpdateLog[]>([]);
+  const [relationItems, setRelationItems] = useState<BuyerSellerRelation[]>([]);
+  const [relationEvents, setRelationEvents] = useState<RelationEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<Tab>('intents');
   const [selectedIntentId, setSelectedIntentId] = useState<string | null>(
@@ -40,11 +43,15 @@ export default function BuyerDetail() {
       buyerParties.get(id),
       buyerParties.intents(id),
       updateLogs.list({ entity_type: 'buyer_party', entity_id: id }),
+      relations.list({ buyer_party_id: id, limit: 50 }),
+      relations.listEvents({ buyer_party_id: id, limit: 50 }),
     ])
-      .then(([p, i, l]) => {
+      .then(([p, i, l, nextRelations, nextEvents]) => {
         setParty(p);
         setIntents(i);
         setLogs(l);
+        setRelationItems(nextRelations);
+        setRelationEvents(nextEvents);
       })
       .catch(() => navigate('/buyers'))
       .finally(() => setLoading(false));
@@ -125,7 +132,13 @@ export default function BuyerDetail() {
                   onSelect={setSelectedIntentId}
                 />
               )}
-              {activeTab === 'relations' && <RelationsTab />}
+              {activeTab === 'relations' && (
+                <RelationsTab
+                  relationItems={relationItems}
+                  relationEvents={relationEvents}
+                  selectedIntentId={selectedIntentId}
+                />
+              )}
               {activeTab === 'history' && <HistoryTab logs={logs} />}
             </div>
           </div>
@@ -145,6 +158,10 @@ export default function BuyerDetail() {
       <BusinessUpdateDrawer
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
+        defaultBuyerPartyId={party.id}
+        defaultBuyerPartyName={party.buyer_name}
+        defaultIntentId={selectedIntent?.id}
+        defaultIntentName={selectedIntent?.intent_name}
       />
     </div>
   );
@@ -321,13 +338,114 @@ function CondRow({ icon: Icon, label, value }: { icon: typeof Building2; label: 
   );
 }
 
-function RelationsTab() {
+function RelationsTab({
+  relationItems,
+  relationEvents,
+  selectedIntentId,
+}: {
+  relationItems: BuyerSellerRelation[];
+  relationEvents: RelationEvent[];
+  selectedIntentId: string | null;
+}) {
+  const filteredRelations = selectedIntentId
+    ? relationItems.filter((relation) => relation.buyer_intent_id === selectedIntentId)
+    : relationItems;
+  const filteredEvents = selectedIntentId
+    ? relationEvents.filter((event) => event.buyer_intent_id === selectedIntentId)
+    : relationEvents;
+
+  if (filteredRelations.length === 0 && filteredEvents.length === 0) {
+    return (
+      <div className="text-center py-10">
+        <SearchIcon className="w-8 h-8 text-gray-300 mx-auto mb-2" />
+        <p className="text-sm text-gray-400">暂无关系与跟进记录</p>
+        <p className="text-xs text-gray-400 mt-1">被推荐的标的和后续沟通会自动沉淀在这里</p>
+      </div>
+    );
+  }
+
   return (
-    <div className="text-center py-10">
-      <p className="text-sm text-gray-400">关系与跟进记录后端开发中</p>
-      <p className="text-xs text-gray-400 mt-1">推荐记录将在此展示</p>
+    <div className="space-y-5">
+      {filteredRelations.length > 0 && (
+        <section>
+          <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">当前关系</h4>
+          <div className="space-y-2">
+            {filteredRelations.map((relation) => (
+              <div key={relation.id} className="border border-gray-100 px-3 py-2.5">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-gray-900">{relation.seller_target_name || '未命名标的'}</p>
+                    <p className="text-xs text-gray-500 mt-0.5">{relation.buyer_intent_name || '未命名意向'}</p>
+                    {relation.last_event_summary && (
+                      <p className="text-xs text-gray-500 mt-1 line-clamp-2">{relation.last_event_summary}</p>
+                    )}
+                  </div>
+                  <span className="text-xs px-2 py-0.5 bg-gray-100 text-gray-700 shrink-0">
+                    {relationStatusLabel(relation.status)}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {filteredEvents.length > 0 && (
+        <section>
+          <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">跟进时间线</h4>
+          <div className="space-y-2">
+            {filteredEvents.map((event) => (
+              <div key={event.id} className="flex items-start gap-3 py-2 border-b border-gray-50 last:border-0">
+                <span className="text-xs text-gray-400 font-mono w-32 shrink-0">
+                  {new Date(event.event_time).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                </span>
+                <div className="min-w-0">
+                  <p className="text-sm text-gray-800">{event.seller_target_name || '未命名标的'}</p>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {eventTypeLabel(event.event_type)}{event.title ? ` · ${event.title}` : ''}
+                  </p>
+                  {event.content && <p className="text-xs text-gray-600 mt-1">{event.content}</p>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   );
+}
+
+function relationStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    recommended: '已推荐',
+    interested: '感兴趣',
+    in_discussion: '沟通中',
+    due_diligence: '尽调中',
+    agreement: '协议阶段',
+    deal_closed: '已成交',
+    not_interested: '不感兴趣',
+    paused: '暂停',
+    lost: '失败',
+  };
+  return labels[status] || status;
+}
+
+function eventTypeLabel(type: string): string {
+  const labels: Record<string, string> = {
+    recommended: '推荐',
+    buyer_interested: '买家感兴趣',
+    buyer_not_interested: '买家不感兴趣',
+    meeting: '会议',
+    call: '电话',
+    material_sent: '发送资料',
+    due_diligence_started: '启动尽调',
+    agreement_discussion: '协议沟通',
+    deal_closed: '成交',
+    paused: '暂停',
+    internal_note: '内部备注',
+    other: '其他',
+  };
+  return labels[type] || type;
 }
 
 function HistoryTab({ logs }: { logs: UpdateLog[] }) {

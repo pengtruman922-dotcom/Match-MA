@@ -8,6 +8,8 @@ interface Props {
   onSuccess?: (id: string) => void;
   defaultTargetId?: string;
   defaultTargetName?: string;
+  defaultBuyerPartyId?: string;
+  defaultBuyerPartyName?: string;
   defaultIntentId?: string;
   defaultIntentName?: string;
 }
@@ -18,21 +20,26 @@ export default function BusinessUpdateDrawer({
   onSuccess,
   defaultTargetId,
   defaultTargetName,
+  defaultBuyerPartyId,
+  defaultBuyerPartyName,
   defaultIntentId,
   defaultIntentName,
 }: Props) {
   const [rawText, setRawText] = useState('');
   const [boundTargetIds, setBoundTargetIds] = useState<string[]>([]);
+  const [boundBuyerPartyIds, setBoundBuyerPartyIds] = useState<string[]>([]);
   const [boundIntentIds, setBoundIntentIds] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
+    setRawText('');
     setBoundTargetIds(defaultTargetId ? [defaultTargetId] : []);
+    setBoundBuyerPartyIds(defaultBuyerPartyId ? [defaultBuyerPartyId] : []);
     setBoundIntentIds(defaultIntentId ? [defaultIntentId] : []);
     setError(null);
-  }, [defaultIntentId, defaultTargetId, open]);
+  }, [defaultBuyerPartyId, defaultIntentId, defaultTargetId, open]);
 
   if (!open) return null;
 
@@ -45,11 +52,13 @@ export default function BusinessUpdateDrawer({
         raw_text: rawText.trim(),
         input_type: 'text',
         bound_seller_target_ids: boundTargetIds.length > 0 ? boundTargetIds : undefined,
+        bound_buyer_party_ids: boundBuyerPartyIds.length > 0 ? boundBuyerPartyIds : undefined,
         bound_buyer_intent_ids: boundIntentIds.length > 0 ? boundIntentIds : undefined,
       });
       await businessUpdates.process(result.id);
       setRawText('');
       setBoundTargetIds([]);
+      setBoundBuyerPartyIds([]);
       setBoundIntentIds([]);
       onSuccess?.(result.id);
       onClose();
@@ -79,7 +88,12 @@ export default function BusinessUpdateDrawer({
             <label className="block text-sm font-medium text-gray-700 mb-2">上下文</label>
             <div className="space-y-2 border border-gray-100 bg-gray-50 px-3 py-2.5">
               <ContextRow label="标的" value={defaultTargetName || '未选择'} muted={!defaultTargetName} />
-              <ContextRow label="买家/意向" value={defaultIntentName || '未选择'} muted={!defaultIntentName} />
+              <ContextRow
+                label="买家"
+                value={defaultBuyerPartyName || '未选择'}
+                muted={!defaultBuyerPartyName}
+              />
+              <ContextRow label="意向" value={defaultIntentName || '未选择'} muted={!defaultIntentName} />
             </div>
           </div>
 
