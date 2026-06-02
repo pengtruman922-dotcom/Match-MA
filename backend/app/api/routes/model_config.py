@@ -254,6 +254,18 @@ class NodeTestRecordOut(BaseModel):
     traces: list[NodeTestTraceOut] = Field(default_factory=list)
 
 
+class ModelConfigSettingsPageOut(BaseModel):
+    capabilities: dict[str, Any]
+    providers: list[ProviderOut]
+    nodes: list[dict[str, Any]]
+    prompts: list[PromptOut]
+    prompts_by_node_name: dict[str, list[PromptOut]]
+    node_test_records: dict[str, list[NodeTestRecordOut]]
+    overview: dict[str, Any]
+    quick_actions: list[dict[str, Any]]
+    security_note: str
+
+
 @router.get("/capabilities")
 def get_model_config_capabilities() -> dict[str, Any]:
     return {
@@ -277,26 +289,54 @@ def get_model_config_capabilities() -> dict[str, Any]:
     }
 
 
+@router.get("/settings-page", response_model=ModelConfigSettingsPageOut)
+def get_model_config_settings_page(
+    db: Session = Depends(get_db),
+    include_inactive: bool = Query(default=True),
+    tests_per_node: int = Query(default=3, ge=0, le=10),
+) -> dict[str, Any]:
+    providers = _list_provider_rows(db, include_inactive=include_inactive)
+    nodes = _list_node_rows(db, node_type=None, include_inactive=include_inactive)
+    prompts = _list_prompt_rows(db, node_name=None, include_inactive=include_inactive)
+    prompts_by_node_name = _group_prompts_by_node_name(prompts)
+    node_test_records = _node_test_records_for_settings_page(
+        db,
+        nodes=nodes,
+        tests_per_node=tests_per_node,
+    )
+    enriched_nodes = [
+        _settings_node_summary(
+            node,
+            prompts=prompts_by_node_name.get(str(node["node_name"]), []),
+            test_records=node_test_records.get(str(node["id"]), []),
+        )
+        for node in nodes
+    ]
+    overview = _settings_page_overview(
+        providers=providers,
+        nodes=enriched_nodes,
+        prompts=prompts,
+        node_test_records=node_test_records,
+    )
+    return {
+        "capabilities": get_model_config_capabilities(),
+        "providers": providers,
+        "nodes": enriched_nodes,
+        "prompts": prompts,
+        "prompts_by_node_name": prompts_by_node_name,
+        "node_test_records": node_test_records,
+        "overview": overview,
+        "quick_actions": _settings_page_quick_actions(overview),
+        "security_note": "Never store or display raw API keys; configure secrets in Railway and store only api_key_secret_ref.",
+    }
+
+
 @router.get("/providers", response_model=list[ProviderOut])
 def list_providers(
     db: Session = Depends(get_db),
     include_inactive: bool = Query(default=False),
 ) -> list[dict[str, Any]]:
-    where = ["team_id = :team_id", "workspace_id = :workspace_id"]
-    if not include_inactive:
-        where.append("is_active = true")
-    rows = db.execute(
-        text(
-            f"""
-            select {_provider_select_columns()}
-            from model_provider_config
-            where {' and '.join(where)}
-            order by is_default desc, provider_name asc
-            """
-        ),
-        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
-    ).mappings().all()
-    return [dict(row) for row in rows]
+    return _list_provider_rows(db, include_inactive=include_inactive)
 
 
 @router.post("/providers", response_model=ProviderOut, status_code=status.HTTP_201_CREATED)
@@ -383,27 +423,7 @@ def list_nodes(
     node_type: str | None = None,
     include_inactive: bool = Query(default=False),
 ) -> list[dict[str, Any]]:
-    where = ["node.team_id = :team_id", "node.workspace_id = :workspace_id"]
-    params: dict[str, Any] = {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID}
-    if node_type:
-        _validate_choice("node_type", node_type, NODE_TYPES)
-        where.append("node.node_type = :node_type")
-        params["node_type"] = node_type
-    if not include_inactive:
-        where.append("node.is_active = true")
-    rows = db.execute(
-        text(
-            f"""
-            select {_node_select_columns()}
-            from model_node_config node
-            left join model_provider_config provider on provider.id = node.provider_config_id
-            where {' and '.join(where)}
-            order by node.node_name asc, node.is_default desc, node.created_at desc
-            """
-        ),
-        params,
-    ).mappings().all()
-    return [_with_prompt_capability(row) for row in rows]
+    return _list_node_rows(db, node_type=node_type, include_inactive=include_inactive)
 
 
 @router.post("/nodes", response_model=NodeOut, status_code=status.HTTP_201_CREATED)
@@ -553,30 +573,7 @@ def list_prompts(
     node_name: str | None = None,
     include_inactive: bool = Query(default=False),
 ) -> list[dict[str, Any]]:
-    where = ["prompt.team_id = :team_id", "prompt.workspace_id = :workspace_id"]
-    params: dict[str, Any] = {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID}
-    if node_name:
-        where.append("prompt.node_name = :node_name")
-        params["node_name"] = node_name
-    if not include_inactive:
-        where.append("prompt.is_active = true")
-    rows = db.execute(
-        text(
-            f"""
-            select {_prompt_select_columns()}
-            from prompt_template prompt
-            left join model_node_config node
-              on node.team_id = prompt.team_id
-             and node.workspace_id = prompt.workspace_id
-             and node.node_name = prompt.node_name
-             and node.is_default = true
-            where {' and '.join(where)}
-            order by prompt.node_name asc, prompt.is_default desc, prompt.created_at desc
-            """
-        ),
-        params,
-    ).mappings().all()
-    return [_with_prompt_capability(row) for row in rows]
+    return _list_prompt_rows(db, node_name=node_name, include_inactive=include_inactive)
 
 
 @router.post("/prompts", response_model=PromptOut, status_code=status.HTTP_201_CREATED)
@@ -637,6 +634,224 @@ def deactivate_prompt(prompt_id: UUID, db: Session = Depends(get_db)) -> dict[st
     row = _update_prompt_row(db, prompt_id=prompt_id, data={"is_active": False, "is_default": False})
     db.commit()
     return row
+
+
+def _list_provider_rows(db: Session, *, include_inactive: bool) -> list[dict[str, Any]]:
+    where = ["team_id = :team_id", "workspace_id = :workspace_id"]
+    if not include_inactive:
+        where.append("is_active = true")
+    rows = db.execute(
+        text(
+            f"""
+            select {_provider_select_columns()}
+            from model_provider_config
+            where {' and '.join(where)}
+            order by is_default desc, provider_name asc
+            """
+        ),
+        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _list_node_rows(
+    db: Session,
+    *,
+    node_type: str | None,
+    include_inactive: bool,
+) -> list[dict[str, Any]]:
+    where = ["node.team_id = :team_id", "node.workspace_id = :workspace_id"]
+    params: dict[str, Any] = {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID}
+    if node_type:
+        _validate_choice("node_type", node_type, NODE_TYPES)
+        where.append("node.node_type = :node_type")
+        params["node_type"] = node_type
+    if not include_inactive:
+        where.append("node.is_active = true")
+    rows = db.execute(
+        text(
+            f"""
+            select {_node_select_columns()}
+            from model_node_config node
+            left join model_provider_config provider on provider.id = node.provider_config_id
+            where {' and '.join(where)}
+            order by node.node_name asc, node.is_default desc, node.created_at desc
+            """
+        ),
+        params,
+    ).mappings().all()
+    return [_with_prompt_capability(row) for row in rows]
+
+
+def _list_prompt_rows(
+    db: Session,
+    *,
+    node_name: str | None,
+    include_inactive: bool,
+) -> list[dict[str, Any]]:
+    where = ["prompt.team_id = :team_id", "prompt.workspace_id = :workspace_id"]
+    params: dict[str, Any] = {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID}
+    if node_name:
+        where.append("prompt.node_name = :node_name")
+        params["node_name"] = node_name
+    if not include_inactive:
+        where.append("prompt.is_active = true")
+    rows = db.execute(
+        text(
+            f"""
+            select {_prompt_select_columns()}
+            from prompt_template prompt
+            left join model_node_config node
+              on node.team_id = prompt.team_id
+             and node.workspace_id = prompt.workspace_id
+             and node.node_name = prompt.node_name
+             and node.is_default = true
+            where {' and '.join(where)}
+            order by prompt.node_name asc, prompt.is_default desc, prompt.created_at desc
+            """
+        ),
+        params,
+    ).mappings().all()
+    return [_with_prompt_capability(row) for row in rows]
+
+
+def _group_prompts_by_node_name(prompts: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for prompt in prompts:
+        grouped.setdefault(str(prompt["node_name"]), []).append(prompt)
+    return grouped
+
+
+def _node_test_records_for_settings_page(
+    db: Session,
+    *,
+    nodes: list[dict[str, Any]],
+    tests_per_node: int,
+) -> dict[str, list[dict[str, Any]]]:
+    records: dict[str, list[dict[str, Any]]] = {}
+    for node in nodes:
+        node_id = node["id"]
+        if tests_per_node <= 0:
+            records[str(node_id)] = []
+            continue
+        jobs = _list_node_test_job_rows(db, node_id=node_id, limit=tests_per_node, offset=0)
+        records[str(node_id)] = [_node_test_record_from_job(db, job) for job in jobs]
+    return records
+
+
+def _settings_node_summary(
+    node: dict[str, Any],
+    *,
+    prompts: list[dict[str, Any]],
+    test_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    default_prompt = next((prompt for prompt in prompts if prompt.get("is_default")), None)
+    latest_test = test_records[0] if test_records else None
+    latest_test_status = latest_test.get("job_status") if latest_test else None
+    return {
+        **node,
+        "test_supported": node.get("node_type") in TESTABLE_NODE_TYPES,
+        "queue_name": _safe_queue_name_for_node_type(str(node.get("node_type"))),
+        "prompt_versions": [
+            {
+                "id": prompt.get("id"),
+                "version": prompt.get("version"),
+                "name": prompt.get("name"),
+                "is_active": prompt.get("is_active"),
+                "is_default": prompt.get("is_default"),
+                "updated_at": prompt.get("updated_at"),
+            }
+            for prompt in prompts
+        ],
+        "default_prompt": default_prompt,
+        "latest_test": latest_test,
+        "test_summary": {
+            "latest_status": latest_test_status,
+            "latest_latency_ms": latest_test.get("latency_ms") if latest_test else None,
+            "latest_error_code": latest_test.get("error_code") if latest_test else None,
+            "latest_error_message": latest_test.get("error_message") if latest_test else None,
+            "record_count": len(test_records),
+        },
+        "ui": {
+            "show_prompt_editor": bool(node.get("prompt_editable")),
+            "show_embedding_dimension": node.get("node_type") == "embedding",
+            "show_sampling_options": node.get("node_type") in CHAT_NODE_TYPES,
+            "show_test_button": node.get("node_type") in TESTABLE_NODE_TYPES,
+            "key_ref_field_label": "api_key_secret_ref",
+        },
+    }
+
+
+def _settings_page_overview(
+    *,
+    providers: list[dict[str, Any]],
+    nodes: list[dict[str, Any]],
+    prompts: list[dict[str, Any]],
+    node_test_records: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    test_records = [record for records in node_test_records.values() for record in records]
+    failed_test_count = len([record for record in test_records if record.get("job_status") == "failed"])
+    running_test_count = len(
+        [
+            record
+            for record in test_records
+            if record.get("job_status") in {"queued", "running", "retry_waiting"}
+        ]
+    )
+    return {
+        "provider_count": len(providers),
+        "active_provider_count": len([provider for provider in providers if provider.get("is_active")]),
+        "node_count": len(nodes),
+        "active_node_count": len([node for node in nodes if node.get("is_active")]),
+        "prompt_count": len(prompts),
+        "prompt_editable_node_count": len([node for node in nodes if node.get("prompt_editable")]),
+        "testable_node_count": len([node for node in nodes if node.get("test_supported")]),
+        "latest_test_count": len(test_records),
+        "failed_test_count": failed_test_count,
+        "running_test_count": running_test_count,
+        "node_type_counts": _count_by_key(nodes, "node_type"),
+    }
+
+
+def _settings_page_quick_actions(overview: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "key": "create_provider",
+            "label": "新增模型供应商",
+            "action": "open_provider_editor",
+            "route": None,
+            "badge_count": None,
+        },
+        {
+            "key": "create_node",
+            "label": "新增模型节点",
+            "action": "open_node_editor",
+            "route": None,
+            "badge_count": None,
+        },
+        {
+            "key": "review_failed_tests",
+            "label": "查看失败测试",
+            "action": "filter_failed_node_tests",
+            "route": None,
+            "badge_count": overview.get("failed_test_count"),
+        },
+    ]
+
+
+def _safe_queue_name_for_node_type(node_type: str) -> str | None:
+    try:
+        return _queue_name_for_node_test(node_type)
+    except HTTPException:
+        return None
+
+
+def _count_by_key(items: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        value = str(item.get(key) or "unknown")
+        counts[value] = counts.get(value, 0) + 1
+    return counts
 
 
 def _validate_choice(field_name: str, value: str | None, allowed: set[str]) -> None:

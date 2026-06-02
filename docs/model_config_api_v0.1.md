@@ -16,6 +16,26 @@ This document records the backend API for the future Settings -> Model and Promp
 
 Returns allowed provider types, auth types, output modes, template engines, and per-node-type edit capabilities.
 
+## Settings page aggregate
+
+`GET /api/v1/model-config/settings-page`
+
+This is the recommended entry for the frontend Settings -> Model and Prompt page. It returns one payload with:
+
+- `capabilities`: provider/node/prompt capability metadata.
+- `providers`: provider configs; includes `api_key_secret_ref`, never raw keys.
+- `nodes`: enriched node configs with prompt edit flags, test support, queue name, prompt versions, default prompt, latest test summary, and UI hints.
+- `prompts`: flat prompt list.
+- `prompts_by_node_name`: prompt versions grouped by node name.
+- `node_test_records`: recent worker test jobs grouped by node id.
+- `overview`: provider/node/prompt/test counts and node type counts.
+- `quick_actions`: suggested frontend actions for creating providers/nodes and filtering failed tests.
+
+Query parameters:
+
+- `include_inactive`: default `true`; settings page should show inactive records so admins can reactivate or inspect them.
+- `tests_per_node`: default `3`, max `10`; set to `0` to skip recent test records.
+
 ## Provider endpoints
 
 - `GET /api/v1/model-config/providers`
