@@ -285,6 +285,23 @@ def _job_traces(db: Session, job_id: UUID) -> list[dict[str, Any]]:
 
 
 def _related_jobs(db: Session, job: dict[str, Any]) -> list[dict[str, Any]]:
+    clauses = ["parent_job_id = :job_id"]
+    params: dict[str, Any] = {
+        "job_id": job["id"],
+        "team_id": DEFAULT_TEAM_ID,
+        "workspace_id": DEFAULT_WORKSPACE_ID,
+    }
+    if job.get("correlation_id") is not None:
+        clauses.append("correlation_id = :correlation_id")
+        params["correlation_id"] = job["correlation_id"]
+    if job.get("parent_job_id") is not None:
+        clauses.append("parent_job_id = :parent_job_id")
+        params["parent_job_id"] = job["parent_job_id"]
+    if job.get("entity_type") is not None and job.get("entity_id") is not None:
+        clauses.append("(entity_type = :entity_type and entity_id = :entity_id)")
+        params["entity_type"] = job["entity_type"]
+        params["entity_id"] = job["entity_id"]
+
     rows = db.execute(
         text(
             f"""
@@ -294,32 +311,13 @@ def _related_jobs(db: Session, job: dict[str, Any]) -> list[dict[str, Any]]:
               and workspace_id = :workspace_id
               and id <> :job_id
               and (
-                (cast(:correlation_id as uuid) is not null and correlation_id = cast(:correlation_id as uuid))
-                or parent_job_id = :job_id
-                or (
-                  cast(:parent_job_id as uuid) is not null
-                  and parent_job_id = cast(:parent_job_id as uuid)
-                )
-                or (
-                  :entity_type is not null
-                  and cast(:entity_id as uuid) is not null
-                  and entity_type = :entity_type
-                  and entity_id = cast(:entity_id as uuid)
-                )
+                {" or ".join(clauses)}
               )
             order by created_at desc
             limit 50
             """
         ),
-        {
-            "job_id": job["id"],
-            "correlation_id": job.get("correlation_id"),
-            "parent_job_id": job.get("parent_job_id"),
-            "entity_type": job.get("entity_type"),
-            "entity_id": job.get("entity_id"),
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
+        params,
     ).mappings().all()
     return [dict(row) for row in rows]
 
