@@ -160,6 +160,13 @@ class RecommendationReportOut(BaseModel):
     metadata_json: dict[str, Any]
 
 
+class RecommendationReportJobOut(BaseModel):
+    report: RecommendationReportOut
+    job_id: UUID
+    job_status: str
+    queue_name: str
+
+
 class RecommendationSessionBundleOut(BaseModel):
     session: RecommendationSessionOut
     messages: list[RecommendationMessageOut]
@@ -633,6 +640,90 @@ def create_recommendation_report(
     _refresh_session_report_count(db, session_id)
     db.commit()
     return report
+
+
+@router.post(
+    "/sessions/{session_id}/reports/jobs",
+    response_model=RecommendationReportJobOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_recommendation_report_job(
+    session_id: UUID,
+    payload: RecommendationReportCreate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    session = _get_recommendation_session_or_404(db, session_id)
+    selected_items = _list_selected_items_for_report(
+        db,
+        session_id=session_id,
+        selected_item_ids=payload.selected_item_ids,
+    )
+    if not selected_items:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one active selected item is required to generate a recommendation report.",
+        )
+
+    report_type = payload.report_type or _default_report_type(session["mode"])
+    title = payload.title or _default_report_title(session, selected_items, report_type)
+    fallback_markdown = _build_recommendation_report_markdown(
+        session=session,
+        selected_items=selected_items,
+        report_type=report_type,
+        title=title,
+    )
+    selected_item_ids_json = [str(item["id"]) for item in selected_items]
+    report_row = db.execute(
+        _report_returning_statement(
+            """
+            insert into recommendation_report (
+              team_id, workspace_id, session_id, report_type, selected_item_ids_json,
+              title, markdown_content, file_format, status,
+              generated_by_model, prompt_version, created_by, metadata_json
+            )
+            values (
+              :team_id, :workspace_id, :session_id, :report_type, :selected_item_ids_json,
+              :title, :markdown_content, 'markdown', 'generating',
+              'rule_template_v0', null, :created_by, :metadata_json
+            )
+            """
+        ).bindparams(
+            bindparam("selected_item_ids_json", type_=JSONB),
+            bindparam("metadata_json", type_=JSONB),
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "session_id": session_id,
+            "report_type": report_type,
+            "selected_item_ids_json": selected_item_ids_json,
+            "title": title,
+            "markdown_content": fallback_markdown,
+            "created_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_json": {
+                **payload.metadata_json,
+                "source": "recommendation_report_job_api",
+                "selected_item_count": len(selected_items),
+                "generation_mode": "queued",
+                "fallback_ready": True,
+            },
+        },
+    ).mappings().one()
+    report = dict(report_row)
+    job_id = _enqueue_recommendation_report_job(
+        db,
+        report_id=report["id"],
+        session_id=session_id,
+        selected_item_ids=selected_item_ids_json,
+    )
+    _refresh_session_report_count(db, session_id)
+    db.commit()
+    return {
+        "report": report,
+        "job_id": job_id,
+        "job_status": "queued",
+        "queue_name": "llm",
+    }
 
 
 @router.get("/sessions/{session_id}/reports", response_model=list[RecommendationReportOut])
@@ -1708,6 +1799,49 @@ def _refresh_session_selected_count(db: Session, session_id: UUID) -> None:
         ),
         {"session_id": session_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
     )
+
+
+def _enqueue_recommendation_report_job(
+    db: Session,
+    *,
+    report_id: UUID,
+    session_id: UUID,
+    selected_item_ids: list[str],
+) -> UUID:
+    row = db.execute(
+        text(
+            """
+            insert into background_job (
+              team_id, workspace_id, job_type, priority, queue_name,
+              entity_type, entity_id, idempotency_key, payload_json,
+              max_attempts, created_by, metadata_json
+            )
+            values (
+              :team_id, :workspace_id, 'recommendation_report_generate', 120, 'llm',
+              'recommendation_report', :report_id, :idempotency_key, :payload_json,
+              1, :created_by, :metadata_json
+            )
+            returning id
+            """
+        ).bindparams(
+            bindparam("payload_json", type_=JSONB),
+            bindparam("metadata_json", type_=JSONB),
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "report_id": report_id,
+            "idempotency_key": f"recommendation_report_generate:{report_id}",
+            "payload_json": {
+                "report_id": str(report_id),
+                "session_id": str(session_id),
+                "selected_item_ids": selected_item_ids,
+            },
+            "created_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_json": {"source": "recommendation_report_job_api"},
+        },
+    ).mappings().one()
+    return row["id"]
 
 
 def _refresh_session_report_count(db: Session, session_id: UUID) -> None:

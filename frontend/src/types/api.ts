@@ -495,6 +495,13 @@ export interface RecommendationReport {
   metadata_json: Record<string, unknown>;
 }
 
+export interface RecommendationReportJob {
+  report: RecommendationReport;
+  job_id: string;
+  job_status: string;
+  queue_name: string;
+}
+
 export interface RecommendationSessionBundle {
   session: RecommendationSession;
   messages: RecommendationMessage[];

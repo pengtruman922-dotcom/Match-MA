@@ -294,6 +294,8 @@ def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
         return _handle_buyer_intent_search_doc_rebuild(db, job)
     if job.job_type == "embedding_generate":
         return _handle_embedding_generate(db, job)
+    if job.job_type == "recommendation_report_generate":
+        return _handle_recommendation_report_generate(db, job)
 
     return {
         "handled": False,
@@ -596,6 +598,187 @@ def _handle_embedding_generate(db: Session, job: JobClaim) -> dict[str, object]:
     }
 
 
+def _handle_recommendation_report_generate(db: Session, job: JobClaim) -> dict[str, object]:
+    report_id = _resolve_entity_id(job, expected_entity_type="recommendation_report")
+    if report_id is None:
+        raise ValueError("recommendation_report_generate job requires a recommendation_report entity_id.")
+
+    report = _get_recommendation_report_for_job(db, report_id)
+    session = _get_recommendation_session_for_report(db, report["session_id"])
+    selected_items = _get_selected_items_for_recommendation_report(
+        db,
+        session_id=report["session_id"],
+        selected_item_ids=report["selected_item_ids_json"],
+    )
+    context_json = _build_recommendation_report_context(
+        report=report,
+        session=session,
+        selected_items=selected_items,
+    )
+    fallback_markdown = report.get("markdown_content") or _build_fallback_recommendation_report_markdown(
+        session=session,
+        selected_items=selected_items,
+        title=report.get("title") or "推荐报告",
+        report_type=report["report_type"],
+    )
+
+    try:
+        node_config = _get_default_node_config(db, "recommendation_report_writer")
+    except Exception as exc:
+        _update_recommendation_report_generated(
+            db,
+            report_id=report_id,
+            markdown_content=fallback_markdown,
+            generated_by_model="rule_template_v0",
+            prompt_version=None,
+            metadata_patch={
+                "generation_mode": "fallback",
+                "fallback_reason": "model_node_config_error",
+                "fallback_error": str(exc),
+                "job_id": str(job.id),
+            },
+        )
+        _insert_recommendation_report_message(
+            db,
+            report_id=report_id,
+            session_id=report["session_id"],
+            markdown_content=fallback_markdown,
+            job_id=job.id,
+            generation_mode="fallback",
+        )
+        return {
+            "handled": True,
+            "job_type": job.job_type,
+            "report_id": str(report_id),
+            "generation_mode": "fallback",
+            "fallback_reason": "model_node_config_error",
+        }
+
+    prompt_messages = _render_prompt_messages(node_config, {"context_json": context_json})
+    input_json = {
+        "report_id": str(report_id),
+        "session_id": str(report["session_id"]),
+        "report_type": report["report_type"],
+        "selected_item_count": len(selected_items),
+        "context_json": context_json,
+    }
+    started = time.perf_counter()
+    try:
+        llm_result = call_openai_compatible_chat(
+            base_url=node_config["base_url"],
+            api_key_secret_ref=node_config["api_key_secret_ref"],
+            model_name=node_config["model_name"],
+            messages=prompt_messages,
+            temperature=node_config["temperature"],
+            top_p=node_config["top_p"],
+            max_tokens=node_config["max_tokens"],
+            timeout_seconds=node_config["timeout_seconds"] or 180,
+            response_format=node_config["response_format"],
+        )
+    except LlmCallError as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        _insert_recommendation_report_llm_trace(
+            db,
+            job=job,
+            report_id=report_id,
+            node_config=node_config,
+            status="failed",
+            input_json=input_json,
+            prompt_messages_json=prompt_messages,
+            raw_output_text=None,
+            parsed_output_json=None,
+            schema_validation_json={"valid": False, "error": str(exc)},
+            latency_ms=latency_ms,
+            error_code="llm_call_failed",
+            error_message=str(exc),
+        )
+        _update_recommendation_report_generated(
+            db,
+            report_id=report_id,
+            markdown_content=fallback_markdown,
+            generated_by_model="rule_template_v0",
+            prompt_version=node_config["prompt_version"],
+            metadata_patch={
+                "generation_mode": "fallback",
+                "fallback_reason": "llm_call_failed",
+                "fallback_error": str(exc),
+                "job_id": str(job.id),
+            },
+        )
+        _insert_recommendation_report_message(
+            db,
+            report_id=report_id,
+            session_id=report["session_id"],
+            markdown_content=fallback_markdown,
+            job_id=job.id,
+            generation_mode="fallback",
+        )
+        return {
+            "handled": True,
+            "job_type": job.job_type,
+            "report_id": str(report_id),
+            "generation_mode": "fallback",
+            "fallback_reason": "llm_call_failed",
+            "trace_created": True,
+        }
+
+    markdown_content = (llm_result.raw_output_text or "").strip()
+    if not markdown_content:
+        markdown_content = fallback_markdown
+        generation_mode = "fallback"
+        schema_validation_json = {"valid": False, "error": "LLM output is empty."}
+    else:
+        generation_mode = "llm"
+        schema_validation_json = {"valid": True, "output_mode": "markdown"}
+
+    _insert_recommendation_report_llm_trace(
+        db,
+        job=job,
+        report_id=report_id,
+        node_config=node_config,
+        status="succeeded" if generation_mode == "llm" else "failed",
+        input_json=input_json,
+        prompt_messages_json=prompt_messages,
+        raw_output_text=llm_result.raw_output_text,
+        parsed_output_json=llm_result.parsed_output_json,
+        schema_validation_json=schema_validation_json,
+        latency_ms=llm_result.latency_ms,
+        prompt_tokens=llm_result.prompt_tokens,
+        completion_tokens=llm_result.completion_tokens,
+        total_tokens=llm_result.total_tokens,
+    )
+    _update_recommendation_report_generated(
+        db,
+        report_id=report_id,
+        markdown_content=markdown_content,
+        generated_by_model=node_config["model_name"] if generation_mode == "llm" else "rule_template_v0",
+        prompt_version=node_config["prompt_version"],
+        metadata_patch={
+            "generation_mode": generation_mode,
+            "job_id": str(job.id),
+            "trace_created": True,
+            "llm_model_name": node_config["model_name"],
+        },
+    )
+    _insert_recommendation_report_message(
+        db,
+        report_id=report_id,
+        session_id=report["session_id"],
+        markdown_content=markdown_content,
+        job_id=job.id,
+        generation_mode=generation_mode,
+    )
+    return {
+        "handled": True,
+        "job_type": job.job_type,
+        "report_id": str(report_id),
+        "generation_mode": generation_mode,
+        "model_name": node_config["model_name"],
+        "prompt_version": node_config["prompt_version"],
+        "trace_created": True,
+    }
+
+
 def _resolve_business_update_id(job: JobClaim) -> UUID | None:
     if job.entity_type == "business_update" and job.entity_id is not None:
         return job.entity_id
@@ -639,6 +822,168 @@ def _get_business_update(db: Session, business_update_id: UUID) -> dict[str, Any
     if row is None:
         raise ValueError(f"Business update not found: {business_update_id}")
     return dict(row)
+
+
+def _get_recommendation_report_for_job(db: Session, report_id: UUID) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            """
+            select
+              id, session_id, report_type, selected_item_ids_json, title,
+              markdown_content, status, generated_by_model, prompt_version,
+              metadata_json
+            from recommendation_report
+            where id = :report_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {
+            "report_id": report_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        raise ValueError(f"Recommendation report not found: {report_id}")
+    return dict(row)
+
+
+def _get_recommendation_session_for_report(db: Session, session_id: UUID) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            """
+            select
+              id, mode, buyer_intent_id, buyer_party_id, seller_target_id,
+              anonymous_input_snapshot, initial_condition_snapshot_json,
+              latest_condition_snapshot_json, selected_count, report_count,
+              metadata_json, created_at::text as created_at, updated_at::text as updated_at
+            from recommendation_session
+            where id = :session_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {
+            "session_id": session_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        raise ValueError(f"Recommendation session not found: {session_id}")
+    return _json_safe_dict(row)
+
+
+def _get_selected_items_for_recommendation_report(
+    db: Session,
+    *,
+    session_id: UUID,
+    selected_item_ids: list[Any] | None,
+) -> list[dict[str, Any]]:
+    where = [
+        "ri.session_id = :session_id",
+        "ri.team_id = :team_id",
+        "ri.workspace_id = :workspace_id",
+        "ri.canceled_at is null",
+    ]
+    params: dict[str, Any] = {
+        "session_id": session_id,
+        "team_id": DEFAULT_TEAM_ID,
+        "workspace_id": DEFAULT_WORKSPACE_ID,
+    }
+    if selected_item_ids:
+        where.append("ri.id in :selected_item_ids")
+        params["selected_item_ids"] = tuple(UUID(str(item)) for item in selected_item_ids)
+
+    statement = text(
+        f"""
+        select
+          ri.id, ri.session_id, ri.mode,
+          ri.seller_target_id, st.target_name as seller_target_name,
+          ri.buyer_intent_id, bi.intent_name as buyer_intent_name,
+          ri.buyer_party_id, bp.buyer_name,
+          ri.rank_at_selection, ri.recommendation_level, ri.match_summary,
+          ri.risk_summary, ri.gap_summary, ri.reason_snapshot,
+          ri.evidence_snapshot_json, ri.selected_at::text as selected_at,
+          ri.metadata_json
+        from recommendation_selected_item ri
+        left join seller_target st on st.id = ri.seller_target_id
+        left join buyer_intent bi on bi.id = ri.buyer_intent_id
+        left join buyer_party bp on bp.id = ri.buyer_party_id
+        where {' and '.join(where)}
+        order by ri.rank_at_selection nulls last, ri.selected_at asc
+        """
+    )
+    if selected_item_ids:
+        statement = statement.bindparams(bindparam("selected_item_ids", expanding=True))
+
+    rows = db.execute(statement, params).mappings().all()
+    return [_json_safe_dict(row) for row in rows]
+
+
+def _build_recommendation_report_context(
+    *,
+    report: dict[str, Any],
+    session: dict[str, Any],
+    selected_items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "report": {
+            "id": report["id"],
+            "report_type": report["report_type"],
+            "title": report.get("title"),
+        },
+        "session": session,
+        "selected_items": selected_items,
+        "instructions": {
+            "source_policy": "Use only provided context. State missing information as review needed.",
+            "output_format": "Chinese Markdown",
+            "generation_boundary": "This is a draft report for human review, not an external final document.",
+        },
+    }
+
+
+def _build_fallback_recommendation_report_markdown(
+    *,
+    session: dict[str, Any],
+    selected_items: list[dict[str, Any]],
+    title: str,
+    report_type: str,
+) -> str:
+    lines = [
+        f"# {title}",
+        "",
+        f"- 推荐会话：`{session['id']}`",
+        f"- 推荐方向：{session['mode']}",
+        f"- 报告类型：{report_type}",
+        f"- 已采用候选数：{len(selected_items)}",
+        "",
+        "## 推荐清单",
+        "",
+    ]
+    for index, item in enumerate(selected_items, start=1):
+        lines.extend(
+            [
+                f"### {index}. {item.get('seller_target_name') or '未绑定标的'} / {item.get('buyer_intent_name') or '未绑定意向'}",
+                "",
+                f"- 买家：{item.get('buyer_name') or '未绑定买家'}",
+                f"- 推荐等级：{item.get('recommendation_level') or '未评级'}",
+                f"- 匹配理由：{item.get('match_summary') or '暂无'}",
+                f"- 信息缺口：{item.get('gap_summary') or '暂无'}",
+                f"- 风险提示：{item.get('risk_summary') or '暂无'}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## 后续建议",
+            "",
+            "- 由业务人员复核推荐理由、信息缺口和风险提示。",
+            "- 复核通过后，在买家-标的关系中继续记录推荐、反馈、尽调和终止等进展。",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _get_default_node_config(db: Session, node_name: str) -> dict[str, Any]:
@@ -1438,6 +1783,175 @@ def _insert_llm_trace(
             "total_tokens": total_tokens,
             "created_by": DEFAULT_ADMIN_USER_ID,
             "metadata_json": {"source": "business_update_extractor"},
+        },
+    )
+
+
+def _update_recommendation_report_generated(
+    db: Session,
+    *,
+    report_id: UUID,
+    markdown_content: str,
+    generated_by_model: str,
+    prompt_version: str | None,
+    metadata_patch: dict[str, Any],
+) -> None:
+    db.execute(
+        text(
+            """
+            update recommendation_report
+            set markdown_content = :markdown_content,
+                status = 'generated',
+                generated_by_model = :generated_by_model,
+                prompt_version = :prompt_version,
+                metadata_json = metadata_json || :metadata_patch
+            where id = :report_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+        {
+            "report_id": report_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "markdown_content": markdown_content,
+            "generated_by_model": generated_by_model,
+            "prompt_version": prompt_version,
+            "metadata_patch": metadata_patch,
+        },
+    )
+
+
+def _insert_recommendation_report_message(
+    db: Session,
+    *,
+    report_id: UUID,
+    session_id: UUID,
+    markdown_content: str,
+    job_id: UUID,
+    generation_mode: str,
+) -> None:
+    db.execute(
+        text(
+            """
+            insert into recommendation_message (
+              team_id, workspace_id, session_id, role, content,
+              content_type, metadata_json, created_by
+            )
+            values (
+              :team_id, :workspace_id, :session_id, 'assistant', :content,
+              'markdown', :metadata_json, :created_by
+            )
+            """
+        ).bindparams(bindparam("metadata_json", type_=JSONB)),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "session_id": session_id,
+            "content": markdown_content,
+            "metadata_json": {
+                "report_id": str(report_id),
+                "job_id": str(job_id),
+                "message_type": "recommendation_report",
+                "generation_mode": generation_mode,
+            },
+            "created_by": DEFAULT_ADMIN_USER_ID,
+        },
+    )
+    db.execute(
+        text(
+            """
+            update recommendation_session
+            set updated_at = now()
+            where id = :session_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {"session_id": session_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    )
+
+
+def _insert_recommendation_report_llm_trace(
+    db: Session,
+    *,
+    job: JobClaim,
+    report_id: UUID,
+    node_config: dict[str, Any],
+    status: str,
+    input_json: dict[str, Any],
+    prompt_messages_json: list[dict[str, str]],
+    raw_output_text: str | None,
+    parsed_output_json: dict[str, Any] | None,
+    schema_validation_json: dict[str, Any],
+    latency_ms: int,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    db.execute(
+        text(
+            """
+            insert into ai_trace (
+              team_id, workspace_id, trace_type, node_name,
+              job_id, correlation_id, entity_type, entity_id,
+              provider_config_id, node_config_id, prompt_template_id,
+              provider_name, model_name, prompt_version, status,
+              input_json, prompt_messages_json, raw_output_text,
+              parsed_output_json, output_schema_json, schema_validation_json,
+              error_code, error_message, latency_ms, prompt_tokens,
+              completion_tokens, total_tokens, created_by, finished_at,
+              metadata_json
+            )
+            values (
+              :team_id, :workspace_id, 'llm', 'recommendation_report_writer',
+              :job_id, :correlation_id, 'recommendation_report', :report_id,
+              :provider_config_id, :node_config_id, :prompt_template_id,
+              :provider_name, :model_name, :prompt_version, :status,
+              :input_json, :prompt_messages_json, :raw_output_text,
+              :parsed_output_json, :output_schema_json, :schema_validation_json,
+              :error_code, :error_message, :latency_ms, :prompt_tokens,
+              :completion_tokens, :total_tokens, :created_by, now(),
+              :metadata_json
+            )
+            """
+        ).bindparams(
+            bindparam("input_json", type_=JSONB),
+            bindparam("prompt_messages_json", type_=JSONB),
+            bindparam("parsed_output_json", type_=JSONB),
+            bindparam("output_schema_json", type_=JSONB),
+            bindparam("schema_validation_json", type_=JSONB),
+            bindparam("metadata_json", type_=JSONB),
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "job_id": job.id,
+            "correlation_id": job.correlation_id,
+            "report_id": report_id,
+            "provider_config_id": node_config["provider_config_id"],
+            "node_config_id": node_config["node_config_id"],
+            "prompt_template_id": node_config["prompt_template_id"],
+            "provider_name": node_config["provider_name"],
+            "model_name": node_config["model_name"],
+            "prompt_version": node_config["prompt_version"],
+            "status": status,
+            "input_json": input_json,
+            "prompt_messages_json": prompt_messages_json,
+            "raw_output_text": raw_output_text,
+            "parsed_output_json": parsed_output_json,
+            "output_schema_json": node_config["output_schema_json"] or {},
+            "schema_validation_json": schema_validation_json,
+            "error_code": error_code,
+            "error_message": error_message,
+            "latency_ms": latency_ms,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "created_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_json": {"source": "recommendation_report_generate"},
         },
     )
 

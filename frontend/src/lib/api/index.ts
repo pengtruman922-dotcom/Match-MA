@@ -22,6 +22,7 @@ import type {
   RecommendationMessageCreate,
   RecommendationReport,
   RecommendationReportCreate,
+  RecommendationReportJob,
   RecommendationSelectedItem,
   RecommendationSelectedItemCreate,
   RecommendationSessionDebugBundle,
@@ -215,6 +216,11 @@ export const recommendations = {
     }),
   createReport: (sessionId: string, data: RecommendationReportCreate = {}) =>
     apiRequest<RecommendationReport>(`/recommendations/sessions/${sessionId}/reports`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  createReportJob: (sessionId: string, data: RecommendationReportCreate = {}) =>
+    apiRequest<RecommendationReportJob>(`/recommendations/sessions/${sessionId}/reports/jobs`, {
       method: 'POST',
       body: JSON.stringify(data),
     }),

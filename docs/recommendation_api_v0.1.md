@@ -39,10 +39,11 @@ Selecting the same active buyer-intent / seller-target pair within the same sess
 ### Reports
 
 - `POST /api/v1/recommendations/sessions/{session_id}/reports`
+- `POST /api/v1/recommendations/sessions/{session_id}/reports/jobs`
 - `GET /api/v1/recommendations/sessions/{session_id}/reports`
 - `GET /api/v1/recommendations/reports/{report_id}`
 
-Report v0 uses selected items to create a Markdown report and inserts it as an assistant message in the session history.
+Report v0 supports two modes: the synchronous endpoint creates a deterministic Markdown report; the job endpoint creates a `generating` report and queues `recommendation_report_generate` on the `llm` queue. The worker calls `recommendation_report_writer` and falls back to the deterministic template if the LLM call fails.
 
 ## Debug Mode
 
@@ -53,5 +54,4 @@ Returns the session, messages, selected items, reports, relations, relation even
 ## Next Backlog
 
 - Add LLM reranker node and prompt.
-- Add LLM report writer job that updates `recommendation_report` from `generating` to `generated`.
 - Add frontend session drawer/history and report preview/download.
