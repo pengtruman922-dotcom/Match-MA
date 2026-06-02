@@ -500,8 +500,11 @@ def _entity_relations(db: Session, entity_type: str, entity_id: UUID) -> list[di
             select
               rel.id, rel.buyer_intent_id, bi.intent_name as buyer_intent_name,
               rel.buyer_party_id, bp.buyer_name, rel.seller_target_id,
-              st.target_name as seller_target_name, rel.status, rel.stage,
-              rel.last_event_at::text as last_event_at, rel.created_at::text as created_at,
+              st.target_name as seller_target_name, rel.status, rel.status_reason,
+              rel.first_recommended_at::text as first_recommended_at,
+              rel.last_contact_at::text as last_contact_at,
+              rel.last_event_at::text as last_event_at,
+              rel.last_event_summary, rel.created_at::text as created_at,
               rel.updated_at::text as updated_at, rel.metadata_json
             from buyer_seller_relation rel
             left join buyer_intent bi on bi.id = rel.buyer_intent_id
@@ -531,8 +534,9 @@ def _entity_relation_events(db: Session, entity_type: str, entity_id: UUID) -> l
             f"""
             select
               id, relation_id, buyer_intent_id, buyer_party_id, seller_target_id,
-              event_type, event_status, event_date, note, source_type, source_id,
-              created_by, created_at::text as created_at, metadata_json
+              event_type, event_time::text as event_time, title, content, next_step,
+              source_type, source_id, created_by, created_at::text as created_at,
+              metadata_json
             from relation_event event
             where team_id = :team_id
               and workspace_id = :workspace_id
