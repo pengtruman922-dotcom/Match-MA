@@ -22,8 +22,10 @@ Creates an optional `recommendation_session`, stores user/tool messages, and ret
 - `GET /api/v1/recommendations/sessions`
 - `GET /api/v1/recommendations/page`
 - `GET /api/v1/recommendations/sessions/{session_id}`
+- `GET /api/v1/recommendations/sessions/recent`
 - `GET /api/v1/recommendations/sessions/{session_id}/status`
 - `GET /api/v1/recommendations/sessions/{session_id}/bundle`
+- `GET /api/v1/recommendations/sessions/{session_id}/page-state`
 - `GET /api/v1/recommendations/sessions/{session_id}/messages`
 - `POST /api/v1/recommendations/sessions/{session_id}/messages`
 
@@ -36,6 +38,15 @@ The page endpoint is the recommended frontend entry for the recommendation page.
 - `overview`: counts for recent sessions, running sessions, failed sessions, generated reports, and active selected items.
 - `quick_actions`: frontend action metadata for "buyer to target", "target to buyer", and "view running".
 - `polling_hint`: when true, poll `GET /api/v1/recommendations/sessions/{session_id}/status`.
+
+
+`GET /api/v1/recommendations/sessions/recent` returns recent session summaries using the same summary shape as `/page`. It supports `mode`, `status=all|running|failed|generated|selected|idle`, `limit`, `offset`, and `preview_limit`, so the frontend can render a session drawer/history list without manually filtering `/sessions` plus status calls.
+
+`GET /api/v1/recommendations/sessions/{session_id}/page-state` is the recommended single-session polling aggregate for the recommendation page. It returns:
+
+- `summary`: the same object as `/sessions/{id}/status`, including rerank/report/selected state.
+- `bundle`: the same object as `/sessions/{id}/bundle`, including initial/reranked/latest candidates, messages, selected items, reports, and debug counters.
+- `polling_hint`: whether to keep polling, the next endpoint, status/bundle endpoints, and watched rerank/report jobs.
 
 The session status endpoint is the recommended polling target after candidate generation, rerank retry, selected item changes, and report generation jobs. It returns the same summary shape as one item in `recent_sessions`, including:
 

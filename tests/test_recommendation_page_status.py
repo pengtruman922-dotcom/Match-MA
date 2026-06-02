@@ -3,9 +3,11 @@ from uuid import UUID
 from backend.app.api.routes.recommendations import (
     _build_recommendation_report_status,
     _build_recommendation_selected_status,
+    _filter_recommendation_session_summaries,
     _recommendation_page_overview,
     _recommendation_session_display,
     _recommendation_session_is_processing,
+    _recommendation_session_polling_hint,
 )
 
 SESSION_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -99,3 +101,34 @@ def test_processing_and_page_overview_counts() -> None:
     assert overview["failed_session_count"] == 1
     assert overview["generated_report_count"] == 1
     assert overview["active_selected_item_count"] == 3
+
+
+def test_recommendation_session_filter_and_polling_hint() -> None:
+    running_summary = {
+        "rerank_status": {"status": "running", "job_id": str(SELLER_TARGET_ID), "queue_name": "rerank"},
+        "report_status": {"status": "not_requested", "latest_job": None},
+        "selected_status": {"active_count": 0},
+    }
+    generated_summary = {
+        "rerank_status": {"status": "succeeded", "job_id": None},
+        "report_status": {"status": "generated", "latest_job": None},
+        "selected_status": {"active_count": 1},
+    }
+    failed_summary = {
+        "rerank_status": {"status": "failed", "job_id": None},
+        "report_status": {"status": "not_requested", "latest_job": None},
+        "selected_status": {"active_count": 0},
+    }
+
+    summaries = [running_summary, generated_summary, failed_summary]
+
+    assert _filter_recommendation_session_summaries(summaries, "running") == [running_summary]
+    assert _filter_recommendation_session_summaries(summaries, "generated") == [generated_summary]
+    assert _filter_recommendation_session_summaries(summaries, "selected") == [generated_summary]
+    assert _filter_recommendation_session_summaries(summaries, "failed") == [failed_summary]
+
+    hint = _recommendation_session_polling_hint(running_summary, session_id=SESSION_ID)
+
+    assert hint["enabled"] is True
+    assert hint["endpoint"] == f"/api/v1/recommendations/sessions/{SESSION_ID}/page-state"
+    assert hint["watched_jobs"][0]["job_type"] == "recommendation_rerank"

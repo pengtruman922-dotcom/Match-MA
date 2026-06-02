@@ -241,6 +241,12 @@ class RecommendationSessionStatusOut(BaseModel):
     debug_ref: dict[str, Any]
 
 
+class RecommendationSessionPageStateOut(BaseModel):
+    summary: RecommendationSessionSummaryOut
+    bundle: RecommendationSessionBundleOut
+    polling_hint: dict[str, Any]
+
+
 @router.post("/candidates", response_model=RecommendationCandidateResponse)
 def generate_recommendation_candidates(
     payload: RecommendationCandidateRequest,
@@ -404,6 +410,28 @@ def list_recommendation_sessions(
     return [dict(row) for row in rows]
 
 
+@router.get("/sessions/recent", response_model=list[RecommendationSessionSummaryOut])
+def list_recent_recommendation_session_summaries(
+    db: Session = Depends(get_db),
+    mode: str | None = None,
+    status_filter: str | None = Query(
+        default=None,
+        alias="status",
+        pattern="^(all|running|failed|generated|selected|idle)$",
+    ),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=500),
+    preview_limit: int = Query(default=3, ge=0, le=20),
+) -> list[dict[str, Any]]:
+    scan_limit = min(200, max(limit + offset, limit * 4))
+    rows = _list_recommendation_session_overview_rows(db, mode=mode, limit=scan_limit, offset=0)
+    summaries = [
+        _build_recommendation_session_summary(db, session=row, preview_limit=preview_limit) for row in rows
+    ]
+    filtered = _filter_recommendation_session_summaries(summaries, status_filter)
+    return filtered[offset : offset + limit]
+
+
 @router.get("/page", response_model=RecommendationPageOut)
 def get_recommendation_page(
     db: Session = Depends(get_db),
@@ -461,6 +489,40 @@ def get_recommendation_session_bundle(
     session_id: UUID,
     db: Session = Depends(get_db),
     include_canceled: bool = Query(default=True),
+) -> dict[str, Any]:
+    return _build_recommendation_session_bundle(
+        db,
+        session_id=session_id,
+        include_canceled=include_canceled,
+    )
+
+
+@router.get("/sessions/{session_id}/page-state", response_model=RecommendationSessionPageStateOut)
+def get_recommendation_session_page_state(
+    session_id: UUID,
+    db: Session = Depends(get_db),
+    include_canceled: bool = Query(default=True),
+    preview_limit: int = Query(default=8, ge=0, le=50),
+) -> dict[str, Any]:
+    session = _get_recommendation_session_overview_or_404(db, session_id)
+    summary = _build_recommendation_session_summary(db, session=session, preview_limit=preview_limit)
+    bundle = _build_recommendation_session_bundle(
+        db,
+        session_id=session_id,
+        include_canceled=include_canceled,
+    )
+    return {
+        "summary": summary,
+        "bundle": bundle,
+        "polling_hint": _recommendation_session_polling_hint(summary, session_id=session_id),
+    }
+
+
+def _build_recommendation_session_bundle(
+    db: Session,
+    *,
+    session_id: UUID,
+    include_canceled: bool,
 ) -> dict[str, Any]:
     session = _get_recommendation_session_or_404(db, session_id)
     messages = _list_recommendation_messages(db, session_id=session_id, limit=500, offset=0)
@@ -1132,6 +1194,78 @@ def _recommendation_session_is_processing(summary: dict[str, Any]) -> bool:
         summary["rerank_status"].get("status") in {"queued", "running", "retry_waiting"}
         or summary["report_status"].get("status") in {"queued", "running", "retry_waiting", "generating"}
     )
+
+
+def _filter_recommendation_session_summaries(
+    summaries: list[dict[str, Any]],
+    status_filter: str | None,
+) -> list[dict[str, Any]]:
+    if not status_filter or status_filter == "all":
+        return summaries
+    if status_filter == "running":
+        return [summary for summary in summaries if _recommendation_session_is_processing(summary)]
+    if status_filter == "failed":
+        return [
+            summary
+            for summary in summaries
+            if summary["rerank_status"].get("status") == "failed"
+            or summary["report_status"].get("status") == "failed"
+        ]
+    if status_filter == "generated":
+        return [summary for summary in summaries if summary["report_status"].get("status") == "generated"]
+    if status_filter == "selected":
+        return [
+            summary
+            for summary in summaries
+            if int(summary["selected_status"].get("active_count") or 0) > 0
+        ]
+    if status_filter == "idle":
+        return [
+            summary
+            for summary in summaries
+            if not _recommendation_session_is_processing(summary)
+            and summary["rerank_status"].get("status") != "failed"
+            and summary["report_status"].get("status") != "failed"
+        ]
+    return summaries
+
+
+def _recommendation_session_polling_hint(
+    summary: dict[str, Any],
+    *,
+    session_id: UUID,
+) -> dict[str, Any]:
+    enabled = _recommendation_session_is_processing(summary)
+    watched_jobs = []
+    rerank_job_id = summary["rerank_status"].get("job_id")
+    if rerank_job_id and summary["rerank_status"].get("status") in {"queued", "running", "retry_waiting"}:
+        watched_jobs.append(
+            {
+                "job_type": "recommendation_rerank",
+                "job_id": rerank_job_id,
+                "queue_name": summary["rerank_status"].get("queue_name"),
+                "status": summary["rerank_status"].get("status"),
+            }
+        )
+    latest_report_job = summary["report_status"].get("latest_job")
+    if latest_report_job and latest_report_job.get("status") in {"queued", "running", "retry_waiting"}:
+        watched_jobs.append(
+            {
+                "job_type": latest_report_job.get("job_type"),
+                "job_id": latest_report_job.get("id"),
+                "queue_name": latest_report_job.get("queue_name"),
+                "status": latest_report_job.get("status"),
+            }
+        )
+    return {
+        "enabled": enabled,
+        "interval_ms": 3000 if enabled else None,
+        "endpoint": f"/api/v1/recommendations/sessions/{session_id}/page-state",
+        "status_endpoint": f"/api/v1/recommendations/sessions/{session_id}/status",
+        "bundle_endpoint": f"/api/v1/recommendations/sessions/{session_id}/bundle",
+        "watched_jobs": watched_jobs,
+        "reason": "rerank_or_report_running" if enabled else "terminal_or_not_requested",
+    }
 
 
 def _recommendation_page_overview(
