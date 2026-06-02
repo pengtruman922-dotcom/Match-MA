@@ -4,12 +4,18 @@ import time
 
 from backend.app.db import session_scope
 from backend.app.jobs.handlers import execute_job
-from backend.app.jobs.queue import claim_next_job, mark_job_failed, mark_job_succeeded
+from backend.app.jobs.queue import (
+    claim_next_job,
+    mark_job_failed,
+    mark_job_succeeded,
+    requeue_stale_running_jobs,
+)
 
 
 def run_once(*, queue_name: str, worker_id: str) -> bool:
     job = None
     with session_scope() as db:
+        requeue_stale_running_jobs(db, queue_name=queue_name)
         job = claim_next_job(db, worker_id=worker_id, queue_name=queue_name)
     if job is None:
         return False

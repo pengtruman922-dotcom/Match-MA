@@ -24,6 +24,63 @@ class JobClaim:
     max_attempts: int
 
 
+
+
+def requeue_stale_running_jobs(
+    db: Session,
+    *,
+    queue_name: str = "default",
+    stale_after_seconds: int = 300,
+) -> int:
+    result = db.execute(
+        text(
+            """
+            update background_job
+            set status = case
+                  when attempt_count < max_attempts then 'retry_waiting'
+                  else 'failed'
+                end,
+                run_after = case
+                  when attempt_count < max_attempts then now()
+                  else run_after
+                end,
+                locked_by = null,
+                locked_at = null,
+                finished_at = case
+                  when attempt_count < max_attempts then null
+                  else now()
+                end,
+                updated_at = now(),
+                error_code = case
+                  when attempt_count < max_attempts then error_code
+                  else coalesce(error_code, 'stale_running_job')
+                end,
+                error_message = case
+                  when attempt_count < max_attempts then error_message
+                  else coalesce(error_message, 'Running job exceeded stale lock timeout.')
+                end,
+                error_detail_json = error_detail_json || jsonb_build_object(
+                  'stale_requeued_at', now()::text,
+                  'stale_after_seconds', :stale_after_seconds
+                )
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and queue_name = :queue_name
+              and status = 'running'
+              and locked_at < now() - (:stale_after_seconds * interval '1 second')
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "queue_name": queue_name,
+            "stale_after_seconds": stale_after_seconds,
+        },
+    )
+    db.commit()
+    return int(result.rowcount or 0)
+
+
 def claim_next_job(db: Session, *, worker_id: str, queue_name: str = "default") -> JobClaim | None:
     # Row locking lets multiple workers poll PostgreSQL without claiming the same job.
     row = db.execute(
