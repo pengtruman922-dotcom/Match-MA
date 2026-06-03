@@ -255,3 +255,10 @@ GET /api/v1/debug/entities/attachment/{attachment_id}
 - terminal `attachment.parse_status`
 
 If no mock text exists, v0.1 returns a successful job with skipped OCR status, so the frontend can still verify task, trace, and debug display without waiting for real OCR integration.
+
+## Latest field source contract for review UI
+
+- Business update review page now returns `evidence_id` on actions and `evidence_span` on application logs when evidence exists.
+- `field_value_source` is no longer limited to OCR-driven parser jobs; extracted-action apply also writes field sources.
+- Frontend detail tabs can call `GET /api/v1/field-sources?entity_type=seller_target&entity_id={id}` or `buyer_intent` to render "字段来源 / 证据".
+- Rollback keeps the update log history and marks matching field-source rows as `ignored`, so evidence panels should visually de-emphasize ignored sources instead of deleting them.

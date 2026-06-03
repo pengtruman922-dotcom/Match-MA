@@ -402,12 +402,14 @@ def _debug_summary(entity_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         }
     if entity_type in {"seller_target", "buyer_intent", "buyer_party"}:
         entity = payload["entity"]
+        debug = payload.get("debug", {})
         return {
             "title": f"{entity_type}: {entity.get('name') or entity.get('title') or entity.get('id')}",
             "status": entity.get("status") or entity.get("recommendation_status"),
             "job_count": len(payload.get("jobs", [])),
             "trace_count": len(payload.get("traces", [])),
             "update_log_count": len(payload.get("application_logs", [])),
+            "field_source_count": debug.get("field_source_count"),
         }
     if entity_type == "model_node_config":
         node = payload["node"]
@@ -618,16 +620,21 @@ def _entity_application_logs(db: Session, entity_type: str, entity_id: UUID) -> 
         text(
             """
             select
-              id, extracted_action_id, business_update_id, entity_type, entity_id,
-              field_path, old_value_json, new_value_json, source_type, source_id,
-              evidence_id, applied_by, applied_at::text as applied_at,
-              edited_before_apply, can_rollback, rollback_at::text as rollback_at,
-              metadata_json
-            from action_application_log
-            where team_id = :team_id
-              and workspace_id = :workspace_id
-              and entity_type = :entity_type
-              and entity_id = :entity_id
+              log.id, log.extracted_action_id, log.business_update_id, log.entity_type, log.entity_id,
+              log.field_path, log.old_value_json, log.new_value_json, log.source_type, log.source_id,
+              log.evidence_id, log.applied_by, log.applied_at::text as applied_at,
+              log.edited_before_apply, log.can_rollback, log.rollback_at::text as rollback_at,
+              log.metadata_json,
+              ev.text_excerpt as evidence_text_excerpt,
+              ev.attachment_id as evidence_attachment_id,
+              ev.parsed_document_id as evidence_parsed_document_id,
+              ev.page_no as evidence_page_no
+            from action_application_log log
+            left join evidence_span ev on ev.id = log.evidence_id
+            where log.team_id = :team_id
+              and log.workspace_id = :workspace_id
+              and log.entity_type = :entity_type
+              and log.entity_id = :entity_id
             order by applied_at desc
             limit 100
             """
@@ -1865,7 +1872,7 @@ def _actions(db: Session, business_update_id: UUID) -> list[dict[str, Any]]:
             """
             select
               id, business_update_id, action_type, target_entity_type, target_entity_id,
-              proposed_changes_json, raw_evidence_text, confidence, review_status,
+              proposed_changes_json, raw_evidence_text, evidence_id, confidence, review_status,
               reviewed_by, reviewed_at::text as reviewed_at, applied_at::text as applied_at,
               metadata_json, created_at::text as created_at
             from extracted_action
@@ -1890,15 +1897,20 @@ def _application_logs(db: Session, business_update_id: UUID) -> list[dict[str, A
         text(
             """
             select
-              id, extracted_action_id, business_update_id, entity_type, entity_id,
-              field_path, old_value_json, new_value_json, source_type, source_id,
-              evidence_id, applied_by, applied_at::text as applied_at,
-              edited_before_apply, can_rollback, rollback_at::text as rollback_at,
-              metadata_json
-            from action_application_log
-            where business_update_id = :business_update_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
+              log.id, log.extracted_action_id, log.business_update_id, log.entity_type, log.entity_id,
+              log.field_path, log.old_value_json, log.new_value_json, log.source_type, log.source_id,
+              log.evidence_id, log.applied_by, log.applied_at::text as applied_at,
+              log.edited_before_apply, log.can_rollback, log.rollback_at::text as rollback_at,
+              log.metadata_json,
+              ev.text_excerpt as evidence_text_excerpt,
+              ev.attachment_id as evidence_attachment_id,
+              ev.parsed_document_id as evidence_parsed_document_id,
+              ev.page_no as evidence_page_no
+            from action_application_log log
+            left join evidence_span ev on ev.id = log.evidence_id
+            where log.business_update_id = :business_update_id
+              and log.team_id = :team_id
+              and log.workspace_id = :workspace_id
             order by applied_at desc
             limit 100
             """

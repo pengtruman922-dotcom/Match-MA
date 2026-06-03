@@ -94,7 +94,7 @@ def _pending_actions(db: Session, *, limit: int = 80) -> list[dict[str, Any]]:
             """
             select
               a.id, a.business_update_id, a.action_type, a.target_entity_type, a.target_entity_id,
-              a.proposed_changes_json, a.raw_evidence_text, a.confidence, a.review_status,
+              a.proposed_changes_json, a.raw_evidence_text, a.evidence_id, a.confidence, a.review_status,
               a.reviewed_by, a.reviewed_at::text as reviewed_at, a.applied_at::text as applied_at,
               a.metadata_json, a.created_at::text as created_at,
               bu.raw_text as business_update_raw_text,
@@ -196,7 +196,7 @@ def _auto_applied_recent(db: Session) -> list[dict[str, Any]]:
             """
             select
               a.id, a.business_update_id, a.action_type, a.target_entity_type, a.target_entity_id,
-              a.proposed_changes_json, a.raw_evidence_text, a.confidence, a.review_status,
+              a.proposed_changes_json, a.raw_evidence_text, a.evidence_id, a.confidence, a.review_status,
               a.applied_at::text as applied_at, a.created_at::text as created_at,
               bu.raw_text as business_update_raw_text,
               st.target_name as seller_target_name,

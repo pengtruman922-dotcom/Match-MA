@@ -158,3 +158,22 @@ action_application_log
 - schema 校验错误。
 - token / 耗时 / 费用。
 - 应用日志和错误信息。
+
+---
+
+## 9. Current backend field-source behavior
+
+As of backend commit after the OCR field-source batch:
+
+- `extracted_action.evidence_id` is accepted and returned by create/list/detail APIs.
+- Applying `seller_fact_update`, `buyer_intent_update`, and `buyer_seller_relation_update` writes:
+  - `action_application_log.source_type = extracted_action`
+  - `action_application_log.source_id = {extracted_action_id}`
+  - `action_application_log.evidence_id` when present
+  - `action_application_log.metadata_json.field_value_source`
+- The same field-level changes also write lightweight `field_value_source` rows.
+- `field_value_source.source_type = extracted_action`, `source_id = {extracted_action_id}`.
+- `field_value_source.review_status = auto_accepted` after system/manual apply, matching the product rule of "apply first, then review".
+- Rolling back an `action_application_log` marks the matching `field_value_source` rows as `ignored`.
+- `GET /api/v1/business-updates/{id}/review-page` includes evidence snippets on application logs when evidence exists.
+- `GET /api/v1/debug/entities/{seller_target|buyer_intent|buyer_party}/{id}` includes `field_sources` and `debug.field_source_count`.

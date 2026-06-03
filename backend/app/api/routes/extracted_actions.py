@@ -9,7 +9,11 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
-from backend.app.api.routes.utils import diff_payload, write_action_logs_for_diff
+from backend.app.api.routes.utils import (
+    diff_payload,
+    write_action_logs_for_diff,
+    write_field_value_sources_for_diff,
+)
 from backend.app.db import get_db
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 
@@ -22,6 +26,7 @@ class ExtractedActionCreate(BaseModel):
     target_entity_id: UUID | None = None
     proposed_changes_json: dict[str, Any] = Field(default_factory=dict)
     raw_evidence_text: str | None = None
+    evidence_id: UUID | None = None
     confidence: Decimal | None = None
     metadata_json: dict[str, Any] = Field(default_factory=dict)
 
@@ -38,6 +43,7 @@ class ExtractedActionOut(BaseModel):
     target_entity_id: UUID | None
     proposed_changes_json: dict[str, Any]
     raw_evidence_text: str | None
+    evidence_id: UUID | None = None
     confidence: Decimal | None
     review_status: str
     reviewed_by: UUID | None
@@ -73,16 +79,16 @@ def create_extracted_action(
         insert into extracted_action (
           team_id, workspace_id, business_update_id,
           action_type, target_entity_type, target_entity_id,
-          proposed_changes_json, raw_evidence_text, confidence, metadata_json
+          proposed_changes_json, raw_evidence_text, evidence_id, confidence, metadata_json
         )
         values (
           :team_id, :workspace_id, :business_update_id,
           :action_type, :target_entity_type, :target_entity_id,
-          :proposed_changes_json, :raw_evidence_text, :confidence, :metadata_json
+          :proposed_changes_json, :raw_evidence_text, :evidence_id, :confidence, :metadata_json
         )
         returning
           id, business_update_id, action_type, target_entity_type, target_entity_id,
-          proposed_changes_json, raw_evidence_text, confidence, review_status,
+          proposed_changes_json, raw_evidence_text, evidence_id, confidence, review_status,
           reviewed_by, reviewed_at::text as reviewed_at, applied_at::text as applied_at,
           metadata_json, created_at::text as created_at
         """
@@ -102,6 +108,7 @@ def create_extracted_action(
             "target_entity_id": payload.target_entity_id,
             "proposed_changes_json": payload.proposed_changes_json,
             "raw_evidence_text": payload.raw_evidence_text,
+            "evidence_id": payload.evidence_id,
             "confidence": payload.confidence,
             "metadata_json": payload.metadata_json,
         },
@@ -159,7 +166,7 @@ def list_extracted_actions(
             f"""
             select
               id, business_update_id, action_type, target_entity_type, target_entity_id,
-              proposed_changes_json, raw_evidence_text, confidence, review_status,
+              proposed_changes_json, raw_evidence_text, evidence_id, confidence, review_status,
               reviewed_by, reviewed_at::text as reviewed_at, applied_at::text as applied_at,
               metadata_json, created_at::text as created_at
             from extracted_action
@@ -198,7 +205,7 @@ def update_extracted_action_review(
               and workspace_id = :workspace_id
             returning
               id, business_update_id, action_type, target_entity_type, target_entity_id,
-              proposed_changes_json, raw_evidence_text, confidence, review_status,
+              proposed_changes_json, raw_evidence_text, evidence_id, confidence, review_status,
               reviewed_by, reviewed_at::text as reviewed_at, applied_at::text as applied_at,
               metadata_json, created_at::text as created_at
             """
@@ -298,14 +305,36 @@ def apply_seller_fact_update_action(
         },
     )
 
+    source_context = _action_source_context(action, default_source_label="Business update extracted action")
     write_action_logs_for_diff(
         db,
         entity_type="seller_target",
         entity_id=seller_target_id,
         diff=diff,
         source_type="extracted_action",
+        source_id=action["id"],
+        evidence_id=source_context["evidence_id"],
         business_update_id=action["business_update_id"],
         extracted_action_id=action["id"],
+        metadata_json={
+            "source": "extracted_action_apply",
+            "action_type": action["action_type"],
+            "field_value_source": source_context,
+        },
+    )
+    write_field_value_sources_for_diff(
+        db,
+        entity_type="seller_target",
+        entity_id=seller_target_id,
+        changes=changes,
+        diff=diff,
+        source_type="extracted_action",
+        source_id=action["id"],
+        evidence_id=source_context["evidence_id"],
+        source_label=source_context["source_label"],
+        confidence=action.get("confidence"),
+        review_status="auto_accepted",
+        source_context=source_context,
     )
     create_search_doc_rebuild_job(
         db,
@@ -400,14 +429,36 @@ def apply_buyer_intent_update_action(
         },
     )
 
+    source_context = _action_source_context(action, default_source_label="Business update extracted action")
     write_action_logs_for_diff(
         db,
         entity_type="buyer_intent",
         entity_id=buyer_intent_id,
         diff=diff,
         source_type="extracted_action",
+        source_id=action["id"],
+        evidence_id=source_context["evidence_id"],
         business_update_id=action["business_update_id"],
         extracted_action_id=action["id"],
+        metadata_json={
+            "source": "extracted_action_apply",
+            "action_type": action["action_type"],
+            "field_value_source": source_context,
+        },
+    )
+    write_field_value_sources_for_diff(
+        db,
+        entity_type="buyer_intent",
+        entity_id=buyer_intent_id,
+        changes=changes,
+        diff=diff,
+        source_type="extracted_action",
+        source_id=action["id"],
+        evidence_id=source_context["evidence_id"],
+        source_label=source_context["source_label"],
+        confidence=action.get("confidence"),
+        review_status="auto_accepted",
+        source_context=source_context,
     )
     create_search_doc_rebuild_job(
         db,
@@ -491,14 +542,36 @@ def apply_buyer_seller_relation_update_action(
             ),
             params,
         )
+        source_context = _action_source_context(action, default_source_label="Business update relation update")
         write_action_logs_for_diff(
             db,
             entity_type="buyer_seller_relation",
             entity_id=relation["id"],
             diff=diff,
             source_type="extracted_action",
+            source_id=action["id"],
+            evidence_id=source_context["evidence_id"],
             business_update_id=action["business_update_id"],
             extracted_action_id=action["id"],
+            metadata_json={
+                "source": "extracted_action_apply",
+                "action_type": action["action_type"],
+                "field_value_source": source_context,
+            },
+        )
+        write_field_value_sources_for_diff(
+            db,
+            entity_type="buyer_seller_relation",
+            entity_id=relation["id"],
+            changes=relation_updates,
+            diff=diff,
+            source_type="extracted_action",
+            source_id=action["id"],
+            evidence_id=source_context["evidence_id"],
+            source_label=source_context["source_label"],
+            confidence=action.get("confidence"),
+            review_status="auto_accepted",
+            source_context=source_context,
         )
 
     _insert_relation_event(db, action, relation["id"], buyer_intent_id, seller_target_id, buyer_party_id, changes)
@@ -641,7 +714,7 @@ def _get_extracted_action_or_404(db: Session, extracted_action_id: UUID) -> dict
             """
             select
               id, business_update_id, action_type, target_entity_type, target_entity_id,
-              proposed_changes_json, raw_evidence_text, confidence, review_status,
+              proposed_changes_json, raw_evidence_text, evidence_id, confidence, review_status,
               reviewed_by, reviewed_at::text as reviewed_at, applied_at::text as applied_at,
               metadata_json, created_at::text as created_at
             from extracted_action
@@ -970,6 +1043,22 @@ def _required_uuid(value: Any, field_name: str) -> UUID:
     if parsed is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"{field_name} is required.")
     return parsed
+
+
+def _action_source_context(action: dict[str, Any], *, default_source_label: str) -> dict[str, Any]:
+    metadata = action.get("metadata_json") if isinstance(action.get("metadata_json"), dict) else {}
+    evidence_id = action.get("evidence_id") or _optional_uuid(metadata.get("evidence_id"))
+    return {
+        "source_type": "extracted_action",
+        "source_id": action["id"],
+        "source_label": metadata.get("source_label") or default_source_label,
+        "business_update_id": action["business_update_id"],
+        "extracted_action_id": action["id"],
+        "evidence_id": evidence_id,
+        "confidence": action.get("confidence"),
+        "raw_evidence_text": action.get("raw_evidence_text"),
+        "action_type": action.get("action_type"),
+    }
 
 
 def _optional_uuid(value: Any) -> UUID | None:

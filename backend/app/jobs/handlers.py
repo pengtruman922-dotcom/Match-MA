@@ -3281,13 +3281,13 @@ def _insert_extracted_actions(
                 insert into extracted_action (
                   team_id, workspace_id, business_update_id,
                   action_type, target_entity_type, target_entity_id,
-                  proposed_changes_json, raw_evidence_text, confidence,
+                  proposed_changes_json, raw_evidence_text, evidence_id, confidence,
                   review_status, metadata_json
                 )
                 values (
                   :team_id, :workspace_id, :business_update_id,
                   :action_type, :target_entity_type, :target_entity_id,
-                  :proposed_changes_json, :raw_evidence_text, :confidence,
+                  :proposed_changes_json, :raw_evidence_text, :evidence_id, :confidence,
                   'pending_review', :metadata_json
                 )
                 returning id
@@ -3305,6 +3305,7 @@ def _insert_extracted_actions(
                 "target_entity_id": action["target_entity_id"],
                 "proposed_changes_json": action["proposed_changes_json"],
                 "raw_evidence_text": action["raw_evidence_text"],
+                "evidence_id": action.get("evidence_id"),
                 "confidence": action["confidence"],
                 "metadata_json": {
                     "source": "business_update_extractor",
@@ -3337,7 +3338,7 @@ def _get_extracted_action_for_auto_apply(db: Session, action_id: UUID) -> dict[s
             """
             select
               id, business_update_id, action_type, target_entity_type, target_entity_id,
-              proposed_changes_json, raw_evidence_text, confidence, review_status,
+              proposed_changes_json, raw_evidence_text, evidence_id, confidence, review_status,
               reviewed_by, reviewed_at::text as reviewed_at, applied_at::text as applied_at,
               metadata_json, created_at::text as created_at
             from extracted_action

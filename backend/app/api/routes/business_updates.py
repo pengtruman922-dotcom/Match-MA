@@ -339,7 +339,7 @@ def _review_page_actions(db: Session, business_update_id: UUID) -> list[dict[str
             """
             select
               a.id, a.business_update_id, a.action_type, a.target_entity_type, a.target_entity_id,
-              a.proposed_changes_json, a.raw_evidence_text, a.confidence, a.review_status,
+              a.proposed_changes_json, a.raw_evidence_text, a.evidence_id, a.confidence, a.review_status,
               a.reviewed_by, a.reviewed_at::text as reviewed_at, a.applied_at::text as applied_at,
               a.metadata_json, a.created_at::text as created_at,
               st.target_name as seller_target_name,
@@ -381,10 +381,15 @@ def _review_page_application_logs(db: Session, business_update_id: UUID) -> list
               log.edited_before_apply, log.can_rollback,
               log.rollback_at::text as rollback_at,
               log.metadata_json,
+              ev.text_excerpt as evidence_text_excerpt,
+              ev.attachment_id as evidence_attachment_id,
+              ev.parsed_document_id as evidence_parsed_document_id,
+              ev.page_no as evidence_page_no,
               st.target_name as seller_target_name,
               bi.intent_name as buyer_intent_name,
               bp.buyer_name
             from action_application_log log
+            left join evidence_span ev on ev.id = log.evidence_id
             left join seller_target st
               on st.id = log.entity_id and log.entity_type = 'seller_target'
             left join buyer_intent bi
@@ -936,8 +941,21 @@ def _enrich_application_log(log: dict[str, Any]) -> dict[str, Any]:
     return {
         **log,
         "target_display": target_display,
+        "evidence_span": _compact_log_evidence(log),
         "can_rollback_now": bool(log.get("can_rollback")) and log.get("rollback_at") is None,
         "debug_ref": _debug_ref("business_update", log["business_update_id"]),
+    }
+
+
+def _compact_log_evidence(log: dict[str, Any]) -> dict[str, Any] | None:
+    if not log.get("evidence_id"):
+        return None
+    return {
+        "id": log.get("evidence_id"),
+        "text_excerpt": log.get("evidence_text_excerpt"),
+        "attachment_id": log.get("evidence_attachment_id"),
+        "parsed_document_id": log.get("evidence_parsed_document_id"),
+        "page_no": log.get("evidence_page_no"),
     }
 
 

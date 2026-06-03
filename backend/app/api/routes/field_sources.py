@@ -132,6 +132,12 @@ def _debug_ref(entity_type: str | None, entity_id: Any) -> dict[str, str] | None
     if entity_type in {"seller_target_parse", "buyer_intent_parse", "attachment_ocr_parse"}:
         entity_type = "background_job"
     entity_id_text = str(entity_id)
+    if entity_type == "extracted_action":
+        return {
+            "entity_type": "extracted_action",
+            "entity_id": entity_id_text,
+            "route": f"/api/v1/extracted-actions/{entity_id_text}",
+        }
     return {
         "entity_type": entity_type,
         "entity_id": entity_id_text,

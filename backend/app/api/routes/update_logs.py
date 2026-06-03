@@ -339,6 +339,7 @@ def _rollback_logs(
 
         _apply_field_rollback(db, log)
         rollback_log = _insert_rollback_log(db, log, current_value=current_value, reason=reason)
+        _mark_field_sources_ignored_after_rollback(db, log)
         _mark_log_rolled_back(db, log["id"])
         _enqueue_rebuild_after_rollback(db, log)
         rolled_back_logs.append(rollback_log)
@@ -496,6 +497,34 @@ def _mark_log_rolled_back(db: Session, log_id: UUID) -> None:
             """
         ),
         {"log_id": log_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    )
+
+
+def _mark_field_sources_ignored_after_rollback(db: Session, log: dict[str, Any]) -> None:
+    db.execute(
+        text(
+            """
+            update field_value_source
+            set review_status = 'ignored'
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and entity_type = :entity_type
+              and entity_id = :entity_id
+              and field_path = :field_path
+              and source_type = :source_type
+              and source_id = :source_id
+              and review_status in ('pending_review', 'accepted', 'auto_accepted')
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "entity_type": log["entity_type"],
+            "entity_id": log["entity_id"],
+            "field_path": log["field_path"],
+            "source_type": log.get("source_type"),
+            "source_id": log.get("source_id"),
+        },
     )
 
 
