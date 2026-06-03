@@ -5,6 +5,7 @@ from fastapi import HTTPException
 
 from backend.app.api.routes.business_updates import (
     _compact_review_attachment,
+    _compact_review_job,
     _enrich_review_action,
     _entity_ref,
     _review_action_group_key,
@@ -128,6 +129,37 @@ def test_compact_review_attachment_exposes_latest_job_and_evidence() -> None:
     assert compacted["latest_evidence"]["id"] == evidence_id
     assert compacted["debug_ref"]["route"] == f"/debug/entities/attachment/{attachment_id}"
 
+
+
+def test_compact_review_job_exposes_ignore_metadata() -> None:
+    job_id = UUID("00000000-0000-0000-0000-000000000010")
+
+    compacted = _compact_review_job(
+        {
+            "id": job_id,
+            "job_type": "business_update_extract_actions",
+            "status": "failed",
+            "queue_name": "llm",
+            "attempt_count": 3,
+            "max_attempts": 3,
+            "error_code": "job_failed",
+            "error_message": "Some actions are invalid.",
+            "created_at": "2026-06-03",
+            "updated_at": "2026-06-03",
+            "started_at": None,
+            "finished_at": "2026-06-03",
+            "metadata_json": {
+                "failure_ignored": True,
+                "failure_ignore_reason": "historical validation data",
+                "failure_ignored_at": "2026-06-03T11:01:55+00:00",
+            },
+        }
+    )
+
+    assert compacted["ignored"] is True
+    assert compacted["ignore_reason"] == "historical validation data"
+    assert compacted["ignored_at"] == "2026-06-03T11:01:55+00:00"
+    assert compacted["debug_ref"]["route"] == f"/debug/entities/background_job/{job_id}"
 
 def test_validate_parse_entity_types_rejects_unsupported_values() -> None:
     _validate_parse_entity_types(["seller_target", "buyer_intent"])
