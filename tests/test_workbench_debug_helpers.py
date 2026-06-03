@@ -7,7 +7,13 @@ from backend.app.api.routes.debug import (
     _debug_summary,
     _truncate_debug_text,
 )
-from backend.app.api.routes.workbench import _categorize_action, _task_priority, _task_title, _truncate_text
+from backend.app.api.routes.workbench import (
+    WorkbenchTaskBoardOut,
+    _categorize_action,
+    _task_priority,
+    _task_title,
+    _truncate_text,
+)
 
 
 def test_workbench_task_priority_uses_confidence_thresholds() -> None:
@@ -35,6 +41,23 @@ def test_workbench_task_title_and_truncation_are_frontend_ready() -> None:
     assert truncated.startswith("abc")
     assert len(truncated) == 4
     assert _truncate_text(None, 4) is None
+
+
+def test_workbench_task_board_schema_includes_queue_summary() -> None:
+    board = WorkbenchTaskBoardOut(
+        groups=[],
+        auto_applied_recent=[],
+        exception_items=[],
+        recent_activity=[],
+        quick_actions=[],
+        overview={"pending_review_count": 0},
+        queue_summary={
+            "totals": {"active_job_count": 0, "failed_job_count": 0},
+            "queues": [{"queue_name": "llm", "health_status": "idle"}],
+        },
+    )
+
+    assert board.queue_summary["queues"][0]["queue_name"] == "llm"
 
 
 def test_debug_summary_supports_unified_entity_types() -> None:

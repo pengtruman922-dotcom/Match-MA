@@ -39,6 +39,8 @@ GET /api/v1/workbench/task-board
 
 ### 关系与跟进
 
+- `queue_summary`: worker queue health summary for `llm`, `ocr`, `embedding`, `rerank`, and `default`, same shape as `GET /background-jobs/summary/queues`.
+
 ```text
 GET /api/v1/relations
 GET /api/v1/relations/{relation_id}
