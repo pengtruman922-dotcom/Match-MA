@@ -173,6 +173,22 @@ v0.1 terminal statuses:
   `trigger_attachment_id` and `trigger_evidence_id`, so the extractor can use the
   relevant OCR evidence span and attach it to extracted actions when unambiguous.
 
+
+OCR client contract:
+
+- The worker calls `backend/app/ai/ocr_client.py` instead of embedding OCR branching directly in the worker.
+- Current v0.1 behavior treats job `mock_extracted_text`, attachment mock text, uploaded text capture, or local text fallback as OCR output.
+- If text is available, the OCR client returns `terminal_parse_status=parsed` and writes that text into `parsed_document`, `evidence_span`, and `ai_trace.raw_output_text`.
+- If no text is available, the OCR client returns `terminal_parse_status=skipped`; binary/document OCR is not attempted yet.
+- The trace input includes `storage_backend`, `storage_uri`, `content_sha256`, `text_capture_source`, and `node_execution_mode` so Debug Mode can show why OCR did or did not run.
+
+Future real OCR integration point:
+
+- Keep the same `OcrInput` / `OcrResult` contract.
+- Add provider execution inside `call_attachment_ocr`.
+- For PDF/image/Office files, read bytes from durable object storage first; do not depend on Railway local filesystem.
+- Store raw provider output in `ai_trace.raw_output_text` or `parsed_output_json` and normalized text in `parsed_document` / `evidence_span`.
+
 ## Field Sources
 
 Parser-applied fields now write lightweight `field_value_source` rows:

@@ -15,6 +15,7 @@ from backend.app.ai.embedding_client import (
     embedding_to_pgvector_literal,
 )
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
+from backend.app.ai.ocr_client import OcrInput, build_attachment_ocr_input_json, call_attachment_ocr
 from backend.app.ai.prompting import render_template
 from backend.app.ai.rerank_client import RerankCallError, call_dashscope_compatible_rerank
 from backend.app.config import get_settings
@@ -547,64 +548,36 @@ def _handle_attachment_ocr_parse(db: Session, job: JobClaim) -> dict[str, object
 
     attachment = _get_attachment_for_ocr(db, attachment_id)
     node_config = _get_default_ocr_node_config(db, "ocr_attachment_parser")
-    mock_extracted_text = _attachment_mock_extracted_text(job, attachment)
-    input_json = {
-        "attachment_id": str(attachment_id),
-        "file_name": attachment["file_name"],
-        "file_type": attachment.get("file_type"),
-        "mime_type": attachment.get("mime_type"),
-        "file_size": attachment.get("file_size"),
-        "storage_path": attachment.get("storage_path"),
-        "has_mock_extracted_text": bool(mock_extracted_text),
-        "execution_mode": "skeleton",
-    }
-
-    started = time.perf_counter()
-    if mock_extracted_text:
-        terminal_status = "parsed"
-        trace_status = "succeeded"
-        error_message = None
-        parsed_output_json = {
-            "execution_mode": "mock_text",
-            "text_length": len(mock_extracted_text),
-            "text_preview": mock_extracted_text[:1000],
-            "evidence_created": True,
-        }
-    else:
-        terminal_status = "skipped"
-        trace_status = "skipped"
-        error_message = "OCR execution is not implemented in v0.1 skeleton."
-        parsed_output_json = {
-            "execution_mode": "skeleton",
-            "reason": error_message,
-            "evidence_created": False,
-        }
+    ocr_input = _attachment_ocr_input(job, attachment_id=attachment_id, attachment=attachment)
+    input_json = build_attachment_ocr_input_json(node_config=node_config, ocr_input=ocr_input)
+    ocr_result = call_attachment_ocr(node_config=node_config, ocr_input=ocr_input)
+    extracted_text = ocr_result.extracted_text
 
     parsed_document_id = _insert_parsed_document_for_ocr(
         db,
         attachment_id=attachment_id,
-        parse_status=terminal_status,
-        extracted_text=mock_extracted_text,
-        error_message=error_message,
+        parse_status=ocr_result.terminal_parse_status,
+        extracted_text=extracted_text,
+        error_message=ocr_result.error_message,
     )
     evidence_id = None
-    if mock_extracted_text:
+    if extracted_text:
         evidence_id = _insert_ocr_evidence_span(
             db,
             attachment_id=attachment_id,
             parsed_document_id=parsed_document_id,
             job_id=job.id,
-            text_excerpt=mock_extracted_text,
+            text_excerpt=extracted_text,
         )
 
     _update_attachment_parse_terminal(
         db,
         attachment_id=attachment_id,
-        parse_status=terminal_status,
+        parse_status=ocr_result.terminal_parse_status,
         job_id=job.id,
         parsed_document_id=parsed_document_id,
         evidence_id=evidence_id,
-        text_length=len(mock_extracted_text) if mock_extracted_text else 0,
+        text_length=len(extracted_text) if extracted_text else 0,
     )
     touched_seller_target_count = _touch_seller_targets_linked_to_attachment(db, attachment_id)
     child_parse_jobs = _enqueue_linked_parse_jobs_after_ocr(
@@ -613,44 +586,44 @@ def _handle_attachment_ocr_parse(db: Session, job: JobClaim) -> dict[str, object
         attachment_id=attachment_id,
         parsed_document_id=parsed_document_id,
         evidence_id=evidence_id,
-        extracted_text=mock_extracted_text,
+        extracted_text=extracted_text,
     )
     business_update_process_job = _enqueue_business_update_process_after_ocr(
         db,
         job=job,
         attachment_id=attachment_id,
         evidence_id=evidence_id,
-        extracted_text=mock_extracted_text,
+        extracted_text=extracted_text,
     )
-    latency_ms = int((time.perf_counter() - started) * 1000)
     _insert_ocr_trace(
         db,
         job=job,
         attachment_id=attachment_id,
         node_config=node_config,
-        status=trace_status,
+        status=ocr_result.trace_status,
         input_json=input_json,
-        raw_output_text=mock_extracted_text or None,
+        raw_output_text=ocr_result.raw_output_text,
         parsed_output_json={
-            **parsed_output_json,
+            **ocr_result.parsed_output_json,
             "parsed_document_id": str(parsed_document_id),
             "evidence_id": str(evidence_id) if evidence_id else None,
-            "terminal_parse_status": terminal_status,
+            "terminal_parse_status": ocr_result.terminal_parse_status,
             "child_parse_jobs": child_parse_jobs,
             "business_update_process_job": business_update_process_job,
         },
-        latency_ms=latency_ms,
+        latency_ms=ocr_result.latency_ms,
+        error_message=ocr_result.error_message,
     )
 
     return {
         "handled": True,
         "job_type": job.job_type,
         "attachment_id": str(attachment_id),
-        "parse_status": terminal_status,
-        "trace_status": trace_status,
+        "parse_status": ocr_result.terminal_parse_status,
+        "trace_status": ocr_result.trace_status,
         "parsed_document_id": str(parsed_document_id),
         "evidence_id": str(evidence_id) if evidence_id else None,
-        "text_length": len(mock_extracted_text) if mock_extracted_text else 0,
+        "text_length": len(extracted_text) if extracted_text else 0,
         "touched_seller_target_count": touched_seller_target_count,
         "child_parse_jobs": child_parse_jobs,
         "child_parse_job_count": len(child_parse_jobs),
@@ -658,6 +631,7 @@ def _handle_attachment_ocr_parse(db: Session, job: JobClaim) -> dict[str, object
         "trace_created": True,
         "node_name": node_config["node_name"],
         "model_name": node_config["model_name"],
+        "execution_mode": ocr_result.execution_mode,
     }
 
 
@@ -1269,26 +1243,7 @@ def _handle_model_node_test(db: Session, job: JobClaim) -> dict[str, object]:
     if node_type == "rerank":
         return _handle_model_rerank_node_test(db, job=job, node_config=node_config)
     if node_type == "ocr":
-        input_json = _model_node_test_input_json(job, node_config)
-        _insert_model_node_test_trace(
-            db,
-            job=job,
-            node_config=node_config,
-            trace_type="ocr",
-            status="skipped",
-            input_json=input_json,
-            parsed_output_json={"reason": "OCR node test is not implemented in v0.1."},
-            latency_ms=0,
-        )
-        return {
-            "handled": True,
-            "job_type": job.job_type,
-            "node_id": str(node_id),
-            "node_name": node_config["node_name"],
-            "node_type": node_type,
-            "status": "skipped",
-            "trace_created": True,
-        }
+        return _handle_model_ocr_node_test(db, job=job, node_config=node_config)
     raise ValueError(f"Unsupported model_node_test node_type: {node_type}")
 
 
@@ -1497,6 +1452,53 @@ def _handle_model_rerank_node_test(
     return _model_node_test_result(job, node_config, "succeeded", output_json, result.latency_ms)
 
 
+def _handle_model_ocr_node_test(
+    db: Session,
+    *,
+    job: JobClaim,
+    node_config: dict[str, Any],
+) -> dict[str, object]:
+    text_hint = str(job.payload_json.get("mock_extracted_text") or job.payload_json.get("input_text") or "")
+    ocr_input = OcrInput(
+        attachment_id="model-node-test",
+        file_name=str(job.payload_json.get("file_name") or "model-node-test.txt"),
+        file_type=str(job.payload_json.get("file_type") or "txt"),
+        mime_type=str(job.payload_json.get("mime_type") or "text/plain"),
+        file_size=len(text_hint.encode("utf-8")) if text_hint else None,
+        storage_path=str(job.payload_json.get("storage_path") or "mock://model-node-test"),
+        metadata_json={
+            "storage_backend": "mock",
+            "storage_uri": "mock://model-node-test",
+            "text_capture_source": "model_node_test_payload" if text_hint else None,
+        },
+        extracted_text_hint=text_hint,
+    )
+    input_json = _model_node_test_input_json(
+        job,
+        node_config,
+        extra=build_attachment_ocr_input_json(node_config=node_config, ocr_input=ocr_input),
+    )
+    result = call_attachment_ocr(node_config=node_config, ocr_input=ocr_input)
+    output_json = {
+        **result.parsed_output_json,
+        "terminal_parse_status": result.terminal_parse_status,
+        "text_length": len(result.extracted_text),
+    }
+    _insert_model_node_test_trace(
+        db,
+        job=job,
+        node_config=node_config,
+        trace_type="ocr",
+        status=result.trace_status,
+        input_json=input_json,
+        raw_output_text=result.raw_output_text,
+        parsed_output_json=output_json,
+        latency_ms=result.latency_ms,
+        error_message=result.error_message,
+    )
+    return _model_node_test_result(job, node_config, result.trace_status, output_json, result.latency_ms)
+
+
 def _resolve_business_update_id(job: JobClaim) -> UUID | None:
     if job.entity_type == "business_update" and job.entity_id is not None:
         return job.entity_id
@@ -1672,6 +1674,25 @@ def _attachment_mock_extracted_text(job: JobClaim, attachment: dict[str, Any]) -
     if text_value is None:
         return ""
     return str(text_value).strip()
+
+
+def _attachment_ocr_input(
+    job: JobClaim,
+    *,
+    attachment_id: UUID,
+    attachment: dict[str, Any],
+) -> OcrInput:
+    metadata_json = attachment.get("metadata_json") if isinstance(attachment.get("metadata_json"), dict) else {}
+    return OcrInput(
+        attachment_id=str(attachment_id),
+        file_name=str(attachment.get("file_name") or ""),
+        file_type=str(attachment["file_type"]) if attachment.get("file_type") is not None else None,
+        mime_type=str(attachment["mime_type"]) if attachment.get("mime_type") is not None else None,
+        file_size=int(attachment["file_size"]) if attachment.get("file_size") is not None else None,
+        storage_path=str(attachment["storage_path"]) if attachment.get("storage_path") is not None else None,
+        metadata_json=metadata_json,
+        extracted_text_hint=_attachment_mock_extracted_text(job, attachment),
+    )
 
 
 def _attachment_local_text_content(attachment: dict[str, Any], *, max_chars: int = 200_000) -> str | None:
@@ -1984,6 +2005,7 @@ def _get_default_rerank_node_config(db: Session, node_name: str) -> dict[str, An
               node.node_name,
               node.model_name,
               node.timeout_seconds,
+              node.metadata_json,
               provider.id as provider_config_id,
               provider.provider_name,
               provider.base_url,
@@ -2023,6 +2045,7 @@ def _get_default_ocr_node_config(db: Session, node_name: str) -> dict[str, Any]:
               node.node_name,
               node.model_name,
               node.timeout_seconds,
+              node.metadata_json,
               provider.id as provider_config_id,
               provider.provider_name,
               provider.base_url,
@@ -2065,6 +2088,7 @@ def _get_model_node_config_by_id(db: Session, node_id: UUID) -> dict[str, Any]:
               node.timeout_seconds,
               node.response_format,
               node.embedding_dimension,
+              node.metadata_json,
               provider.id as provider_config_id,
               provider.provider_name,
               provider.base_url,
