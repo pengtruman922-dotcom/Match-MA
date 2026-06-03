@@ -13,6 +13,7 @@ import {
 import { fetchWorkbenchData, type ActionGroup } from '../lib/workbench';
 import type { BusinessUpdate } from '../types/api';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
+import BackgroundJobFailurePanel from '../components/BackgroundJobFailurePanel';
 
 export default function Home() {
   const [groups, setGroups] = useState<ActionGroup[]>([]);
@@ -145,6 +146,8 @@ export default function Home() {
             </div>
             <p className="text-xs text-gray-400 mt-3">更多统计数据后端开发中</p>
           </div>
+
+          <BackgroundJobFailurePanel />
 
           {/* Recent Recommendation Sessions */}
           <div className="bg-white border border-gray-200 p-5">

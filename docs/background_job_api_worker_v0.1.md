@@ -147,11 +147,13 @@ llm, ocr, embedding, rerank, default
 ```text
 GET /api/v1/background-jobs/summary/failures
 GET /api/v1/background-jobs/summary/failures?lookback_hours=168&limit=20
+GET /api/v1/background-jobs/summary/failures?include_ignored=true
 ```
 
 Purpose:
 
 - Show failed jobs grouped by queue and job type.
+- Ignore archived/acknowledged failures by default when `metadata_json.failure_ignored = true`.
 - Give workbench and Debug Mode a compact list of recent failed jobs with `debug_ref` and related entity links.
 
 Response highlights:
@@ -166,9 +168,23 @@ Response highlights:
   },
   "by_queue": [{ "queue_name": "llm", "failed_count": 3 }],
   "by_job_type": [{ "job_type": "business_update_extract_actions", "queue_name": "llm", "failed_count": 3 }],
-  "recent_failures": [{ "id": "uuid", "job_type": "...", "failure_category": "db_constraint | code_error | schema_validation | provider_or_llm | unknown", "failure_summary": "...", "debug_ref": {}, "related_entity_ref": {}, "can_retry": true, "retry_route": "/background-jobs/{id}/retry", "recommended_actions": [] }]
+  "recent_failures": [{ "id": "uuid", "job_type": "...", "failure_category": "db_constraint | code_error | schema_validation | provider_or_llm | unknown", "failure_summary": "...", "debug_ref": {}, "related_entity_ref": {}, "can_retry": true, "retry_preview_route": "/background-jobs/{id}/retry-preview", "retry_route": "/background-jobs/{id}/retry", "ignore_route": "/background-jobs/{id}/ignore", "recommended_actions": [] }]
 }
 ```
+
+
+### 2.9 Retry preview and ignored failures
+
+```text
+GET /api/v1/background-jobs/{job_id}/retry-preview
+POST /api/v1/background-jobs/{job_id}/ignore
+POST /api/v1/background-jobs/{job_id}/unignore
+```
+
+- Retry preview is read-only. It reports retry eligibility, related entity/job counts, trace availability, and warnings such as missing trace or existing application logs.
+- Ignore stores `failure_ignored`, `failure_ignored_at`, `failure_ignored_by`, and `failure_ignore_reason` in `background_job.metadata_json`; it does not delete the job.
+- Retrying an ignored job removes the ignore marker and stores the previous failure in `last_retry_previous_*` metadata.
+- Ignoring a failed `business_update_extract_actions` job also moves a stuck `business_update.processing_status = 'processing'` to `failed`, so the review page can re-run parsing.
 
 ## 3. Business Update Process API
 

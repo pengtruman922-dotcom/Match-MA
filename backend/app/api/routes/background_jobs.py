@@ -1,7 +1,7 @@
 ﻿from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -23,6 +23,10 @@ class BackgroundJobCreate(BaseModel):
     payload_json: dict[str, Any] = Field(default_factory=dict)
     max_attempts: int = Field(default=3, ge=1, le=20)
     metadata_json: dict[str, Any] = Field(default_factory=dict)
+
+
+class BackgroundJobIgnoreRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
 
 
 class BackgroundJobOut(BaseModel):
@@ -95,10 +99,20 @@ class QueueSummaryOut(BaseModel):
 class FailureSummaryOut(BaseModel):
     generated_at: str
     lookback_hours: int
+    include_ignored: bool = False
     totals: dict[str, Any]
     by_queue: list[dict[str, Any]]
     by_job_type: list[dict[str, Any]]
     recent_failures: list[dict[str, Any]]
+    debug_ref: dict[str, Any]
+
+
+class BackgroundJobRetryPreviewOut(BaseModel):
+    job: dict[str, Any]
+    retry: dict[str, Any]
+    related: dict[str, Any]
+    effects: list[dict[str, Any]]
+    warnings: list[dict[str, Any]]
     debug_ref: dict[str, Any]
 
 
@@ -152,6 +166,7 @@ def list_background_jobs(
     queue_name: str | None = None,
     entity_type: str | None = None,
     entity_id: UUID | None = None,
+    include_ignored: bool = Query(default=False),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
@@ -166,6 +181,8 @@ def list_background_jobs(
     if status_filter:
         where.append("status = :status")
         params["status"] = status_filter
+        if status_filter == "failed" and not include_ignored:
+            where.append(_not_failure_ignored_sql())
     if job_type:
         where.append("job_type = :job_type")
         params["job_type"] = job_type
@@ -198,9 +215,15 @@ def list_background_jobs(
 def get_background_job_queue_summary(
     db: Session = Depends(get_db),
     include_empty: bool = Query(default=True),
+    include_ignored: bool = Query(default=False),
     lookback_hours: int = Query(default=24, ge=1, le=168),
 ) -> dict[str, Any]:
-    summary = _queue_summary(db, include_empty=include_empty, lookback_hours=lookback_hours)
+    summary = _queue_summary(
+        db,
+        include_empty=include_empty,
+        include_ignored=include_ignored,
+        lookback_hours=lookback_hours,
+    )
     return summary
 
 
@@ -209,13 +232,20 @@ def get_background_job_failure_summary(
     db: Session = Depends(get_db),
     lookback_hours: int = Query(default=168, ge=1, le=720),
     limit: int = Query(default=20, ge=1, le=100),
+    include_ignored: bool = Query(default=False),
 ) -> dict[str, Any]:
-    return _failure_summary(db, lookback_hours=lookback_hours, limit=limit)
+    return _failure_summary(db, lookback_hours=lookback_hours, limit=limit, include_ignored=include_ignored)
 
 
 @router.get("/{job_id}", response_model=BackgroundJobOut)
 def get_background_job(job_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
     return _get_job_or_404(db, job_id)
+
+
+@router.get("/{job_id}/retry-preview", response_model=BackgroundJobRetryPreviewOut)
+def preview_background_job_retry(job_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+    current = _get_job_or_404(db, job_id)
+    return _retry_preview(db, current)
 
 
 @router.post("/{job_id}/cancel", response_model=BackgroundJobOut)
@@ -253,6 +283,84 @@ def cancel_background_job(job_id: UUID, db: Session = Depends(get_db)) -> dict[s
     return dict(row)
 
 
+@router.post("/{job_id}/ignore", response_model=BackgroundJobOut)
+def ignore_background_job(
+    job_id: UUID,
+    payload: BackgroundJobIgnoreRequest | None = Body(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    payload = payload or BackgroundJobIgnoreRequest()
+    current = _get_job_or_404(db, job_id)
+    if current["status"] not in {"failed", "cancelled"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only failed or cancelled jobs can be marked ignored.",
+        )
+
+    row = db.execute(
+        _job_returning_statement(
+            """
+            update background_job
+            set metadata_json = metadata_json || jsonb_build_object(
+                    'failure_ignored', true,
+                    'failure_ignored_at', now()::text,
+                    'failure_ignored_by', :ignored_by,
+                    'failure_ignore_reason', :ignore_reason
+                ),
+                updated_at = now()
+            where id = :job_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {
+            "job_id": job_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "ignored_by": str(DEFAULT_ADMIN_USER_ID),
+            "ignore_reason": payload.reason,
+        },
+    ).mappings().one()
+    row_dict = dict(row)
+    _mark_related_business_update_ignored(db, row_dict)
+    db.commit()
+    return row_dict
+
+
+@router.post("/{job_id}/unignore", response_model=BackgroundJobOut)
+def unignore_background_job(job_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+    _get_job_or_404(db, job_id)
+    row = db.execute(
+        _job_returning_statement(
+            """
+            update background_job
+            set metadata_json = (
+                    metadata_json
+                    - 'failure_ignored'
+                    - 'failure_ignored_at'
+                    - 'failure_ignored_by'
+                    - 'failure_ignore_reason'
+                ) || jsonb_build_object(
+                    'failure_unignored_at', now()::text,
+                    'failure_unignored_by', :unignored_by
+                ),
+                updated_at = now()
+            where id = :job_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {
+            "job_id": job_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "unignored_by": str(DEFAULT_ADMIN_USER_ID),
+        },
+    ).mappings().one()
+    db.commit()
+    return dict(row)
+
+
 @router.post("/{job_id}/retry", response_model=BackgroundJobOut)
 def retry_background_job(job_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
     current = _get_job_or_404(db, job_id)
@@ -276,6 +384,20 @@ def retry_background_job(job_id: UUID, db: Session = Depends(get_db)) -> dict[st
                 error_code = null,
                 error_message = null,
                 error_detail_json = '{}'::jsonb,
+                metadata_json = (
+                    metadata_json
+                    - 'failure_ignored'
+                    - 'failure_ignored_at'
+                    - 'failure_ignored_by'
+                    - 'failure_ignore_reason'
+                ) || jsonb_build_object(
+                    'last_retry_at', now()::text,
+                    'last_retry_by', :retry_by,
+                    'last_retry_previous_status', status,
+                    'last_retry_previous_error_code', error_code,
+                    'last_retry_previous_error_message', left(coalesce(error_message, ''), 2000),
+                    'last_retry_previous_attempt_count', attempt_count
+                ),
                 updated_at = now()
             where id = :job_id
               and team_id = :team_id
@@ -286,8 +408,10 @@ def retry_background_job(job_id: UUID, db: Session = Depends(get_db)) -> dict[st
             "job_id": job_id,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
+            "retry_by": str(DEFAULT_ADMIN_USER_ID),
         },
     ).mappings().one()
+    _mark_related_business_update_retrying(db, dict(row))
     db.commit()
     return dict(row)
 
@@ -352,7 +476,283 @@ def _get_job_or_404(db: Session, job_id: UUID) -> dict[str, Any]:
     return dict(row)
 
 
-def _queue_summary(db: Session, *, include_empty: bool, lookback_hours: int) -> dict[str, Any]:
+def _retry_preview(db: Session, job: dict[str, Any]) -> dict[str, Any]:
+    can_retry = job.get("status") in {"failed", "cancelled"}
+    related = _retry_preview_related(db, job)
+    warnings = _retry_preview_warnings(job, related)
+    effects = [
+        {
+            "key": "reset_job_state",
+            "label": "Reset job to queued",
+            "description": "Retry will set status=queued, attempt_count=0, run_after=now, and clear locks.",
+        },
+        {
+            "key": "clear_current_error",
+            "label": "Clear current error fields",
+            "description": "The current error_code/error_message/error_detail_json will move into metadata as last_retry_previous_*.",
+        },
+    ]
+    if _job_failure_ignored(job):
+        effects.append(
+            {
+                "key": "clear_ignore_marker",
+                "label": "Clear ignore marker",
+                "description": "Retry removes failure_ignored metadata so the retried job can surface again if it fails.",
+            }
+        )
+    if job.get("job_type") == "business_update_extract_actions":
+        effects.append(
+            {
+                "key": "business_update_processing",
+                "label": "Mark business update processing",
+                "description": "The related business_update is marked processing so review-page actions are enabled while retry runs.",
+            }
+        )
+    if job.get("job_type") in {
+        "business_update_extract_actions",
+        "seller_target_parse",
+        "buyer_intent_parse",
+    }:
+        effects.append(
+            {
+                "key": "may_auto_apply",
+                "label": "May auto-apply parsed fields",
+                "description": "This job type can write entity fields automatically when extraction is valid and target binding is safe.",
+            }
+        )
+
+    compact = _compact_failure_job(job) if job.get("status") in {"failed", "cancelled"} else _compact_queue_job(job)
+    compact["payload_json"] = job.get("payload_json") or {}
+    compact["metadata_json"] = job.get("metadata_json") or {}
+    compact["result_json"] = job.get("result_json") or {}
+    compact["error_detail_json"] = job.get("error_detail_json") or {}
+    return {
+        "job": compact,
+        "retry": {
+            "eligible": can_retry,
+            "route": f"/background-jobs/{job['id']}/retry" if can_retry else None,
+            "method": "POST" if can_retry else None,
+            "queue_name": job.get("queue_name"),
+            "will_reset_attempt_count_to": 0 if can_retry else None,
+            "will_run_after": "now" if can_retry else None,
+        },
+        "related": related,
+        "effects": effects,
+        "warnings": warnings,
+        "debug_ref": _debug_ref("background_job", job["id"]),
+    }
+
+
+def _retry_preview_related(db: Session, job: dict[str, Any]) -> dict[str, Any]:
+    entity_type = job.get("entity_type")
+    entity_id = job.get("entity_id")
+    related: dict[str, Any] = {
+        "entity_ref": _debug_ref(entity_type, entity_id) if entity_type and entity_id else None,
+        "same_entity_job_count": 0,
+        "active_same_entity_job_count": 0,
+        "trace_count": _count_job_traces(db, job["id"]),
+    }
+    if entity_type and entity_id:
+        counts = _same_entity_job_counts(db, entity_type, entity_id)
+        related.update(counts)
+    if entity_type == "business_update" and entity_id:
+        related["business_update"] = _business_update_retry_context(db, entity_id)
+    return related
+
+
+def _retry_preview_warnings(job: dict[str, Any], related: dict[str, Any]) -> list[dict[str, Any]]:
+    warnings: list[dict[str, Any]] = []
+    if job.get("status") not in {"failed", "cancelled"}:
+        warnings.append(
+            {
+                "key": "not_retryable_status",
+                "severity": "blocker",
+                "message": "Only failed or cancelled jobs can be retried.",
+            }
+        )
+    if int(related.get("active_same_entity_job_count") or 0) > 0:
+        warnings.append(
+            {
+                "key": "active_related_jobs",
+                "severity": "warning",
+                "message": "The related entity already has queued/running/retry_waiting jobs.",
+            }
+        )
+    if related.get("trace_count") == 0:
+        warnings.append(
+            {
+                "key": "no_trace",
+                "severity": "info",
+                "message": "No ai_trace exists for this job; retry may overwrite the visible failure state.",
+            }
+        )
+    business_update = related.get("business_update") or {}
+    if int(business_update.get("application_log_count") or 0) > 0:
+        warnings.append(
+            {
+                "key": "existing_application_logs",
+                "severity": "warning",
+                "message": "The related business update already has application logs; review duplicate effects before retry.",
+            }
+        )
+    return warnings
+
+
+def _same_entity_job_counts(db: Session, entity_type: str, entity_id: UUID) -> dict[str, int]:
+    row = db.execute(
+        text(
+            """
+            select count(*)::int as same_entity_job_count,
+                   count(*) filter (
+                     where status in ('queued', 'running', 'retry_waiting')
+                   )::int as active_same_entity_job_count
+            from background_job
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and entity_type = :entity_type
+              and entity_id = :entity_id
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+        },
+    ).mappings().one()
+    return {
+        "same_entity_job_count": int(row["same_entity_job_count"] or 0),
+        "active_same_entity_job_count": int(row["active_same_entity_job_count"] or 0),
+    }
+
+
+def _business_update_retry_context(db: Session, business_update_id: UUID) -> dict[str, Any] | None:
+    row = db.execute(
+        text(
+            """
+            select
+              bu.id,
+              bu.processing_status,
+              bu.created_at::text as created_at,
+              bu.metadata_json,
+              (select count(*)::int from extracted_action action
+               where action.team_id = bu.team_id
+                 and action.workspace_id = bu.workspace_id
+                 and action.business_update_id = bu.id) as action_count,
+              (select count(*)::int from action_application_log log
+               where log.team_id = bu.team_id
+                 and log.workspace_id = bu.workspace_id
+                 and log.business_update_id = bu.id) as application_log_count
+            from business_update bu
+            where bu.id = :business_update_id
+              and bu.team_id = :team_id
+              and bu.workspace_id = :workspace_id
+            """
+        ),
+        {
+            "business_update_id": business_update_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        return None
+    item = dict(row)
+    item["action_count"] = int(item.get("action_count") or 0)
+    item["application_log_count"] = int(item.get("application_log_count") or 0)
+    return item
+
+
+def _count_job_traces(db: Session, job_id: UUID) -> int:
+    return int(
+        db.execute(
+            text(
+                """
+                select count(*)::int
+                from ai_trace
+                where job_id = :job_id
+                  and team_id = :team_id
+                  and workspace_id = :workspace_id
+                """
+            ),
+            {
+                "job_id": job_id,
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+            },
+        ).scalar_one()
+        or 0
+    )
+
+
+def _mark_related_business_update_retrying(db: Session, job: dict[str, Any]) -> None:
+    if job.get("job_type") != "business_update_extract_actions" or job.get("entity_type") != "business_update":
+        return
+    business_update_id = job.get("entity_id")
+    if not business_update_id:
+        return
+    db.execute(
+        text(
+            """
+            update business_update
+            set processing_status = 'processing',
+                metadata_json = metadata_json || jsonb_build_object(
+                  'last_retry_job_id', :job_id,
+                  'last_retry_at', now()::text
+                )
+            where id = :business_update_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {
+            "business_update_id": business_update_id,
+            "job_id": str(job["id"]),
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )
+
+
+def _mark_related_business_update_ignored(db: Session, job: dict[str, Any]) -> None:
+    if job.get("job_type") != "business_update_extract_actions" or job.get("entity_type") != "business_update":
+        return
+    business_update_id = job.get("entity_id")
+    if not business_update_id:
+        return
+    db.execute(
+        text(
+            """
+            update business_update
+            set processing_status = case
+                  when processing_status = 'processing' then 'failed'
+                  else processing_status
+                end,
+                metadata_json = metadata_json || jsonb_build_object(
+                  'last_ignored_failed_job_id', :job_id,
+                  'last_ignored_failed_job_at', now()::text
+                )
+            where id = :business_update_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {
+            "business_update_id": business_update_id,
+            "job_id": str(job["id"]),
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )
+
+
+def _queue_summary(
+    db: Session,
+    *,
+    include_empty: bool,
+    include_ignored: bool = False,
+    lookback_hours: int,
+) -> dict[str, Any]:
     rows = db.execute(
         text(
             """
@@ -362,7 +762,14 @@ def _queue_summary(db: Session, *, include_empty: bool, lookback_hours: int) -> 
               count(*) filter (where status = 'queued')::int as queued_count,
               count(*) filter (where status = 'retry_waiting')::int as retry_waiting_count,
               count(*) filter (where status = 'running')::int as running_count,
-              count(*) filter (where status = 'failed')::int as failed_count,
+              count(*) filter (
+                where status = 'failed'
+                  and (:include_ignored or coalesce(metadata_json ->> 'failure_ignored', 'false') <> 'true')
+              )::int as failed_count,
+              count(*) filter (
+                where status = 'failed'
+                  and coalesce(metadata_json ->> 'failure_ignored', 'false') = 'true'
+              )::int as ignored_failed_count,
               count(*) filter (where status = 'succeeded')::int as succeeded_count,
               count(*) filter (where status = 'cancelled')::int as cancelled_count,
               count(*) filter (
@@ -375,6 +782,7 @@ def _queue_summary(db: Session, *, include_empty: bool, lookback_hours: int) -> 
               count(*) filter (
                 where finished_at >= now() - (:lookback_hours * interval '1 hour')
                   and status = 'failed'
+                  and (:include_ignored or coalesce(metadata_json ->> 'failure_ignored', 'false') <> 'true')
               )::int as recent_failed_count,
               min(run_after) filter (where status in ('queued', 'retry_waiting'))::text as next_run_after,
               max(updated_at)::text as last_updated_at
@@ -388,6 +796,7 @@ def _queue_summary(db: Session, *, include_empty: bool, lookback_hours: int) -> 
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
             "lookback_hours": lookback_hours,
+            "include_ignored": include_ignored,
         },
     ).mappings().all()
     queue_map = {str(row["queue_name"]): dict(row) for row in rows}
@@ -397,6 +806,7 @@ def _queue_summary(db: Session, *, include_empty: bool, lookback_hours: int) -> 
             db,
             queue_name=queue_name,
             row=queue_map.get(queue_name),
+            include_ignored=include_ignored,
             lookback_hours=lookback_hours,
         )
         for queue_name in queue_names
@@ -411,12 +821,19 @@ def _queue_summary(db: Session, *, include_empty: bool, lookback_hours: int) -> 
     }
 
 
-def _failure_summary(db: Session, *, lookback_hours: int, limit: int) -> dict[str, Any]:
+def _failure_summary(
+    db: Session,
+    *,
+    lookback_hours: int,
+    limit: int,
+    include_ignored: bool = False,
+) -> dict[str, Any]:
     params = {
         "team_id": DEFAULT_TEAM_ID,
         "workspace_id": DEFAULT_WORKSPACE_ID,
         "lookback_hours": lookback_hours,
         "limit": limit,
+        "include_ignored": include_ignored,
     }
     by_queue_rows = db.execute(
         text(
@@ -426,6 +843,7 @@ def _failure_summary(db: Session, *, lookback_hours: int, limit: int) -> dict[st
             where team_id = :team_id
               and workspace_id = :workspace_id
               and status = 'failed'
+              and (:include_ignored or coalesce(metadata_json ->> 'failure_ignored', 'false') <> 'true')
               and updated_at >= now() - (:lookback_hours * interval '1 hour')
             group by queue_name
             order by failed_count desc, latest_failed_at desc
@@ -442,6 +860,7 @@ def _failure_summary(db: Session, *, lookback_hours: int, limit: int) -> dict[st
             where team_id = :team_id
               and workspace_id = :workspace_id
               and status = 'failed'
+              and (:include_ignored or coalesce(metadata_json ->> 'failure_ignored', 'false') <> 'true')
               and updated_at >= now() - (:lookback_hours * interval '1 hour')
             group by job_type, queue_name
             order by failed_count desc, latest_failed_at desc
@@ -456,11 +875,12 @@ def _failure_summary(db: Session, *, lookback_hours: int, limit: int) -> dict[st
             select id, job_type, status, priority, queue_name, entity_type, entity_id,
                    run_after::text as run_after, created_at::text as created_at,
                    updated_at::text as updated_at, error_code, error_message,
-                   attempt_count, max_attempts
+                   attempt_count, max_attempts, metadata_json
             from background_job
             where team_id = :team_id
               and workspace_id = :workspace_id
               and status = 'failed'
+              and (:include_ignored or coalesce(metadata_json ->> 'failure_ignored', 'false') <> 'true')
               and updated_at >= now() - (:lookback_hours * interval '1 hour')
             order by updated_at desc
             limit :limit
@@ -476,6 +896,7 @@ def _failure_summary(db: Session, *, lookback_hours: int, limit: int) -> dict[st
     return {
         "generated_at": generated_at,
         "lookback_hours": lookback_hours,
+        "include_ignored": include_ignored,
         "totals": totals,
         "by_queue": by_queue,
         "by_job_type": by_job_type,
@@ -503,6 +924,7 @@ def _failure_job_type_item(row: dict[str, Any]) -> dict[str, Any]:
 
 def _compact_failure_job(row: dict[str, Any]) -> dict[str, Any]:
     compact = _compact_queue_job(row)
+    ignored = _job_failure_ignored(row)
     can_retry = row.get("status") in {"failed", "cancelled"}
     failure_category = _failure_category(row.get("error_code"), row.get("error_message"))
     compact["error_code"] = row.get("error_code")
@@ -512,8 +934,14 @@ def _compact_failure_job(row: dict[str, Any]) -> dict[str, Any]:
     compact["max_attempts"] = row.get("max_attempts")
     compact["error_message"] = _truncate_text(row.get("error_message"), 500)
     compact["related_entity_ref"] = _debug_ref(row.get("entity_type"), row.get("entity_id")) if row.get("entity_type") and row.get("entity_id") else None
+    compact["ignored"] = ignored
+    compact["ignore_reason"] = (row.get("metadata_json") or {}).get("failure_ignore_reason")
+    compact["ignored_at"] = (row.get("metadata_json") or {}).get("failure_ignored_at")
     compact["can_retry"] = can_retry
     compact["retry_route"] = f"/background-jobs/{row['id']}/retry" if can_retry else None
+    compact["retry_preview_route"] = f"/background-jobs/{row['id']}/retry-preview" if can_retry else None
+    compact["ignore_route"] = None if ignored else f"/background-jobs/{row['id']}/ignore"
+    compact["unignore_route"] = f"/background-jobs/{row['id']}/unignore" if ignored else None
     compact["recommended_actions"] = _failure_recommended_actions(compact)
     return compact
 
@@ -566,9 +994,36 @@ def _failure_recommended_actions(job: dict[str, Any]) -> list[dict[str, Any]]:
     if job.get("can_retry"):
         actions.append(
             {
+                "key": "preview_retry",
+                "label": "Preview Retry",
+                "route": job.get("retry_preview_route"),
+                "method": "GET",
+            }
+        )
+    if job.get("can_retry"):
+        actions.append(
+            {
                 "key": "retry_job",
                 "label": "Retry Job",
                 "route": job.get("retry_route"),
+                "method": "POST",
+            }
+        )
+    if job.get("ignored"):
+        actions.append(
+            {
+                "key": "unignore_job",
+                "label": "Unignore Job",
+                "route": job.get("unignore_route"),
+                "method": "POST",
+            }
+        )
+    else:
+        actions.append(
+            {
+                "key": "ignore_job",
+                "label": "Ignore Job",
+                "route": job.get("ignore_route"),
                 "method": "POST",
             }
         )
@@ -600,6 +1055,7 @@ def _queue_summary_item(
     *,
     queue_name: str,
     row: dict[str, Any] | None,
+    include_ignored: bool,
     lookback_hours: int,
 ) -> dict[str, Any]:
     counts = {
@@ -608,6 +1064,7 @@ def _queue_summary_item(
         "retry_waiting": _int_value(row, "retry_waiting_count"),
         "running": _int_value(row, "running_count"),
         "failed": _int_value(row, "failed_count"),
+        "ignored_failed": _int_value(row, "ignored_failed_count"),
         "succeeded": _int_value(row, "succeeded_count"),
         "cancelled": _int_value(row, "cancelled_count"),
         "recent_created": _int_value(row, "recent_created_count"),
@@ -625,7 +1082,7 @@ def _queue_summary_item(
         "next_run_after": row.get("next_run_after") if row else None,
         "last_updated_at": row.get("last_updated_at") if row else None,
         "next_job": _queue_next_job(db, queue_name),
-        "latest_failed_job": _queue_latest_failed_job(db, queue_name),
+        "latest_failed_job": _queue_latest_failed_job(db, queue_name, include_ignored=include_ignored),
         "debug_ref": {
             "route": f"/background-jobs?queue_name={queue_name}",
             "entity_type": "background_job_queue",
@@ -667,18 +1124,19 @@ def _queue_next_job(db: Session, queue_name: str) -> dict[str, Any] | None:
     return _compact_queue_job(dict(row)) if row else None
 
 
-def _queue_latest_failed_job(db: Session, queue_name: str) -> dict[str, Any] | None:
+def _queue_latest_failed_job(db: Session, queue_name: str, *, include_ignored: bool = False) -> dict[str, Any] | None:
     row = db.execute(
         text(
             """
             select id, job_type, status, priority, queue_name, entity_type, entity_id,
                    run_after::text as run_after, created_at::text as created_at,
-                   updated_at::text as updated_at, error_message
+                   updated_at::text as updated_at, error_message, metadata_json
             from background_job
             where team_id = :team_id
               and workspace_id = :workspace_id
               and queue_name = :queue_name
               and status = 'failed'
+              and (:include_ignored or coalesce(metadata_json ->> 'failure_ignored', 'false') <> 'true')
             order by updated_at desc
             limit 1
             """
@@ -687,6 +1145,7 @@ def _queue_latest_failed_job(db: Session, queue_name: str) -> dict[str, Any] | N
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
             "queue_name": queue_name,
+            "include_ignored": include_ignored,
         },
     ).mappings().one_or_none()
     return _compact_queue_job(dict(row)) if row else None
@@ -709,6 +1168,14 @@ def _compact_queue_job(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _job_failure_ignored(row: dict[str, Any]) -> bool:
+    return (row.get("metadata_json") or {}).get("failure_ignored") is True
+
+
+def _not_failure_ignored_sql() -> str:
+    return "coalesce(metadata_json ->> 'failure_ignored', 'false') <> 'true'"
+
+
 def _queue_summary_totals(queues: list[dict[str, Any]]) -> dict[str, Any]:
     totals = {
         "queue_count": len(queues),
@@ -716,6 +1183,7 @@ def _queue_summary_totals(queues: list[dict[str, Any]]) -> dict[str, Any]:
         "failed_queue_count": 0,
         "active_job_count": 0,
         "failed_job_count": 0,
+        "ignored_failed_job_count": 0,
         "queued_job_count": 0,
         "running_job_count": 0,
         "retry_waiting_job_count": 0,
@@ -728,6 +1196,7 @@ def _queue_summary_totals(queues: list[dict[str, Any]]) -> dict[str, Any]:
             totals["failed_queue_count"] += 1
         totals["active_job_count"] += int(queue.get("active_count") or 0)
         totals["failed_job_count"] += int(counts.get("failed") or 0)
+        totals["ignored_failed_job_count"] += int(counts.get("ignored_failed") or 0)
         totals["queued_job_count"] += int(counts.get("queued") or 0)
         totals["running_job_count"] += int(counts.get("running") or 0)
         totals["retry_waiting_job_count"] += int(counts.get("retry_waiting") or 0)

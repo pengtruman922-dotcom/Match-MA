@@ -1,16 +1,45 @@
 from uuid import UUID
 
+from backend.app.api.routes import background_jobs as background_job_routes
 from backend.app.api.routes.background_jobs import (
+    BackgroundJobIgnoreRequest,
     _compact_queue_job,
     _compact_failure_job,
     _failure_category,
     _failure_job_type_item,
+    _job_failure_ignored,
+    _retry_preview_warnings,
     _failure_summary_text,
     _failure_summary_totals,
     _queue_health_status,
     _queue_summary_names,
     _queue_summary_totals,
 )
+
+
+class _FakeExecuteResult:
+    def __init__(self, row: dict):
+        self.row = row
+
+    def mappings(self):
+        return self
+
+    def one(self):
+        return self.row
+
+
+class _FakeDb:
+    def __init__(self, row: dict):
+        self.row = row
+        self.execute_calls = []
+        self.commit_count = 0
+
+    def execute(self, *args, **kwargs):
+        self.execute_calls.append((args, kwargs))
+        return _FakeExecuteResult(self.row)
+
+    def commit(self):
+        self.commit_count += 1
 
 
 def test_queue_summary_names_include_default_worker_queues() -> None:
@@ -36,11 +65,11 @@ def test_queue_summary_totals_aggregate_active_and_failed_counts() -> None:
         [
             {
                 "active_count": 3,
-                "counts": {"failed": 1, "queued": 2, "running": 1, "retry_waiting": 0},
+                "counts": {"failed": 1, "ignored_failed": 2, "queued": 2, "running": 1, "retry_waiting": 0},
             },
             {
                 "active_count": 0,
-                "counts": {"failed": 0, "queued": 0, "running": 0, "retry_waiting": 0},
+                "counts": {"failed": 0, "ignored_failed": 0, "queued": 0, "running": 0, "retry_waiting": 0},
             },
         ]
     )
@@ -49,6 +78,7 @@ def test_queue_summary_totals_aggregate_active_and_failed_counts() -> None:
     assert totals["active_queue_count"] == 1
     assert totals["failed_queue_count"] == 1
     assert totals["active_job_count"] == 3
+    assert totals["ignored_failed_job_count"] == 2
     assert totals["queued_job_count"] == 2
     assert totals["running_job_count"] == 1
 
@@ -116,6 +146,7 @@ def test_compact_failure_job_truncates_error_and_links_related_entity() -> None:
             "error_message": "x" * 600,
             "attempt_count": 1,
             "max_attempts": 3,
+            "metadata_json": {},
         }
     )
 
@@ -126,10 +157,65 @@ def test_compact_failure_job_truncates_error_and_links_related_entity() -> None:
     assert compact["related_entity_ref"]["route"] == f"/debug/entities/business_update/{entity_id}"
     assert compact["can_retry"] is True
     assert compact["retry_route"] == f"/background-jobs/{job_id}/retry"
+    assert compact["retry_preview_route"] == f"/background-jobs/{job_id}/retry-preview"
+    assert compact["ignore_route"] == f"/background-jobs/{job_id}/ignore"
     assert [item["key"] for item in compact["recommended_actions"]] == [
         "open_debug",
         "open_related_entity",
+        "preview_retry",
         "retry_job",
+        "ignore_job",
+    ]
+
+
+def test_compact_failure_job_exposes_ignore_metadata() -> None:
+    job_id = UUID("00000000-0000-0000-0000-000000000005")
+    compact = _compact_failure_job(
+        {
+            "id": job_id,
+            "job_type": "buyer_intent_parse",
+            "status": "failed",
+            "priority": 100,
+            "queue_name": "llm",
+            "entity_type": None,
+            "entity_id": None,
+            "run_after": None,
+            "created_at": "2026-06-03",
+            "updated_at": "2026-06-03",
+            "error_code": "job_failed",
+            "error_message": "test data",
+            "attempt_count": 3,
+            "max_attempts": 3,
+            "metadata_json": {
+                "failure_ignored": True,
+                "failure_ignored_at": "2026-06-03",
+                "failure_ignore_reason": "test garbage",
+            },
+        }
+    )
+
+    assert _job_failure_ignored({"metadata_json": {"failure_ignored": True}}) is True
+    assert compact["ignored"] is True
+    assert compact["ignore_reason"] == "test garbage"
+    assert compact["ignore_route"] is None
+    assert compact["unignore_route"] == f"/background-jobs/{job_id}/unignore"
+    assert compact["recommended_actions"][-1]["key"] == "unignore_job"
+
+
+def test_retry_preview_warnings_flag_missing_trace_and_existing_logs() -> None:
+    warnings = _retry_preview_warnings(
+        {"status": "failed"},
+        {
+            "trace_count": 0,
+            "active_same_entity_job_count": 1,
+            "business_update": {"application_log_count": 2},
+        },
+    )
+
+    assert [item["key"] for item in warnings] == [
+        "active_related_jobs",
+        "no_trace",
+        "existing_application_logs",
     ]
 
 
@@ -141,3 +227,101 @@ def test_failure_category_and_summary_map_common_errors() -> None:
     assert _failure_summary_text("db_constraint", "raw") == (
         "Database constraint failed while applying extracted data. Check enum/normalized field values."
     )
+
+
+def test_ignore_background_job_marks_related_business_update(monkeypatch) -> None:
+    job_id = UUID("00000000-0000-0000-0000-000000000010")
+    business_update_id = UUID("00000000-0000-0000-0000-000000000011")
+    db = _FakeDb(
+        {
+            "id": job_id,
+            "job_type": "business_update_extract_actions",
+            "status": "failed",
+            "entity_type": "business_update",
+            "entity_id": business_update_id,
+        }
+    )
+    marked_jobs = []
+
+    monkeypatch.setattr(
+        background_job_routes,
+        "_get_job_or_404",
+        lambda _db, _job_id: {"id": _job_id, "status": "failed"},
+    )
+    monkeypatch.setattr(
+        background_job_routes,
+        "_mark_related_business_update_ignored",
+        lambda _db, job: marked_jobs.append(job),
+    )
+
+    result = background_job_routes.ignore_background_job(
+        job_id,
+        BackgroundJobIgnoreRequest(reason="historical test data"),
+        db,
+    )
+
+    assert result["id"] == job_id
+    assert marked_jobs == [db.row]
+    assert db.commit_count == 1
+
+
+def test_cancel_background_job_does_not_mark_business_update_ignored(monkeypatch) -> None:
+    job_id = UUID("00000000-0000-0000-0000-000000000012")
+    db = _FakeDb(
+        {
+            "id": job_id,
+            "job_type": "business_update_extract_actions",
+            "status": "cancelled",
+            "entity_type": "business_update",
+            "entity_id": UUID("00000000-0000-0000-0000-000000000013"),
+        }
+    )
+    marked_jobs = []
+
+    monkeypatch.setattr(
+        background_job_routes,
+        "_get_job_or_404",
+        lambda _db, _job_id: {"id": _job_id, "status": "queued"},
+    )
+    monkeypatch.setattr(
+        background_job_routes,
+        "_mark_related_business_update_ignored",
+        lambda _db, job: marked_jobs.append(job),
+    )
+
+    result = background_job_routes.cancel_background_job(job_id, db)
+
+    assert result["status"] == "cancelled"
+    assert marked_jobs == []
+    assert db.commit_count == 1
+
+
+def test_retry_background_job_marks_related_business_update_processing(monkeypatch) -> None:
+    job_id = UUID("00000000-0000-0000-0000-000000000014")
+    db = _FakeDb(
+        {
+            "id": job_id,
+            "job_type": "business_update_extract_actions",
+            "status": "queued",
+            "entity_type": "business_update",
+            "entity_id": UUID("00000000-0000-0000-0000-000000000015"),
+        }
+    )
+    marked_jobs = []
+
+    monkeypatch.setattr(
+        background_job_routes,
+        "_get_job_or_404",
+        lambda _db, _job_id: {"id": _job_id, "status": "failed"},
+    )
+    monkeypatch.setattr(
+        background_job_routes,
+        "_mark_related_business_update_retrying",
+        lambda _db, job: marked_jobs.append(job),
+    )
+
+    result = background_job_routes.retry_background_job(job_id, db)
+
+    assert result["status"] == "queued"
+    assert marked_jobs == [db.row]
+    assert db.commit_count == 1

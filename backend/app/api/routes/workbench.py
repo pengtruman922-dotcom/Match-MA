@@ -240,6 +240,7 @@ def _exception_items(db: Session) -> list[dict[str, Any]]:
             where team_id = :team_id
               and workspace_id = :workspace_id
               and status = 'failed'
+              and coalesce(metadata_json ->> 'failure_ignored', 'false') <> 'true'
             order by updated_at desc
             limit 10
             """
@@ -413,7 +414,8 @@ def _overview(db: Session, *, pending_review_count: int) -> dict[str, int]:
                  and created_at >= now() - interval '7 days') as recent_update_count,
               (select count(*) from background_job
                where team_id = :team_id and workspace_id = :workspace_id
-                 and status = 'failed') as failed_job_count,
+                 and status = 'failed'
+                 and coalesce(metadata_json ->> 'failure_ignored', 'false') <> 'true') as failed_job_count,
               (select count(*) from background_job
                where team_id = :team_id and workspace_id = :workspace_id
                  and status in ('queued', 'running', 'retry_waiting')) as running_job_count,

@@ -376,26 +376,12 @@ def _handle_seller_target_parse(db: Session, job: JobClaim) -> dict[str, object]
             error_code="llm_call_failed",
             error_message=str(exc),
         )
+        db.commit()
         raise
 
     parsed_output_json = llm_result.parsed_output_json
     schema_validation_json = _validate_seller_target_parse_output(parsed_output_json)
     changes, normalization_notes = _normalize_seller_target_parse_changes(parsed_output_json)
-    applied_fields: list[str] = []
-    if schema_validation_json["valid"] and changes:
-        applied_fields = _apply_seller_target_parse_changes(
-            db,
-            seller_target,
-            changes,
-            job.id,
-            normalization_notes,
-            _parse_source_context(
-                job,
-                default_source_type="seller_target_parse",
-                default_source_label="Seller target parser",
-            ),
-        )
-
     _insert_seller_target_parse_trace(
         db,
         job=job,
@@ -414,8 +400,24 @@ def _handle_seller_target_parse(db: Session, job: JobClaim) -> dict[str, object]
         error_code=None if schema_validation_json["valid"] else "schema_validation_failed",
         error_message=schema_validation_json.get("error"),
     )
+    db.commit()
     if not schema_validation_json["valid"]:
         raise ValueError(schema_validation_json.get("error") or "Seller target parser output is invalid.")
+
+    applied_fields: list[str] = []
+    if changes:
+        applied_fields = _apply_seller_target_parse_changes(
+            db,
+            seller_target,
+            changes,
+            job.id,
+            normalization_notes,
+            _parse_source_context(
+                job,
+                default_source_type="seller_target_parse",
+                default_source_label="Seller target parser",
+            ),
+        )
 
     return {
         "handled": True,
@@ -485,26 +487,12 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
             error_code="llm_call_failed",
             error_message=str(exc),
         )
+        db.commit()
         raise
 
     parsed_output_json = llm_result.parsed_output_json
     schema_validation_json = _validate_buyer_intent_parse_output(parsed_output_json)
     changes, normalization_notes = _normalize_buyer_intent_parse_changes(parsed_output_json, raw_requirement_text)
-    applied_fields: list[str] = []
-    if schema_validation_json["valid"] and changes:
-        applied_fields = _apply_buyer_intent_parse_changes(
-            db,
-            buyer_intent,
-            changes,
-            job.id,
-            normalization_notes,
-            _parse_source_context(
-                job,
-                default_source_type="buyer_intent_parse",
-                default_source_label="Buyer intent parser",
-            ),
-        )
-
     _insert_buyer_intent_parse_trace(
         db,
         job=job,
@@ -523,8 +511,24 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
         error_code=None if schema_validation_json["valid"] else "schema_validation_failed",
         error_message=schema_validation_json.get("error"),
     )
+    db.commit()
     if not schema_validation_json["valid"]:
         raise ValueError(schema_validation_json.get("error") or "Buyer intent parser output is invalid.")
+
+    applied_fields: list[str] = []
+    if changes:
+        applied_fields = _apply_buyer_intent_parse_changes(
+            db,
+            buyer_intent,
+            changes,
+            job.id,
+            normalization_notes,
+            _parse_source_context(
+                job,
+                default_source_type="buyer_intent_parse",
+                default_source_label="Buyer intent parser",
+            ),
+        )
 
     return {
         "handled": True,
@@ -714,6 +718,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
             error_message=str(exc),
         )
         _mark_business_update_failed(db, business_update_id, job.id, str(exc))
+        db.commit()
         raise
 
     parsed_output_json = llm_result.parsed_output_json
@@ -721,9 +726,6 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
     actions = _normalize_actions(parsed_output_json, business_update_for_normalization)
     if not actions:
         actions = [_build_unresolved_action(parsed_output_json, llm_result.raw_output_text)]
-    created_actions = _insert_extracted_actions(db, business_update_id, actions, job.id)
-    auto_apply_results = _auto_apply_safe_actions(db, created_actions)
-
     _insert_llm_trace(
         db,
         job=job,
@@ -740,42 +742,52 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
         completion_tokens=llm_result.completion_tokens,
         total_tokens=llm_result.total_tokens,
     )
+    db.commit()
 
-    db.execute(
-        text(
-            """
-            update business_update
-            set processing_status = case
-                  when :auto_applied_count > 0 and exists (
-                    select 1
-                    from extracted_action
-                    where business_update_id = :business_update_id
-                      and applied_at is null
-                      and review_status in ('pending_review', 'accepted', 'auto_accepted')
-                  ) then 'partially_applied'
-                  when :auto_applied_count > 0 then 'applied'
-                  else 'parsed'
-                end,
-                metadata_json = metadata_json || :metadata_patch
-            where id = :business_update_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
-            """
-        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
-        {
-            "business_update_id": business_update_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "auto_applied_count": len(auto_apply_results),
-            "metadata_patch": {
-                "last_processed_job_id": str(job.id),
-                "last_processing_result": "llm_parsed",
-                "last_actions_created": len(created_actions),
-                "last_auto_applied_actions": len(auto_apply_results),
-                "last_schema_valid": schema_validation_json["valid"],
+    try:
+        created_actions = _insert_extracted_actions(db, business_update_id, actions, job.id)
+        auto_apply_results = _auto_apply_safe_actions(db, created_actions)
+
+        db.execute(
+            text(
+                """
+                update business_update
+                set processing_status = case
+                      when :auto_applied_count > 0 and exists (
+                        select 1
+                        from extracted_action
+                        where business_update_id = :business_update_id
+                          and applied_at is null
+                          and review_status in ('pending_review', 'accepted', 'auto_accepted')
+                      ) then 'partially_applied'
+                      when :auto_applied_count > 0 then 'applied'
+                      else 'parsed'
+                    end,
+                    metadata_json = metadata_json || :metadata_patch
+                where id = :business_update_id
+                  and team_id = :team_id
+                  and workspace_id = :workspace_id
+                """
+            ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+            {
+                "business_update_id": business_update_id,
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+                "auto_applied_count": len(auto_apply_results),
+                "metadata_patch": {
+                    "last_processed_job_id": str(job.id),
+                    "last_processing_result": "llm_parsed",
+                    "last_actions_created": len(created_actions),
+                    "last_auto_applied_actions": len(auto_apply_results),
+                    "last_schema_valid": schema_validation_json["valid"],
+                },
             },
-        },
-    )
+        )
+    except Exception as exc:
+        db.rollback()
+        _mark_business_update_failed(db, business_update_id, job.id, str(exc))
+        db.commit()
+        raise
 
     return {
         "handled": True,

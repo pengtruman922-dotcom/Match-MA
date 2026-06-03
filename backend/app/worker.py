@@ -1,7 +1,11 @@
-﻿import argparse
+import argparse
 import socket
 import time
 
+from sqlalchemy import bindparam, text
+from sqlalchemy.dialects.postgresql import JSONB
+
+from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import session_scope
 from backend.app.jobs.handlers import execute_job
 from backend.app.jobs.queue import (
@@ -26,10 +30,42 @@ def run_once(*, queue_name: str, worker_id: str) -> bool:
             mark_job_succeeded(db, job_id=job.id, result_json=result)
     except Exception as exc:  # pragma: no cover - defensive worker boundary
         with session_scope() as db:
+            _mark_related_business_update_failed(db, job, str(exc))
             mark_job_failed(db, job_id=job.id, error_message=str(exc))
         raise
 
     return True
+
+
+def _mark_related_business_update_failed(db, job, error_message: str) -> None:
+    if (
+        job.job_type != "business_update_extract_actions"
+        or job.entity_type != "business_update"
+        or job.entity_id is None
+    ):
+        return
+    db.execute(
+        text(
+            """
+            update business_update
+            set processing_status = 'failed',
+                metadata_json = metadata_json || :metadata_patch
+            where id = :business_update_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+        {
+            "business_update_id": job.entity_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "metadata_patch": {
+                "last_processed_job_id": str(job.id),
+                "last_processing_result": "failed",
+                "last_error_message": error_message,
+            },
+        },
+    )
 
 
 def main() -> None:
