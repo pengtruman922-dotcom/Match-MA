@@ -1565,6 +1565,7 @@ def _compact_review_trace(trace: dict[str, Any]) -> dict[str, Any]:
 
 
 def _compact_review_attachment(row: dict[str, Any]) -> dict[str, Any]:
+    parse_readiness = _review_attachment_parse_readiness(row)
     return {
         "id": row["id"],
         "file_name": row.get("file_name"),
@@ -1573,6 +1574,7 @@ def _compact_review_attachment(row: dict[str, Any]) -> dict[str, Any]:
         "file_size": row.get("file_size"),
         "storage_path": row.get("storage_path"),
         "parse_status": row.get("parse_status"),
+        "parse_readiness": parse_readiness,
         "link_type": row.get("link_type"),
         "linked_at": row.get("linked_at"),
         "latest_job": {
@@ -1599,6 +1601,73 @@ def _compact_review_attachment(row: dict[str, Any]) -> dict[str, Any]:
         else None,
         "debug_ref": _debug_ref("attachment", row["id"]),
     }
+
+
+def _review_attachment_parse_readiness(row: dict[str, Any]) -> dict[str, Any]:
+    metadata_json = row.get("metadata_json") if isinstance(row.get("metadata_json"), dict) else {}
+    text_source, text_value = _review_attachment_available_text(metadata_json)
+    text_available = bool(text_value)
+    binary_or_document = _review_attachment_is_binary_or_document(row)
+    blocking_reasons: list[str] = []
+    recommended_actions: list[str] = []
+
+    if text_available:
+        readiness_status = "ready"
+        expected_parse_status = "parsed"
+        recommended_actions.append("Start OCR parsing; v0.1 will use the available text as OCR output.")
+    elif binary_or_document:
+        readiness_status = "blocked"
+        expected_parse_status = "skipped"
+        blocking_reasons.append("No extracted text is available for this binary/document attachment.")
+        blocking_reasons.append("Real OCR requires durable object storage and an OCR provider integration.")
+        recommended_actions.append("Upload a text-like file or provide mock_extracted_text for current testing.")
+        recommended_actions.append("Configure object storage and a real OCR provider before parsing PDF/image/Office files.")
+    else:
+        readiness_status = "needs_text"
+        expected_parse_status = "skipped"
+        blocking_reasons.append("No extracted text is available for this attachment.")
+        recommended_actions.append("Upload a supported text-like file or provide mock_extracted_text.")
+
+    return {
+        "readiness_status": readiness_status,
+        "can_parse_now": text_available,
+        "expected_parse_status": expected_parse_status,
+        "available_text_source": text_source,
+        "text_available": text_available,
+        "text_preview": _truncate_review_text(text_value, 240) if text_value else None,
+        "storage_backend": metadata_json.get("storage_backend"),
+        "storage_uri": metadata_json.get("storage_uri") or row.get("storage_path"),
+        "content_sha256": metadata_json.get("content_sha256"),
+        "is_binary_or_document": binary_or_document,
+        "blocking_reasons": blocking_reasons,
+        "recommended_actions": recommended_actions,
+    }
+
+
+def _review_attachment_available_text(metadata_json: dict[str, Any]) -> tuple[str | None, str | None]:
+    for key in ("mock_extracted_text", "uploaded_text_content"):
+        value = metadata_json.get(key)
+        if value is not None and str(value).strip():
+            return key, str(value).strip()
+    return None, None
+
+
+def _review_attachment_is_binary_or_document(row: dict[str, Any]) -> bool:
+    file_type = str(row.get("file_type") or "").lower()
+    mime_type = str(row.get("mime_type") or "").split(";")[0].strip().lower()
+    return (
+        file_type in {"pdf", "png", "jpg", "jpeg", "webp", "doc", "docx", "xls", "xlsx", "ppt", "pptx"}
+        or mime_type.startswith("image/")
+        or mime_type in {
+            "application/pdf",
+            "application/msword",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.ms-excel",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.ms-powerpoint",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        }
+    )
 
 
 def _collect_entity_ids(

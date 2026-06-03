@@ -151,7 +151,7 @@ Behavior:
 
 `GET /api/v1/business-updates/{id}/review-page` now returns an `attachments`
 array with the latest OCR job, latest parsed document, latest evidence snippet,
-and debug refs for the review UI.
+parse readiness, and debug refs for the review UI.
 
 ## Worker behavior
 

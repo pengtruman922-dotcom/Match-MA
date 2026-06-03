@@ -99,6 +99,12 @@ def test_compact_review_attachment_exposes_latest_job_and_evidence() -> None:
             "file_size": 1200,
             "storage_path": "mock://teaser.pdf",
             "parse_status": "parsed",
+            "metadata_json": {
+                "storage_backend": "local",
+                "storage_uri": "mock://teaser.pdf",
+                "content_sha256": "abc",
+                "uploaded_text_content": "net profit 25m",
+            },
             "link_type": "source_document",
             "linked_at": "2026-06-03",
             "latest_job_id": job_id,
@@ -114,6 +120,9 @@ def test_compact_review_attachment_exposes_latest_job_and_evidence() -> None:
     )
 
     assert compacted["latest_job"]["debug_ref"]["route"] == f"/debug/entities/background_job/{job_id}"
+    assert compacted["parse_readiness"]["readiness_status"] == "ready"
+    assert compacted["parse_readiness"]["available_text_source"] == "uploaded_text_content"
+    assert compacted["parse_readiness"]["storage_backend"] == "local"
     assert compacted["latest_parsed_document"]["id"] == parsed_document_id
     assert compacted["latest_evidence"]["id"] == evidence_id
     assert compacted["debug_ref"]["route"] == f"/debug/entities/attachment/{attachment_id}"

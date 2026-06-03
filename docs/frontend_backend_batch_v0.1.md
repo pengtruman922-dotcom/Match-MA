@@ -298,7 +298,7 @@ Frontend expectations:
 
 - If `auto_start_ocr=true`, show OCR/background-job progress from review page `attachments[*].latest_job` and `jobs`.
 - If `process_after_ocr=true`, the OCR worker enqueues the LLM extraction job; keep polling the review page until actions/logs appear or a job fails.
-- `review-page.attachments` contains latest parsed document and evidence snippet cards, so `/updates/:id` does not need to call `/attachments/{id}/ocr-status` in the normal review flow.
+- `review-page.attachments` contains parse readiness, latest parsed document, and evidence snippet cards, so `/updates/:id` does not need to call `/attachments/{id}/ocr-status` in the normal review flow.
 - Debug Mode can open `attachments[*].debug_ref` or `attachments[*].latest_job.debug_ref` when OCR/extraction is wrong.
 
 ## Latest attachment upload contract
