@@ -1,6 +1,7 @@
 from uuid import UUID
 
 from backend.app.api.routes.attachments import (
+    _attachment_parse_readiness,
     _compact_child_parse_job,
     _compact_ocr_job,
     _compact_ocr_trace,
@@ -98,6 +99,69 @@ def test_upload_helpers_normalize_file_inputs() -> None:
 def test_decode_text_bytes_supports_utf8_and_gb18030() -> None:
     assert decode_text_bytes("测试文本".encode("utf-8")) == "测试文本"
     assert decode_text_bytes("测试文本".encode("gb18030")) == "测试文本"
+
+
+def test_attachment_parse_readiness_is_ready_when_uploaded_text_exists() -> None:
+    readiness = _attachment_parse_readiness(
+        {
+            "id": ATTACHMENT_ID,
+            "file_name": "note.txt",
+            "file_type": "txt",
+            "mime_type": "text/plain",
+            "storage_path": "local://attachments/note.txt",
+            "metadata_json": {
+                "storage_backend": "local",
+                "storage_uri": "local://attachments/note.txt",
+                "content_sha256": "abc",
+                "uploaded_text_content": "  ready text  ",
+            },
+            "links": [],
+        }
+    )
+
+    assert readiness["readiness_status"] == "ready"
+    assert readiness["can_parse_now"] is True
+    assert readiness["expected_parse_status"] == "parsed"
+    assert readiness["available_text_source"] == "uploaded_text_content"
+    assert readiness["text_preview"] == "ready text"
+
+
+def test_attachment_parse_readiness_blocks_binary_without_text() -> None:
+    readiness = _attachment_parse_readiness(
+        {
+            "id": ATTACHMENT_ID,
+            "file_name": "teaser.pdf",
+            "file_type": "pdf",
+            "mime_type": "application/pdf",
+            "storage_path": "local://attachments/teaser.pdf",
+            "metadata_json": {"storage_backend": "local"},
+            "links": [],
+        }
+    )
+
+    assert readiness["readiness_status"] == "blocked"
+    assert readiness["can_parse_now"] is False
+    assert readiness["expected_parse_status"] == "skipped"
+    assert readiness["is_binary_or_document"] is True
+    assert "Real OCR requires durable object storage" in readiness["blocking_reasons"][1]
+
+
+def test_attachment_parse_readiness_needs_text_for_non_binary_without_text() -> None:
+    readiness = _attachment_parse_readiness(
+        {
+            "id": ATTACHMENT_ID,
+            "file_name": "unknown.dat",
+            "file_type": "dat",
+            "mime_type": "application/octet-stream",
+            "storage_path": "local://attachments/unknown.dat",
+            "metadata_json": {},
+            "links": [],
+        }
+    )
+
+    assert readiness["readiness_status"] == "needs_text"
+    assert readiness["can_parse_now"] is False
+    assert readiness["is_binary_or_document"] is False
 
 
 def test_compact_attachment_ocr_status_helpers_expose_debug_refs() -> None:

@@ -109,6 +109,23 @@ class AttachmentOcrStatusOut(BaseModel):
     debug_ref: dict[str, Any]
 
 
+class AttachmentParseReadinessOut(BaseModel):
+    attachment: AttachmentOut
+    readiness_status: str
+    can_parse_now: bool
+    expected_parse_status: str
+    available_text_source: str | None
+    text_available: bool
+    text_preview: str | None
+    storage_backend: str | None
+    storage_uri: str | None
+    content_sha256: str | None
+    is_binary_or_document: bool
+    blocking_reasons: list[str]
+    recommended_actions: list[str]
+    debug_ref: dict[str, Any]
+
+
 ATTACHMENT_SELECT_COLUMNS = """
       id, visibility, file_name, file_type, mime_type, file_size, storage_path,
       uploaded_by, uploaded_at::text as uploaded_at, parse_status, metadata_json,
@@ -341,6 +358,15 @@ def get_attachment(attachment_id: UUID, db: Session = Depends(get_db)) -> dict[s
     return _attachment_with_links(db, attachment_id)
 
 
+@router.get("/{attachment_id}/parse-readiness", response_model=AttachmentParseReadinessOut)
+def get_attachment_parse_readiness(
+    attachment_id: UUID,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    attachment = _attachment_with_links(db, attachment_id)
+    return _attachment_parse_readiness(attachment)
+
+
 @router.post("/{attachment_id}/ocr", response_model=AttachmentOcrJobOut)
 def create_attachment_ocr_job(
     attachment_id: UUID,
@@ -469,6 +495,75 @@ def _ocr_job_out(row: dict[str, Any]) -> dict[str, Any]:
         "attachment_id": row["entity_id"],
         "reused_existing": row.get("reused_existing", False),
     }
+
+
+def _attachment_parse_readiness(attachment: dict[str, Any]) -> dict[str, Any]:
+    metadata_json = attachment.get("metadata_json") if isinstance(attachment.get("metadata_json"), dict) else {}
+    text_source, text_value = _attachment_available_text(metadata_json)
+    text_available = bool(text_value)
+    binary_or_document = _is_binary_or_document_attachment(attachment)
+    blocking_reasons: list[str] = []
+    recommended_actions: list[str] = []
+
+    if text_available:
+        readiness_status = "ready"
+        expected_parse_status = "parsed"
+        recommended_actions.append("Start OCR parsing; v0.1 will use the available text as OCR output.")
+    elif binary_or_document:
+        readiness_status = "blocked"
+        expected_parse_status = "skipped"
+        blocking_reasons.append("No extracted text is available for this binary/document attachment.")
+        blocking_reasons.append("Real OCR requires durable object storage and an OCR provider integration.")
+        recommended_actions.append("Upload a text-like file or provide mock_extracted_text for current testing.")
+        recommended_actions.append("Configure object storage and a real OCR provider before parsing PDF/image/Office files.")
+    else:
+        readiness_status = "needs_text"
+        expected_parse_status = "skipped"
+        blocking_reasons.append("No extracted text is available for this attachment.")
+        recommended_actions.append("Upload a supported text-like file or provide mock_extracted_text.")
+
+    return {
+        "attachment": attachment,
+        "readiness_status": readiness_status,
+        "can_parse_now": text_available,
+        "expected_parse_status": expected_parse_status,
+        "available_text_source": text_source,
+        "text_available": text_available,
+        "text_preview": _truncate_text(text_value, 500) if text_value else None,
+        "storage_backend": metadata_json.get("storage_backend"),
+        "storage_uri": metadata_json.get("storage_uri") or attachment.get("storage_path"),
+        "content_sha256": metadata_json.get("content_sha256"),
+        "is_binary_or_document": binary_or_document,
+        "blocking_reasons": blocking_reasons,
+        "recommended_actions": recommended_actions,
+        "debug_ref": _debug_ref("attachment", attachment["id"]),
+    }
+
+
+def _attachment_available_text(metadata_json: dict[str, Any]) -> tuple[str | None, str | None]:
+    for key in ("mock_extracted_text", "uploaded_text_content"):
+        value = metadata_json.get(key)
+        if value is not None and str(value).strip():
+            return key, str(value).strip()
+    return None, None
+
+
+def _is_binary_or_document_attachment(attachment: dict[str, Any]) -> bool:
+    file_type = str(attachment.get("file_type") or "").lower()
+    mime_type = str(attachment.get("mime_type") or "").split(";")[0].strip().lower()
+    return (
+        file_type in {"pdf", "png", "jpg", "jpeg", "webp", "doc", "docx", "xls", "xlsx", "ppt", "pptx"}
+        or mime_type.startswith("image/")
+        or mime_type in {
+            "application/pdf",
+            "application/msword",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.ms-excel",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.ms-powerpoint",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        }
+    )
 
 
 def _validate_attachment_payload(payload: AttachmentCreate) -> None:

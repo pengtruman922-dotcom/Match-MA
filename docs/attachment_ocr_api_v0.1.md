@@ -239,6 +239,42 @@ Debug payload includes:
 
 When binary upload/storage is added, `storage_path` should point to a real object storage path. The OCR worker can then replace the skeleton branch with actual parser/OCR execution while keeping the same public API and status/debug contract.
 
+
+### Parse readiness
+
+```text
+GET /api/v1/attachments/{attachment_id}/parse-readiness
+```
+
+Purpose:
+
+- Let frontend and Debug Mode explain whether an attachment can be parsed by the current v0.1 OCR skeleton.
+- Avoid confusing users when PDF/image/Office files upload successfully but OCR is skipped.
+
+Response highlights:
+
+```json
+{
+  "readiness_status": "ready | needs_text | blocked",
+  "can_parse_now": true,
+  "expected_parse_status": "parsed | skipped",
+  "available_text_source": "uploaded_text_content",
+  "text_preview": "...",
+  "storage_backend": "local",
+  "storage_uri": "local://attachments/...",
+  "content_sha256": "...",
+  "is_binary_or_document": false,
+  "blocking_reasons": [],
+  "recommended_actions": ["Start OCR parsing; v0.1 will use the available text as OCR output."]
+}
+```
+
+Status meaning:
+
+- `ready`: text is already available from mock text or uploaded text capture; OCR job should become `parsed`.
+- `needs_text`: non-binary attachment has no available text; provide `mock_extracted_text` or upload a supported text-like file.
+- `blocked`: binary/document attachment has no text; real parsing needs durable object storage plus OCR provider integration.
+
 ### Upload attachment
 
 ```text
