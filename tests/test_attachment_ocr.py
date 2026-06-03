@@ -127,6 +127,15 @@ def test_compact_attachment_ocr_status_helpers_expose_debug_refs() -> None:
             "provider_name": "aliyun_dashscope",
             "model_name": "ocr-skeleton-v0",
             "status": "succeeded",
+            "input_json": {
+                "attachment_id": str(ATTACHMENT_ID),
+                "storage_backend": "local",
+                "storage_uri": "local://attachments/x",
+                "content_sha256": "abc",
+                "text_capture_source": "uploaded_text_content",
+                "node_execution_mode": "skeleton",
+                "api_key": "should-not-leak",
+            },
             "raw_output_text": "x" * 900,
             "parsed_output_json": {"evidence_created": True},
             "schema_validation_json": {"valid": True},
@@ -143,6 +152,9 @@ def test_compact_attachment_ocr_status_helpers_expose_debug_refs() -> None:
 
     assert job["debug_ref"]["route"] == f"/debug/entities/background_job/{JOB_ID}"
     assert trace["raw_output_preview"].endswith("...")
+    assert trace["input_json"]["storage_backend"] == "local"
+    assert trace["input_json"]["content_sha256"] == "abc"
+    assert "api_key" not in trace["input_json"]
     assert trace["debug_ref"]["entity_type"] == "background_job"
 
 

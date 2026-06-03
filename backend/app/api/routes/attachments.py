@@ -734,7 +734,7 @@ def _latest_ocr_trace(db: Session, attachment_id: UUID) -> dict[str, Any] | None
             """
             select
               id, trace_type, node_name, job_id, provider_name, model_name,
-              status, raw_output_text, parsed_output_json, schema_validation_json,
+              status, input_json, raw_output_text, parsed_output_json, schema_validation_json,
               error_code, error_message, latency_ms, prompt_tokens, completion_tokens,
               total_tokens, started_at::text as started_at, finished_at::text as finished_at
             from ai_trace
@@ -885,6 +885,7 @@ def _compact_ocr_trace(trace: dict[str, Any]) -> dict[str, Any]:
         "provider_name": trace.get("provider_name"),
         "model_name": trace.get("model_name"),
         "status": trace["status"],
+        "input_json": _safe_ocr_trace_input_json(trace.get("input_json")),
         "raw_output_preview": _truncate_text(trace.get("raw_output_text"), 800),
         "parsed_output_json": trace.get("parsed_output_json"),
         "schema_validation_json": trace.get("schema_validation_json"),
@@ -898,6 +899,29 @@ def _compact_ocr_trace(trace: dict[str, Any]) -> dict[str, Any]:
         "finished_at": trace.get("finished_at"),
         "debug_ref": _debug_ref("background_job", trace["job_id"]) if trace.get("job_id") else None,
     }
+
+
+def _safe_ocr_trace_input_json(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    allowed_keys = {
+        "attachment_id",
+        "file_name",
+        "file_type",
+        "mime_type",
+        "file_size",
+        "storage_path",
+        "storage_backend",
+        "storage_uri",
+        "content_sha256",
+        "text_capture_source",
+        "uploaded_text_truncated",
+        "has_text_hint",
+        "node_execution_mode",
+        "provider_name",
+        "model_name",
+    }
+    return {key: value.get(key) for key in sorted(allowed_keys) if key in value}
 
 
 def _compact_parsed_document(parsed_document: dict[str, Any]) -> dict[str, Any]:
