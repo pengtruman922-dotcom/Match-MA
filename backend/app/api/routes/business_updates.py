@@ -1528,6 +1528,7 @@ def _compact_log_evidence(log: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _compact_review_job(job: dict[str, Any]) -> dict[str, Any]:
+    metadata = job.get("metadata_json") if isinstance(job.get("metadata_json"), dict) else {}
     return {
         "id": job["id"],
         "job_type": job["job_type"],
@@ -1541,6 +1542,9 @@ def _compact_review_job(job: dict[str, Any]) -> dict[str, Any]:
         "updated_at": job.get("updated_at"),
         "started_at": job.get("started_at"),
         "finished_at": job.get("finished_at"),
+        "ignored": metadata.get("failure_ignored") is True,
+        "ignore_reason": metadata.get("failure_ignore_reason"),
+        "ignored_at": metadata.get("failure_ignored_at"),
         "debug_ref": _debug_ref("background_job", job["id"]),
     }
 
