@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -1664,10 +1665,33 @@ def _attachment_mock_extracted_text(job: JobClaim, attachment: dict[str, Any]) -
     payload_text = job.payload_json.get("mock_extracted_text")
     metadata_json = attachment.get("metadata_json") if isinstance(attachment.get("metadata_json"), dict) else {}
     metadata_text = metadata_json.get("mock_extracted_text")
-    text_value = payload_text if payload_text is not None else metadata_text
+    uploaded_text = metadata_json.get("uploaded_text_content")
+    local_file_text = _attachment_local_text_content(attachment)
+    text_value = payload_text if payload_text is not None else metadata_text or uploaded_text or local_file_text
     if text_value is None:
         return ""
     return str(text_value).strip()
+
+
+def _attachment_local_text_content(attachment: dict[str, Any], *, max_chars: int = 200_000) -> str | None:
+    metadata_json = attachment.get("metadata_json") if isinstance(attachment.get("metadata_json"), dict) else {}
+    local_path = metadata_json.get("local_path")
+    if not local_path:
+        return None
+    path = Path(str(local_path))
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        with path.open("rb") as file:
+            data = file.read(max_chars)
+    except OSError:
+        return None
+    for encoding in ("utf-8-sig", "utf-8", "gb18030"):
+        try:
+            return data.decode(encoding).strip()
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="ignore").strip() or None
 
 
 def _parse_source_context(

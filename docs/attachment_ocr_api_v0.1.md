@@ -222,3 +222,37 @@ Debug payload includes:
 ## Next step after v0.1
 
 When binary upload/storage is added, `storage_path` should point to a real object storage path. The OCR worker can then replace the skeleton branch with actual parser/OCR execution while keeping the same public API and status/debug contract.
+
+### Upload attachment
+
+```text
+POST /api/v1/attachments/upload
+Content-Type: multipart/form-data
+```
+
+Form fields:
+
+- `file`: required uploaded file.
+- `visibility`: optional, defaults to `workspace`.
+- `entity_type`, `entity_id`, `link_type`: optional direct link to a business object.
+- `auto_start_ocr`: optional boolean. If true, creates an OCR job immediately.
+- `auto_parse_linked_objects`: optional boolean for OCR-driven seller/buyer parsing.
+- `parse_entity_types`: optional JSON array or comma-separated string, e.g. `["seller_target"]` or `seller_target,buyer_intent`.
+- `metadata_json`: optional JSON object string.
+
+Response:
+
+```json
+{
+  "attachment": { "id": "uuid", "storage_path": "local://attachments/...", "links": [] },
+  "ocr_job": { "job_id": "uuid", "status": "queued" }
+}
+```
+
+Important v0.1 storage note:
+
+- The API writes the file to `ATTACHMENT_STORAGE_DIR`, default `storage/attachments`.
+- Railway workers do not share a durable filesystem with the API service, so text-like uploads also store the first 200KB of decoded text in `attachment.metadata_json.uploaded_text_content`.
+- The OCR skeleton reads text in this priority order: job `mock_extracted_text`, attachment `mock_extracted_text`, uploaded text metadata, then local file path if available.
+- Binary files are persisted as attachment records but still need a real object storage + OCR provider before they can be parsed across services.
+- Max upload size is controlled by `ATTACHMENT_MAX_UPLOAD_BYTES`, default 25MB.

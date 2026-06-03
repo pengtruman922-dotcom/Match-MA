@@ -300,3 +300,21 @@ Frontend expectations:
 - If `process_after_ocr=true`, the OCR worker enqueues the LLM extraction job; keep polling the review page until actions/logs appear or a job fails.
 - `review-page.attachments` contains latest parsed document and evidence snippet cards, so `/updates/:id` does not need to call `/attachments/{id}/ocr-status` in the normal review flow.
 - Debug Mode can open `attachments[*].debug_ref` or `attachments[*].latest_job.debug_ref` when OCR/extraction is wrong.
+
+## Latest attachment upload contract
+
+Frontend can now upload a file before or instead of manually creating attachment JSON:
+
+```text
+POST /api/v1/attachments/upload
+multipart/form-data: file, optional entity_type/entity_id/link_type, optional auto_start_ocr
+```
+
+Recommended first frontend behavior:
+
+- For text-like files (`.txt`, `.md`, `.csv`, `.json`, `text/*`), call `/attachments/upload?auto_start_ocr=true` or send `auto_start_ocr=true` as form data; the OCR skeleton will use captured text metadata even when API and worker run as separate Railway services.
+- For PDF/image/Office files, upload will create an attachment record and link it, but OCR will be `skipped` until the real OCR provider/object storage integration is added.
+- If a user attaches files inside the business update drawer, the frontend can either:
+  1. upload first, then pass returned `attachment.id` via `attachment_ids` to `POST /business-updates`; or
+  2. continue using inline JSON attachments with `mock_extracted_text` in development/testing.
+- Use `GET /business-updates/{id}/review-page` for normal progress display; use `/attachments/{id}/ocr-status` for attachment-specific debug pages.

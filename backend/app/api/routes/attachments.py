@@ -1,12 +1,16 @@
+import json
+import re
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
+from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 
@@ -21,6 +25,16 @@ ATTACHMENT_LINK_ENTITY_TYPES = {
     "business_update",
     "recommendation_session",
     "recommendation_report",
+}
+TEXT_CAPTURE_MAX_BYTES = 200_000
+TEXT_FILE_EXTENSIONS = {".csv", ".json", ".log", ".md", ".txt", ".tsv", ".xml", ".yaml", ".yml"}
+TEXT_MIME_PREFIXES = ("text/",)
+TEXT_MIME_TYPES = {
+    "application/csv",
+    "application/json",
+    "application/xml",
+    "application/x-ndjson",
+    "application/yaml",
 }
 
 
@@ -86,6 +100,11 @@ class AttachmentOcrJobOut(BaseModel):
     reused_existing: bool = False
 
 
+class AttachmentUploadOut(BaseModel):
+    attachment: AttachmentOut
+    ocr_job: AttachmentOcrJobOut | None = None
+
+
 class AttachmentOcrStatusOut(BaseModel):
     attachment: AttachmentOut
     linked_entities: list[dict[str, Any]]
@@ -146,6 +165,115 @@ def create_attachment(payload: AttachmentCreate, db: Session = Depends(get_db)) 
 
     db.commit()
     return _attachment_with_links(db, attachment["id"])
+
+
+@router.post("/upload", response_model=AttachmentUploadOut, status_code=status.HTTP_201_CREATED)
+def upload_attachment(
+    file: UploadFile = File(...),
+    visibility: str = Form(default="workspace"),
+    entity_type: str | None = Form(default=None),
+    entity_id: UUID | None = Form(default=None),
+    link_type: str | None = Form(default="source_document"),
+    auto_start_ocr: bool = Form(default=False),
+    auto_parse_linked_objects: bool = Form(default=False),
+    parse_entity_types: str | None = Form(default=None),
+    metadata_json: str | None = Form(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if visibility not in ATTACHMENT_VISIBILITY_VALUES:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Invalid visibility.")
+    if entity_id and not entity_type:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="entity_type is required when entity_id is provided.",
+        )
+    links = []
+    if entity_type and entity_id:
+        link = AttachmentLinkCreate(entity_type=entity_type, entity_id=entity_id, link_type=link_type)
+        _validate_attachment_link(db, link)
+        links.append(link)
+
+    parse_types = _parse_entity_types_form(parse_entity_types)
+    _validate_parse_entity_types(parse_types)
+    form_metadata = _parse_metadata_json_form(metadata_json)
+
+    settings = get_settings()
+    attachment_id = uuid4()
+    original_file_name = file.filename or "upload.bin"
+    safe_file_name = _safe_upload_filename(original_file_name)
+    storage_root = _attachment_storage_root()
+    target_dir = storage_root / str(attachment_id)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / safe_file_name
+    uploaded = _write_upload_file(
+        file,
+        target_path,
+        max_bytes=settings.attachment_max_upload_bytes,
+        capture_text=_is_text_upload(safe_file_name, file.content_type),
+    )
+
+    metadata = {
+        **form_metadata,
+        "uploaded_via": "multipart_upload",
+        "original_file_name": original_file_name,
+        "safe_file_name": safe_file_name,
+        "storage_backend": "local_ephemeral",
+        "local_path": str(target_path),
+        "uploaded_text_truncated": uploaded["text_truncated"],
+    }
+    if uploaded["text_content"]:
+        metadata["uploaded_text_content"] = uploaded["text_content"]
+
+    row = db.execute(
+        text(
+            f"""
+            insert into attachment (
+              id, team_id, workspace_id, visibility, file_name, file_type, mime_type,
+              file_size, storage_path, uploaded_by, metadata_json
+            )
+            values (
+              :id, :team_id, :workspace_id, :visibility, :file_name, :file_type, :mime_type,
+              :file_size, :storage_path, :uploaded_by, :metadata_json
+            )
+            returning
+{ATTACHMENT_SELECT_COLUMNS}
+            """
+        ).bindparams(bindparam("metadata_json", type_=JSONB)),
+        {
+            "id": attachment_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "visibility": visibility,
+            "file_name": original_file_name[:500],
+            "file_type": _file_type_from_name(safe_file_name),
+            "mime_type": file.content_type,
+            "file_size": uploaded["file_size"],
+            "storage_path": f"local://attachments/{attachment_id}/{safe_file_name}",
+            "uploaded_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_json": _json_safe_value(metadata),
+        },
+    ).mappings().one()
+
+    for link in links:
+        _insert_attachment_link(db, attachment_id, link)
+
+    ocr_job = None
+    if auto_start_ocr:
+        ocr_job = _enqueue_attachment_ocr_job(
+            db,
+            attachment_id=attachment_id,
+            force=False,
+            mock_extracted_text=None,
+            auto_parse_linked_objects=auto_parse_linked_objects,
+            parse_entity_types=parse_types,
+            source="attachment_upload_auto_ocr",
+        )
+
+    db.commit()
+    return {
+        "attachment": _attachment_with_links(db, row["id"]),
+        "ocr_job": _ocr_job_out(ocr_job) if ocr_job else None,
+    }
 
 
 @router.get("", response_model=list[AttachmentOut])
@@ -226,19 +354,56 @@ def create_attachment_ocr_job(
     request = payload or AttachmentOcrRequest()
     _get_attachment_or_404(db, attachment_id)
     _validate_parse_entity_types(request.parse_entity_types)
+    row = _enqueue_attachment_ocr_job(
+        db,
+        attachment_id=attachment_id,
+        force=request.force,
+        mock_extracted_text=request.mock_extracted_text,
+        auto_parse_linked_objects=request.auto_parse_linked_objects,
+        parse_entity_types=request.parse_entity_types,
+        source="attachment_ocr_api",
+    )
+    db.commit()
+    return _ocr_job_out(row)
 
-    if not request.force:
+
+@router.get("/{attachment_id}/ocr-status", response_model=AttachmentOcrStatusOut)
+def get_attachment_ocr_status(
+    attachment_id: UUID,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    attachment = _attachment_with_links(db, attachment_id)
+    latest_job = _latest_ocr_job(db, attachment_id)
+    latest_trace = _latest_ocr_trace(db, attachment_id)
+    parsed_document = _latest_parsed_document(db, attachment_id)
+    evidence_spans = _evidence_spans(db, attachment_id)
+    child_parse_jobs = _child_parse_jobs(db, latest_job["id"]) if latest_job else []
+    return {
+        "attachment": attachment,
+        "linked_entities": _linked_entity_refs(attachment["links"]),
+        "latest_job": _compact_ocr_job(latest_job) if latest_job else None,
+        "latest_trace": _compact_ocr_trace(latest_trace) if latest_trace else None,
+        "latest_parsed_document": _compact_parsed_document(parsed_document) if parsed_document else None,
+        "evidence_spans": [_compact_evidence_span(item) for item in evidence_spans],
+        "child_parse_jobs": [_compact_child_parse_job(item) for item in child_parse_jobs],
+        "debug_ref": _debug_ref("attachment", attachment_id),
+    }
+
+
+def _enqueue_attachment_ocr_job(
+    db: Session,
+    *,
+    attachment_id: UUID,
+    force: bool,
+    mock_extracted_text: str | None,
+    auto_parse_linked_objects: bool,
+    parse_entity_types: list[str],
+    source: str,
+) -> dict[str, Any]:
+    if not force:
         existing_job = _latest_active_ocr_job(db, attachment_id)
         if existing_job:
-            db.commit()
-            return {
-                "job_id": existing_job["id"],
-                "job_type": existing_job["job_type"],
-                "status": existing_job["status"],
-                "queue_name": existing_job["queue_name"],
-                "attachment_id": existing_job["entity_id"],
-                "reused_existing": True,
-            }
+            return {**existing_job, "reused_existing": True}
 
     row = db.execute(
         text(
@@ -266,12 +431,12 @@ def create_attachment_ocr_job(
             "idempotency_key": f"attachment_ocr_parse:{attachment_id}:{uuid4()}",
             "payload_json": {
                 "attachment_id": str(attachment_id),
-                "mock_extracted_text": request.mock_extracted_text,
-                "auto_parse_linked_objects": request.auto_parse_linked_objects,
-                "parse_entity_types": request.parse_entity_types,
+                "mock_extracted_text": mock_extracted_text,
+                "auto_parse_linked_objects": auto_parse_linked_objects,
+                "parse_entity_types": parse_entity_types,
             },
             "created_by": DEFAULT_ADMIN_USER_ID,
-            "metadata_json": {"source": "attachment_ocr_api", "force": request.force},
+            "metadata_json": {"source": source, "force": force},
         },
     ).mappings().one()
     db.execute(
@@ -296,37 +461,17 @@ def create_attachment_ocr_job(
             },
         },
     )
-    db.commit()
+    return {**dict(row), "reused_existing": False}
+
+
+def _ocr_job_out(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "job_id": row["id"],
         "job_type": row["job_type"],
         "status": row["status"],
         "queue_name": row["queue_name"],
         "attachment_id": row["entity_id"],
-        "reused_existing": False,
-    }
-
-
-@router.get("/{attachment_id}/ocr-status", response_model=AttachmentOcrStatusOut)
-def get_attachment_ocr_status(
-    attachment_id: UUID,
-    db: Session = Depends(get_db),
-) -> dict[str, Any]:
-    attachment = _attachment_with_links(db, attachment_id)
-    latest_job = _latest_ocr_job(db, attachment_id)
-    latest_trace = _latest_ocr_trace(db, attachment_id)
-    parsed_document = _latest_parsed_document(db, attachment_id)
-    evidence_spans = _evidence_spans(db, attachment_id)
-    child_parse_jobs = _child_parse_jobs(db, latest_job["id"]) if latest_job else []
-    return {
-        "attachment": attachment,
-        "linked_entities": _linked_entity_refs(attachment["links"]),
-        "latest_job": _compact_ocr_job(latest_job) if latest_job else None,
-        "latest_trace": _compact_ocr_trace(latest_trace) if latest_trace else None,
-        "latest_parsed_document": _compact_parsed_document(parsed_document) if parsed_document else None,
-        "evidence_spans": [_compact_evidence_span(item) for item in evidence_spans],
-        "child_parse_jobs": [_compact_child_parse_job(item) for item in child_parse_jobs],
-        "debug_ref": _debug_ref("attachment", attachment_id),
+        "reused_existing": row.get("reused_existing", False),
     }
 
 
@@ -379,6 +524,119 @@ def _validate_attachment_link(db: Session, link: AttachmentLinkCreate) -> None:
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Linked entity not found: {link.entity_type}/{link.entity_id}",
         )
+
+
+def _parse_entity_types_form(value: str | None) -> list[str]:
+    if not value:
+        return []
+    stripped = value.strip()
+    if not stripped:
+        return []
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        parsed = [item.strip() for item in stripped.split(",")]
+    if isinstance(parsed, str):
+        return [parsed]
+    if isinstance(parsed, list):
+        return [str(item).strip() for item in parsed if str(item).strip()]
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail="parse_entity_types must be a JSON array or comma-separated string.",
+    )
+
+
+def _parse_metadata_json_form(value: str | None) -> dict[str, Any]:
+    if not value or not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="metadata_json must be valid JSON.",
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="metadata_json must be a JSON object.",
+        )
+    return parsed
+
+
+def _attachment_storage_root() -> Path:
+    settings = get_settings()
+    root = Path(settings.attachment_storage_dir)
+    if not root.is_absolute():
+        root = Path.cwd() / root
+    return root
+
+
+def _safe_upload_filename(file_name: str) -> str:
+    name = Path(file_name or "upload.bin").name
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
+    return safe[:180] or "upload.bin"
+
+
+def _file_type_from_name(file_name: str) -> str | None:
+    suffix = Path(file_name).suffix.lower().lstrip(".")
+    return suffix or None
+
+
+def _is_text_upload(file_name: str, content_type: str | None) -> bool:
+    suffix = Path(file_name).suffix.lower()
+    mime_type = (content_type or "").split(";")[0].strip().lower()
+    return suffix in TEXT_FILE_EXTENSIONS or mime_type in TEXT_MIME_TYPES or mime_type.startswith(TEXT_MIME_PREFIXES)
+
+
+def _write_upload_file(
+    file: UploadFile,
+    target_path: Path,
+    *,
+    max_bytes: int,
+    capture_text: bool,
+) -> dict[str, Any]:
+    total = 0
+    captured = bytearray()
+    with target_path.open("wb") as output:
+        while True:
+            chunk = file.file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                try:
+                    target_path.unlink(missing_ok=True)
+                finally:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail=f"Attachment exceeds max upload size of {max_bytes} bytes.",
+                    )
+            output.write(chunk)
+            if capture_text and len(captured) < TEXT_CAPTURE_MAX_BYTES:
+                remaining = TEXT_CAPTURE_MAX_BYTES - len(captured)
+                captured.extend(chunk[:remaining])
+
+    text_content = None
+    text_truncated = False
+    if capture_text and captured:
+        text_content = _decode_text_bytes(bytes(captured))
+        text_truncated = total > len(captured)
+
+    return {
+        "file_size": total,
+        "text_content": text_content,
+        "text_truncated": text_truncated,
+    }
+
+
+def _decode_text_bytes(value: bytes) -> str | None:
+    for encoding in ("utf-8-sig", "utf-8", "gb18030"):
+        try:
+            return value.decode(encoding).strip()
+        except UnicodeDecodeError:
+            continue
+    return value.decode("utf-8", errors="ignore").strip() or None
 
 
 def _linked_entity_exists(db: Session, entity_type: str, entity_id: UUID) -> bool:
