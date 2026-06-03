@@ -3,7 +3,9 @@ from uuid import UUID
 from backend.app.api.routes.background_jobs import (
     _compact_queue_job,
     _compact_failure_job,
+    _failure_category,
     _failure_job_type_item,
+    _failure_summary_text,
     _failure_summary_totals,
     _queue_health_status,
     _queue_summary_names,
@@ -118,6 +120,8 @@ def test_compact_failure_job_truncates_error_and_links_related_entity() -> None:
     )
 
     assert compact["error_code"] == "llm_failed"
+    assert compact["failure_category"] == "provider_or_llm"
+    assert compact["failure_summary"] == "Model provider call failed or returned an unusable response. Check model config and trace."
     assert len(compact["error_message"]) == 500
     assert compact["related_entity_ref"]["route"] == f"/debug/entities/business_update/{entity_id}"
     assert compact["can_retry"] is True
@@ -127,3 +131,13 @@ def test_compact_failure_job_truncates_error_and_links_related_entity() -> None:
         "open_related_entity",
         "retry_job",
     ]
+
+
+def test_failure_category_and_summary_map_common_errors() -> None:
+    assert _failure_category("job_failed", "violates check constraint seller_target_listed_status_check") == "db_constraint"
+    assert _failure_category("job_failed", "name 'x' is not defined") == "code_error"
+    assert _failure_category("job_failed", "Some actions are invalid.") == "schema_validation"
+    assert _failure_category("llm_failed", "LLM HTTP 401") == "provider_or_llm"
+    assert _failure_summary_text("db_constraint", "raw") == (
+        "Database constraint failed while applying extracted data. Check enum/normalized field values."
+    )

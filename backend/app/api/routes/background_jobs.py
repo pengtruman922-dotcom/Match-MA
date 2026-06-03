@@ -504,7 +504,10 @@ def _failure_job_type_item(row: dict[str, Any]) -> dict[str, Any]:
 def _compact_failure_job(row: dict[str, Any]) -> dict[str, Any]:
     compact = _compact_queue_job(row)
     can_retry = row.get("status") in {"failed", "cancelled"}
+    failure_category = _failure_category(row.get("error_code"), row.get("error_message"))
     compact["error_code"] = row.get("error_code")
+    compact["failure_category"] = failure_category
+    compact["failure_summary"] = _failure_summary_text(failure_category, row.get("error_message"))
     compact["attempt_count"] = row.get("attempt_count")
     compact["max_attempts"] = row.get("max_attempts")
     compact["error_message"] = _truncate_text(row.get("error_message"), 500)
@@ -513,6 +516,35 @@ def _compact_failure_job(row: dict[str, Any]) -> dict[str, Any]:
     compact["retry_route"] = f"/background-jobs/{row['id']}/retry" if can_retry else None
     compact["recommended_actions"] = _failure_recommended_actions(compact)
     return compact
+
+
+def _failure_category(error_code: Any, error_message: Any) -> str:
+    code = str(error_code or "").lower()
+    message = str(error_message or "").lower()
+    if "checkviolation" in message or "violates check constraint" in message:
+        return "db_constraint"
+    if "not defined" in message or "nameerror" in message or code in {"name_error", "code_error"}:
+        return "code_error"
+    if "schema" in message or "invalid" in message or code in {"schema_validation_failed", "invalid_output"}:
+        return "schema_validation"
+    if "llm" in message or "provider" in message or "http " in message or code in {"llm_failed", "provider_failed"}:
+        return "provider_or_llm"
+    if code:
+        return code
+    return "unknown"
+
+
+def _failure_summary_text(category: str, error_message: Any) -> str:
+    message = _truncate_text(error_message, 240)
+    if category == "db_constraint":
+        return "Database constraint failed while applying extracted data. Check enum/normalized field values."
+    if category == "code_error":
+        return "Backend code error occurred while running the job. Check deploy version and stack trace."
+    if category == "schema_validation":
+        return "AI output or extracted action payload failed validation. Check trace output and prompt/schema."
+    if category == "provider_or_llm":
+        return "Model provider call failed or returned an unusable response. Check model config and trace."
+    return message or "Job failed without a detailed error message."
 
 
 def _failure_recommended_actions(job: dict[str, Any]) -> list[dict[str, Any]]:

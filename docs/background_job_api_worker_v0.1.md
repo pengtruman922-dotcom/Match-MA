@@ -166,7 +166,7 @@ Response highlights:
   },
   "by_queue": [{ "queue_name": "llm", "failed_count": 3 }],
   "by_job_type": [{ "job_type": "business_update_extract_actions", "queue_name": "llm", "failed_count": 3 }],
-  "recent_failures": [{ "id": "uuid", "job_type": "...", "debug_ref": {}, "related_entity_ref": {}, "can_retry": true, "retry_route": "/background-jobs/{id}/retry", "recommended_actions": [] }]
+  "recent_failures": [{ "id": "uuid", "job_type": "...", "failure_category": "db_constraint | code_error | schema_validation | provider_or_llm | unknown", "failure_summary": "...", "debug_ref": {}, "related_entity_ref": {}, "can_retry": true, "retry_route": "/background-jobs/{id}/retry", "recommended_actions": [] }]
 }
 ```
 
