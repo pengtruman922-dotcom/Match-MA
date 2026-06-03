@@ -141,6 +141,35 @@ Default queues shown when `include_empty=true`:
 llm, ocr, embedding, rerank, default
 ```
 
+
+### 2.8 Failure summary
+
+```text
+GET /api/v1/background-jobs/summary/failures
+GET /api/v1/background-jobs/summary/failures?lookback_hours=168&limit=20
+```
+
+Purpose:
+
+- Show failed jobs grouped by queue and job type.
+- Give workbench and Debug Mode a compact list of recent failed jobs with `debug_ref` and related entity links.
+
+Response highlights:
+
+```json
+{
+  "totals": {
+    "failed_job_count": 3,
+    "failed_queue_count": 1,
+    "failed_job_type_count": 1,
+    "recent_failure_count": 3
+  },
+  "by_queue": [{ "queue_name": "llm", "failed_count": 3 }],
+  "by_job_type": [{ "job_type": "business_update_extract_actions", "queue_name": "llm", "failed_count": 3 }],
+  "recent_failures": [{ "id": "uuid", "job_type": "...", "debug_ref": {}, "related_entity_ref": {} }]
+}
+```
+
 ## 3. Business Update Process API
 
 为了业务更新入口更方便创建任务，新增：

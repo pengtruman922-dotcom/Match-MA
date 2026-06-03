@@ -55,9 +55,16 @@ def test_workbench_task_board_schema_includes_queue_summary() -> None:
             "totals": {"active_job_count": 0, "failed_job_count": 0},
             "queues": [{"queue_name": "llm", "health_status": "idle"}],
         },
+        failure_summary={
+            "totals": {"failed_job_count": 0},
+            "by_queue": [],
+            "by_job_type": [],
+            "recent_failures": [],
+        },
     )
 
     assert board.queue_summary["queues"][0]["queue_name"] == "llm"
+    assert board.failure_summary["totals"]["failed_job_count"] == 0
 
 
 def test_debug_summary_supports_unified_entity_types() -> None:

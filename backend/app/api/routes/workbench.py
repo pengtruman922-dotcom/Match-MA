@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
-from backend.app.api.routes.background_jobs import _queue_summary
+from backend.app.api.routes.background_jobs import _failure_summary, _queue_summary
 
 router = APIRouter(prefix="/workbench", tags=["workbench"])
 
@@ -35,6 +35,7 @@ class WorkbenchTaskBoardOut(BaseModel):
     quick_actions: list[dict[str, Any]]
     overview: dict[str, Any]
     queue_summary: dict[str, Any]
+    failure_summary: dict[str, Any]
 
 
 class WorkbenchOut(BaseModel):
@@ -81,6 +82,7 @@ def get_workbench_task_board(db: Session = Depends(get_db)) -> dict[str, Any]:
         exception_count=len(exception_items),
     )
     queue_summary = _queue_summary(db, include_empty=True, lookback_hours=24)
+    failure_summary = _failure_summary(db, lookback_hours=168, limit=10)
     return {
         "groups": groups,
         "auto_applied_recent": auto_applied_recent,
@@ -89,6 +91,7 @@ def get_workbench_task_board(db: Session = Depends(get_db)) -> dict[str, Any]:
         "quick_actions": _quick_actions(overview),
         "overview": overview,
         "queue_summary": queue_summary,
+        "failure_summary": failure_summary,
     }
 
 

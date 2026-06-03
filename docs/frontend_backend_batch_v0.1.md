@@ -40,6 +40,7 @@ GET /api/v1/workbench/task-board
 ### 关系与跟进
 
 - `queue_summary`: worker queue health summary for `llm`, `ocr`, `embedding`, `rerank`, and `default`, same shape as `GET /background-jobs/summary/queues`.
+- `failure_summary`: failed job aggregation by queue/job type plus recent failures, same shape as `GET /background-jobs/summary/failures`.
 
 ```text
 GET /api/v1/relations

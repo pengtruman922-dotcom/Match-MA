@@ -92,6 +92,16 @@ class QueueSummaryOut(BaseModel):
     debug_ref: dict[str, Any]
 
 
+class FailureSummaryOut(BaseModel):
+    generated_at: str
+    lookback_hours: int
+    totals: dict[str, Any]
+    by_queue: list[dict[str, Any]]
+    by_job_type: list[dict[str, Any]]
+    recent_failures: list[dict[str, Any]]
+    debug_ref: dict[str, Any]
+
+
 @router.post("", response_model=BackgroundJobOut, status_code=status.HTTP_201_CREATED)
 def create_background_job(
     payload: BackgroundJobCreate,
@@ -192,6 +202,15 @@ def get_background_job_queue_summary(
 ) -> dict[str, Any]:
     summary = _queue_summary(db, include_empty=include_empty, lookback_hours=lookback_hours)
     return summary
+
+
+@router.get("/summary/failures", response_model=FailureSummaryOut)
+def get_background_job_failure_summary(
+    db: Session = Depends(get_db),
+    lookback_hours: int = Query(default=168, ge=1, le=720),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict[str, Any]:
+    return _failure_summary(db, lookback_hours=lookback_hours, limit=limit)
 
 
 @router.get("/{job_id}", response_model=BackgroundJobOut)
@@ -392,6 +411,120 @@ def _queue_summary(db: Session, *, include_empty: bool, lookback_hours: int) -> 
     }
 
 
+def _failure_summary(db: Session, *, lookback_hours: int, limit: int) -> dict[str, Any]:
+    params = {
+        "team_id": DEFAULT_TEAM_ID,
+        "workspace_id": DEFAULT_WORKSPACE_ID,
+        "lookback_hours": lookback_hours,
+        "limit": limit,
+    }
+    by_queue_rows = db.execute(
+        text(
+            """
+            select queue_name, count(*)::int as failed_count, max(updated_at)::text as latest_failed_at
+            from background_job
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and status = 'failed'
+              and updated_at >= now() - (:lookback_hours * interval '1 hour')
+            group by queue_name
+            order by failed_count desc, latest_failed_at desc
+            limit :limit
+            """
+        ),
+        params,
+    ).mappings().all()
+    by_job_type_rows = db.execute(
+        text(
+            """
+            select job_type, queue_name, count(*)::int as failed_count, max(updated_at)::text as latest_failed_at
+            from background_job
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and status = 'failed'
+              and updated_at >= now() - (:lookback_hours * interval '1 hour')
+            group by job_type, queue_name
+            order by failed_count desc, latest_failed_at desc
+            limit :limit
+            """
+        ),
+        params,
+    ).mappings().all()
+    recent_rows = db.execute(
+        text(
+            """
+            select id, job_type, status, priority, queue_name, entity_type, entity_id,
+                   run_after::text as run_after, created_at::text as created_at,
+                   updated_at::text as updated_at, error_code, error_message,
+                   attempt_count, max_attempts
+            from background_job
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and status = 'failed'
+              and updated_at >= now() - (:lookback_hours * interval '1 hour')
+            order by updated_at desc
+            limit :limit
+            """
+        ),
+        params,
+    ).mappings().all()
+    by_queue = [_failure_group_item(dict(row), group_key="queue_name") for row in by_queue_rows]
+    by_job_type = [_failure_job_type_item(dict(row)) for row in by_job_type_rows]
+    recent_failures = [_compact_failure_job(dict(row)) for row in recent_rows]
+    totals = _failure_summary_totals(by_queue=by_queue, by_job_type=by_job_type, recent_failures=recent_failures)
+    generated_at = db.execute(text("select now()::text")).scalar_one()
+    return {
+        "generated_at": generated_at,
+        "lookback_hours": lookback_hours,
+        "totals": totals,
+        "by_queue": by_queue,
+        "by_job_type": by_job_type,
+        "recent_failures": recent_failures,
+        "debug_ref": {"route": "/debug/entities/background_job", "entity_type": "background_job"},
+    }
+
+
+def _failure_group_item(row: dict[str, Any], *, group_key: str) -> dict[str, Any]:
+    group_value = str(row.get(group_key) or "unknown")
+    return {
+        group_key: group_value,
+        "failed_count": int(row.get("failed_count") or 0),
+        "latest_failed_at": row.get("latest_failed_at"),
+        "list_route": f"/background-jobs?status=failed&{group_key}={group_value}",
+    }
+
+
+def _failure_job_type_item(row: dict[str, Any]) -> dict[str, Any]:
+    item = _failure_group_item(row, group_key="job_type")
+    item["queue_name"] = row.get("queue_name")
+    item["list_route"] = f"/background-jobs?status=failed&job_type={item['job_type']}"
+    return item
+
+
+def _compact_failure_job(row: dict[str, Any]) -> dict[str, Any]:
+    compact = _compact_queue_job(row)
+    compact["error_code"] = row.get("error_code")
+    compact["attempt_count"] = row.get("attempt_count")
+    compact["max_attempts"] = row.get("max_attempts")
+    compact["error_message"] = _truncate_text(row.get("error_message"), 500)
+    compact["related_entity_ref"] = _debug_ref(row.get("entity_type"), row.get("entity_id")) if row.get("entity_type") and row.get("entity_id") else None
+    return compact
+
+
+def _failure_summary_totals(
+    *,
+    by_queue: list[dict[str, Any]],
+    by_job_type: list[dict[str, Any]],
+    recent_failures: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "failed_job_count": sum(int(item.get("failed_count") or 0) for item in by_queue),
+        "failed_queue_count": len(by_queue),
+        "failed_job_type_count": len(by_job_type),
+        "recent_failure_count": len(recent_failures),
+    }
+
+
 def _queue_summary_names(queue_names: Any, *, include_empty: bool) -> list[str]:
     defaults = ["llm", "ocr", "embedding", "rerank", "default"]
     names = list(dict.fromkeys([*defaults, *[str(item) for item in queue_names]]))
@@ -551,6 +684,15 @@ def _debug_ref(entity_type: str, entity_id: Any) -> dict[str, str]:
         "entity_id": entity_id_text,
         "route": f"/debug/entities/{entity_type}/{entity_id_text}",
     }
+
+
+def _truncate_text(value: Any, max_length: int) -> str | None:
+    if value is None:
+        return None
+    text_value = str(value).strip()
+    if len(text_value) <= max_length:
+        return text_value
+    return text_value[: max_length - 3] + "..."
 
 
 def _job_select_columns() -> str:
