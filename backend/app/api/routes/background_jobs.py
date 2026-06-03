@@ -1,4 +1,5 @@
-﻿from typing import Any
+from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
@@ -297,28 +298,23 @@ def ignore_background_job(
             detail="Only failed or cancelled jobs can be marked ignored.",
         )
 
+    metadata_json = _ignore_metadata(current.get("metadata_json"), reason=payload.reason)
     row = db.execute(
         _job_returning_statement(
             """
             update background_job
-            set metadata_json = metadata_json || jsonb_build_object(
-                    'failure_ignored', true,
-                    'failure_ignored_at', now()::text,
-                    'failure_ignored_by', :ignored_by,
-                    'failure_ignore_reason', :ignore_reason
-                ),
+            set metadata_json = :metadata_json,
                 updated_at = now()
             where id = :job_id
               and team_id = :team_id
               and workspace_id = :workspace_id
             """
-        ),
+        ).bindparams(bindparam("metadata_json", type_=JSONB)),
         {
             "job_id": job_id,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
-            "ignored_by": str(DEFAULT_ADMIN_USER_ID),
-            "ignore_reason": payload.reason,
+            "metadata_json": metadata_json,
         },
     ).mappings().one()
     row_dict = dict(row)
@@ -329,32 +325,24 @@ def ignore_background_job(
 
 @router.post("/{job_id}/unignore", response_model=BackgroundJobOut)
 def unignore_background_job(job_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
-    _get_job_or_404(db, job_id)
+    current = _get_job_or_404(db, job_id)
+    metadata_json = _unignore_metadata(current.get("metadata_json"))
     row = db.execute(
         _job_returning_statement(
             """
             update background_job
-            set metadata_json = (
-                    metadata_json
-                    - 'failure_ignored'
-                    - 'failure_ignored_at'
-                    - 'failure_ignored_by'
-                    - 'failure_ignore_reason'
-                ) || jsonb_build_object(
-                    'failure_unignored_at', now()::text,
-                    'failure_unignored_by', :unignored_by
-                ),
+            set metadata_json = :metadata_json,
                 updated_at = now()
             where id = :job_id
               and team_id = :team_id
               and workspace_id = :workspace_id
             """
-        ),
+        ).bindparams(bindparam("metadata_json", type_=JSONB)),
         {
             "job_id": job_id,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
-            "unignored_by": str(DEFAULT_ADMIN_USER_ID),
+            "metadata_json": metadata_json,
         },
     ).mappings().one()
     db.commit()
@@ -370,6 +358,7 @@ def retry_background_job(job_id: UUID, db: Session = Depends(get_db)) -> dict[st
             detail="Only failed or cancelled jobs can be retried.",
         )
 
+    metadata_json = _retry_metadata(current)
     row = db.execute(
         _job_returning_statement(
             """
@@ -384,31 +373,18 @@ def retry_background_job(job_id: UUID, db: Session = Depends(get_db)) -> dict[st
                 error_code = null,
                 error_message = null,
                 error_detail_json = '{}'::jsonb,
-                metadata_json = (
-                    metadata_json
-                    - 'failure_ignored'
-                    - 'failure_ignored_at'
-                    - 'failure_ignored_by'
-                    - 'failure_ignore_reason'
-                ) || jsonb_build_object(
-                    'last_retry_at', now()::text,
-                    'last_retry_by', :retry_by,
-                    'last_retry_previous_status', status,
-                    'last_retry_previous_error_code', error_code,
-                    'last_retry_previous_error_message', left(coalesce(error_message, ''), 2000),
-                    'last_retry_previous_attempt_count', attempt_count
-                ),
+                metadata_json = :metadata_json,
                 updated_at = now()
             where id = :job_id
               and team_id = :team_id
               and workspace_id = :workspace_id
             """
-        ),
+        ).bindparams(bindparam("metadata_json", type_=JSONB)),
         {
             "job_id": job_id,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
-            "retry_by": str(DEFAULT_ADMIN_USER_ID),
+            "metadata_json": metadata_json,
         },
     ).mappings().one()
     _mark_related_business_update_retrying(db, dict(row))
@@ -685,31 +661,88 @@ def _count_job_traces(db: Session, job_id: UUID) -> int:
     )
 
 
+def _retry_metadata(job: dict[str, Any]) -> dict[str, Any]:
+    metadata = _without_keys(
+        job.get("metadata_json"),
+        {"failure_ignored", "failure_ignored_at", "failure_ignored_by", "failure_ignore_reason"},
+    )
+    metadata.update(
+        {
+            "last_retry_at": _utc_now_text(),
+            "last_retry_by": str(DEFAULT_ADMIN_USER_ID),
+            "last_retry_previous_status": job.get("status"),
+            "last_retry_previous_error_code": job.get("error_code"),
+            "last_retry_previous_error_message": _truncate_text(job.get("error_message"), 2000) or "",
+            "last_retry_previous_attempt_count": job.get("attempt_count"),
+        }
+    )
+    return metadata
+
+
+def _ignore_metadata(metadata_json: Any, *, reason: str | None) -> dict[str, Any]:
+    metadata = dict(metadata_json) if isinstance(metadata_json, dict) else {}
+    metadata.update(
+        {
+            "failure_ignored": True,
+            "failure_ignored_at": _utc_now_text(),
+            "failure_ignored_by": str(DEFAULT_ADMIN_USER_ID),
+            "failure_ignore_reason": reason,
+        }
+    )
+    return metadata
+
+
+def _unignore_metadata(metadata_json: Any) -> dict[str, Any]:
+    metadata = _without_keys(
+        metadata_json,
+        {"failure_ignored", "failure_ignored_at", "failure_ignored_by", "failure_ignore_reason"},
+    )
+    metadata.update(
+        {
+            "failure_unignored_at": _utc_now_text(),
+            "failure_unignored_by": str(DEFAULT_ADMIN_USER_ID),
+        }
+    )
+    return metadata
+
+
+def _without_keys(metadata_json: Any, keys: set[str]) -> dict[str, Any]:
+    metadata = dict(metadata_json) if isinstance(metadata_json, dict) else {}
+    for key in keys:
+        metadata.pop(key, None)
+    return metadata
+
+
+def _utc_now_text() -> str:
+    return datetime.now(UTC).isoformat()
+
+
 def _mark_related_business_update_retrying(db: Session, job: dict[str, Any]) -> None:
     if job.get("job_type") != "business_update_extract_actions" or job.get("entity_type") != "business_update":
         return
     business_update_id = job.get("entity_id")
     if not business_update_id:
         return
+    metadata_patch = {
+        "last_retry_job_id": str(job["id"]),
+        "last_retry_at": _utc_now_text(),
+    }
     db.execute(
         text(
             """
             update business_update
             set processing_status = 'processing',
-                metadata_json = metadata_json || jsonb_build_object(
-                  'last_retry_job_id', :job_id,
-                  'last_retry_at', now()::text
-                )
+                metadata_json = metadata_json || :metadata_patch
             where id = :business_update_id
               and team_id = :team_id
               and workspace_id = :workspace_id
             """
-        ),
+        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
         {
             "business_update_id": business_update_id,
-            "job_id": str(job["id"]),
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
+            "metadata_patch": metadata_patch,
         },
     )
 
@@ -720,6 +753,10 @@ def _mark_related_business_update_ignored(db: Session, job: dict[str, Any]) -> N
     business_update_id = job.get("entity_id")
     if not business_update_id:
         return
+    metadata_patch = {
+        "last_ignored_failed_job_id": str(job["id"]),
+        "last_ignored_failed_job_at": _utc_now_text(),
+    }
     db.execute(
         text(
             """
@@ -728,20 +765,17 @@ def _mark_related_business_update_ignored(db: Session, job: dict[str, Any]) -> N
                   when processing_status = 'processing' then 'failed'
                   else processing_status
                 end,
-                metadata_json = metadata_json || jsonb_build_object(
-                  'last_ignored_failed_job_id', :job_id,
-                  'last_ignored_failed_job_at', now()::text
-                )
+                metadata_json = metadata_json || :metadata_patch
             where id = :business_update_id
               and team_id = :team_id
               and workspace_id = :workspace_id
             """
-        ),
+        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
         {
             "business_update_id": business_update_id,
-            "job_id": str(job["id"]),
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
+            "metadata_patch": metadata_patch,
         },
     )
 
