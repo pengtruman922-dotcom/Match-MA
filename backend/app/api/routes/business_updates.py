@@ -1385,7 +1385,8 @@ def _review_page_overview(
     pending_count = len([action for action in actions if action["review_status"] == "pending_review"])
     auto_applied_count = len([action for action in actions if action["is_auto_applied"]])
     applied_action_count = len([action for action in actions if action["applied_at"] is not None])
-    failed_job_count = len([job for job in jobs if job["status"] == "failed"])
+    failed_job_count = len([job for job in jobs if job["status"] == "failed" and not _job_failure_ignored(job)])
+    ignored_failed_job_count = len([job for job in jobs if job["status"] == "failed" and _job_failure_ignored(job)])
     running_job_count = len([job for job in jobs if job["status"] in {"queued", "running", "retry_waiting"}])
     failed_trace_count = len([trace for trace in traces if trace["status"] == "failed" or trace.get("error_code")])
     return {
@@ -1396,12 +1397,17 @@ def _review_page_overview(
         "applied_action_count": applied_action_count,
         "application_log_count": len(application_logs),
         "failed_job_count": failed_job_count,
+        "ignored_failed_job_count": ignored_failed_job_count,
         "running_job_count": running_job_count,
         "trace_count": len(traces),
         "failed_trace_count": failed_trace_count,
         "mode": "auto_apply_then_review",
         "needs_review": pending_count > 0 or auto_applied_count > 0 or failed_job_count > 0 or failed_trace_count > 0,
     }
+
+
+def _job_failure_ignored(job: dict[str, Any]) -> bool:
+    return (job.get("metadata_json") or {}).get("failure_ignored") is True
 
 
 def _review_page_quick_actions(business_update: dict[str, Any], overview: dict[str, Any]) -> list[dict[str, Any]]:

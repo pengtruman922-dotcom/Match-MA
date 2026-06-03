@@ -66,13 +66,14 @@ def test_review_page_overview_counts_auto_apply_and_debug_flags() -> None:
             {"review_status": "auto_accepted", "is_auto_applied": True, "applied_at": "2026-06-02"},
         ],
         [{"id": "log-1"}],
-        [{"status": "failed"}, {"status": "running"}],
+        [{"status": "failed", "metadata_json": {}}, {"status": "failed", "metadata_json": {"failure_ignored": True}}, {"status": "running"}],
         [{"status": "failed", "error_code": "schema_failed"}],
     )
 
     assert overview["pending_review_count"] == 1
     assert overview["auto_applied_count"] == 1
     assert overview["failed_job_count"] == 1
+    assert overview["ignored_failed_job_count"] == 1
     assert overview["running_job_count"] == 1
     assert overview["needs_review"] is True
 

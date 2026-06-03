@@ -1124,7 +1124,8 @@ def _debug_center_overview(db: Session) -> dict[str, Any]:
             select
               (select count(*) from background_job
                where team_id = :team_id and workspace_id = :workspace_id
-                 and status = 'failed') as failed_job_count,
+                 and status = 'failed'
+                 and coalesce(metadata_json ->> 'failure_ignored', 'false') <> 'true') as failed_job_count,
               (select count(*) from background_job
                where team_id = :team_id and workspace_id = :workspace_id
                  and status = 'queued') as queued_job_count,
@@ -1142,7 +1143,8 @@ def _debug_center_overview(db: Session) -> dict[str, Any]:
                  and started_at >= now() - interval '24 hours') as recent_trace_count,
               (select count(*) from background_job
                where team_id = :team_id and workspace_id = :workspace_id
-                 and job_type = 'model_node_test' and status = 'failed') as failed_model_node_test_count,
+                 and job_type = 'model_node_test' and status = 'failed'
+                 and coalesce(metadata_json ->> 'failure_ignored', 'false') <> 'true') as failed_model_node_test_count,
               (select count(*) from business_update
                where team_id = :team_id and workspace_id = :workspace_id
                  and processing_status = 'failed') as failed_business_update_count,
@@ -1175,6 +1177,7 @@ def _debug_center_failed_jobs(db: Session, limit: int) -> list[dict[str, Any]]:
             where team_id = :team_id
               and workspace_id = :workspace_id
               and status = 'failed'
+              and coalesce(metadata_json ->> 'failure_ignored', 'false') <> 'true'
             order by updated_at desc
             limit :limit
             """
@@ -1259,7 +1262,8 @@ def _debug_center_recent_business_updates(db: Session, limit: int) -> list[dict[
               (select count(*) from background_job job
                where job.team_id = bu.team_id and job.workspace_id = bu.workspace_id
                  and job.entity_type = 'business_update' and job.entity_id = bu.id
-                 and job.status = 'failed') as failed_job_count,
+                 and job.status = 'failed'
+                 and coalesce(job.metadata_json ->> 'failure_ignored', 'false') <> 'true') as failed_job_count,
               (select count(*) from ai_trace trace
                where trace.team_id = bu.team_id and trace.workspace_id = bu.workspace_id
                  and trace.entity_type = 'business_update' and trace.entity_id = bu.id) as trace_count
@@ -1299,6 +1303,7 @@ def _debug_center_recent_recommendation_sessions(db: Session, limit: int) -> lis
               (select count(*) from background_job job
                where job.team_id = rs.team_id and job.workspace_id = rs.workspace_id
                  and job.status = 'failed'
+                 and coalesce(job.metadata_json ->> 'failure_ignored', 'false') <> 'true'
                  and (
                    job.payload_json ->> 'session_id' = rs.id::text
                    or job.entity_id in (
@@ -1353,6 +1358,7 @@ def _debug_center_model_node_test_failures(db: Session, limit: int) -> list[dict
               and job.workspace_id = :workspace_id
               and job.job_type = 'model_node_test'
               and job.status = 'failed'
+              and coalesce(job.metadata_json ->> 'failure_ignored', 'false') <> 'true'
             order by job.updated_at desc
             limit :limit
             """

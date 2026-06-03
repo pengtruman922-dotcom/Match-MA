@@ -3,6 +3,7 @@ import type {
   SellerTargetCreate,
   SellerTargetUpdate,
   BackgroundJob,
+  BackgroundJobRetryPreview,
   BusinessUpdate,
   BusinessUpdateCreate,
   BuyerIntent,
@@ -30,6 +31,9 @@ import type {
   RecommendationSessionBundle,
   UpdateLog,
   WorkbenchData,
+  WorkbenchTaskBoardData,
+  FailureSummary,
+  QueueSummary,
 } from '../../types/api';
 import { apiRequest, buildQuery } from './client';
 
@@ -144,10 +148,31 @@ export const relations = {
 };
 
 export const backgroundJobs = {
-  list: (params?: { status?: string; job_type?: string; queue_name?: string; entity_type?: string; entity_id?: string; limit?: number; offset?: number }) =>
+  list: (params?: {
+    status?: string;
+    job_type?: string;
+    queue_name?: string;
+    entity_type?: string;
+    entity_id?: string;
+    include_ignored?: boolean;
+    limit?: number;
+    offset?: number;
+  }) =>
     apiRequest<BackgroundJob[]>(`/background-jobs${buildQuery(params || {})}`),
   get: (id: string) => apiRequest<BackgroundJob>(`/background-jobs/${id}`),
   traces: (id: string) => apiRequest<BusinessUpdateDebugBundle['traces']>(`/background-jobs/${id}/traces`),
+  retryPreview: (id: string) => apiRequest<BackgroundJobRetryPreview>(`/background-jobs/${id}/retry-preview`),
+  retry: (id: string) => apiRequest<BackgroundJob>(`/background-jobs/${id}/retry`, { method: 'POST' }),
+  ignore: (id: string, reason?: string) =>
+    apiRequest<BackgroundJob>(`/background-jobs/${id}/ignore`, {
+      method: 'POST',
+      body: JSON.stringify({ reason: reason || null }),
+    }),
+  unignore: (id: string) => apiRequest<BackgroundJob>(`/background-jobs/${id}/unignore`, { method: 'POST' }),
+  summaryFailures: (params?: { lookback_hours?: number; limit?: number; include_ignored?: boolean }) =>
+    apiRequest<FailureSummary>(`/background-jobs/summary/failures${buildQuery(params || {})}`),
+  summaryQueues: (params?: { include_empty?: boolean; include_ignored?: boolean; lookback_hours?: number }) =>
+    apiRequest<QueueSummary>(`/background-jobs/summary/queues${buildQuery(params || {})}`),
 };
 
 export const updateLogs = {
@@ -157,6 +182,7 @@ export const updateLogs = {
 
 export const workbench = {
   get: () => apiRequest<WorkbenchData>('/workbench'),
+  taskBoard: () => apiRequest<WorkbenchTaskBoardData>('/workbench/task-board'),
 };
 
 export const debugApi = {

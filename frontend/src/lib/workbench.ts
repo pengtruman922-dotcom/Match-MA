@@ -1,5 +1,5 @@
 import { businessUpdates, extractedActions, workbench } from './api';
-import type { BusinessUpdate, ExtractedAction } from '../types/api';
+import type { BusinessUpdate, ExtractedAction, FailureSummary, QueueSummary } from '../types/api';
 
 export interface ActionGroup {
   key: string;
@@ -11,6 +11,8 @@ export interface ActionGroup {
 export interface WorkbenchData {
   groups: ActionGroup[];
   recentUpdates: BusinessUpdate[];
+  failureSummary: FailureSummary | null;
+  queueSummary: QueueSummary | null;
   loading: boolean;
 }
 
@@ -44,6 +46,8 @@ export async function fetchWorkbenchData(): Promise<Omit<WorkbenchData, 'loading
     return {
       groups: data.groups,
       recentUpdates: data.recent_updates,
+      failureSummary: null,
+      queueSummary: null,
     };
   } catch {
     // Keep the Bolt UI usable against older API deployments while Railway catches up.
@@ -68,5 +72,5 @@ export async function fetchWorkbenchData(): Promise<Omit<WorkbenchData, 'loading
     items: grouped[key] || [],
   })).filter((g) => g.count > 0);
 
-  return { groups, recentUpdates: updates };
+  return { groups, recentUpdates: updates, failureSummary: null, queueSummary: null };
 }

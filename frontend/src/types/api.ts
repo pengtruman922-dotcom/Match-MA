@@ -299,6 +299,163 @@ export interface BackgroundJob {
   metadata_json: Record<string, unknown>;
 }
 
+export interface DebugRef {
+  entity_type: string;
+  entity_id: string;
+  route: string;
+}
+
+export interface BackgroundJobCompact {
+  id: string;
+  job_type: string;
+  status: string;
+  priority: number | null;
+  queue_name: string | null;
+  entity_type: string | null;
+  entity_id: string | null;
+  run_after: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  error_message: string | null;
+  debug_ref: DebugRef;
+}
+
+export interface BackgroundJobRecommendedAction {
+  key: string;
+  label: string;
+  route: string | null;
+  method?: 'GET' | 'POST' | string;
+}
+
+export interface BackgroundJobFailure extends BackgroundJobCompact {
+  error_code: string | null;
+  failure_category: string;
+  failure_summary: string;
+  attempt_count: number | null;
+  max_attempts: number | null;
+  related_entity_ref: DebugRef | null;
+  ignored: boolean;
+  ignore_reason: string | null;
+  ignored_at: string | null;
+  can_retry: boolean;
+  retry_route: string | null;
+  retry_preview_route: string | null;
+  ignore_route: string | null;
+  unignore_route: string | null;
+  recommended_actions: BackgroundJobRecommendedAction[];
+}
+
+export interface QueueSummaryItem {
+  queue_name: string;
+  health_status: 'idle' | 'active' | 'has_failures' | string;
+  active_count: number;
+  counts: {
+    total: number;
+    queued: number;
+    retry_waiting: number;
+    running: number;
+    failed: number;
+    ignored_failed: number;
+    succeeded: number;
+    cancelled: number;
+    recent_created: number;
+    recent_succeeded: number;
+    recent_failed: number;
+  };
+  lookback_hours: number;
+  next_run_after: string | null;
+  last_updated_at: string | null;
+  next_job: BackgroundJobCompact | null;
+  latest_failed_job: BackgroundJobCompact | null;
+  debug_ref: DebugRef;
+}
+
+export interface QueueSummary {
+  generated_at: string;
+  totals: {
+    queue_count: number;
+    active_queue_count: number;
+    failed_queue_count: number;
+    active_job_count: number;
+    failed_job_count: number;
+    ignored_failed_job_count: number;
+    queued_job_count: number;
+    running_job_count: number;
+    retry_waiting_job_count: number;
+    [key: string]: number;
+  };
+  queues: QueueSummaryItem[];
+  debug_ref: Record<string, unknown>;
+}
+
+export interface FailureSummaryGroupItem {
+  failed_count: number;
+  latest_failed_at: string | null;
+  list_route: string;
+  queue_name?: string;
+  job_type?: string;
+}
+
+export interface FailureSummary {
+  generated_at: string;
+  lookback_hours: number;
+  include_ignored: boolean;
+  totals: {
+    failed_job_count: number;
+    failed_queue_count: number;
+    failed_job_type_count: number;
+    recent_failure_count: number;
+    [key: string]: number;
+  };
+  by_queue: FailureSummaryGroupItem[];
+  by_job_type: FailureSummaryGroupItem[];
+  recent_failures: BackgroundJobFailure[];
+  debug_ref: Record<string, unknown>;
+}
+
+export interface BackgroundJobRetryPreview {
+  job: BackgroundJobFailure & {
+    payload_json: Record<string, unknown>;
+    metadata_json: Record<string, unknown>;
+    result_json: Record<string, unknown>;
+    error_detail_json: Record<string, unknown>;
+  };
+  retry: {
+    eligible: boolean;
+    route: string | null;
+    method: 'POST' | string | null;
+    queue_name: string | null;
+    will_reset_attempt_count_to: number | null;
+    will_run_after: 'now' | string | null;
+  };
+  related: {
+    entity_ref: DebugRef | null;
+    same_entity_job_count: number;
+    active_same_entity_job_count: number;
+    trace_count: number;
+    business_update?: {
+      id: string;
+      processing_status: string;
+      created_at: string;
+      metadata_json: Record<string, unknown> | null;
+      action_count: number;
+      application_log_count: number;
+    } | null;
+    [key: string]: unknown;
+  };
+  effects: Array<{
+    key: string;
+    label: string;
+    description: string;
+  }>;
+  warnings: Array<{
+    key: string;
+    severity: 'info' | 'warning' | 'blocker' | string;
+    message: string;
+  }>;
+  debug_ref: DebugRef;
+}
+
 export interface AiTrace {
   id: string;
   trace_type: string;
@@ -517,4 +674,15 @@ export interface RecommendationSessionBundle {
     report_count: number;
     engine_hint: string;
   };
+}
+
+export interface WorkbenchTaskBoardData {
+  groups: WorkbenchActionGroup[];
+  auto_applied_recent: ExtractedAction[];
+  exception_items: Record<string, unknown>[];
+  recent_activity: Record<string, unknown>[];
+  quick_actions: Record<string, unknown>[];
+  overview: Record<string, unknown>;
+  queue_summary: QueueSummary;
+  failure_summary: FailureSummary;
 }
