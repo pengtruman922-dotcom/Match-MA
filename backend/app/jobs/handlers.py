@@ -50,6 +50,8 @@ ALLOWED_TARGET_ENTITY_TYPES = {
     "buyer_seller_relation",
 }
 
+_SKIP_FIELD = object()
+
 SELLER_TARGET_CHANGE_FIELDS = {
     "target_name",
     "industry_primary",
@@ -3170,16 +3172,31 @@ def _normalize_seller_listed_status(value: Any) -> str:
 
 def _normalize_listed_status(value: Any) -> str:
     normalized = str(value or "").strip().lower()
-    if normalized in {"listed", "上市", "已上市"}:
+    normalized_key = normalized.replace(" ", "_").replace("-", "_")
+    if normalized_key in {"listed", "public", "public_company", "yes", "true", "1"} or normalized in {
+        "上市",
+        "已上市",
+    }:
         return "listed"
-    if normalized in {"unlisted", "非上市", "未上市"}:
+    if normalized_key in {
+        "unlisted",
+        "not_listed",
+        "non_listed",
+        "private",
+        "private_company",
+        "non_public",
+        "not_public",
+        "unquoted",
+        "no",
+        "false",
+        "0",
+    } or normalized in {"非上市", "未上市"}:
         return "unlisted"
-    if normalized in {"pre_ipo", "pre-ipo", "拟上市"}:
+    if normalized_key in {"pre_ipo", "preipo"} or normalized in {"拟上市"}:
         return "pre_ipo"
-    if normalized in {"any", "不限", "均可"}:
+    if normalized_key in {"any", "no_preference", "all"} or normalized in {"不限", "均可"}:
         return "any"
     return "unknown"
-
 
 def _normalize_equity_requirement_type(value: Any) -> str | None:
     normalized = str(value or "").strip().lower()
@@ -3316,12 +3333,16 @@ def _normalize_change_fields(
 
     for key, value in proposed_changes.items():
         if key in allowed_fields:
-            normalized[key] = _normalize_field_value(key, value, enum_fields, notes)
+            normalized_value = _normalize_field_value(key, value, enum_fields, notes)
+            if normalized_value is not _SKIP_FIELD:
+                normalized[key] = normalized_value
             continue
 
         alias = aliases.get(key)
         if alias and alias in allowed_fields:
-            normalized[alias] = _normalize_field_value(alias, value, enum_fields, notes)
+            normalized_value = _normalize_field_value(alias, value, enum_fields, notes)
+            if normalized_value is not _SKIP_FIELD:
+                normalized[alias] = normalized_value
             notes.append(f"{key}->{alias}")
             continue
 
@@ -3329,12 +3350,14 @@ def _normalize_change_fields(
             for child_key, child_value in value.items():
                 nested_alias = nested_aliases.get((key, child_key))
                 if nested_alias and nested_alias in allowed_fields:
-                    normalized[nested_alias] = _normalize_field_value(
+                    normalized_value = _normalize_field_value(
                         nested_alias,
                         child_value,
                         enum_fields,
                         notes,
                     )
+                    if normalized_value is not _SKIP_FIELD:
+                        normalized[nested_alias] = normalized_value
                     notes.append(f"{key}.{child_key}->{nested_alias}")
 
     return normalized, notes
@@ -3349,7 +3372,12 @@ def _normalize_field_value(
     if not enum_fields or field not in enum_fields:
         return value
 
-    normalized = _normalize_enum_value(value)
+    if field == "listed_status":
+        normalized = _normalize_seller_listed_status(value)
+    elif field == "preferred_listed_status":
+        normalized = _normalize_listed_status(value)
+    else:
+        normalized = _normalize_enum_value(value)
     allowed_values = enum_fields[field]
     if normalized in allowed_values:
         if normalized != value:
@@ -3357,7 +3385,7 @@ def _normalize_field_value(
         return normalized
 
     notes.append(f"{field}:{value}->dropped_invalid_enum")
-    return value
+    return _SKIP_FIELD
 
 
 def _normalize_enum_value(value: Any) -> str:

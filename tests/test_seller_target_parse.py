@@ -1,7 +1,11 @@
 from backend.app.jobs.handlers import (
+    _normalize_change_fields,
     _normalize_seller_listed_status,
     _normalize_seller_target_parse_changes,
     _validate_seller_target_parse_output,
+    SELLER_TARGET_CHANGE_FIELDS,
+    SELLER_TARGET_ENUM_FIELDS,
+    SELLER_TARGET_FIELD_ALIASES,
 )
 
 
@@ -44,6 +48,27 @@ def test_seller_target_parse_changes_normalize_enums_and_numbers() -> None:
 
 def test_seller_listed_status_does_not_return_any() -> None:
     assert _normalize_seller_listed_status("any") == "unknown"
+
+
+def test_seller_listed_status_accepts_llm_boolean_style_values() -> None:
+    assert _normalize_seller_listed_status("no") == "unlisted"
+    assert _normalize_seller_listed_status("not listed") == "unlisted"
+    assert _normalize_seller_listed_status("private company") == "unlisted"
+    assert _normalize_seller_listed_status("yes") == "listed"
+
+
+def test_extracted_action_seller_fact_normalizes_listed_status_before_apply() -> None:
+    changes, notes = _normalize_change_fields(
+        {"listed_status": "no", "information_status": "bad_value"},
+        allowed_fields=SELLER_TARGET_CHANGE_FIELDS,
+        aliases=SELLER_TARGET_FIELD_ALIASES,
+        enum_fields=SELLER_TARGET_ENUM_FIELDS,
+    )
+
+    assert changes["listed_status"] == "unlisted"
+    assert "information_status" not in changes
+    assert "listed_status:no->unlisted" in notes
+    assert "information_status:bad_value->dropped_invalid_enum" in notes
 
 
 def test_seller_target_parse_supports_rollback_fields() -> None:
