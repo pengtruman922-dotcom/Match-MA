@@ -7,8 +7,11 @@ from backend.app.api.routes.background_jobs import (
     _compact_failure_job,
     _failure_category,
     _failure_job_type_item,
+    _ignore_metadata,
     _job_failure_ignored,
+    _retry_metadata,
     _retry_preview_warnings,
+    _unignore_metadata,
     _failure_summary_text,
     _failure_summary_totals,
     _queue_health_status,
@@ -201,6 +204,39 @@ def test_compact_failure_job_exposes_ignore_metadata() -> None:
     assert compact["unignore_route"] == f"/background-jobs/{job_id}/unignore"
     assert compact["recommended_actions"][-1]["key"] == "unignore_job"
 
+
+
+def test_retry_ignore_metadata_helpers_preserve_audit_snapshot() -> None:
+    retry_metadata = _retry_metadata(
+        {
+            "status": "failed",
+            "error_code": "job_failed",
+            "error_message": "x" * 2100,
+            "attempt_count": 3,
+            "metadata_json": {
+                "source": "test",
+                "failure_ignored": True,
+                "failure_ignore_reason": "old",
+            },
+        }
+    )
+
+    assert retry_metadata["source"] == "test"
+    assert "failure_ignored" not in retry_metadata
+    assert retry_metadata["last_retry_previous_status"] == "failed"
+    assert retry_metadata["last_retry_previous_error_code"] == "job_failed"
+    assert len(retry_metadata["last_retry_previous_error_message"]) == 2000
+    assert retry_metadata["last_retry_previous_attempt_count"] == 3
+
+    ignored_metadata = _ignore_metadata({"source": "test"}, reason="historical garbage")
+    assert ignored_metadata["source"] == "test"
+    assert ignored_metadata["failure_ignored"] is True
+    assert ignored_metadata["failure_ignore_reason"] == "historical garbage"
+
+    unignored_metadata = _unignore_metadata(ignored_metadata)
+    assert unignored_metadata["source"] == "test"
+    assert "failure_ignored" not in unignored_metadata
+    assert unignored_metadata["failure_unignored_by"]
 
 def test_retry_preview_warnings_flag_missing_trace_and_existing_logs() -> None:
     warnings = _retry_preview_warnings(
