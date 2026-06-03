@@ -378,7 +378,18 @@ def _handle_seller_target_parse(db: Session, job: JobClaim) -> dict[str, object]
     changes, normalization_notes = _normalize_seller_target_parse_changes(parsed_output_json)
     applied_fields: list[str] = []
     if schema_validation_json["valid"] and changes:
-        applied_fields = _apply_seller_target_parse_changes(db, seller_target, changes, job.id, normalization_notes)
+        applied_fields = _apply_seller_target_parse_changes(
+            db,
+            seller_target,
+            changes,
+            job.id,
+            normalization_notes,
+            _parse_source_context(
+                job,
+                default_source_type="seller_target_parse",
+                default_source_label="Seller target parser",
+            ),
+        )
 
     _insert_seller_target_parse_trace(
         db,
@@ -476,7 +487,18 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
     changes, normalization_notes = _normalize_buyer_intent_parse_changes(parsed_output_json, raw_requirement_text)
     applied_fields: list[str] = []
     if schema_validation_json["valid"] and changes:
-        applied_fields = _apply_buyer_intent_parse_changes(db, buyer_intent, changes, job.id, normalization_notes)
+        applied_fields = _apply_buyer_intent_parse_changes(
+            db,
+            buyer_intent,
+            changes,
+            job.id,
+            normalization_notes,
+            _parse_source_context(
+                job,
+                default_source_type="buyer_intent_parse",
+                default_source_label="Buyer intent parser",
+            ),
+        )
 
     _insert_buyer_intent_parse_trace(
         db,
@@ -581,6 +603,14 @@ def _handle_attachment_ocr_parse(db: Session, job: JobClaim) -> dict[str, object
         text_length=len(mock_extracted_text) if mock_extracted_text else 0,
     )
     touched_seller_target_count = _touch_seller_targets_linked_to_attachment(db, attachment_id)
+    child_parse_jobs = _enqueue_linked_parse_jobs_after_ocr(
+        db,
+        job=job,
+        attachment_id=attachment_id,
+        parsed_document_id=parsed_document_id,
+        evidence_id=evidence_id,
+        extracted_text=mock_extracted_text,
+    )
     latency_ms = int((time.perf_counter() - started) * 1000)
     _insert_ocr_trace(
         db,
@@ -595,6 +625,7 @@ def _handle_attachment_ocr_parse(db: Session, job: JobClaim) -> dict[str, object
             "parsed_document_id": str(parsed_document_id),
             "evidence_id": str(evidence_id) if evidence_id else None,
             "terminal_parse_status": terminal_status,
+            "child_parse_jobs": child_parse_jobs,
         },
         latency_ms=latency_ms,
     )
@@ -609,6 +640,8 @@ def _handle_attachment_ocr_parse(db: Session, job: JobClaim) -> dict[str, object
         "evidence_id": str(evidence_id) if evidence_id else None,
         "text_length": len(mock_extracted_text) if mock_extracted_text else 0,
         "touched_seller_target_count": touched_seller_target_count,
+        "child_parse_jobs": child_parse_jobs,
+        "child_parse_job_count": len(child_parse_jobs),
         "trace_created": True,
         "node_name": node_config["node_name"],
         "model_name": node_config["model_name"],
@@ -1606,6 +1639,25 @@ def _attachment_mock_extracted_text(job: JobClaim, attachment: dict[str, Any]) -
     if text_value is None:
         return ""
     return str(text_value).strip()
+
+
+def _parse_source_context(
+    job: JobClaim,
+    *,
+    default_source_type: str,
+    default_source_label: str,
+) -> dict[str, Any]:
+    evidence_id = _optional_uuid(job.payload_json.get("evidence_id"))
+    attachment_id = _optional_uuid(job.payload_json.get("attachment_id"))
+    parsed_document_id = _optional_uuid(job.payload_json.get("parsed_document_id"))
+    return {
+        "source_type": str(job.payload_json.get("source_type") or default_source_type),
+        "source_id": _optional_uuid(job.payload_json.get("source_id")) or job.id,
+        "source_label": str(job.payload_json.get("source_label") or default_source_label),
+        "evidence_id": evidence_id,
+        "attachment_id": attachment_id,
+        "parsed_document_id": parsed_document_id,
+    }
 
 
 def _build_buyer_profile_context(db: Session, buyer_intent: dict[str, Any]) -> dict[str, Any]:
@@ -2630,6 +2682,7 @@ def _apply_seller_target_parse_changes(
     changes: dict[str, Any],
     job_id: UUID,
     normalization_notes: list[str],
+    source_context: dict[str, Any],
 ) -> list[str]:
     diff = _diff_json_safe(seller_target, changes)
     if not diff:
@@ -2656,7 +2709,16 @@ def _apply_seller_target_parse_changes(
             "workspace_id": DEFAULT_WORKSPACE_ID,
         },
     )
-    _write_seller_target_parse_logs(db, seller_target, changes, diff, job_id, normalization_notes)
+    _write_seller_target_parse_logs(db, seller_target, changes, diff, job_id, normalization_notes, source_context)
+    _write_field_value_sources(
+        db,
+        entity_type="seller_target",
+        entity_id=UUID(str(seller_target["id"])),
+        changes=changes,
+        diff=diff,
+        source_context=source_context,
+        review_status="auto_accepted",
+    )
     create_search_doc_rebuild_job(
         db,
         entity_type="seller_target",
@@ -2673,6 +2735,7 @@ def _write_seller_target_parse_logs(
     diff: dict[str, tuple[Any, Any]],
     job_id: UUID,
     normalization_notes: list[str],
+    source_context: dict[str, Any],
 ) -> None:
     for field_path, (old_value, new_value) in diff.items():
         db.execute(
@@ -2681,12 +2744,12 @@ def _write_seller_target_parse_logs(
                 insert into action_application_log (
                   team_id, workspace_id, entity_type, entity_id, field_path,
                   old_value_json, new_value_json, source_type, source_id,
-                  applied_by, edited_before_apply, metadata_json
+                  evidence_id, applied_by, edited_before_apply, metadata_json
                 )
                 values (
                   :team_id, :workspace_id, 'seller_target', :seller_target_id, :field_path,
                   :old_value_json, :new_value_json, 'seller_target_parse', :job_id,
-                  :applied_by, false, :metadata_json
+                  :evidence_id, :applied_by, false, :metadata_json
                 )
                 """
             ).bindparams(
@@ -2702,11 +2765,13 @@ def _write_seller_target_parse_logs(
                 "old_value_json": _json_safe_value(old_value),
                 "new_value_json": _json_safe_value(new_value),
                 "job_id": job_id,
+                "evidence_id": source_context.get("evidence_id"),
                 "applied_by": DEFAULT_ADMIN_USER_ID,
                 "metadata_json": {
                     "source": "seller_target_parser",
                     "normalization_notes": normalization_notes,
                     "proposed_value": _json_safe_value(changes.get(field_path)),
+                    "field_value_source": _json_safe_value(source_context),
                 },
             },
         )
@@ -2780,6 +2845,7 @@ def _apply_buyer_intent_parse_changes(
     changes: dict[str, Any],
     job_id: UUID,
     normalization_notes: list[str],
+    source_context: dict[str, Any],
 ) -> list[str]:
     diff = _diff_json_safe(buyer_intent, changes)
     if not diff:
@@ -2810,7 +2876,16 @@ def _apply_buyer_intent_parse_changes(
             "workspace_id": DEFAULT_WORKSPACE_ID,
         },
     )
-    _write_buyer_intent_parse_logs(db, buyer_intent, changes, diff, job_id, normalization_notes)
+    _write_buyer_intent_parse_logs(db, buyer_intent, changes, diff, job_id, normalization_notes, source_context)
+    _write_field_value_sources(
+        db,
+        entity_type="buyer_intent",
+        entity_id=UUID(str(buyer_intent["id"])),
+        changes=changes,
+        diff=diff,
+        source_context=source_context,
+        review_status="auto_accepted",
+    )
     create_search_doc_rebuild_job(
         db,
         entity_type="buyer_intent",
@@ -2827,6 +2902,7 @@ def _write_buyer_intent_parse_logs(
     diff: dict[str, tuple[Any, Any]],
     job_id: UUID,
     normalization_notes: list[str],
+    source_context: dict[str, Any],
 ) -> None:
     for field_path, (old_value, new_value) in diff.items():
         db.execute(
@@ -2835,12 +2911,12 @@ def _write_buyer_intent_parse_logs(
                 insert into action_application_log (
                   team_id, workspace_id, entity_type, entity_id, field_path,
                   old_value_json, new_value_json, source_type, source_id,
-                  applied_by, edited_before_apply, metadata_json
+                  evidence_id, applied_by, edited_before_apply, metadata_json
                 )
                 values (
                   :team_id, :workspace_id, 'buyer_intent', :buyer_intent_id, :field_path,
                   :old_value_json, :new_value_json, 'buyer_intent_parse', :job_id,
-                  :applied_by, false, :metadata_json
+                  :evidence_id, :applied_by, false, :metadata_json
                 )
                 """
             ).bindparams(
@@ -2856,12 +2932,61 @@ def _write_buyer_intent_parse_logs(
                 "old_value_json": _json_safe_value(old_value),
                 "new_value_json": _json_safe_value(new_value),
                 "job_id": job_id,
+                "evidence_id": source_context.get("evidence_id"),
                 "applied_by": DEFAULT_ADMIN_USER_ID,
                 "metadata_json": {
                     "source": "buyer_intent_parser",
                     "normalization_notes": normalization_notes,
                     "proposed_value": _json_safe_value(changes.get(field_path)),
+                    "field_value_source": _json_safe_value(source_context),
                 },
+            },
+        )
+
+
+def _write_field_value_sources(
+    db: Session,
+    *,
+    entity_type: str,
+    entity_id: UUID,
+    changes: dict[str, Any],
+    diff: dict[str, tuple[Any, Any]],
+    source_context: dict[str, Any],
+    review_status: str,
+) -> None:
+    for field_path in diff:
+        db.execute(
+            text(
+                """
+                insert into field_value_source (
+                  team_id, workspace_id, entity_type, entity_id, field_path,
+                  value_snapshot_json, source_type, source_id, evidence_id,
+                  source_label, confidence, review_status, created_by
+                )
+                values (
+                  :team_id, :workspace_id, :entity_type, :entity_id, :field_path,
+                  :value_snapshot_json, :source_type, :source_id, :evidence_id,
+                  :source_label, :confidence, :review_status, :created_by
+                )
+                """
+            ).bindparams(bindparam("value_snapshot_json", type_=JSONB)),
+            {
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "field_path": field_path,
+                "value_snapshot_json": {
+                    "value": _json_safe_value(changes.get(field_path)),
+                    "source_context": _json_safe_value(source_context),
+                },
+                "source_type": source_context.get("source_type"),
+                "source_id": source_context.get("source_id"),
+                "evidence_id": source_context.get("evidence_id"),
+                "source_label": source_context.get("source_label"),
+                "confidence": source_context.get("confidence"),
+                "review_status": review_status,
+                "created_by": DEFAULT_ADMIN_USER_ID,
             },
         )
 
@@ -3942,6 +4067,172 @@ def _touch_seller_targets_linked_to_attachment(db: Session, attachment_id: UUID)
         },
     )
     return int(result.rowcount or 0)
+
+
+def _enqueue_linked_parse_jobs_after_ocr(
+    db: Session,
+    *,
+    job: JobClaim,
+    attachment_id: UUID,
+    parsed_document_id: UUID,
+    evidence_id: UUID | None,
+    extracted_text: str,
+) -> list[dict[str, Any]]:
+    if not extracted_text.strip() or not job.payload_json.get("auto_parse_linked_objects"):
+        return []
+
+    requested_entity_types = _parse_requested_entity_types(job.payload_json.get("parse_entity_types"))
+    links = _attachment_parse_links(db, attachment_id, requested_entity_types=requested_entity_types)
+    child_jobs: list[dict[str, Any]] = []
+    for link in links:
+        entity_type = str(link["entity_type"])
+        if entity_type == "seller_target":
+            raw_text_key = "raw_target_text"
+            job_type = "seller_target_parse"
+        elif entity_type == "buyer_intent":
+            raw_text_key = "raw_requirement_text"
+            job_type = "buyer_intent_parse"
+        else:
+            continue
+
+        existing = _latest_active_child_parse_job(
+            db,
+            job_type=job_type,
+            entity_type=entity_type,
+            entity_id=link["entity_id"],
+        )
+        if existing:
+            child_jobs.append(
+                {
+                    "id": str(existing["id"]),
+                    "job_type": existing["job_type"],
+                    "status": existing["status"],
+                    "queue_name": existing["queue_name"],
+                    "entity_type": entity_type,
+                    "entity_id": str(link["entity_id"]),
+                    "reused_existing": True,
+                }
+            )
+            continue
+
+        payload_json = {
+            f"{entity_type}_id": str(link["entity_id"]),
+            raw_text_key: extracted_text,
+            "attachment_id": str(attachment_id),
+            "parsed_document_id": str(parsed_document_id),
+            "evidence_id": str(evidence_id) if evidence_id else None,
+            "source_type": "attachment_ocr_parse",
+            "source_id": str(job.id),
+            "source_label": f"Attachment OCR: {link.get('link_type') or 'linked document'}",
+        }
+        row = db.execute(
+            text(
+                """
+                insert into background_job (
+                  team_id, workspace_id, job_type, priority, queue_name,
+                  entity_type, entity_id, idempotency_key, payload_json,
+                  max_attempts, parent_job_id, correlation_id, created_by, metadata_json
+                )
+                values (
+                  :team_id, :workspace_id, :job_type, 105, 'llm',
+                  :entity_type, :entity_id, :idempotency_key, :payload_json,
+                  3, :parent_job_id, :correlation_id, :created_by, :metadata_json
+                )
+                returning id, job_type, status, queue_name, entity_type, entity_id
+                """
+            ).bindparams(
+                bindparam("payload_json", type_=JSONB),
+                bindparam("metadata_json", type_=JSONB),
+            ),
+            {
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+                "job_type": job_type,
+                "entity_type": entity_type,
+                "entity_id": link["entity_id"],
+                "idempotency_key": f"{job_type}:attachment_ocr:{attachment_id}:{link['entity_id']}:{job.id}",
+                "payload_json": payload_json,
+                "parent_job_id": job.id,
+                "correlation_id": job.correlation_id or job.id,
+                "created_by": DEFAULT_ADMIN_USER_ID,
+                "metadata_json": {
+                    "source": "attachment_ocr_auto_parse",
+                    "attachment_id": str(attachment_id),
+                    "evidence_id": str(evidence_id) if evidence_id else None,
+                },
+            },
+        ).mappings().one()
+        child_jobs.append({**_json_safe_dict(row), "reused_existing": False})
+    return child_jobs
+
+
+def _parse_requested_entity_types(value: Any) -> set[str]:
+    supported = {"seller_target", "buyer_intent"}
+    if not isinstance(value, list) or not value:
+        return supported
+    requested = {str(item) for item in value if str(item) in supported}
+    return requested or supported
+
+
+def _attachment_parse_links(
+    db: Session,
+    attachment_id: UUID,
+    *,
+    requested_entity_types: set[str],
+) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select entity_type, entity_id, link_type
+            from attachment_link
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and attachment_id = :attachment_id
+              and entity_type = any(:entity_types)
+            order by created_at asc
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "attachment_id": attachment_id,
+            "entity_types": list(requested_entity_types),
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _latest_active_child_parse_job(
+    db: Session,
+    *,
+    job_type: str,
+    entity_type: str,
+    entity_id: UUID,
+) -> dict[str, Any] | None:
+    row = db.execute(
+        text(
+            """
+            select id, job_type, status, queue_name, entity_type, entity_id
+            from background_job
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and job_type = :job_type
+              and entity_type = :entity_type
+              and entity_id = :entity_id
+              and status in ('queued', 'running', 'retry_waiting')
+            order by created_at desc
+            limit 1
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "job_type": job_type,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+        },
+    ).mappings().one_or_none()
+    return dict(row) if row else None
 
 
 def _insert_recommendation_rerank_message(

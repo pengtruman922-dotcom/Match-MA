@@ -1,11 +1,18 @@
 from uuid import UUID
 
 from backend.app.api.routes.attachments import (
+    _compact_child_parse_job,
     _compact_ocr_job,
     _compact_ocr_trace,
     _linked_entity_refs,
 )
-from backend.app.jobs.handlers import _approx_token_count, _attachment_mock_extracted_text
+from backend.app.api.routes.field_sources import _field_value_source_out
+from backend.app.jobs.handlers import (
+    _approx_token_count,
+    _attachment_mock_extracted_text,
+    _parse_requested_entity_types,
+    _parse_source_context,
+)
 from backend.app.jobs.queue import JobClaim
 
 ATTACHMENT_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -119,3 +126,104 @@ def test_linked_entity_refs_include_routes_and_debug_refs() -> None:
 def test_approx_token_count_is_nonzero_for_short_text() -> None:
     assert _approx_token_count("abc") == 1
     assert _approx_token_count("a" * 20) == 5
+
+
+def test_parse_source_context_carries_attachment_evidence() -> None:
+    evidence_id = UUID("00000000-0000-0000-0000-000000000005")
+    parsed_document_id = UUID("00000000-0000-0000-0000-000000000006")
+    job = JobClaim(
+        id=JOB_ID,
+        job_type="seller_target_parse",
+        queue_name="llm",
+        entity_type="seller_target",
+        entity_id=SELLER_TARGET_ID,
+        correlation_id=None,
+        payload_json={
+            "source_type": "attachment_ocr_parse",
+            "source_id": str(JOB_ID),
+            "source_label": "Attachment OCR",
+            "attachment_id": str(ATTACHMENT_ID),
+            "parsed_document_id": str(parsed_document_id),
+            "evidence_id": str(evidence_id),
+        },
+        attempt_count=1,
+        max_attempts=3,
+    )
+
+    context = _parse_source_context(
+        job,
+        default_source_type="seller_target_parse",
+        default_source_label="Seller parser",
+    )
+
+    assert context["source_type"] == "attachment_ocr_parse"
+    assert context["source_id"] == JOB_ID
+    assert context["attachment_id"] == ATTACHMENT_ID
+    assert context["parsed_document_id"] == parsed_document_id
+    assert context["evidence_id"] == evidence_id
+
+
+def test_parse_requested_entity_types_defaults_to_supported_objects() -> None:
+    assert _parse_requested_entity_types([]) == {"seller_target", "buyer_intent"}
+    assert _parse_requested_entity_types(["seller_target", "unsupported"]) == {"seller_target"}
+
+
+def test_compact_child_parse_job_links_debug_refs() -> None:
+    child = _compact_child_parse_job(
+        {
+            "id": JOB_ID,
+            "job_type": "seller_target_parse",
+            "status": "queued",
+            "queue_name": "llm",
+            "entity_type": "seller_target",
+            "entity_id": SELLER_TARGET_ID,
+            "error_code": None,
+            "error_message": None,
+            "attempt_count": 0,
+            "max_attempts": 3,
+            "started_at": None,
+            "finished_at": None,
+            "created_at": "2026-06-03",
+            "updated_at": "2026-06-03",
+            "result_json": {},
+        }
+    )
+
+    assert child["debug_ref"]["route"] == f"/debug/entities/background_job/{JOB_ID}"
+    assert child["target_debug_ref"]["route"] == f"/debug/entities/seller_target/{SELLER_TARGET_ID}"
+
+
+def test_field_value_source_out_includes_evidence_and_debug_ref() -> None:
+    source = _field_value_source_out(
+        {
+            "id": UUID("00000000-0000-0000-0000-000000000007"),
+            "entity_type": "seller_target",
+            "entity_id": SELLER_TARGET_ID,
+            "field_path": "business_summary",
+            "value_snapshot_json": {"value": "summary"},
+            "source_type": "attachment_ocr_parse",
+            "source_id": JOB_ID,
+            "evidence_id": UUID("00000000-0000-0000-0000-000000000008"),
+            "source_label": "Attachment OCR",
+            "confidence": None,
+            "review_status": "auto_accepted",
+            "created_at": "2026-06-03",
+            "created_by": UUID("00000000-0000-0000-0000-000000000201"),
+            "ev_id": UUID("00000000-0000-0000-0000-000000000008"),
+            "ev_source_type": "attachment_ocr_parse",
+            "ev_source_id": JOB_ID,
+            "ev_attachment_id": ATTACHMENT_ID,
+            "ev_parsed_document_id": UUID("00000000-0000-0000-0000-000000000009"),
+            "ev_page_no": 1,
+            "ev_slide_no": None,
+            "ev_sheet_name": None,
+            "ev_cell_range": None,
+            "ev_text_excerpt": "OCR excerpt",
+            "ev_char_start": 0,
+            "ev_char_end": 11,
+            "ev_created_at": "2026-06-03",
+        }
+    )
+
+    assert source["debug_ref"]["route"] == f"/debug/entities/background_job/{JOB_ID}"
+    assert source["evidence_span"]["text_excerpt"] == "OCR excerpt"

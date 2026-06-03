@@ -8,6 +8,7 @@ from backend.app.api.routes import (
     buyer_parties,
     debug,
     extracted_actions,
+    field_sources,
     health,
     meta,
     model_config,
@@ -34,5 +35,6 @@ api_router.include_router(search_docs.router)
 api_router.include_router(update_logs.router)
 api_router.include_router(business_updates.router)
 api_router.include_router(extracted_actions.router)
+api_router.include_router(field_sources.router)
 api_router.include_router(workbench.router)
 api_router.include_router(debug.router)

@@ -73,6 +73,8 @@ class AttachmentOut(BaseModel):
 class AttachmentOcrRequest(BaseModel):
     force: bool = False
     mock_extracted_text: str | None = Field(default=None, max_length=200000)
+    auto_parse_linked_objects: bool = False
+    parse_entity_types: list[str] = Field(default_factory=list)
 
 
 class AttachmentOcrJobOut(BaseModel):
@@ -91,6 +93,7 @@ class AttachmentOcrStatusOut(BaseModel):
     latest_trace: dict[str, Any] | None
     latest_parsed_document: dict[str, Any] | None
     evidence_spans: list[dict[str, Any]]
+    child_parse_jobs: list[dict[str, Any]] = Field(default_factory=list)
     debug_ref: dict[str, Any]
 
 
@@ -222,6 +225,7 @@ def create_attachment_ocr_job(
 ) -> dict[str, Any]:
     request = payload or AttachmentOcrRequest()
     _get_attachment_or_404(db, attachment_id)
+    _validate_parse_entity_types(request.parse_entity_types)
 
     if not request.force:
         existing_job = _latest_active_ocr_job(db, attachment_id)
@@ -263,6 +267,8 @@ def create_attachment_ocr_job(
             "payload_json": {
                 "attachment_id": str(attachment_id),
                 "mock_extracted_text": request.mock_extracted_text,
+                "auto_parse_linked_objects": request.auto_parse_linked_objects,
+                "parse_entity_types": request.parse_entity_types,
             },
             "created_by": DEFAULT_ADMIN_USER_ID,
             "metadata_json": {"source": "attachment_ocr_api", "force": request.force},
@@ -311,6 +317,7 @@ def get_attachment_ocr_status(
     latest_trace = _latest_ocr_trace(db, attachment_id)
     parsed_document = _latest_parsed_document(db, attachment_id)
     evidence_spans = _evidence_spans(db, attachment_id)
+    child_parse_jobs = _child_parse_jobs(db, latest_job["id"]) if latest_job else []
     return {
         "attachment": attachment,
         "linked_entities": _linked_entity_refs(attachment["links"]),
@@ -318,6 +325,7 @@ def get_attachment_ocr_status(
         "latest_trace": _compact_ocr_trace(latest_trace) if latest_trace else None,
         "latest_parsed_document": _compact_parsed_document(parsed_document) if parsed_document else None,
         "evidence_spans": [_compact_evidence_span(item) for item in evidence_spans],
+        "child_parse_jobs": [_compact_child_parse_job(item) for item in child_parse_jobs],
         "debug_ref": _debug_ref("attachment", attachment_id),
     }
 
@@ -329,6 +337,16 @@ def _validate_attachment_payload(payload: AttachmentCreate) -> None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="entity_type is required when entity_id is provided.",
+        )
+
+
+def _validate_parse_entity_types(parse_entity_types: list[str]) -> None:
+    supported = {"seller_target", "buyer_intent"}
+    invalid = [item for item in parse_entity_types if item not in supported]
+    if invalid:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unsupported OCR auto-parse entity types: {', '.join(invalid)}",
         )
 
 
@@ -609,6 +627,33 @@ def _evidence_spans(db: Session, attachment_id: UUID) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def _child_parse_jobs(db: Session, ocr_job_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              id, job_type, status, queue_name, entity_type, entity_id,
+              error_code, error_message, attempt_count, max_attempts,
+              started_at::text as started_at, finished_at::text as finished_at,
+              created_at::text as created_at, updated_at::text as updated_at,
+              result_json, metadata_json
+            from background_job
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and parent_job_id = :ocr_job_id
+            order by created_at asc
+            limit 50
+            """
+        ),
+        {
+            "ocr_job_id": ocr_job_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
 def _compact_ocr_job(job: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": job["id"],
@@ -625,6 +670,30 @@ def _compact_ocr_job(job: dict[str, Any]) -> dict[str, Any]:
         "updated_at": job.get("updated_at"),
         "result_json": job.get("result_json"),
         "debug_ref": _debug_ref("background_job", job["id"]),
+    }
+
+
+def _compact_child_parse_job(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": job["id"],
+        "job_type": job["job_type"],
+        "status": job["status"],
+        "queue_name": job["queue_name"],
+        "entity_type": job.get("entity_type"),
+        "entity_id": job.get("entity_id"),
+        "error_code": job.get("error_code"),
+        "error_message": job.get("error_message"),
+        "attempt_count": job.get("attempt_count"),
+        "max_attempts": job.get("max_attempts"),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+        "result_json": job.get("result_json"),
+        "debug_ref": _debug_ref("background_job", job["id"]),
+        "target_debug_ref": _debug_ref(job.get("entity_type"), job.get("entity_id"))
+        if job.get("entity_type") and job.get("entity_id")
+        else None,
     }
 
 

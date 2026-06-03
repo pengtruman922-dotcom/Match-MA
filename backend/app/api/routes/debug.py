@@ -269,6 +269,12 @@ def _business_object_debug(db: Session, entity_type: str, entity_id: UUID) -> di
         lambda: _entity_application_logs(db, entity_type, entity_id),
         [],
     )
+    field_sources = _safe_debug_query(
+        errors,
+        "field_sources",
+        lambda: _entity_field_sources(db, entity_type, entity_id),
+        [],
+    )
     relations = []
     relation_events = []
     search_doc = None
@@ -286,6 +292,7 @@ def _business_object_debug(db: Session, entity_type: str, entity_id: UUID) -> di
         "jobs": jobs,
         "traces": traces,
         "application_logs": application_logs,
+        "field_sources": field_sources,
         "relations": relations,
         "relation_events": relation_events,
         "search_doc": search_doc,
@@ -293,6 +300,7 @@ def _business_object_debug(db: Session, entity_type: str, entity_id: UUID) -> di
             "job_count": len(jobs),
             "trace_count": len(traces),
             "update_log_count": len(application_logs),
+            "field_source_count": len(field_sources),
             "relation_count": len(relations),
             "relation_event_count": len(relation_events),
             "has_search_doc": search_doc is not None,
@@ -621,6 +629,39 @@ def _entity_application_logs(db: Session, entity_type: str, entity_id: UUID) -> 
               and entity_type = :entity_type
               and entity_id = :entity_id
             order by applied_at desc
+            limit 100
+            """
+        ),
+        {
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _entity_field_sources(db: Session, entity_type: str, entity_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              fvs.id, fvs.entity_type, fvs.entity_id, fvs.field_path,
+              fvs.value_snapshot_json, fvs.source_type, fvs.source_id,
+              fvs.evidence_id, fvs.source_label, fvs.confidence, fvs.review_status,
+              fvs.created_at::text as created_at, fvs.created_by,
+              ev.text_excerpt as evidence_text_excerpt,
+              ev.attachment_id as evidence_attachment_id,
+              ev.parsed_document_id as evidence_parsed_document_id,
+              ev.page_no as evidence_page_no
+            from field_value_source fvs
+            left join evidence_span ev on ev.id = fvs.evidence_id
+            where fvs.team_id = :team_id
+              and fvs.workspace_id = :workspace_id
+              and fvs.entity_type = :entity_type
+              and fvs.entity_id = :entity_id
+            order by fvs.created_at desc
             limit 100
             """
         ),

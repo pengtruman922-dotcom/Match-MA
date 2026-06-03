@@ -71,7 +71,9 @@ Request:
 ```json
 {
   "force": false,
-  "mock_extracted_text": "Optional mock OCR text for v0.1 testing."
+  "mock_extracted_text": "Optional mock OCR text for v0.1 testing.",
+  "auto_parse_linked_objects": false,
+  "parse_entity_types": ["seller_target"]
 }
 ```
 
@@ -82,6 +84,8 @@ Behavior:
 - Uses `entity_type=attachment` and `entity_id={attachment_id}`.
 - Reuses an existing queued/running/retry_waiting OCR job unless `force=true`.
 - Sets `attachment.parse_status=parsing` while the job is queued/running.
+- If `auto_parse_linked_objects=true`, after OCR succeeds the worker creates child parse jobs for linked `seller_target` and/or `buyer_intent` objects.
+- `parse_entity_types` is optional. Empty means both `seller_target` and `buyer_intent`; otherwise it can contain `seller_target` and/or `buyer_intent`.
 
 ### OCR status
 
@@ -97,6 +101,7 @@ Returns:
 - `latest_trace`
 - `latest_parsed_document`
 - `evidence_spans`
+- `child_parse_jobs`
 - `debug_ref`
 
 ## Worker behavior
@@ -111,6 +116,28 @@ v0.1 terminal statuses:
 
 - If mock text exists, `attachment.parse_status=parsed`, `parsed_document.parse_status=parsed`, one `evidence_span` is created, and OCR trace status is `succeeded`.
 - If no mock text exists, `attachment.parse_status=skipped`, `parsed_document.parse_status=skipped`, no evidence is created, and OCR trace status is `skipped`.
+- If auto-parse is enabled, the OCR worker creates child `seller_target_parse` / `buyer_intent_parse` jobs with `parent_job_id` pointing to the OCR job.
+- Child parse jobs carry `attachment_id`, `parsed_document_id`, and `evidence_id` in `payload_json`, so applied fields can write source records.
+
+## Field Sources
+
+Parser-applied fields now write lightweight `field_value_source` rows:
+
+```text
+GET /api/v1/field-sources?entity_type=seller_target&entity_id={id}
+GET /api/v1/field-sources?entity_type=seller_target&entity_id={id}&field_path=business_summary
+```
+
+Each source row includes:
+
+- field path and current value snapshot
+- source type / source id
+- evidence id and evidence span when available
+- source label
+- review status
+- debug ref
+
+For OCR-driven parsing, `source_type=attachment_ocr_parse`, `source_id={ocr_job_id}`, and `evidence_id` points to the OCR evidence span.
 
 The worker uses the default model node:
 
