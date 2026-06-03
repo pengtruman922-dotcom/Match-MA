@@ -89,6 +89,58 @@ GET /api/v1/background-jobs/{job_id}/traces
 
 ---
 
+
+### 2.7 Queue summary
+
+```text
+GET /api/v1/background-jobs/summary/queues
+GET /api/v1/background-jobs/summary/queues?include_empty=true&lookback_hours=24
+```
+
+Purpose:
+
+- Give frontend workbench and Debug Mode one endpoint to display worker queue health.
+- Avoid requiring the frontend to issue separate list queries for `llm`, `ocr`, `embedding`, and `rerank`.
+
+Response highlights:
+
+```json
+{
+  "generated_at": "2026-06-03 ...",
+  "totals": {
+    "active_queue_count": 1,
+    "failed_queue_count": 0,
+    "active_job_count": 3,
+    "queued_job_count": 2,
+    "running_job_count": 1
+  },
+  "queues": [
+    {
+      "queue_name": "ocr",
+      "health_status": "idle | active | has_failures",
+      "active_count": 0,
+      "counts": {
+        "queued": 0,
+        "retry_waiting": 0,
+        "running": 0,
+        "failed": 0,
+        "recent_created": 5,
+        "recent_succeeded": 5,
+        "recent_failed": 0
+      },
+      "next_job": null,
+      "latest_failed_job": null
+    }
+  ]
+}
+```
+
+Default queues shown when `include_empty=true`:
+
+```text
+llm, ocr, embedding, rerank, default
+```
+
 ## 3. Business Update Process API
 
 为了业务更新入口更方便创建任务，新增：

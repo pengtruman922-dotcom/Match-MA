@@ -85,6 +85,13 @@ class AiTraceOut(BaseModel):
     metadata_json: dict[str, Any]
 
 
+class QueueSummaryOut(BaseModel):
+    generated_at: str
+    totals: dict[str, Any]
+    queues: list[dict[str, Any]]
+    debug_ref: dict[str, Any]
+
+
 @router.post("", response_model=BackgroundJobOut, status_code=status.HTTP_201_CREATED)
 def create_background_job(
     payload: BackgroundJobCreate,
@@ -175,6 +182,16 @@ def list_background_jobs(
         params,
     ).mappings().all()
     return [dict(row) for row in rows]
+
+
+@router.get("/summary/queues", response_model=QueueSummaryOut)
+def get_background_job_queue_summary(
+    db: Session = Depends(get_db),
+    include_empty: bool = Query(default=True),
+    lookback_hours: int = Query(default=24, ge=1, le=168),
+) -> dict[str, Any]:
+    summary = _queue_summary(db, include_empty=include_empty, lookback_hours=lookback_hours)
+    return summary
 
 
 @router.get("/{job_id}", response_model=BackgroundJobOut)
@@ -314,6 +331,226 @@ def _get_job_or_404(db: Session, job_id: UUID) -> dict[str, Any]:
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Background job not found.")
     return dict(row)
+
+
+def _queue_summary(db: Session, *, include_empty: bool, lookback_hours: int) -> dict[str, Any]:
+    rows = db.execute(
+        text(
+            """
+            select
+              coalesce(queue_name, 'default') as queue_name,
+              count(*)::int as total_count,
+              count(*) filter (where status = 'queued')::int as queued_count,
+              count(*) filter (where status = 'retry_waiting')::int as retry_waiting_count,
+              count(*) filter (where status = 'running')::int as running_count,
+              count(*) filter (where status = 'failed')::int as failed_count,
+              count(*) filter (where status = 'succeeded')::int as succeeded_count,
+              count(*) filter (where status = 'cancelled')::int as cancelled_count,
+              count(*) filter (
+                where created_at >= now() - (:lookback_hours * interval '1 hour')
+              )::int as recent_created_count,
+              count(*) filter (
+                where finished_at >= now() - (:lookback_hours * interval '1 hour')
+                  and status = 'succeeded'
+              )::int as recent_succeeded_count,
+              count(*) filter (
+                where finished_at >= now() - (:lookback_hours * interval '1 hour')
+                  and status = 'failed'
+              )::int as recent_failed_count,
+              min(run_after) filter (where status in ('queued', 'retry_waiting'))::text as next_run_after,
+              max(updated_at)::text as last_updated_at
+            from background_job
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+            group by coalesce(queue_name, 'default')
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "lookback_hours": lookback_hours,
+        },
+    ).mappings().all()
+    queue_map = {str(row["queue_name"]): dict(row) for row in rows}
+    queue_names = _queue_summary_names(queue_map.keys(), include_empty=include_empty)
+    queues = [
+        _queue_summary_item(
+            db,
+            queue_name=queue_name,
+            row=queue_map.get(queue_name),
+            lookback_hours=lookback_hours,
+        )
+        for queue_name in queue_names
+    ]
+    totals = _queue_summary_totals(queues)
+    generated_at = db.execute(text("select now()::text")).scalar_one()
+    return {
+        "generated_at": generated_at,
+        "totals": totals,
+        "queues": queues,
+        "debug_ref": {"route": "/debug/entities/background_job", "entity_type": "background_job"},
+    }
+
+
+def _queue_summary_names(queue_names: Any, *, include_empty: bool) -> list[str]:
+    defaults = ["llm", "ocr", "embedding", "rerank", "default"]
+    names = list(dict.fromkeys([*defaults, *[str(item) for item in queue_names]]))
+    return names if include_empty else [name for name in names if name not in defaults or name in queue_names]
+
+
+def _queue_summary_item(
+    db: Session,
+    *,
+    queue_name: str,
+    row: dict[str, Any] | None,
+    lookback_hours: int,
+) -> dict[str, Any]:
+    counts = {
+        "total": _int_value(row, "total_count"),
+        "queued": _int_value(row, "queued_count"),
+        "retry_waiting": _int_value(row, "retry_waiting_count"),
+        "running": _int_value(row, "running_count"),
+        "failed": _int_value(row, "failed_count"),
+        "succeeded": _int_value(row, "succeeded_count"),
+        "cancelled": _int_value(row, "cancelled_count"),
+        "recent_created": _int_value(row, "recent_created_count"),
+        "recent_succeeded": _int_value(row, "recent_succeeded_count"),
+        "recent_failed": _int_value(row, "recent_failed_count"),
+    }
+    active_count = counts["queued"] + counts["retry_waiting"] + counts["running"]
+    health_status = _queue_health_status(active_count=active_count, failed_count=counts["failed"])
+    return {
+        "queue_name": queue_name,
+        "health_status": health_status,
+        "active_count": active_count,
+        "counts": counts,
+        "lookback_hours": lookback_hours,
+        "next_run_after": row.get("next_run_after") if row else None,
+        "last_updated_at": row.get("last_updated_at") if row else None,
+        "next_job": _queue_next_job(db, queue_name),
+        "latest_failed_job": _queue_latest_failed_job(db, queue_name),
+        "debug_ref": {
+            "route": f"/background-jobs?queue_name={queue_name}",
+            "entity_type": "background_job_queue",
+            "entity_id": queue_name,
+        },
+    }
+
+
+def _queue_health_status(*, active_count: int, failed_count: int) -> str:
+    if failed_count:
+        return "has_failures"
+    if active_count:
+        return "active"
+    return "idle"
+
+
+def _queue_next_job(db: Session, queue_name: str) -> dict[str, Any] | None:
+    row = db.execute(
+        text(
+            """
+            select id, job_type, status, priority, queue_name, entity_type, entity_id,
+                   run_after::text as run_after, created_at::text as created_at,
+                   updated_at::text as updated_at, error_message
+            from background_job
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and queue_name = :queue_name
+              and status in ('queued', 'retry_waiting')
+            order by priority desc, run_after asc, created_at asc
+            limit 1
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "queue_name": queue_name,
+        },
+    ).mappings().one_or_none()
+    return _compact_queue_job(dict(row)) if row else None
+
+
+def _queue_latest_failed_job(db: Session, queue_name: str) -> dict[str, Any] | None:
+    row = db.execute(
+        text(
+            """
+            select id, job_type, status, priority, queue_name, entity_type, entity_id,
+                   run_after::text as run_after, created_at::text as created_at,
+                   updated_at::text as updated_at, error_message
+            from background_job
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and queue_name = :queue_name
+              and status = 'failed'
+            order by updated_at desc
+            limit 1
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "queue_name": queue_name,
+        },
+    ).mappings().one_or_none()
+    return _compact_queue_job(dict(row)) if row else None
+
+
+def _compact_queue_job(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "job_type": row["job_type"],
+        "status": row["status"],
+        "priority": row.get("priority"),
+        "queue_name": row.get("queue_name"),
+        "entity_type": row.get("entity_type"),
+        "entity_id": row.get("entity_id"),
+        "run_after": row.get("run_after"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "error_message": row.get("error_message"),
+        "debug_ref": _debug_ref("background_job", row["id"]),
+    }
+
+
+def _queue_summary_totals(queues: list[dict[str, Any]]) -> dict[str, Any]:
+    totals = {
+        "queue_count": len(queues),
+        "active_queue_count": 0,
+        "failed_queue_count": 0,
+        "active_job_count": 0,
+        "failed_job_count": 0,
+        "queued_job_count": 0,
+        "running_job_count": 0,
+        "retry_waiting_job_count": 0,
+    }
+    for queue in queues:
+        counts = queue.get("counts") or {}
+        if queue.get("active_count"):
+            totals["active_queue_count"] += 1
+        if counts.get("failed"):
+            totals["failed_queue_count"] += 1
+        totals["active_job_count"] += int(queue.get("active_count") or 0)
+        totals["failed_job_count"] += int(counts.get("failed") or 0)
+        totals["queued_job_count"] += int(counts.get("queued") or 0)
+        totals["running_job_count"] += int(counts.get("running") or 0)
+        totals["retry_waiting_job_count"] += int(counts.get("retry_waiting") or 0)
+    return totals
+
+
+def _int_value(row: dict[str, Any] | None, key: str) -> int:
+    if row is None:
+        return 0
+    value = row.get(key)
+    return int(value) if value is not None else 0
+
+
+def _debug_ref(entity_type: str, entity_id: Any) -> dict[str, str]:
+    entity_id_text = str(entity_id)
+    return {
+        "entity_type": entity_type,
+        "entity_id": entity_id_text,
+        "route": f"/debug/entities/{entity_type}/{entity_id_text}",
+    }
 
 
 def _job_select_columns() -> str:

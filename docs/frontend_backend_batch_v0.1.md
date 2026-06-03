@@ -320,3 +320,4 @@ Recommended first frontend behavior:
   1. upload first, then pass returned `attachment.id` via `attachment_ids` to `POST /business-updates`; or
   2. continue using inline JSON attachments with `mock_extracted_text` in development/testing.
 - Use `GET /business-updates/{id}/review-page` for normal progress display; use `/attachments/{id}/ocr-status` for attachment-specific debug pages.
+- Use `GET /background-jobs/summary/queues` for workbench/debug queue cards instead of stitching together separate job list calls for LLM/OCR/embedding/rerank.
