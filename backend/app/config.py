@@ -13,8 +13,10 @@ class Settings(BaseSettings):
     railway_git_branch: str | None = None
     railway_service_name: str | None = None
     railway_environment_name: str | None = None
+    attachment_storage_backend: str = "local"
     attachment_storage_dir: str = "storage/attachments"
     attachment_max_upload_bytes: int = 25 * 1024 * 1024
+    attachment_text_capture_max_bytes: int = 200_000
 
     model_config = SettingsConfigDict(
         env_file=".env",

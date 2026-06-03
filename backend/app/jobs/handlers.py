@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import time
 from decimal import Decimal
-from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -18,6 +17,7 @@ from backend.app.ai.embedding_client import (
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
 from backend.app.ai.prompting import render_template
 from backend.app.ai.rerank_client import RerankCallError, call_dashscope_compatible_rerank
+from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.api.routes.extracted_actions import (
     apply_buyer_intent_target_exclusion_action,
@@ -32,6 +32,7 @@ from backend.app.services.search_docs import (
     rebuild_buyer_intent_search_doc,
     rebuild_seller_target_search_doc,
 )
+from backend.app.services.attachment_storage import read_local_text_content
 
 ALLOWED_ACTION_TYPES = {
     "seller_fact_update",
@@ -1674,24 +1675,12 @@ def _attachment_mock_extracted_text(job: JobClaim, attachment: dict[str, Any]) -
 
 
 def _attachment_local_text_content(attachment: dict[str, Any], *, max_chars: int = 200_000) -> str | None:
-    metadata_json = attachment.get("metadata_json") if isinstance(attachment.get("metadata_json"), dict) else {}
-    local_path = metadata_json.get("local_path")
-    if not local_path:
-        return None
-    path = Path(str(local_path))
-    if not path.exists() or not path.is_file():
-        return None
-    try:
-        with path.open("rb") as file:
-            data = file.read(max_chars)
-    except OSError:
-        return None
-    for encoding in ("utf-8-sig", "utf-8", "gb18030"):
-        try:
-            return data.decode(encoding).strip()
-        except UnicodeDecodeError:
-            continue
-    return data.decode("utf-8", errors="ignore").strip() or None
+    settings = get_settings()
+    return read_local_text_content(
+        attachment,
+        storage_dir=settings.attachment_storage_dir,
+        max_bytes=max_chars,
+    )
 
 
 def _parse_source_context(

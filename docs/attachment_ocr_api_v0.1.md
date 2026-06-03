@@ -252,7 +252,25 @@ Response:
 Important v0.1 storage note:
 
 - The API writes the file to `ATTACHMENT_STORAGE_DIR`, default `storage/attachments`.
-- Railway workers do not share a durable filesystem with the API service, so text-like uploads also store the first 200KB of decoded text in `attachment.metadata_json.uploaded_text_content`.
-- The OCR skeleton reads text in this priority order: job `mock_extracted_text`, attachment `mock_extracted_text`, uploaded text metadata, then local file path if available.
+- Upload now goes through an attachment storage service contract. Current backend is `ATTACHMENT_STORAGE_BACKEND=local`; future `oss`/`s3` backends should keep the same public API and store provider URIs in `storage_path`.
+- Uploaded metadata includes `storage_backend`, `storage_uri`, `storage_contract_version`, `content_sha256`, `text_capture_source`, and `uploaded_text_truncated`.
+- Railway workers do not share a durable filesystem with the API service, so text-like uploads also store decoded text in `attachment.metadata_json.uploaded_text_content`.
+- The text capture limit is controlled by `ATTACHMENT_TEXT_CAPTURE_MAX_BYTES`, default 200KB.
+- The OCR skeleton reads text in this priority order: job `mock_extracted_text`, attachment `mock_extracted_text`, uploaded text metadata, then local file path / local storage URI if available.
 - Binary files are persisted as attachment records but still need a real object storage + OCR provider before they can be parsed across services.
 - Max upload size is controlled by `ATTACHMENT_MAX_UPLOAD_BYTES`, default 25MB.
+
+Recommended Railway variables for v0.1:
+
+```text
+ATTACHMENT_STORAGE_BACKEND=local
+ATTACHMENT_STORAGE_DIR=storage/attachments
+ATTACHMENT_MAX_UPLOAD_BYTES=26214400
+ATTACHMENT_TEXT_CAPTURE_MAX_BYTES=200000
+```
+
+Object-storage-ready contract:
+
+- `local://attachments/{attachment_id}/{safe_file_name}` remains the current storage URI format.
+- A future object storage implementation should return a durable URI such as `oss://bucket/key` or `s3://bucket/key`.
+- Workers should prefer durable object storage for binary OCR; metadata text capture is only a bridge for text-like files and debug testing.

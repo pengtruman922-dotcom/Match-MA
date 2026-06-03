@@ -1,6 +1,4 @@
 import json
-import re
-from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -13,6 +11,11 @@ from sqlalchemy.orm import Session
 from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
+from backend.app.services.attachment_storage import (
+    AttachmentStorageError,
+    AttachmentTooLargeError,
+    save_upload_file,
+)
 
 router = APIRouter(prefix="/attachments", tags=["attachments"])
 
@@ -25,16 +28,6 @@ ATTACHMENT_LINK_ENTITY_TYPES = {
     "business_update",
     "recommendation_session",
     "recommendation_report",
-}
-TEXT_CAPTURE_MAX_BYTES = 200_000
-TEXT_FILE_EXTENSIONS = {".csv", ".json", ".log", ".md", ".txt", ".tsv", ".xml", ".yaml", ".yml"}
-TEXT_MIME_PREFIXES = ("text/",)
-TEXT_MIME_TYPES = {
-    "application/csv",
-    "application/json",
-    "application/xml",
-    "application/x-ndjson",
-    "application/yaml",
 }
 
 
@@ -200,29 +193,32 @@ def upload_attachment(
     settings = get_settings()
     attachment_id = uuid4()
     original_file_name = file.filename or "upload.bin"
-    safe_file_name = _safe_upload_filename(original_file_name)
-    storage_root = _attachment_storage_root()
-    target_dir = storage_root / str(attachment_id)
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = target_dir / safe_file_name
-    uploaded = _write_upload_file(
-        file,
-        target_path,
-        max_bytes=settings.attachment_max_upload_bytes,
-        capture_text=_is_text_upload(safe_file_name, file.content_type),
-    )
+    try:
+        uploaded = save_upload_file(
+            file.file,
+            attachment_id=attachment_id,
+            original_file_name=original_file_name,
+            content_type=file.content_type,
+            storage_dir=settings.attachment_storage_dir,
+            storage_backend=settings.attachment_storage_backend,
+            max_bytes=settings.attachment_max_upload_bytes,
+            text_capture_max_bytes=settings.attachment_text_capture_max_bytes,
+        )
+    except AttachmentTooLargeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=str(exc),
+        ) from exc
+    except AttachmentStorageError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=str(exc),
+        ) from exc
 
     metadata = {
         **form_metadata,
-        "uploaded_via": "multipart_upload",
-        "original_file_name": original_file_name,
-        "safe_file_name": safe_file_name,
-        "storage_backend": "local_ephemeral",
-        "local_path": str(target_path),
-        "uploaded_text_truncated": uploaded["text_truncated"],
+        **uploaded.metadata_json(),
     }
-    if uploaded["text_content"]:
-        metadata["uploaded_text_content"] = uploaded["text_content"]
 
     row = db.execute(
         text(
@@ -245,10 +241,10 @@ def upload_attachment(
             "workspace_id": DEFAULT_WORKSPACE_ID,
             "visibility": visibility,
             "file_name": original_file_name[:500],
-            "file_type": _file_type_from_name(safe_file_name),
+            "file_type": uploaded.file_type,
             "mime_type": file.content_type,
-            "file_size": uploaded["file_size"],
-            "storage_path": f"local://attachments/{attachment_id}/{safe_file_name}",
+            "file_size": uploaded.file_size,
+            "storage_path": uploaded.storage_uri,
             "uploaded_by": DEFAULT_ADMIN_USER_ID,
             "metadata_json": _json_safe_value(metadata),
         },
@@ -562,81 +558,6 @@ def _parse_metadata_json_form(value: str | None) -> dict[str, Any]:
             detail="metadata_json must be a JSON object.",
         )
     return parsed
-
-
-def _attachment_storage_root() -> Path:
-    settings = get_settings()
-    root = Path(settings.attachment_storage_dir)
-    if not root.is_absolute():
-        root = Path.cwd() / root
-    return root
-
-
-def _safe_upload_filename(file_name: str) -> str:
-    name = Path(file_name or "upload.bin").name
-    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
-    return safe[:180] or "upload.bin"
-
-
-def _file_type_from_name(file_name: str) -> str | None:
-    suffix = Path(file_name).suffix.lower().lstrip(".")
-    return suffix or None
-
-
-def _is_text_upload(file_name: str, content_type: str | None) -> bool:
-    suffix = Path(file_name).suffix.lower()
-    mime_type = (content_type or "").split(";")[0].strip().lower()
-    return suffix in TEXT_FILE_EXTENSIONS or mime_type in TEXT_MIME_TYPES or mime_type.startswith(TEXT_MIME_PREFIXES)
-
-
-def _write_upload_file(
-    file: UploadFile,
-    target_path: Path,
-    *,
-    max_bytes: int,
-    capture_text: bool,
-) -> dict[str, Any]:
-    total = 0
-    captured = bytearray()
-    with target_path.open("wb") as output:
-        while True:
-            chunk = file.file.read(1024 * 1024)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                try:
-                    target_path.unlink(missing_ok=True)
-                finally:
-                    raise HTTPException(
-                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                        detail=f"Attachment exceeds max upload size of {max_bytes} bytes.",
-                    )
-            output.write(chunk)
-            if capture_text and len(captured) < TEXT_CAPTURE_MAX_BYTES:
-                remaining = TEXT_CAPTURE_MAX_BYTES - len(captured)
-                captured.extend(chunk[:remaining])
-
-    text_content = None
-    text_truncated = False
-    if capture_text and captured:
-        text_content = _decode_text_bytes(bytes(captured))
-        text_truncated = total > len(captured)
-
-    return {
-        "file_size": total,
-        "text_content": text_content,
-        "text_truncated": text_truncated,
-    }
-
-
-def _decode_text_bytes(value: bytes) -> str | None:
-    for encoding in ("utf-8-sig", "utf-8", "gb18030"):
-        try:
-            return value.decode(encoding).strip()
-        except UnicodeDecodeError:
-            continue
-    return value.decode("utf-8", errors="ignore").strip() or None
 
 
 def _linked_entity_exists(db: Session, entity_type: str, entity_id: UUID) -> bool:

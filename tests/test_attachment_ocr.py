@@ -4,11 +4,8 @@ from backend.app.api.routes.attachments import (
     _compact_child_parse_job,
     _compact_ocr_job,
     _compact_ocr_trace,
-    _decode_text_bytes,
-    _is_text_upload,
     _linked_entity_refs,
     _parse_entity_types_form,
-    _safe_upload_filename,
 )
 from backend.app.api.routes.field_sources import _field_value_source_out
 from backend.app.jobs.handlers import (
@@ -20,6 +17,7 @@ from backend.app.jobs.handlers import (
     _parse_source_context,
 )
 from backend.app.jobs.queue import JobClaim
+from backend.app.services.attachment_storage import decode_text_bytes, is_text_upload, safe_upload_filename
 
 ATTACHMENT_ID = UUID("00000000-0000-0000-0000-000000000001")
 JOB_ID = UUID("00000000-0000-0000-0000-000000000002")
@@ -90,16 +88,16 @@ def test_attachment_mock_text_uses_uploaded_text_metadata() -> None:
 
 
 def test_upload_helpers_normalize_file_inputs() -> None:
-    assert _safe_upload_filename("../foo bar(1).txt") == "foo_bar_1_.txt"
-    assert _is_text_upload("note.md", None) is True
-    assert _is_text_upload("file.bin", "application/octet-stream") is False
+    assert safe_upload_filename("../foo bar(1).txt") == "foo_bar_1_.txt"
+    assert is_text_upload("note.md", None) is True
+    assert is_text_upload("file.bin", "application/octet-stream") is False
     assert _parse_entity_types_form("seller_target,buyer_intent") == ["seller_target", "buyer_intent"]
     assert _parse_entity_types_form('["seller_target"]') == ["seller_target"]
 
 
 def test_decode_text_bytes_supports_utf8_and_gb18030() -> None:
-    assert _decode_text_bytes("测试文本".encode("utf-8")) == "测试文本"
-    assert _decode_text_bytes("测试文本".encode("gb18030")) == "测试文本"
+    assert decode_text_bytes("测试文本".encode("utf-8")) == "测试文本"
+    assert decode_text_bytes("测试文本".encode("gb18030")) == "测试文本"
 
 
 def test_compact_attachment_ocr_status_helpers_expose_debug_refs() -> None:

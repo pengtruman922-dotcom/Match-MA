@@ -313,6 +313,7 @@ multipart/form-data: file, optional entity_type/entity_id/link_type, optional au
 Recommended first frontend behavior:
 
 - For text-like files (`.txt`, `.md`, `.csv`, `.json`, `text/*`), call `/attachments/upload?auto_start_ocr=true` or send `auto_start_ocr=true` as form data; the OCR skeleton will use captured text metadata even when API and worker run as separate Railway services.
+- The upload response metadata now includes storage debug fields: `storage_backend`, `storage_uri`, `content_sha256`, `text_capture_source`, and `uploaded_text_truncated`.
 - For PDF/image/Office files, upload will create an attachment record and link it, but OCR will be `skipped` until the real OCR provider/object storage integration is added.
 - If a user attaches files inside the business update drawer, the frontend can either:
   1. upload first, then pass returned `attachment.id` via `attachment_ids` to `POST /business-updates`; or
