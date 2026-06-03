@@ -120,3 +120,10 @@ def test_compact_failure_job_truncates_error_and_links_related_entity() -> None:
     assert compact["error_code"] == "llm_failed"
     assert len(compact["error_message"]) == 500
     assert compact["related_entity_ref"]["route"] == f"/debug/entities/business_update/{entity_id}"
+    assert compact["can_retry"] is True
+    assert compact["retry_route"] == f"/background-jobs/{job_id}/retry"
+    assert [item["key"] for item in compact["recommended_actions"]] == [
+        "open_debug",
+        "open_related_entity",
+        "retry_job",
+    ]

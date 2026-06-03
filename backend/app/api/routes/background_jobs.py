@@ -503,12 +503,44 @@ def _failure_job_type_item(row: dict[str, Any]) -> dict[str, Any]:
 
 def _compact_failure_job(row: dict[str, Any]) -> dict[str, Any]:
     compact = _compact_queue_job(row)
+    can_retry = row.get("status") in {"failed", "cancelled"}
     compact["error_code"] = row.get("error_code")
     compact["attempt_count"] = row.get("attempt_count")
     compact["max_attempts"] = row.get("max_attempts")
     compact["error_message"] = _truncate_text(row.get("error_message"), 500)
     compact["related_entity_ref"] = _debug_ref(row.get("entity_type"), row.get("entity_id")) if row.get("entity_type") and row.get("entity_id") else None
+    compact["can_retry"] = can_retry
+    compact["retry_route"] = f"/background-jobs/{row['id']}/retry" if can_retry else None
+    compact["recommended_actions"] = _failure_recommended_actions(compact)
     return compact
+
+
+def _failure_recommended_actions(job: dict[str, Any]) -> list[dict[str, Any]]:
+    actions = [
+        {
+            "key": "open_debug",
+            "label": "Open Debug",
+            "route": job["debug_ref"]["route"],
+        }
+    ]
+    if job.get("related_entity_ref"):
+        actions.append(
+            {
+                "key": "open_related_entity",
+                "label": "Open Related Entity",
+                "route": job["related_entity_ref"]["route"],
+            }
+        )
+    if job.get("can_retry"):
+        actions.append(
+            {
+                "key": "retry_job",
+                "label": "Retry Job",
+                "route": job.get("retry_route"),
+                "method": "POST",
+            }
+        )
+    return actions
 
 
 def _failure_summary_totals(
