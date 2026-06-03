@@ -22,7 +22,7 @@ NODE_TYPES = {"llm", "embedding", "ocr", "rerank", "research", "parser"}
 OUTPUT_MODES = {"text", "json", "embedding", "file", "mixed"}
 TEMPLATE_ENGINES = {"jinja", "plain", "custom"}
 PROMPT_EDITABLE_NODE_TYPES = {"llm", "parser", "research"}
-TESTABLE_NODE_TYPES = {"llm", "parser", "research", "embedding", "rerank"}
+TESTABLE_NODE_TYPES = {"llm", "parser", "research", "embedding", "rerank", "ocr"}
 CHAT_NODE_TYPES = {"llm", "parser", "research"}
 
 

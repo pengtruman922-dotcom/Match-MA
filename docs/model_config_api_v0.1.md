@@ -66,6 +66,7 @@ Current important nodes:
 - `business_update_extractor`: LLM node, prompt editable.
 - `recommendation_report_writer`: LLM node, prompt editable.
 - `recommendation_reranker`: rerank node, prompt not editable, model `qwen3-rerank`.
+- `ocr_attachment_parser`: OCR node, prompt not editable, v0.1 skeleton execution.
 - `embedding_seller_doc`: embedding node, prompt not editable.
 - `embedding_buyer_intent`: embedding node, prompt not editable.
 
@@ -81,7 +82,7 @@ Current important nodes:
 - LLM / parser / research nodes call the chat endpoint with the provided `messages` or `input_text`.
 - Embedding nodes call the embedding endpoint and return dimension plus a short vector preview.
 - Rerank nodes call the rerank endpoint and return sorted relevance results.
-- OCR nodes return `skipped` in v0.1 because OCR execution is not implemented yet.
+- OCR node tests route through the `ocr` worker. v0.1 records a skipped trace for direct node tests because real OCR execution is not implemented yet.
 - Raw API keys are never accepted or returned; tests use `api_key_secret_ref` to read server-side environment variables. Because production keys are configured on worker services, frontend should call `test-jobs`, then poll `/api/v1/background-jobs/{job_id}` and `/api/v1/background-jobs/{job_id}/traces`.
 
 For Settings UI, prefer these model-config scoped record endpoints:
@@ -118,3 +119,5 @@ Current default Prompt baseline:
 
 
 `seller_target_parser` is an LLM node with editable prompt. It expects `raw_target_text` and `target_context_json`, returns a top-level `fields` object, auto-applies supported fields to `seller_target`, records field-level logs, and triggers seller search_doc / embedding rebuild.
+
+`ocr_attachment_parser` is an OCR node with no prompt editor. It is used by `attachment_ocr_parse` jobs and can later be pointed to a real OCR/document parser provider without changing the attachment status API.

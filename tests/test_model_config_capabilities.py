@@ -16,7 +16,7 @@ def test_capabilities_expose_prompt_and_test_support() -> None:
     assert capabilities["node_types"]["rerank"]["prompt_editable"] is False
     assert capabilities["node_types"]["rerank"]["test_supported"] is True
     assert capabilities["node_types"]["ocr"]["prompt_editable"] is False
-    assert capabilities["node_types"]["ocr"]["test_supported"] is False
+    assert capabilities["node_types"]["ocr"]["test_supported"] is True
 
 
 def test_json_chat_node_default_test_message_returns_json_instruction() -> None:

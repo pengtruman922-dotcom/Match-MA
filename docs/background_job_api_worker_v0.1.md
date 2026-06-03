@@ -175,6 +175,7 @@ buyer_intent_search_doc_rebuild -> embedding queue fan-out
 embedding_generate -> embedding queue, node_name=*_embedding
 recommendation_rerank -> rerank queue, node_name=recommendation_reranker
 recommendation_report_generate -> llm queue, node_name=recommendation_report_writer
+attachment_ocr_parse -> ocr queue, node_name=ocr_attachment_parser
 model_node_test -> llm / embedding / rerank queue by node type
 ```
 
@@ -201,6 +202,14 @@ model_node_test -> llm / embedding / rerank queue by node type
 6. Write one `action_application_log` row per field change with `source_type = seller_target_parse`.
 7. Create `seller_search_doc_rebuild`; embedding workers refresh search_doc / embedding.
 8. Write `ai_trace`; Debug Mode can inspect raw JSON, schema validation, tokens, latency, and errors.
+
+`attachment_ocr_parse` is the v0.1 attachment/OCR skeleton.
+
+1. Use `attachment.metadata_json.mock_extracted_text` or job `payload_json.mock_extracted_text` if provided.
+2. Create a `parsed_document` row with `parser_name=ocr_attachment_parser`.
+3. If mock text exists, mark attachment and parsed document as `parsed`, create an `evidence_span`, and write a succeeded OCR trace.
+4. If no mock text exists, mark attachment and parsed document as `skipped`, create no evidence, and write a skipped OCR trace.
+5. Debug Mode can inspect `/debug/entities/attachment/{attachment_id}`.
 
 Example result_json:
 

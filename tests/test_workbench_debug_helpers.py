@@ -73,6 +73,25 @@ def test_debug_summary_supports_recommendation_report() -> None:
     assert summary["message_count"] == 1
 
 
+def test_debug_summary_supports_attachment() -> None:
+    summary = _debug_summary(
+        "attachment",
+        {
+            "attachment": {"file_name": "teaser.pdf", "parse_status": "parsed"},
+            "debug": {
+                "job_count": 1,
+                "trace_count": 1,
+                "parsed_document_count": 1,
+                "evidence_count": 2,
+            },
+        },
+    )
+
+    assert summary["title"] == "Attachment: teaser.pdf"
+    assert summary["status"] == "parsed"
+    assert summary["evidence_count"] == 2
+
+
 def test_debug_center_health_level_prioritizes_failures() -> None:
     assert _debug_center_health_level({"failed_job_count": 1, "failed_trace_count": 0}) == "error"
     assert _debug_center_health_level({"failed_job_count": 0, "failed_trace_count": 1}) == "error"

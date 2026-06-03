@@ -108,6 +108,8 @@ def get_debug_entity(entity_type: str, entity_id: UUID, db: Session = Depends(ge
         payload = _model_node_debug(db, entity_id)
     elif entity_type == "recommendation_report":
         payload = _recommendation_report_debug(db, entity_id)
+    elif entity_type == "attachment":
+        payload = _attachment_debug(db, entity_id)
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported debug entity_type: {entity_type}")
     return {
@@ -337,6 +339,33 @@ def _recommendation_report_debug(db: Session, report_id: UUID) -> dict[str, Any]
     }
 
 
+def _attachment_debug(db: Session, attachment_id: UUID) -> dict[str, Any]:
+    attachment = _attachment(db, attachment_id)
+    links = _attachment_links(db, attachment_id)
+    jobs = _entity_jobs(db, "attachment", attachment_id)
+    traces = _entity_traces(db, "attachment", attachment_id)
+    parsed_documents = _attachment_parsed_documents(db, attachment_id)
+    evidence_spans = _attachment_evidence_spans(db, attachment_id)
+    return {
+        "attachment": attachment,
+        "links": links,
+        "jobs": jobs,
+        "traces": traces,
+        "parsed_documents": parsed_documents,
+        "evidence_spans": evidence_spans,
+        "debug": {
+            "status": attachment.get("parse_status"),
+            "job_count": len(jobs),
+            "trace_count": len(traces),
+            "link_count": len(links),
+            "parsed_document_count": len(parsed_documents),
+            "evidence_count": len(evidence_spans),
+            "latest_job_status": jobs[0]["status"] if jobs else None,
+            "latest_trace_status": traces[0]["status"] if traces else None,
+        },
+    }
+
+
 def _debug_summary(entity_type: str, payload: dict[str, Any]) -> dict[str, Any]:
     if entity_type == "business_update":
         return {
@@ -389,6 +418,17 @@ def _debug_summary(entity_type: str, payload: dict[str, Any]) -> dict[str, Any]:
             "job_count": len(payload.get("jobs", [])),
             "trace_count": len(payload.get("traces", [])),
             "message_count": len(payload.get("messages", [])),
+        }
+    if entity_type == "attachment":
+        attachment = payload["attachment"]
+        debug = payload.get("debug", {})
+        return {
+            "title": f"Attachment: {attachment.get('file_name') or attachment.get('id')}",
+            "status": attachment.get("parse_status"),
+            "job_count": debug.get("job_count"),
+            "trace_count": debug.get("trace_count"),
+            "parsed_document_count": debug.get("parsed_document_count"),
+            "evidence_count": debug.get("evidence_count"),
         }
     return {"title": entity_type}
 
@@ -689,6 +729,106 @@ def _entity_search_doc(db: Session, entity_type: str, entity_id: UUID) -> dict[s
         {"entity_id": entity_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
     ).mappings().one_or_none()
     return dict(row) if row else None
+
+
+def _attachment(db: Session, attachment_id: UUID) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            """
+            select
+              id, visibility, file_name, file_type, mime_type, file_size,
+              storage_path, uploaded_by, uploaded_at::text as uploaded_at,
+              parse_status, metadata_json, deleted_at::text as deleted_at
+            from attachment
+            where id = :attachment_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ),
+        {
+            "attachment_id": attachment_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Attachment not found.")
+    return dict(row)
+
+
+def _attachment_links(db: Session, attachment_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              id, attachment_id, entity_type, entity_id, link_type,
+              created_at::text as created_at, created_by
+            from attachment_link
+            where attachment_id = :attachment_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            order by created_at asc
+            limit 100
+            """
+        ),
+        {
+            "attachment_id": attachment_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _attachment_parsed_documents(db: Session, attachment_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              id, attachment_id, parser_name, parser_version, parse_status,
+              text_path, markdown_path, manifest_path, page_count, token_count,
+              error_message, created_at::text as created_at, updated_at::text as updated_at
+            from parsed_document
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and attachment_id = :attachment_id
+            order by created_at desc
+            limit 100
+            """
+        ),
+        {
+            "attachment_id": attachment_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _attachment_evidence_spans(db: Session, attachment_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              id, source_type, source_id, attachment_id, parsed_document_id,
+              page_no, slide_no, sheet_name, cell_range, text_excerpt,
+              char_start, char_end, created_at::text as created_at
+            from evidence_span
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and attachment_id = :attachment_id
+            order by created_at desc
+            limit 100
+            """
+        ),
+        {
+            "attachment_id": attachment_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
 
 
 def _background_job(db: Session, job_id: UUID) -> dict[str, Any]:

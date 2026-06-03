@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from backend.app.api.routes import (
+    attachments,
     background_jobs,
     business_updates,
     buyer_intents,
@@ -23,6 +24,7 @@ api_router.include_router(health.router)
 api_router.include_router(meta.router)
 api_router.include_router(model_config.router)
 api_router.include_router(background_jobs.router)
+api_router.include_router(attachments.router)
 api_router.include_router(seller_targets.router)
 api_router.include_router(buyer_parties.router)
 api_router.include_router(buyer_intents.router)

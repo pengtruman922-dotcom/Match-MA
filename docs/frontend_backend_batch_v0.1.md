@@ -214,3 +214,44 @@ Request example:
 - Worker writes `ai_trace`, auto-applies fields, writes `action_application_log`, and triggers seller search_doc / embedding rebuild.
 - `GET /parse-status` returns the current `seller_target`, latest_job, latest_trace, recent_update_logs, and debug_ref.
 - Frontend can use `latest_trace.raw_output_preview`, `parsed_output_json`, and `schema_validation_json` for Debug Mode, and `recent_update_logs` to display AI-applied field changes and rollback entry points.
+
+## 8. Attachment / OCR Skeleton
+
+```text
+POST /api/v1/attachments
+GET /api/v1/attachments
+GET /api/v1/attachments/{attachment_id}
+POST /api/v1/attachments/{attachment_id}/ocr
+GET /api/v1/attachments/{attachment_id}/ocr-status
+GET /api/v1/debug/entities/attachment/{attachment_id}
+```
+
+一期前端可以先用 JSON 创建附件元数据，不做真实文件上传：
+
+```json
+{
+  "file_name": "target-teaser.pdf",
+  "file_type": "pdf",
+  "mime_type": "application/pdf",
+  "storage_path": "mock://target-teaser.pdf",
+  "metadata_json": {
+    "mock_extracted_text": "Text used by the v0.1 OCR skeleton."
+  },
+  "links": [
+    {
+      "entity_type": "seller_target",
+      "entity_id": "uuid",
+      "link_type": "source_document"
+    }
+  ]
+}
+```
+
+`POST /ocr` creates an `attachment_ocr_parse` job in the `ocr` queue. The worker writes:
+
+- `parsed_document`
+- `evidence_span` when mock text exists
+- `ai_trace` with `trace_type=ocr`
+- terminal `attachment.parse_status`
+
+If no mock text exists, v0.1 returns a successful job with skipped OCR status, so the frontend can still verify task, trace, and debug display without waiting for real OCR integration.

@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -294,6 +294,8 @@ def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
         return _handle_seller_target_parse(db, job)
     if job.job_type == "buyer_intent_parse":
         return _handle_buyer_intent_parse(db, job)
+    if job.job_type == "attachment_ocr_parse":
+        return _handle_attachment_ocr_parse(db, job)
     if job.job_type == "seller_search_doc_rebuild":
         return _handle_seller_search_doc_rebuild(db, job)
     if job.job_type == "buyer_intent_search_doc_rebuild":
@@ -507,6 +509,109 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
         "model_name": node_config["model_name"],
         "prompt_version": node_config["prompt_version"],
         "schema_valid": schema_validation_json["valid"],
+    }
+
+
+def _handle_attachment_ocr_parse(db: Session, job: JobClaim) -> dict[str, object]:
+    attachment_id = _resolve_entity_id(job, expected_entity_type="attachment")
+    if attachment_id is None:
+        attachment_id = _optional_uuid(job.payload_json.get("attachment_id"))
+    if attachment_id is None:
+        raise ValueError("attachment_ocr_parse job requires an attachment entity_id.")
+
+    attachment = _get_attachment_for_ocr(db, attachment_id)
+    node_config = _get_default_ocr_node_config(db, "ocr_attachment_parser")
+    mock_extracted_text = _attachment_mock_extracted_text(job, attachment)
+    input_json = {
+        "attachment_id": str(attachment_id),
+        "file_name": attachment["file_name"],
+        "file_type": attachment.get("file_type"),
+        "mime_type": attachment.get("mime_type"),
+        "file_size": attachment.get("file_size"),
+        "storage_path": attachment.get("storage_path"),
+        "has_mock_extracted_text": bool(mock_extracted_text),
+        "execution_mode": "skeleton",
+    }
+
+    started = time.perf_counter()
+    if mock_extracted_text:
+        terminal_status = "parsed"
+        trace_status = "succeeded"
+        error_message = None
+        parsed_output_json = {
+            "execution_mode": "mock_text",
+            "text_length": len(mock_extracted_text),
+            "text_preview": mock_extracted_text[:1000],
+            "evidence_created": True,
+        }
+    else:
+        terminal_status = "skipped"
+        trace_status = "skipped"
+        error_message = "OCR execution is not implemented in v0.1 skeleton."
+        parsed_output_json = {
+            "execution_mode": "skeleton",
+            "reason": error_message,
+            "evidence_created": False,
+        }
+
+    parsed_document_id = _insert_parsed_document_for_ocr(
+        db,
+        attachment_id=attachment_id,
+        parse_status=terminal_status,
+        extracted_text=mock_extracted_text,
+        error_message=error_message,
+    )
+    evidence_id = None
+    if mock_extracted_text:
+        evidence_id = _insert_ocr_evidence_span(
+            db,
+            attachment_id=attachment_id,
+            parsed_document_id=parsed_document_id,
+            job_id=job.id,
+            text_excerpt=mock_extracted_text,
+        )
+
+    _update_attachment_parse_terminal(
+        db,
+        attachment_id=attachment_id,
+        parse_status=terminal_status,
+        job_id=job.id,
+        parsed_document_id=parsed_document_id,
+        evidence_id=evidence_id,
+        text_length=len(mock_extracted_text) if mock_extracted_text else 0,
+    )
+    touched_seller_target_count = _touch_seller_targets_linked_to_attachment(db, attachment_id)
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    _insert_ocr_trace(
+        db,
+        job=job,
+        attachment_id=attachment_id,
+        node_config=node_config,
+        status=trace_status,
+        input_json=input_json,
+        raw_output_text=mock_extracted_text or None,
+        parsed_output_json={
+            **parsed_output_json,
+            "parsed_document_id": str(parsed_document_id),
+            "evidence_id": str(evidence_id) if evidence_id else None,
+            "terminal_parse_status": terminal_status,
+        },
+        latency_ms=latency_ms,
+    )
+
+    return {
+        "handled": True,
+        "job_type": job.job_type,
+        "attachment_id": str(attachment_id),
+        "parse_status": terminal_status,
+        "trace_status": trace_status,
+        "parsed_document_id": str(parsed_document_id),
+        "evidence_id": str(evidence_id) if evidence_id else None,
+        "text_length": len(mock_extracted_text) if mock_extracted_text else 0,
+        "touched_seller_target_count": touched_seller_target_count,
+        "trace_created": True,
+        "node_name": node_config["node_name"],
+        "model_name": node_config["model_name"],
     }
 
 
@@ -1468,6 +1573,41 @@ def _get_buyer_intent_for_parse(db: Session, buyer_intent_id: UUID) -> dict[str,
     return _json_safe_dict(row)
 
 
+def _get_attachment_for_ocr(db: Session, attachment_id: UUID) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            """
+            select
+              id, file_name, file_type, mime_type, file_size, storage_path,
+              parse_status, metadata_json, uploaded_at::text as uploaded_at
+            from attachment
+            where id = :attachment_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ),
+        {
+            "attachment_id": attachment_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        raise ValueError(f"Attachment not found: {attachment_id}")
+    return _json_safe_dict(row)
+
+
+def _attachment_mock_extracted_text(job: JobClaim, attachment: dict[str, Any]) -> str:
+    payload_text = job.payload_json.get("mock_extracted_text")
+    metadata_json = attachment.get("metadata_json") if isinstance(attachment.get("metadata_json"), dict) else {}
+    metadata_text = metadata_json.get("mock_extracted_text")
+    text_value = payload_text if payload_text is not None else metadata_text
+    if text_value is None:
+        return ""
+    return str(text_value).strip()
+
+
 def _build_buyer_profile_context(db: Session, buyer_intent: dict[str, Any]) -> dict[str, Any]:
     buyer_party = None
     if buyer_intent.get("buyer_party_id"):
@@ -1778,6 +1918,42 @@ def _get_default_rerank_node_config(db: Session, node_name: str) -> dict[str, An
     if not config.get("base_url"):
         raise ValueError(f"Provider base_url is not configured for node: {node_name}")
     return config
+
+
+def _get_default_ocr_node_config(db: Session, node_name: str) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            """
+            select
+              node.id as node_config_id,
+              node.node_name,
+              node.model_name,
+              node.timeout_seconds,
+              provider.id as provider_config_id,
+              provider.provider_name,
+              provider.base_url,
+              provider.api_key_secret_ref
+            from model_node_config node
+            join model_provider_config provider
+              on provider.id = node.provider_config_id
+            where node.team_id = :team_id
+              and node.workspace_id = :workspace_id
+              and node.node_name = :node_name
+              and node.node_type = 'ocr'
+              and node.is_default = true
+              and node.is_active = true
+            limit 1
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "node_name": node_name,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        raise ValueError(f"Default OCR node is not configured: {node_name}")
+    return dict(row)
 
 
 def _get_model_node_config_by_id(db: Session, node_id: UUID) -> dict[str, Any]:
@@ -2187,6 +2363,22 @@ def _json_dumps(value: dict[str, Any]) -> str:
     import json
 
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _truncate_text(value: Any, max_length: int) -> str | None:
+    if value is None:
+        return None
+    text_value = str(value).strip()
+    if len(text_value) <= max_length:
+        return text_value
+    return text_value[: max_length - 3] + "..."
+
+
+def _approx_token_count(value: str) -> int:
+    stripped = value.strip()
+    if not stripped:
+        return 0
+    return max(1, len(stripped) // 4)
 
 
 def _join_lines(values: Any) -> str:
@@ -3610,6 +3802,148 @@ def _insert_rerank_trace(
     )
 
 
+def _insert_parsed_document_for_ocr(
+    db: Session,
+    *,
+    attachment_id: UUID,
+    parse_status: str,
+    extracted_text: str,
+    error_message: str | None,
+) -> UUID:
+    parsed_document_id = uuid4()
+    token_count = _approx_token_count(extracted_text) if extracted_text else None
+    row = db.execute(
+        text(
+            """
+            insert into parsed_document (
+              id, team_id, workspace_id, attachment_id, parser_name, parser_version,
+              parse_status, text_path, markdown_path, manifest_path, page_count,
+              token_count, error_message
+            )
+            values (
+              :id, :team_id, :workspace_id, :attachment_id, 'ocr_attachment_parser',
+              'v0.1.0-skeleton', :parse_status, :text_path, null, null, :page_count,
+              :token_count, :error_message
+            )
+            returning id
+            """
+        ),
+        {
+            "id": parsed_document_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "attachment_id": attachment_id,
+            "parse_status": parse_status,
+            "text_path": f"mock://parsed-documents/{parsed_document_id}.txt" if extracted_text else None,
+            "page_count": 1 if extracted_text else None,
+            "token_count": token_count,
+            "error_message": error_message,
+        },
+    ).mappings().one()
+    return row["id"]
+
+
+def _insert_ocr_evidence_span(
+    db: Session,
+    *,
+    attachment_id: UUID,
+    parsed_document_id: UUID,
+    job_id: UUID,
+    text_excerpt: str,
+) -> UUID:
+    excerpt = _truncate_text(text_excerpt, 2000) or ""
+    row = db.execute(
+        text(
+            """
+            insert into evidence_span (
+              team_id, workspace_id, source_type, source_id, attachment_id,
+              parsed_document_id, page_no, text_excerpt, char_start, char_end
+            )
+            values (
+              :team_id, :workspace_id, 'attachment_ocr_parse', :job_id, :attachment_id,
+              :parsed_document_id, 1, :text_excerpt, 0, :char_end
+            )
+            returning id
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "job_id": job_id,
+            "attachment_id": attachment_id,
+            "parsed_document_id": parsed_document_id,
+            "text_excerpt": excerpt,
+            "char_end": len(excerpt),
+        },
+    ).mappings().one()
+    return row["id"]
+
+
+def _update_attachment_parse_terminal(
+    db: Session,
+    *,
+    attachment_id: UUID,
+    parse_status: str,
+    job_id: UUID,
+    parsed_document_id: UUID,
+    evidence_id: UUID | None,
+    text_length: int,
+) -> None:
+    db.execute(
+        text(
+            """
+            update attachment
+            set parse_status = :parse_status,
+                metadata_json = metadata_json || :metadata_patch
+            where id = :attachment_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+        {
+            "attachment_id": attachment_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "parse_status": parse_status,
+            "metadata_patch": {
+                "last_ocr_job_id": str(job_id),
+                "last_ocr_status": parse_status,
+                "last_parsed_document_id": str(parsed_document_id),
+                "last_evidence_id": str(evidence_id) if evidence_id else None,
+                "last_text_length": text_length,
+            },
+        },
+    )
+
+
+def _touch_seller_targets_linked_to_attachment(db: Session, attachment_id: UUID) -> int:
+    result = db.execute(
+        text(
+            """
+            update seller_target st
+            set last_attachment_parse_at = now(),
+                updated_at = now()
+            from attachment_link al
+            where al.attachment_id = :attachment_id
+              and al.team_id = :team_id
+              and al.workspace_id = :workspace_id
+              and al.entity_type = 'seller_target'
+              and al.entity_id = st.id
+              and st.team_id = :team_id
+              and st.workspace_id = :workspace_id
+              and st.deleted_at is null
+            """
+        ),
+        {
+            "attachment_id": attachment_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )
+    return int(result.rowcount or 0)
+
+
 def _insert_recommendation_rerank_message(
     db: Session,
     *,
@@ -3748,6 +4082,73 @@ def _insert_model_node_test_trace(
             "total_tokens": total_tokens,
             "created_by": DEFAULT_ADMIN_USER_ID,
             "metadata_json": {"source": "model_node_test"},
+        },
+    )
+
+
+def _insert_ocr_trace(
+    db: Session,
+    *,
+    job: JobClaim,
+    attachment_id: UUID,
+    node_config: dict[str, Any],
+    status: str,
+    input_json: dict[str, Any],
+    raw_output_text: str | None,
+    parsed_output_json: dict[str, Any] | None,
+    latency_ms: int,
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    db.execute(
+        text(
+            """
+            insert into ai_trace (
+              team_id, workspace_id, trace_type, node_name,
+              job_id, correlation_id, entity_type, entity_id,
+              provider_config_id, node_config_id,
+              provider_name, model_name, status,
+              input_json, raw_output_text, parsed_output_json,
+              schema_validation_json, error_code, error_message,
+              latency_ms, created_by, finished_at, metadata_json
+            )
+            values (
+              :team_id, :workspace_id, 'ocr', :node_name,
+              :job_id, :correlation_id, 'attachment', :attachment_id,
+              :provider_config_id, :node_config_id,
+              :provider_name, :model_name, :status,
+              :input_json, :raw_output_text, :parsed_output_json,
+              :schema_validation_json, :error_code, :error_message,
+              :latency_ms, :created_by, now(), :metadata_json
+            )
+            """
+        ).bindparams(
+            bindparam("input_json", type_=JSONB),
+            bindparam("parsed_output_json", type_=JSONB),
+            bindparam("schema_validation_json", type_=JSONB),
+            bindparam("metadata_json", type_=JSONB),
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "node_name": node_config["node_name"],
+            "job_id": job.id,
+            "correlation_id": job.correlation_id,
+            "attachment_id": attachment_id,
+            "provider_config_id": node_config["provider_config_id"],
+            "node_config_id": node_config["node_config_id"],
+            "provider_name": node_config["provider_name"],
+            "model_name": node_config["model_name"],
+            "status": status,
+            "input_json": input_json,
+            "raw_output_text": raw_output_text,
+            "parsed_output_json": parsed_output_json,
+            "schema_validation_json": {"valid": status in {"succeeded", "skipped"}},
+            "error_code": error_code,
+            "error_message": error_message,
+            "latency_ms": latency_ms,
+            "created_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_json": {"source": "attachment_ocr_parse", "execution_mode": "skeleton"},
         },
     )
 

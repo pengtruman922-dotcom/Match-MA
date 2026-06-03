@@ -140,6 +140,18 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
         """,
         enabled=table_checks["model_node_config"],
     )
+    default_ocr_nodes = _count_by_query(
+        db,
+        """
+        select count(*)
+        from model_node_config
+        where node_name = 'ocr_attachment_parser'
+          and node_type = 'ocr'
+          and is_default = true
+          and is_active = true
+        """,
+        enabled=table_checks["model_node_config"],
+    )
     default_embedding_nodes = _count_by_query(
         db,
         """
@@ -189,6 +201,7 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
         "default_provider": default_provider,
         "default_llm_nodes": default_llm_nodes >= 3,
         "default_rerank_nodes": default_rerank_nodes >= 1,
+        "default_ocr_nodes": default_ocr_nodes >= 1,
         "default_embedding_nodes": default_embedding_nodes >= 2,
         "default_prompts": default_prompts >= 2,
         "real_business_update_prompt": real_business_update_prompt,
@@ -201,6 +214,7 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
         and default_provider
         and default_llm_nodes >= 3
         and default_rerank_nodes >= 1
+        and default_ocr_nodes >= 1
         and default_embedding_nodes >= 2
         and default_prompts >= 2
         and real_business_update_prompt
@@ -218,6 +232,7 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
             "active_prompts": prompt_counts,
             "default_llm_nodes": default_llm_nodes,
             "default_rerank_nodes": default_rerank_nodes,
+            "default_ocr_nodes": default_ocr_nodes,
             "default_embedding_nodes": default_embedding_nodes,
             "default_prompts": default_prompts,
         },
