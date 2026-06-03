@@ -262,3 +262,41 @@ If no mock text exists, v0.1 returns a successful job with skipped OCR status, s
 - `field_value_source` is no longer limited to OCR-driven parser jobs; extracted-action apply also writes field sources.
 - Frontend detail tabs can call `GET /api/v1/field-sources?entity_type=seller_target&entity_id={id}` or `buyer_intent` to render "字段来源 / 证据".
 - Rollback keeps the update log history and marks matching field-source rows as `ignored`, so evidence panels should visually de-emphasize ignored sources instead of deleting them.
+
+## Latest business update attachment contract
+
+The business update drawer can submit text and attachment metadata in one call:
+
+```text
+POST /api/v1/business-updates
+POST /api/v1/business-updates/{business_update_id}/attachments
+GET /api/v1/business-updates/{business_update_id}/review-page
+```
+
+Recommended first-phase frontend payload:
+
+```json
+{
+  "raw_text": "Manual business update text",
+  "bound_seller_target_ids": ["uuid"],
+  "attachments": [
+    {
+      "file_name": "teaser.pdf",
+      "file_type": "pdf",
+      "mime_type": "application/pdf",
+      "storage_path": "mock://teaser.pdf",
+      "mock_extracted_text": "Only used while real upload/OCR is not implemented."
+    }
+  ],
+  "auto_start_ocr": true,
+  "process_after_ocr": true,
+  "include_attachment_text": true
+}
+```
+
+Frontend expectations:
+
+- If `auto_start_ocr=true`, show OCR/background-job progress from review page `attachments[*].latest_job` and `jobs`.
+- If `process_after_ocr=true`, the OCR worker enqueues the LLM extraction job; keep polling the review page until actions/logs appear or a job fails.
+- `review-page.attachments` contains latest parsed document and evidence snippet cards, so `/updates/:id` does not need to call `/attachments/{id}/ocr-status` in the normal review flow.
+- Debug Mode can open `attachments[*].debug_ref` or `attachments[*].latest_job.debug_ref` when OCR/extraction is wrong.

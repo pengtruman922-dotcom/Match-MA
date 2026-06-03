@@ -1,5 +1,5 @@
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -12,6 +12,22 @@ from backend.app.db import get_db
 
 router = APIRouter(prefix="/business-updates", tags=["business-updates"])
 
+ATTACHMENT_VISIBILITY_VALUES = {"workspace", "team", "private"}
+ATTACHMENT_PARSE_ENTITY_TYPES = {"seller_target", "buyer_intent"}
+
+
+class BusinessUpdateAttachmentCreate(BaseModel):
+    file_name: str = Field(min_length=1, max_length=500)
+    storage_path: str = Field(min_length=1, max_length=2000)
+    visibility: str = "workspace"
+    file_type: str | None = Field(default=None, max_length=80)
+    mime_type: str | None = Field(default=None, max_length=200)
+    file_size: int | None = Field(default=None, ge=0)
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+    mock_extracted_text: str | None = Field(default=None, max_length=200000)
+    link_type: str = Field(default="source_document", max_length=80)
+    link_to_bound_objects: bool = True
+
 
 class BusinessUpdateCreate(BaseModel):
     raw_text: str = Field(min_length=1)
@@ -19,6 +35,14 @@ class BusinessUpdateCreate(BaseModel):
     bound_seller_target_ids: list[UUID] = Field(default_factory=list)
     bound_buyer_party_ids: list[UUID] = Field(default_factory=list)
     bound_buyer_intent_ids: list[UUID] = Field(default_factory=list)
+    attachment_ids: list[UUID] = Field(default_factory=list)
+    attachments: list[BusinessUpdateAttachmentCreate] = Field(default_factory=list)
+    auto_start_ocr: bool = False
+    auto_process: bool = False
+    process_after_ocr: bool = True
+    include_attachment_text: bool = True
+    auto_parse_linked_objects: bool = False
+    parse_entity_types: list[str] = Field(default_factory=list)
     metadata_json: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -44,6 +68,28 @@ class BusinessUpdateProcessOut(BaseModel):
     business_update_id: UUID
 
 
+class BusinessUpdateProcessRequest(BaseModel):
+    include_attachment_text: bool = True
+
+
+class BusinessUpdateAttachmentIngest(BaseModel):
+    attachment_ids: list[UUID] = Field(default_factory=list)
+    attachments: list[BusinessUpdateAttachmentCreate] = Field(default_factory=list)
+    auto_start_ocr: bool = False
+    process_after_ocr: bool = True
+    include_attachment_text: bool = True
+    auto_parse_linked_objects: bool = False
+    parse_entity_types: list[str] = Field(default_factory=list)
+
+
+class BusinessUpdateAttachmentIngestOut(BaseModel):
+    business_update_id: UUID
+    linked_attachment_ids: list[UUID]
+    created_attachment_ids: list[UUID]
+    ocr_jobs: list[dict[str, Any]]
+    process_job: dict[str, Any] | None = None
+
+
 class BusinessUpdateReviewPageOut(BaseModel):
     business_update: dict[str, Any]
     overview: dict[str, Any]
@@ -52,6 +98,7 @@ class BusinessUpdateReviewPageOut(BaseModel):
     application_logs: list[dict[str, Any]]
     jobs: list[dict[str, Any]]
     traces: list[dict[str, Any]]
+    attachments: list[dict[str, Any]]
     bound_entities: dict[str, Any]
     quick_actions: list[dict[str, Any]]
     debug_ref: dict[str, Any]
@@ -101,94 +148,50 @@ def create_business_update(
             "metadata_json": payload.metadata_json,
         },
     ).mappings().one()
+    follow_up = _ingest_business_update_attachments(
+        db,
+        business_update_id=row["id"],
+        attachment_ids=payload.attachment_ids,
+        attachments=payload.attachments,
+        bound_seller_target_ids=payload.bound_seller_target_ids,
+        bound_buyer_party_ids=payload.bound_buyer_party_ids,
+        bound_buyer_intent_ids=payload.bound_buyer_intent_ids,
+        auto_start_ocr=payload.auto_start_ocr,
+        process_after_ocr=payload.process_after_ocr,
+        include_attachment_text=payload.include_attachment_text,
+        auto_parse_linked_objects=payload.auto_parse_linked_objects,
+        parse_entity_types=payload.parse_entity_types,
+    )
+    defer_process_for_ocr = bool(follow_up["ocr_jobs"]) and payload.process_after_ocr
+    if payload.auto_process and not defer_process_for_ocr and not follow_up["process_job"]:
+        follow_up["process_job"] = _enqueue_business_update_process_job(
+            db,
+            business_update_id=row["id"],
+            include_attachment_text=payload.include_attachment_text,
+            source="business_update_create_auto_process",
+        )
+    if follow_up["process_job"] or defer_process_for_ocr:
+        _mark_business_update_processing(db, row["id"])
+        row = {**dict(row), "processing_status": "processing"}
     db.commit()
-    return dict(row)
+    return _append_ingest_metadata(dict(row), follow_up)
 
 
 @router.post("/{business_update_id}/process", response_model=BusinessUpdateProcessOut)
 def process_business_update(
     business_update_id: UUID,
+    payload: BusinessUpdateProcessRequest | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     _ensure_business_update_exists(db, business_update_id)
-
-    existing_job = db.execute(
-        text(
-            """
-            select id, job_type, status, queue_name, entity_id
-            from background_job
-            where team_id = :team_id
-              and workspace_id = :workspace_id
-              and job_type = 'business_update_extract_actions'
-              and entity_type = 'business_update'
-              and entity_id = :business_update_id
-              and status in ('queued', 'running', 'retry_waiting')
-            order by created_at desc
-            limit 1
-            """
-        ),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "business_update_id": business_update_id,
-        },
-    ).mappings().one_or_none()
-    if existing_job is not None:
-        return {
-            "job_id": existing_job["id"],
-            "job_type": existing_job["job_type"],
-            "status": existing_job["status"],
-            "queue_name": existing_job["queue_name"],
-            "business_update_id": existing_job["entity_id"],
-        }
-
-    job = db.execute(
-        text(
-            """
-            insert into background_job (
-              team_id, workspace_id, job_type, priority, queue_name,
-              entity_type, entity_id, idempotency_key, payload_json,
-              created_by, metadata_json
-            )
-            values (
-              :team_id, :workspace_id, 'business_update_extract_actions', 100, 'llm',
-              'business_update', :business_update_id, :idempotency_key, :payload_json,
-              :created_by, :metadata_json
-            )
-            returning id, job_type, status, queue_name, entity_id
-            """
-        ).bindparams(
-            bindparam("payload_json", type_=JSONB),
-            bindparam("metadata_json", type_=JSONB),
-        ),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "business_update_id": business_update_id,
-            "idempotency_key": f"business_update_extract_actions:{business_update_id}",
-            "payload_json": {"business_update_id": str(business_update_id)},
-            "created_by": DEFAULT_ADMIN_USER_ID,
-            "metadata_json": {"source": "api_process_endpoint"},
-        },
-    ).mappings().one()
-
-    db.execute(
-        text(
-            """
-            update business_update
-            set processing_status = 'processing'
-            where id = :business_update_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
-              and processing_status in ('pending', 'failed')
-            """
-        ),
-        {
-            "business_update_id": business_update_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
+    request = payload or BusinessUpdateProcessRequest()
+    job = _enqueue_business_update_process_job(
+        db,
+        business_update_id=business_update_id,
+        include_attachment_text=request.include_attachment_text,
+        source="api_process_endpoint",
     )
+    _mark_business_update_processing(db, business_update_id)
     db.commit()
     return {
         "job_id": job["id"],
@@ -197,6 +200,33 @@ def process_business_update(
         "queue_name": job["queue_name"],
         "business_update_id": job["entity_id"],
     }
+
+
+@router.post("/{business_update_id}/attachments", response_model=BusinessUpdateAttachmentIngestOut)
+def add_business_update_attachments(
+    business_update_id: UUID,
+    payload: BusinessUpdateAttachmentIngest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    business_update = get_business_update(business_update_id, db)
+    result = _ingest_business_update_attachments(
+        db,
+        business_update_id=business_update_id,
+        attachment_ids=payload.attachment_ids,
+        attachments=payload.attachments,
+        bound_seller_target_ids=_uuid_list(business_update["bound_seller_target_ids_json"]),
+        bound_buyer_party_ids=_uuid_list(business_update["bound_buyer_party_ids_json"]),
+        bound_buyer_intent_ids=_uuid_list(business_update["bound_buyer_intent_ids_json"]),
+        auto_start_ocr=payload.auto_start_ocr,
+        process_after_ocr=payload.process_after_ocr,
+        include_attachment_text=payload.include_attachment_text,
+        auto_parse_linked_objects=payload.auto_parse_linked_objects,
+        parse_entity_types=payload.parse_entity_types,
+    )
+    if result["process_job"] or (result["ocr_jobs"] and payload.process_after_ocr):
+        _mark_business_update_processing(db, business_update_id)
+    db.commit()
+    return result
 
 
 @router.get("", response_model=list[BusinessUpdateOut])
@@ -287,6 +317,7 @@ def get_business_update_review_page(
     application_logs = _review_page_application_logs(db, business_update_id)
     jobs = _review_page_jobs(db, business_update_id)
     traces = _review_page_traces(db, business_update_id)
+    attachments = _review_page_attachments(db, business_update_id)
     bound_entities = _review_page_bound_entities(db, business_update, actions)
     logs_by_action = _logs_by_action(application_logs)
     target_snapshots = _review_target_snapshots(bound_entities)
@@ -306,6 +337,7 @@ def get_business_update_review_page(
         "application_logs": application_logs,
         "jobs": [_compact_review_job(job) for job in jobs],
         "traces": [_compact_review_trace(trace) for trace in traces],
+        "attachments": attachments,
         "bound_entities": bound_entities,
         "quick_actions": _review_page_quick_actions(business_update, overview),
         "debug_ref": _debug_ref("business_update", business_update_id),
@@ -331,6 +363,467 @@ def _ensure_business_update_exists(db: Session, business_update_id: UUID) -> Non
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Business update not found.")
+
+
+def _ingest_business_update_attachments(
+    db: Session,
+    *,
+    business_update_id: UUID,
+    attachment_ids: list[UUID],
+    attachments: list[BusinessUpdateAttachmentCreate],
+    bound_seller_target_ids: list[UUID],
+    bound_buyer_party_ids: list[UUID],
+    bound_buyer_intent_ids: list[UUID],
+    auto_start_ocr: bool,
+    process_after_ocr: bool,
+    include_attachment_text: bool,
+    auto_parse_linked_objects: bool,
+    parse_entity_types: list[str],
+) -> dict[str, Any]:
+    _validate_parse_entity_types(parse_entity_types)
+    created_attachment_ids = [_create_attachment_for_business_update(db, item) for item in attachments]
+    linked_attachment_ids = _unique_uuid_list([*attachment_ids, *created_attachment_ids])
+    for attachment_id in linked_attachment_ids:
+        attachment_payload = _created_attachment_payload(attachments, created_attachment_ids, attachment_id)
+        _ensure_attachment_exists(db, attachment_id)
+        link_type = attachment_payload.link_type if attachment_payload else "source_document"
+        _link_attachment_if_missing(db, attachment_id, "business_update", business_update_id, link_type)
+        if attachment_payload is None or attachment_payload.link_to_bound_objects:
+            for entity_type, ids in _bound_attachment_link_targets(
+                seller_target_ids=bound_seller_target_ids,
+                buyer_party_ids=bound_buyer_party_ids,
+                buyer_intent_ids=bound_buyer_intent_ids,
+            ):
+                for entity_id in ids:
+                    _link_attachment_if_missing(db, attachment_id, entity_type, entity_id, "business_update_context")
+
+    ocr_jobs: list[dict[str, Any]] = []
+    if auto_start_ocr:
+        for attachment_id in linked_attachment_ids:
+            attachment_payload = _created_attachment_payload(attachments, created_attachment_ids, attachment_id)
+            ocr_jobs.append(
+                _enqueue_attachment_ocr_job(
+                    db,
+                    attachment_id=attachment_id,
+                    business_update_id=business_update_id,
+                    mock_extracted_text=attachment_payload.mock_extracted_text if attachment_payload else None,
+                    auto_parse_linked_objects=auto_parse_linked_objects,
+                    parse_entity_types=parse_entity_types,
+                    process_after_ocr=process_after_ocr,
+                    include_attachment_text=include_attachment_text,
+                )
+            )
+
+    process_job = None
+    if process_after_ocr and linked_attachment_ids and not auto_start_ocr:
+        process_job = _enqueue_business_update_process_job(
+            db,
+            business_update_id=business_update_id,
+            include_attachment_text=include_attachment_text,
+            source="business_update_attachment_ingest",
+        )
+
+    result = {
+        "business_update_id": business_update_id,
+        "linked_attachment_ids": linked_attachment_ids,
+        "created_attachment_ids": created_attachment_ids,
+        "ocr_jobs": ocr_jobs,
+        "process_job": process_job,
+    }
+    _patch_business_update_attachment_ingest_metadata(db, business_update_id, result)
+    return result
+
+
+def _append_ingest_metadata(row: dict[str, Any], follow_up: dict[str, Any]) -> dict[str, Any]:
+    metadata = dict(row.get("metadata_json") or {})
+    if follow_up["linked_attachment_ids"] or follow_up["process_job"]:
+        metadata["attachment_ingest"] = {
+            "linked_attachment_ids": [str(item) for item in follow_up["linked_attachment_ids"]],
+            "created_attachment_ids": [str(item) for item in follow_up["created_attachment_ids"]],
+            "ocr_job_ids": [str(item["id"]) for item in follow_up["ocr_jobs"]],
+            "process_job_id": str(follow_up["process_job"]["id"]) if follow_up["process_job"] else None,
+        }
+    return {**row, "metadata_json": metadata}
+
+
+def _patch_business_update_attachment_ingest_metadata(
+    db: Session,
+    business_update_id: UUID,
+    follow_up: dict[str, Any],
+) -> None:
+    if not (follow_up["linked_attachment_ids"] or follow_up["process_job"]):
+        return
+    db.execute(
+        text(
+            """
+            update business_update
+            set metadata_json = metadata_json || :metadata_patch
+            where id = :business_update_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+        {
+            "business_update_id": business_update_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "metadata_patch": {
+                "attachment_ingest": {
+                    "linked_attachment_ids": [str(item) for item in follow_up["linked_attachment_ids"]],
+                    "created_attachment_ids": [str(item) for item in follow_up["created_attachment_ids"]],
+                    "ocr_job_ids": [str(item["id"]) for item in follow_up["ocr_jobs"]],
+                    "process_job_id": str(follow_up["process_job"]["id"]) if follow_up["process_job"] else None,
+                }
+            },
+        },
+    )
+
+
+def _created_attachment_payload(
+    attachments: list[BusinessUpdateAttachmentCreate],
+    created_attachment_ids: list[UUID],
+    attachment_id: UUID,
+) -> BusinessUpdateAttachmentCreate | None:
+    for created_id, payload in zip(created_attachment_ids, attachments, strict=False):
+        if created_id == attachment_id:
+            return payload
+    return None
+
+
+def _create_attachment_for_business_update(db: Session, payload: BusinessUpdateAttachmentCreate) -> UUID:
+    if payload.visibility not in ATTACHMENT_VISIBILITY_VALUES:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Invalid visibility.")
+    metadata = _json_safe_value(payload.metadata_json)
+    if payload.mock_extracted_text:
+        metadata["mock_extracted_text"] = payload.mock_extracted_text
+    row = db.execute(
+        text(
+            """
+            insert into attachment (
+              team_id, workspace_id, visibility, file_name, file_type, mime_type,
+              file_size, storage_path, uploaded_by, metadata_json
+            )
+            values (
+              :team_id, :workspace_id, :visibility, :file_name, :file_type, :mime_type,
+              :file_size, :storage_path, :uploaded_by, :metadata_json
+            )
+            returning id
+            """
+        ).bindparams(bindparam("metadata_json", type_=JSONB)),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "visibility": payload.visibility,
+            "file_name": payload.file_name.strip(),
+            "file_type": _clean_optional_text(payload.file_type),
+            "mime_type": _clean_optional_text(payload.mime_type),
+            "file_size": payload.file_size,
+            "storage_path": payload.storage_path.strip(),
+            "uploaded_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_json": metadata,
+        },
+    ).mappings().one()
+    return row["id"]
+
+
+def _enqueue_attachment_ocr_job(
+    db: Session,
+    *,
+    attachment_id: UUID,
+    business_update_id: UUID,
+    mock_extracted_text: str | None,
+    auto_parse_linked_objects: bool,
+    parse_entity_types: list[str],
+    process_after_ocr: bool,
+    include_attachment_text: bool,
+) -> dict[str, Any]:
+    existing = _latest_active_ocr_job(db, attachment_id, business_update_id)
+    if existing:
+        return {**existing, "reused_existing": True}
+
+    row = db.execute(
+        text(
+            """
+            insert into background_job (
+              team_id, workspace_id, job_type, priority, queue_name,
+              entity_type, entity_id, idempotency_key, payload_json,
+              max_attempts, correlation_id, created_by, metadata_json
+            )
+            values (
+              :team_id, :workspace_id, 'attachment_ocr_parse', 100, 'ocr',
+              'attachment', :attachment_id, :idempotency_key, :payload_json,
+              1, :correlation_id, :created_by, :metadata_json
+            )
+            returning id, job_type, status, queue_name, entity_id
+            """
+        ).bindparams(
+            bindparam("payload_json", type_=JSONB),
+            bindparam("metadata_json", type_=JSONB),
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "attachment_id": attachment_id,
+            "idempotency_key": f"attachment_ocr_parse:business_update:{business_update_id}:{attachment_id}:{uuid4()}",
+            "payload_json": {
+                "attachment_id": str(attachment_id),
+                "business_update_id": str(business_update_id),
+                "mock_extracted_text": mock_extracted_text,
+                "auto_parse_linked_objects": auto_parse_linked_objects,
+                "parse_entity_types": parse_entity_types,
+                "process_business_update_after_ocr": process_after_ocr,
+                "include_attachment_text": include_attachment_text,
+            },
+            "correlation_id": business_update_id,
+            "created_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_json": {
+                "source": "business_update_attachment_ingest",
+                "business_update_id": str(business_update_id),
+                "process_after_ocr": process_after_ocr,
+            },
+        },
+    ).mappings().one()
+    _mark_attachment_parsing(db, attachment_id, row["id"])
+    return {**dict(row), "reused_existing": False}
+
+
+def _enqueue_business_update_process_job(
+    db: Session,
+    *,
+    business_update_id: UUID,
+    include_attachment_text: bool,
+    source: str,
+) -> dict[str, Any]:
+    existing_job = _latest_active_business_update_process_job(db, business_update_id)
+    if existing_job:
+        return {**existing_job, "reused_existing": True}
+
+    row = db.execute(
+        text(
+            """
+            insert into background_job (
+              team_id, workspace_id, job_type, priority, queue_name,
+              entity_type, entity_id, idempotency_key, payload_json,
+              correlation_id, created_by, metadata_json
+            )
+            values (
+              :team_id, :workspace_id, 'business_update_extract_actions', 100, 'llm',
+              'business_update', :business_update_id, :idempotency_key, :payload_json,
+              :correlation_id, :created_by, :metadata_json
+            )
+            returning id, job_type, status, queue_name, entity_id
+            """
+        ).bindparams(
+            bindparam("payload_json", type_=JSONB),
+            bindparam("metadata_json", type_=JSONB),
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "business_update_id": business_update_id,
+            "idempotency_key": f"business_update_extract_actions:{business_update_id}",
+            "payload_json": {
+                "business_update_id": str(business_update_id),
+                "include_attachment_text": include_attachment_text,
+            },
+            "correlation_id": business_update_id,
+            "created_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_json": {"source": source},
+        },
+    ).mappings().one()
+    return {**dict(row), "reused_existing": False}
+
+
+def _latest_active_business_update_process_job(db: Session, business_update_id: UUID) -> dict[str, Any] | None:
+    row = db.execute(
+        text(
+            """
+            select id, job_type, status, queue_name, entity_id
+            from background_job
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and job_type = 'business_update_extract_actions'
+              and entity_type = 'business_update'
+              and entity_id = :business_update_id
+              and status in ('queued', 'running', 'retry_waiting')
+            order by created_at desc
+            limit 1
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "business_update_id": business_update_id,
+        },
+    ).mappings().one_or_none()
+    return dict(row) if row else None
+
+
+def _latest_active_ocr_job(db: Session, attachment_id: UUID, business_update_id: UUID) -> dict[str, Any] | None:
+    row = db.execute(
+        text(
+            """
+            select id, job_type, status, queue_name, entity_id
+            from background_job
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and job_type = 'attachment_ocr_parse'
+              and entity_type = 'attachment'
+              and entity_id = :attachment_id
+              and payload_json ->> 'business_update_id' = :business_update_id
+              and status in ('queued', 'running', 'retry_waiting')
+            order by created_at desc
+            limit 1
+            """
+        ),
+        {
+            "attachment_id": attachment_id,
+            "business_update_id": str(business_update_id),
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    return dict(row) if row else None
+
+
+def _mark_business_update_processing(db: Session, business_update_id: UUID) -> None:
+    db.execute(
+        text(
+            """
+            update business_update
+            set processing_status = 'processing'
+            where id = :business_update_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and processing_status in ('pending', 'failed', 'parsed', 'partially_applied', 'applied')
+            """
+        ),
+        {
+            "business_update_id": business_update_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )
+
+
+def _mark_attachment_parsing(db: Session, attachment_id: UUID, job_id: UUID) -> None:
+    db.execute(
+        text(
+            """
+            update attachment
+            set parse_status = 'parsing',
+                metadata_json = metadata_json || :metadata_patch
+            where id = :attachment_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+        {
+            "attachment_id": attachment_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "metadata_patch": {
+                "last_ocr_job_id": str(job_id),
+                "last_ocr_status": "queued",
+            },
+        },
+    )
+
+
+def _link_attachment_if_missing(
+    db: Session,
+    attachment_id: UUID,
+    entity_type: str,
+    entity_id: UUID,
+    link_type: str,
+) -> None:
+    db.execute(
+        text(
+            """
+            insert into attachment_link (
+              team_id, workspace_id, attachment_id, entity_type, entity_id, link_type, created_by
+            )
+            select :team_id, :workspace_id, :attachment_id, :entity_type, :entity_id, :link_type, :created_by
+            where not exists (
+              select 1
+              from attachment_link
+              where team_id = :team_id
+                and workspace_id = :workspace_id
+                and attachment_id = :attachment_id
+                and entity_type = :entity_type
+                and entity_id = :entity_id
+                and link_type = :link_type
+            )
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "attachment_id": attachment_id,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "link_type": link_type,
+            "created_by": DEFAULT_ADMIN_USER_ID,
+        },
+    )
+
+
+def _ensure_attachment_exists(db: Session, attachment_id: UUID) -> None:
+    exists = db.execute(
+        text(
+            """
+            select exists(
+              select 1
+              from attachment
+              where id = :attachment_id
+                and team_id = :team_id
+                and workspace_id = :workspace_id
+                and deleted_at is null
+            )
+            """
+        ),
+        {
+            "attachment_id": attachment_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).scalar_one()
+    if not exists:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attachment not found.")
+
+
+def _bound_attachment_link_targets(
+    *,
+    seller_target_ids: list[UUID],
+    buyer_party_ids: list[UUID],
+    buyer_intent_ids: list[UUID],
+) -> list[tuple[str, list[UUID]]]:
+    return [
+        ("seller_target", seller_target_ids),
+        ("buyer_party", buyer_party_ids),
+        ("buyer_intent", buyer_intent_ids),
+    ]
+
+
+def _validate_parse_entity_types(parse_entity_types: list[str]) -> None:
+    invalid = [item for item in parse_entity_types if item not in ATTACHMENT_PARSE_ENTITY_TYPES]
+    if invalid:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Unsupported OCR auto-parse entity types: {', '.join(invalid)}",
+        )
+
+
+def _unique_uuid_list(items: list[UUID]) -> list[UUID]:
+    seen: set[UUID] = set()
+    result: list[UUID] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
 
 
 def _review_page_actions(db: Session, business_update_id: UUID) -> list[dict[str, Any]]:
@@ -426,14 +919,17 @@ def _review_page_jobs(db: Session, business_update_id: UUID) -> list[dict[str, A
             from background_job
             where team_id = :team_id
               and workspace_id = :workspace_id
-              and entity_type = 'business_update'
-              and entity_id = :business_update_id
+              and (
+                (entity_type = 'business_update' and entity_id = :business_update_id)
+                or payload_json ->> 'business_update_id' = :business_update_id_text
+              )
             order by created_at desc
             limit 100
             """
         ),
         {
             "business_update_id": business_update_id,
+            "business_update_id_text": str(business_update_id),
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
         },
@@ -463,11 +959,77 @@ def _review_page_traces(db: Session, business_update_id: UUID) -> list[dict[str,
                   from background_job
                   where team_id = :team_id
                     and workspace_id = :workspace_id
-                    and entity_type = 'business_update'
-                    and entity_id = :business_update_id
+                    and (
+                      (entity_type = 'business_update' and entity_id = :business_update_id)
+                      or payload_json ->> 'business_update_id' = :business_update_id_text
+                    )
                 )
               )
             order by trace.started_at desc
+            limit 100
+            """
+        ),
+        {
+            "business_update_id": business_update_id,
+            "business_update_id_text": str(business_update_id),
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _review_page_attachments(db: Session, business_update_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              a.id, a.visibility, a.file_name, a.file_type, a.mime_type, a.file_size,
+              a.storage_path, a.uploaded_by, a.uploaded_at::text as uploaded_at,
+              a.parse_status, a.metadata_json, a.deleted_at::text as deleted_at,
+              al.link_type, al.created_at::text as linked_at,
+              job.id as latest_job_id, job.status as latest_job_status,
+              job.queue_name as latest_job_queue, job.error_message as latest_job_error_message,
+              ev.id as latest_evidence_id, ev.text_excerpt as latest_evidence_text_excerpt,
+              ev.page_no as latest_evidence_page_no,
+              pd.id as latest_parsed_document_id, pd.parse_status as latest_parsed_document_status
+            from attachment_link al
+            join attachment a on a.id = al.attachment_id
+            left join lateral (
+              select id, status, queue_name, error_message
+              from background_job
+              where team_id = al.team_id
+                and workspace_id = al.workspace_id
+                and job_type = 'attachment_ocr_parse'
+                and entity_type = 'attachment'
+                and entity_id = al.attachment_id
+              order by created_at desc
+              limit 1
+            ) job on true
+            left join lateral (
+              select id, parse_status
+              from parsed_document
+              where team_id = al.team_id
+                and workspace_id = al.workspace_id
+                and attachment_id = al.attachment_id
+              order by created_at desc
+              limit 1
+            ) pd on true
+            left join lateral (
+              select id, text_excerpt, page_no
+              from evidence_span
+              where team_id = al.team_id
+                and workspace_id = al.workspace_id
+                and attachment_id = al.attachment_id
+              order by created_at desc
+              limit 1
+            ) ev on true
+            where al.team_id = :team_id
+              and al.workspace_id = :workspace_id
+              and al.entity_type = 'business_update'
+              and al.entity_id = :business_update_id
+              and a.deleted_at is null
+            order by al.created_at asc
             limit 100
             """
         ),
@@ -477,7 +1039,7 @@ def _review_page_traces(db: Session, business_update_id: UUID) -> list[dict[str,
             "workspace_id": DEFAULT_WORKSPACE_ID,
         },
     ).mappings().all()
-    return [dict(row) for row in rows]
+    return [_compact_review_attachment(dict(row)) for row in rows]
 
 
 def _review_page_bound_entities(
@@ -1002,6 +1564,43 @@ def _compact_review_trace(trace: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _compact_review_attachment(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "file_name": row.get("file_name"),
+        "file_type": row.get("file_type"),
+        "mime_type": row.get("mime_type"),
+        "file_size": row.get("file_size"),
+        "storage_path": row.get("storage_path"),
+        "parse_status": row.get("parse_status"),
+        "link_type": row.get("link_type"),
+        "linked_at": row.get("linked_at"),
+        "latest_job": {
+            "id": row.get("latest_job_id"),
+            "status": row.get("latest_job_status"),
+            "queue_name": row.get("latest_job_queue"),
+            "error_message": _truncate_review_text(row.get("latest_job_error_message"), 240),
+            "debug_ref": _debug_ref("background_job", row["latest_job_id"]),
+        }
+        if row.get("latest_job_id")
+        else None,
+        "latest_parsed_document": {
+            "id": row.get("latest_parsed_document_id"),
+            "parse_status": row.get("latest_parsed_document_status"),
+        }
+        if row.get("latest_parsed_document_id")
+        else None,
+        "latest_evidence": {
+            "id": row.get("latest_evidence_id"),
+            "text_excerpt": _truncate_review_text(row.get("latest_evidence_text_excerpt"), 500),
+            "page_no": row.get("latest_evidence_page_no"),
+        }
+        if row.get("latest_evidence_id")
+        else None,
+        "debug_ref": _debug_ref("attachment", row["id"]),
+    }
+
+
 def _collect_entity_ids(
     seed_values: Any,
     actions: list[dict[str, Any]],
@@ -1084,6 +1683,17 @@ def _optional_uuid(value: Any) -> UUID | None:
         return None
 
 
+def _uuid_list(value: Any) -> list[UUID]:
+    if not isinstance(value, list):
+        return []
+    result: list[UUID] = []
+    for item in value:
+        parsed = _optional_uuid(item)
+        if parsed:
+            result.append(parsed)
+    return result
+
+
 def _optional_float(value: Any) -> float | None:
     if value is None:
         return None
@@ -1091,3 +1701,20 @@ def _optional_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _clean_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _json_safe_value(value: Any) -> Any:
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_safe_value(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_safe_value(item) for item in value]
+    return value

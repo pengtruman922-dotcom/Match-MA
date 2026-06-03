@@ -177,3 +177,38 @@ As of backend commit after the OCR field-source batch:
 - Rolling back an `action_application_log` marks the matching `field_value_source` rows as `ignored`.
 - `GET /api/v1/business-updates/{id}/review-page` includes evidence snippets on application logs when evidence exists.
 - `GET /api/v1/debug/entities/{seller_target|buyer_intent|buyer_party}/{id}` includes `field_sources` and `debug.field_source_count`.
+
+## 10. Business update attachments and OCR evidence
+
+Business update extraction can now consume OCR evidence from linked attachments:
+
+- `POST /api/v1/business-updates` accepts `attachment_ids`, inline
+  `attachments`, `auto_start_ocr`, `process_after_ocr`, and
+  `include_attachment_text`.
+- `POST /api/v1/business-updates/{id}/attachments` can add attachments to an
+  existing update and optionally start OCR.
+- OCR jobs can enqueue a child `business_update_extract_actions` job after OCR
+  succeeds.
+- The business update extractor appends OCR evidence text to the LLM input and
+  passes attachment evidence metadata in `context_json.attachments`.
+- If an extracted action explicitly returns `evidence_id`, it is stored on
+  `extracted_action.evidence_id`.
+- If the action has raw evidence text and the business update extraction has
+  exactly one OCR evidence span, the backend assigns that evidence span
+  automatically.
+- Applied fields then carry the evidence chain through `action_application_log`
+  and `field_value_source`.
+
+Review UI contract:
+
+```text
+GET /api/v1/business-updates/{business_update_id}/review-page
+```
+
+The response includes:
+
+- `attachments`: linked attachments with latest OCR job, latest parsed document,
+  latest evidence snippet, and debug refs.
+- `actions[*].evidence_id`: evidence selected by the extractor or backend.
+- `application_logs[*].evidence_span`: evidence snippets for already-applied
+  field changes.

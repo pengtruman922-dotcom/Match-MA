@@ -611,6 +611,13 @@ def _handle_attachment_ocr_parse(db: Session, job: JobClaim) -> dict[str, object
         evidence_id=evidence_id,
         extracted_text=mock_extracted_text,
     )
+    business_update_process_job = _enqueue_business_update_process_after_ocr(
+        db,
+        job=job,
+        attachment_id=attachment_id,
+        evidence_id=evidence_id,
+        extracted_text=mock_extracted_text,
+    )
     latency_ms = int((time.perf_counter() - started) * 1000)
     _insert_ocr_trace(
         db,
@@ -626,6 +633,7 @@ def _handle_attachment_ocr_parse(db: Session, job: JobClaim) -> dict[str, object
             "evidence_id": str(evidence_id) if evidence_id else None,
             "terminal_parse_status": terminal_status,
             "child_parse_jobs": child_parse_jobs,
+            "business_update_process_job": business_update_process_job,
         },
         latency_ms=latency_ms,
     )
@@ -642,6 +650,7 @@ def _handle_attachment_ocr_parse(db: Session, job: JobClaim) -> dict[str, object
         "touched_seller_target_count": touched_seller_target_count,
         "child_parse_jobs": child_parse_jobs,
         "child_parse_job_count": len(child_parse_jobs),
+        "business_update_process_job": business_update_process_job,
         "trace_created": True,
         "node_name": node_config["node_name"],
         "model_name": node_config["model_name"],
@@ -655,18 +664,36 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
 
     business_update = _get_business_update(db, business_update_id)
     node_config = _get_default_node_config(db, "business_update_extractor")
+    attachment_context = (
+        _build_business_update_attachment_context(
+            db,
+            business_update_id,
+            trigger_attachment_id=_optional_uuid(job.payload_json.get("trigger_attachment_id")),
+            trigger_evidence_id=_optional_uuid(job.payload_json.get("trigger_evidence_id")),
+        )
+        if job.payload_json.get("include_attachment_text", True)
+        else {"attachments": [], "combined_text": "", "evidence_ids": []}
+    )
+    raw_text = _business_update_raw_text_with_attachments(business_update["raw_text"], attachment_context)
+    business_update_for_normalization = {
+        **business_update,
+        "attachment_evidence_ids": attachment_context.get("evidence_ids", []),
+    }
     context_json = _build_business_update_context(db, business_update)
+    context_json["attachments"] = attachment_context.get("attachments", [])
     prompt_messages = _render_prompt_messages(
         node_config,
         {
             "context_json": context_json,
-            "raw_text": business_update["raw_text"] or "",
+            "raw_text": raw_text,
         },
     )
     input_json = {
         "business_update_id": str(business_update["id"]),
-        "raw_text": business_update["raw_text"],
+        "raw_text": raw_text,
+        "original_raw_text": business_update["raw_text"],
         "input_type": business_update["input_type"],
+        "attachment_count": len(attachment_context.get("attachments", [])),
         "bound_seller_target_ids": business_update["bound_seller_target_ids_json"],
         "bound_buyer_party_ids": business_update["bound_buyer_party_ids_json"],
         "bound_buyer_intent_ids": business_update["bound_buyer_intent_ids_json"],
@@ -713,7 +740,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
 
     parsed_output_json = llm_result.parsed_output_json
     schema_validation_json = _validate_extractor_output(parsed_output_json)
-    actions = _normalize_actions(parsed_output_json, business_update)
+    actions = _normalize_actions(parsed_output_json, business_update_for_normalization)
     if not actions:
         actions = [_build_unresolved_action(parsed_output_json, llm_result.raw_output_text)]
     created_actions = _insert_extracted_actions(db, business_update_id, actions, job.id)
@@ -2309,6 +2336,128 @@ def _build_business_update_context(db: Session, business_update: dict[str, Any])
     }
 
 
+def _build_business_update_attachment_context(
+    db: Session,
+    business_update_id: UUID,
+    *,
+    trigger_attachment_id: UUID | None = None,
+    trigger_evidence_id: UUID | None = None,
+) -> dict[str, Any]:
+    evidence_lateral_filter_sql = ""
+    outer_filter_sql = ""
+    if trigger_evidence_id:
+        evidence_lateral_filter_sql = "and id = :trigger_evidence_id"
+        outer_filter_sql = "and ev.id is not null"
+    elif trigger_attachment_id:
+        outer_filter_sql = "and al.attachment_id = :trigger_attachment_id"
+    rows = db.execute(
+        text(
+            f"""
+            select
+              a.id as attachment_id, a.file_name, a.file_type, a.mime_type,
+              a.parse_status, al.link_type,
+              pd.id as parsed_document_id, pd.parse_status as parsed_document_status,
+              ev.id as evidence_id, ev.text_excerpt, ev.page_no, ev.char_start, ev.char_end
+            from attachment_link al
+            join attachment a on a.id = al.attachment_id
+            left join lateral (
+              select id, parse_status
+              from parsed_document
+              where team_id = al.team_id
+                and workspace_id = al.workspace_id
+                and attachment_id = al.attachment_id
+              order by created_at desc
+              limit 1
+            ) pd on true
+            left join lateral (
+              select id, text_excerpt, page_no, char_start, char_end
+              from evidence_span
+              where team_id = al.team_id
+                and workspace_id = al.workspace_id
+                and attachment_id = al.attachment_id
+                {evidence_lateral_filter_sql}
+              order by created_at desc
+              limit 5
+            ) ev on true
+            where al.team_id = :team_id
+              and al.workspace_id = :workspace_id
+              and al.entity_type = 'business_update'
+              and al.entity_id = :business_update_id
+              and a.deleted_at is null
+              {outer_filter_sql}
+            order by al.created_at asc, ev.page_no nulls last
+            limit 50
+            """
+        ),
+        {
+            "business_update_id": business_update_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "trigger_attachment_id": trigger_attachment_id,
+            "trigger_evidence_id": trigger_evidence_id,
+        },
+    ).mappings().all()
+
+    attachments_by_id: dict[str, dict[str, Any]] = {}
+    evidence_ids: list[str] = []
+    for row in rows:
+        item = dict(row)
+        attachment_id = str(item["attachment_id"])
+        attachment = attachments_by_id.setdefault(
+            attachment_id,
+            {
+                "attachment_id": attachment_id,
+                "file_name": item.get("file_name"),
+                "file_type": item.get("file_type"),
+                "mime_type": item.get("mime_type"),
+                "parse_status": item.get("parse_status"),
+                "link_type": item.get("link_type"),
+                "parsed_document_id": str(item["parsed_document_id"]) if item.get("parsed_document_id") else None,
+                "parsed_document_status": item.get("parsed_document_status"),
+                "evidence_spans": [],
+            },
+        )
+        if item.get("evidence_id"):
+            evidence_id = str(item["evidence_id"])
+            if evidence_id not in evidence_ids:
+                evidence_ids.append(evidence_id)
+            attachment["evidence_spans"].append(
+                {
+                    "evidence_id": evidence_id,
+                    "page_no": item.get("page_no"),
+                    "text_excerpt": item.get("text_excerpt"),
+                    "char_start": item.get("char_start"),
+                    "char_end": item.get("char_end"),
+                }
+            )
+
+    attachments = list(attachments_by_id.values())
+    combined_parts: list[str] = []
+    for attachment in attachments:
+        for evidence in attachment.get("evidence_spans", []):
+            text_excerpt = _truncate_text(evidence.get("text_excerpt"), 4000)
+            if text_excerpt:
+                combined_parts.append(
+                    "[Attachment evidence "
+                    f"{evidence['evidence_id']} from {attachment.get('file_name')}]\n{text_excerpt}"
+                )
+    return {
+        "attachments": attachments,
+        "combined_text": "\n\n".join(combined_parts),
+        "evidence_ids": evidence_ids,
+    }
+
+
+def _business_update_raw_text_with_attachments(raw_text: Any, attachment_context: dict[str, Any]) -> str:
+    base_text = str(raw_text or "").strip()
+    attachment_text = str(attachment_context.get("combined_text") or "").strip()
+    if not attachment_text:
+        return base_text
+    if not base_text:
+        return f"Attachment OCR evidence:\n{attachment_text}"
+    return f"{base_text}\n\nAttachment OCR evidence:\n{attachment_text}"
+
+
 def _fetch_seller_targets(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
     if not ids:
         return []
@@ -3101,6 +3250,7 @@ def _normalize_actions(
                 "target_entity_id": target_entity_id,
                 "proposed_changes_json": normalized_changes,
                 "raw_evidence_text": action.get("raw_evidence_text"),
+                "evidence_id": _business_update_action_evidence_id(action, business_update),
                 "confidence": _optional_decimal(action.get("confidence")),
                 "reason": action.get("reason"),
                 "raw_action": action,
@@ -3137,6 +3287,20 @@ def _normalize_proposed_changes(
             enum_fields=BUYER_SELLER_RELATION_ENUM_FIELDS,
         )
     return proposed_changes, []
+
+
+def _business_update_action_evidence_id(
+    action: dict[str, Any],
+    business_update: dict[str, Any],
+) -> UUID | None:
+    explicit = _optional_uuid(action.get("evidence_id"))
+    if explicit:
+        return explicit
+    raw_evidence_text = str(action.get("raw_evidence_text") or "").strip()
+    evidence_ids = business_update.get("attachment_evidence_ids")
+    if raw_evidence_text and isinstance(evidence_ids, list) and len(evidence_ids) == 1:
+        return _optional_uuid(evidence_ids[0])
+    return None
 
 
 def _normalize_change_fields(
@@ -3261,6 +3425,7 @@ def _build_unresolved_action(
             "parsed_output_json": parsed_output_json,
         },
         "raw_evidence_text": raw_output_text[:2000],
+        "evidence_id": None,
         "confidence": Decimal("0"),
         "reason": "Fallback action for debugging invalid or unusable LLM output.",
         "raw_action": parsed_output_json,
@@ -4201,6 +4366,118 @@ def _attachment_parse_links(
         },
     ).mappings().all()
     return [dict(row) for row in rows]
+
+
+def _enqueue_business_update_process_after_ocr(
+    db: Session,
+    *,
+    job: JobClaim,
+    attachment_id: UUID,
+    evidence_id: UUID | None,
+    extracted_text: str,
+) -> dict[str, Any] | None:
+    business_update_id = _optional_uuid(job.payload_json.get("business_update_id"))
+    if (
+        not business_update_id
+        or not extracted_text.strip()
+        or not job.payload_json.get("process_business_update_after_ocr")
+    ):
+        return None
+
+    existing = _latest_active_business_update_process_job(db, business_update_id)
+    if existing:
+        return {**_json_safe_dict(existing), "reused_existing": True}
+
+    row = db.execute(
+        text(
+            """
+            insert into background_job (
+              team_id, workspace_id, job_type, priority, queue_name,
+              entity_type, entity_id, idempotency_key, payload_json,
+              parent_job_id, correlation_id, created_by, metadata_json
+            )
+            values (
+              :team_id, :workspace_id, 'business_update_extract_actions', 110, 'llm',
+              'business_update', :business_update_id, :idempotency_key, :payload_json,
+              :parent_job_id, :correlation_id, :created_by, :metadata_json
+            )
+            returning id, job_type, status, queue_name, entity_type, entity_id
+            """
+        ).bindparams(
+            bindparam("payload_json", type_=JSONB),
+            bindparam("metadata_json", type_=JSONB),
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "business_update_id": business_update_id,
+            "idempotency_key": f"business_update_extract_actions:attachment_ocr:{business_update_id}:{job.id}",
+            "payload_json": {
+                "business_update_id": str(business_update_id),
+                "include_attachment_text": bool(job.payload_json.get("include_attachment_text", True)),
+                "trigger_attachment_id": str(attachment_id),
+                "trigger_evidence_id": str(evidence_id) if evidence_id else None,
+            },
+            "parent_job_id": job.id,
+            "correlation_id": job.correlation_id or business_update_id,
+            "created_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_json": {
+                "source": "attachment_ocr_auto_business_update_process",
+                "attachment_id": str(attachment_id),
+                "evidence_id": str(evidence_id) if evidence_id else None,
+            },
+        },
+    ).mappings().one()
+    db.execute(
+        text(
+            """
+            update business_update
+            set processing_status = 'processing',
+                metadata_json = metadata_json || :metadata_patch
+            where id = :business_update_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and processing_status in ('pending', 'failed', 'processing', 'parsed', 'partially_applied', 'applied')
+            """
+        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+        {
+            "business_update_id": business_update_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "metadata_patch": {
+                "last_ocr_trigger_job_id": str(job.id),
+                "last_ocr_trigger_attachment_id": str(attachment_id),
+                "last_ocr_trigger_evidence_id": str(evidence_id) if evidence_id else None,
+                "last_ocr_process_job_id": str(row["id"]),
+            },
+        },
+    )
+    return {**_json_safe_dict(row), "reused_existing": False}
+
+
+def _latest_active_business_update_process_job(db: Session, business_update_id: UUID) -> dict[str, Any] | None:
+    row = db.execute(
+        text(
+            """
+            select id, job_type, status, queue_name, entity_type, entity_id
+            from background_job
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and job_type = 'business_update_extract_actions'
+              and entity_type = 'business_update'
+              and entity_id = :business_update_id
+              and status in ('queued', 'running', 'retry_waiting')
+            order by created_at desc
+            limit 1
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "business_update_id": business_update_id,
+        },
+    ).mappings().one_or_none()
+    return dict(row) if row else None
 
 
 def _latest_active_child_parse_job(

@@ -104,6 +104,55 @@ Returns:
 - `child_parse_jobs`
 - `debug_ref`
 
+### Business update attachment ingest
+
+Business updates can now create/link attachments directly, so the frontend does
+not have to call the generic attachment API first.
+
+```text
+POST /api/v1/business-updates
+POST /api/v1/business-updates/{business_update_id}/attachments
+```
+
+Request fields on `POST /business-updates`:
+
+```json
+{
+  "raw_text": "Manual update text",
+  "bound_seller_target_ids": ["uuid"],
+  "attachments": [
+    {
+      "file_name": "target-teaser.pdf",
+      "file_type": "pdf",
+      "mime_type": "application/pdf",
+      "storage_path": "mock://target-teaser.pdf",
+      "mock_extracted_text": "OCR text used by the v0.1 worker."
+    }
+  ],
+  "auto_start_ocr": true,
+  "process_after_ocr": true,
+  "include_attachment_text": true
+}
+```
+
+Behavior:
+
+- `attachments` creates attachment rows; `attachment_ids` links existing rows.
+- All linked attachments get an `attachment_link` to the business update.
+- By default, attachments are also linked to bound seller targets, buyer parties,
+  and buyer intents with `link_type=business_update_context`.
+- `auto_start_ocr=true` creates `attachment_ocr_parse` jobs in the `ocr` queue.
+- `process_after_ocr=true` lets the OCR worker enqueue a follow-up
+  `business_update_extract_actions` job in the `llm` queue after OCR evidence is
+  created.
+- `include_attachment_text=true` makes the business update extractor append OCR
+  evidence text to the LLM input and include attachment evidence in
+  `context_json.attachments`.
+
+`GET /api/v1/business-updates/{id}/review-page` now returns an `attachments`
+array with the latest OCR job, latest parsed document, latest evidence snippet,
+and debug refs for the review UI.
+
 ## Worker behavior
 
 `attachment_ocr_parse` runs in the OCR worker:
@@ -118,6 +167,11 @@ v0.1 terminal statuses:
 - If no mock text exists, `attachment.parse_status=skipped`, `parsed_document.parse_status=skipped`, no evidence is created, and OCR trace status is `skipped`.
 - If auto-parse is enabled, the OCR worker creates child `seller_target_parse` / `buyer_intent_parse` jobs with `parent_job_id` pointing to the OCR job.
 - Child parse jobs carry `attachment_id`, `parsed_document_id`, and `evidence_id` in `payload_json`, so applied fields can write source records.
+- If the OCR job payload has `business_update_id` and
+  `process_business_update_after_ocr=true`, the worker also creates a child
+  `business_update_extract_actions` job. That child job carries
+  `trigger_attachment_id` and `trigger_evidence_id`, so the extractor can use the
+  relevant OCR evidence span and attach it to extracted actions when unambiguous.
 
 ## Field Sources
 

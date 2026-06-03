@@ -10,6 +10,8 @@ from backend.app.api.routes.field_sources import _field_value_source_out
 from backend.app.jobs.handlers import (
     _approx_token_count,
     _attachment_mock_extracted_text,
+    _business_update_action_evidence_id,
+    _business_update_raw_text_with_attachments,
     _parse_requested_entity_types,
     _parse_source_context,
 )
@@ -166,6 +168,54 @@ def test_parse_source_context_carries_attachment_evidence() -> None:
 def test_parse_requested_entity_types_defaults_to_supported_objects() -> None:
     assert _parse_requested_entity_types([]) == {"seller_target", "buyer_intent"}
     assert _parse_requested_entity_types(["seller_target", "unsupported"]) == {"seller_target"}
+
+
+def test_business_update_raw_text_appends_attachment_evidence() -> None:
+    raw_text = _business_update_raw_text_with_attachments(
+        "manual note",
+        {"combined_text": "[Attachment evidence ev-1]\nprofit 25m"},
+    )
+
+    assert raw_text.startswith("manual note")
+    assert "Attachment OCR evidence" in raw_text
+    assert "profit 25m" in raw_text
+
+
+def test_business_update_action_evidence_id_uses_single_attachment_evidence() -> None:
+    evidence_id = UUID("00000000-0000-0000-0000-000000000010")
+
+    resolved = _business_update_action_evidence_id(
+        {"raw_evidence_text": "profit 25m"},
+        {"attachment_evidence_ids": [str(evidence_id)]},
+    )
+
+    assert resolved == evidence_id
+
+
+def test_business_update_action_evidence_id_prefers_explicit_value() -> None:
+    explicit_id = UUID("00000000-0000-0000-0000-000000000011")
+    other_id = UUID("00000000-0000-0000-0000-000000000012")
+
+    resolved = _business_update_action_evidence_id(
+        {"evidence_id": str(explicit_id), "raw_evidence_text": "profit 25m"},
+        {"attachment_evidence_ids": [str(other_id)]},
+    )
+
+    assert resolved == explicit_id
+
+
+def test_business_update_action_evidence_id_skips_ambiguous_attachment_evidence() -> None:
+    resolved = _business_update_action_evidence_id(
+        {"raw_evidence_text": "profit 25m"},
+        {
+            "attachment_evidence_ids": [
+                "00000000-0000-0000-0000-000000000013",
+                "00000000-0000-0000-0000-000000000014",
+            ]
+        },
+    )
+
+    assert resolved is None
 
 
 def test_compact_child_parse_job_links_debug_refs() -> None:
