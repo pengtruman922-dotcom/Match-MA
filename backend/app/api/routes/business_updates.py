@@ -207,11 +207,13 @@ def upload_business_update(
     include_attachment_text: bool = Form(default=True),
     auto_parse_linked_objects: bool = Form(default=False),
     parse_entity_types: str | None = Form(default=None),
+    metadata_json: str | None = Form(default=None),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     _validate_business_update_input_type(input_type)
     parse_types = _parse_entity_types_form(parse_entity_types)
     _validate_parse_entity_types(parse_types)
+    form_metadata = _parse_metadata_json_form(metadata_json)
     settings = get_settings()
 
     row = _insert_business_update_row(
@@ -219,6 +221,7 @@ def upload_business_update(
         raw_text=raw_text,
         input_type=input_type,
         metadata_json={
+            **form_metadata,
             "source": "business_update_multipart_upload",
             "upload_mode": "mixed",
         },
@@ -1103,6 +1106,24 @@ def _parse_entity_types_form(value: str | None) -> list[str]:
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail="parse_entity_types must be a JSON array or comma-separated string.",
     )
+
+
+def _parse_metadata_json_form(value: str | None) -> dict[str, Any]:
+    if not value or not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="metadata_json must be valid JSON.",
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="metadata_json must be a JSON object.",
+        )
+    return _json_safe_value(parsed)
 
 
 def _unique_uuid_list(items: list[UUID]) -> list[UUID]:

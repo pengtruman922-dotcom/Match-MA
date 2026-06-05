@@ -8,6 +8,7 @@ from backend.app.api.routes.business_updates import (
     _compact_review_job,
     _enrich_review_action,
     _entity_ref,
+    _parse_metadata_json_form,
     _parse_entity_types_form,
     _review_action_group_key,
     _review_page_overview,
@@ -234,12 +235,21 @@ def test_business_update_upload_helpers_classify_images_as_multimodal_only() -> 
 def test_business_update_form_helpers_parse_entity_types_and_validate_input_type() -> None:
     assert _parse_entity_types_form("seller_target,buyer_intent") == ["seller_target", "buyer_intent"]
     assert _parse_entity_types_form('["seller_target"]') == ["seller_target"]
+    assert _parse_metadata_json_form('{"test_data": true, "label": "pinda"}') == {
+        "test_data": True,
+        "label": "pinda",
+    }
     _validate_business_update_input_type("mixed")
 
     with pytest.raises(HTTPException) as exc_info:
         _validate_business_update_input_type("attachment_validation")
 
     assert exc_info.value.status_code == 422
+
+    with pytest.raises(HTTPException) as metadata_exc:
+        _parse_metadata_json_form("[1,2,3]")
+
+    assert metadata_exc.value.status_code == 422
 
 
 def test_unique_uuid_list_preserves_order_and_dedupes() -> None:
