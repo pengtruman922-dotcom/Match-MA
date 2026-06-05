@@ -521,14 +521,17 @@ def _s3_client(
         raise AttachmentStorageError("boto3 is required for S3 attachment storage.") from exc
 
     config = Config(s3={"addressing_style": "path" if force_path_style else "auto"})
-    return boto3.client(
-        "s3",
-        endpoint_url=endpoint_url or os.getenv("ATTACHMENT_S3_ENDPOINT_URL"),
-        region_name=region or os.getenv("ATTACHMENT_S3_REGION") or "auto",
-        aws_access_key_id=access_key_id or os.getenv("ATTACHMENT_S3_ACCESS_KEY_ID"),
-        aws_secret_access_key=secret_access_key or os.getenv("ATTACHMENT_S3_SECRET_ACCESS_KEY"),
-        config=config,
-    )
+    try:
+        return boto3.client(
+            "s3",
+            endpoint_url=endpoint_url or os.getenv("ATTACHMENT_S3_ENDPOINT_URL"),
+            region_name=region or os.getenv("ATTACHMENT_S3_REGION") or "auto",
+            aws_access_key_id=access_key_id or os.getenv("ATTACHMENT_S3_ACCESS_KEY_ID"),
+            aws_secret_access_key=secret_access_key or os.getenv("ATTACHMENT_S3_SECRET_ACCESS_KEY"),
+            config=config,
+        )
+    except Exception as exc:  # pragma: no cover - exercised only with real S3 config
+        raise AttachmentStorageError(f"Failed to create S3 attachment client: {exc}") from exc
 
 
 def _safe_s3_key_part(value: str) -> str:
