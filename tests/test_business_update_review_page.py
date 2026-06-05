@@ -106,6 +106,7 @@ def test_compact_review_attachment_exposes_latest_job_and_evidence() -> None:
                 "storage_uri": "mock://teaser.pdf",
                 "content_sha256": "abc",
                 "uploaded_text_content": "net profit 25m",
+                "last_text_length": 24,
             },
             "link_type": "source_document",
             "linked_at": "2026-06-03",
@@ -122,12 +123,57 @@ def test_compact_review_attachment_exposes_latest_job_and_evidence() -> None:
     )
 
     assert compacted["latest_job"]["debug_ref"]["route"] == f"/debug/entities/background_job/{job_id}"
-    assert compacted["parse_readiness"]["readiness_status"] == "ready"
-    assert compacted["parse_readiness"]["available_text_source"] == "uploaded_text_content"
+    assert compacted["parse_readiness"]["readiness_status"] == "parsed"
+    assert compacted["parse_readiness"]["available_text_source"] == "parsed_document"
     assert compacted["parse_readiness"]["storage_backend"] == "local"
+    assert compacted["parse_readiness"]["parsed_document_id"] == str(parsed_document_id)
+    assert compacted["parse_readiness"]["evidence_id"] == str(evidence_id)
+    assert compacted["parse_readiness"]["parsed_text_length"] == 24
     assert compacted["latest_parsed_document"]["id"] == parsed_document_id
     assert compacted["latest_evidence"]["id"] == evidence_id
     assert compacted["debug_ref"]["route"] == f"/debug/entities/attachment/{attachment_id}"
+
+
+def test_compact_review_attachment_marks_parsed_pdf_without_upload_text_as_parsed() -> None:
+    attachment_id = UUID("00000000-0000-0000-0000-000000000004")
+    parsed_document_id = UUID("00000000-0000-0000-0000-000000000007")
+
+    compacted = _compact_review_attachment(
+        {
+            "id": attachment_id,
+            "file_name": "scan.pdf",
+            "file_type": "pdf",
+            "mime_type": "application/pdf",
+            "file_size": 1200,
+            "storage_path": "s3://bucket/scan.pdf",
+            "parse_status": "parsed",
+            "metadata_json": {
+                "storage_backend": "s3",
+                "storage_uri": "s3://bucket/scan.pdf",
+                "last_text_length": 21802,
+            },
+            "link_type": "source_document",
+            "linked_at": "2026-06-03",
+            "latest_job_id": None,
+            "latest_job_status": None,
+            "latest_job_queue": None,
+            "latest_job_error_message": None,
+            "latest_parsed_document_id": parsed_document_id,
+            "latest_parsed_document_status": "parsed",
+            "latest_evidence_id": None,
+            "latest_evidence_text_excerpt": None,
+            "latest_evidence_page_no": None,
+        }
+    )
+
+    readiness = compacted["parse_readiness"]
+
+    assert readiness["readiness_status"] == "parsed"
+    assert readiness["available_text_source"] == "parsed_document"
+    assert readiness["text_available"] is True
+    assert readiness["blocking_reasons"] == []
+    assert readiness["parsed_document_id"] == str(parsed_document_id)
+    assert readiness["parsed_text_length"] == 21802
 
 
 

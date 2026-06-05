@@ -121,6 +121,9 @@ class AttachmentParseReadinessOut(BaseModel):
     storage_backend: str | None
     storage_uri: str | None
     content_sha256: str | None
+    parsed_document_id: str | None = None
+    evidence_id: str | None = None
+    parsed_text_length: int | None = None
     is_binary_or_document: bool
     multimodal_image_supported: bool
     multimodal_image_constraints: dict[str, Any]
@@ -534,8 +537,16 @@ def _attachment_parse_readiness(attachment: dict[str, Any]) -> dict[str, Any]:
     )
     blocking_reasons: list[str] = []
     recommended_actions: list[str] = []
+    already_parsed = attachment.get("parse_status") == "parsed" or bool(metadata_json.get("last_parsed_document_id"))
 
-    if text_available:
+    if already_parsed:
+        readiness_status = "parsed"
+        expected_parse_status = "parsed"
+        text_source = "parsed_document"
+        recommended_actions.append("View the parsed document/evidence or continue business update processing.")
+        if text_value:
+            recommended_actions.append("Retry OCR only if the parsed text looks incomplete or stale.")
+    elif text_available:
         readiness_status = "ready"
         expected_parse_status = "parsed"
         recommended_actions.append("Start OCR parsing; v0.1 will use the available text as OCR output.")
@@ -568,11 +579,14 @@ def _attachment_parse_readiness(attachment: dict[str, Any]) -> dict[str, Any]:
         "can_parse_now": text_available,
         "expected_parse_status": expected_parse_status,
         "available_text_source": text_source,
-        "text_available": text_available,
+        "text_available": text_available or already_parsed,
         "text_preview": _truncate_text(text_value, 500) if text_value else None,
         "storage_backend": metadata_json.get("storage_backend"),
         "storage_uri": metadata_json.get("storage_uri") or attachment.get("storage_path"),
         "content_sha256": metadata_json.get("content_sha256"),
+        "parsed_document_id": metadata_json.get("last_parsed_document_id"),
+        "evidence_id": metadata_json.get("last_evidence_id"),
+        "parsed_text_length": metadata_json.get("last_text_length"),
         "is_binary_or_document": binary_or_document,
         "multimodal_image_supported": image_supported,
         "multimodal_image_constraints": image_constraints,
