@@ -1,7 +1,8 @@
+import json
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -10,12 +11,18 @@ from sqlalchemy.orm import Session
 from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
+from backend.app.services.attachment_storage import (
+    AttachmentStorageError,
+    AttachmentTooLargeError,
+    save_upload_file,
+)
 from backend.app.services.image_inputs import is_supported_multimodal_image, multimodal_image_constraints
 
 router = APIRouter(prefix="/business-updates", tags=["business-updates"])
 
 ATTACHMENT_VISIBILITY_VALUES = {"workspace", "team", "private"}
 ATTACHMENT_PARSE_ENTITY_TYPES = {"seller_target", "buyer_intent"}
+BUSINESS_UPDATE_INPUT_TYPES = {"text", "screenshot", "attachment", "mixed"}
 
 
 class BusinessUpdateAttachmentCreate(BaseModel):
@@ -92,6 +99,16 @@ class BusinessUpdateAttachmentIngestOut(BaseModel):
     process_job: dict[str, Any] | None = None
 
 
+class BusinessUpdateUploadOut(BaseModel):
+    business_update: BusinessUpdateOut
+    uploaded_attachment_ids: list[UUID]
+    ocr_attachment_ids: list[UUID]
+    multimodal_image_attachment_ids: list[UUID]
+    skipped_ocr_attachment_ids: list[UUID]
+    ocr_jobs: list[dict[str, Any]]
+    process_job: dict[str, Any] | None = None
+
+
 class BusinessUpdateReviewPageOut(BaseModel):
     business_update: dict[str, Any]
     overview: dict[str, Any]
@@ -111,6 +128,7 @@ def create_business_update(
     payload: BusinessUpdateCreate,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    _validate_business_update_input_type(payload.input_type)
     statement = text(
         """
         insert into business_update (
@@ -177,6 +195,85 @@ def create_business_update(
         row = {**dict(row), "processing_status": "processing"}
     db.commit()
     return _append_ingest_metadata(dict(row), follow_up)
+
+
+@router.post("/upload", response_model=BusinessUpdateUploadOut, status_code=status.HTTP_201_CREATED)
+def upload_business_update(
+    raw_text: str = Form(..., min_length=1),
+    input_type: str = Form(default="mixed"),
+    files: list[UploadFile] | None = File(default=None),
+    auto_process: bool = Form(default=True),
+    process_after_ocr: bool = Form(default=True),
+    include_attachment_text: bool = Form(default=True),
+    auto_parse_linked_objects: bool = Form(default=False),
+    parse_entity_types: str | None = Form(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    _validate_business_update_input_type(input_type)
+    parse_types = _parse_entity_types_form(parse_entity_types)
+    _validate_parse_entity_types(parse_types)
+    settings = get_settings()
+
+    row = _insert_business_update_row(
+        db,
+        raw_text=raw_text,
+        input_type=input_type,
+        metadata_json={
+            "source": "business_update_multipart_upload",
+            "upload_mode": "mixed",
+        },
+    )
+    uploaded = _save_business_update_upload_files(db, files or [], settings=settings)
+    for attachment_id in uploaded["uploaded_attachment_ids"]:
+        _link_attachment_if_missing(db, attachment_id, "business_update", row["id"], "source_document")
+
+    ocr_jobs: list[dict[str, Any]] = []
+    if uploaded["ocr_attachment_ids"]:
+        for attachment_id in uploaded["ocr_attachment_ids"]:
+            ocr_jobs.append(
+                _enqueue_attachment_ocr_job(
+                    db,
+                    attachment_id=attachment_id,
+                    business_update_id=row["id"],
+                    mock_extracted_text=None,
+                    auto_parse_linked_objects=auto_parse_linked_objects,
+                    parse_entity_types=parse_types,
+                    process_after_ocr=process_after_ocr,
+                    include_attachment_text=include_attachment_text,
+                )
+            )
+
+    process_job = None
+    if auto_process and (not ocr_jobs or not process_after_ocr):
+        process_job = _enqueue_business_update_process_job(
+            db,
+            business_update_id=row["id"],
+            include_attachment_text=include_attachment_text,
+            source="business_update_multipart_upload",
+        )
+
+    if process_job or ocr_jobs:
+        _mark_business_update_processing(db, row["id"])
+        row = {**row, "processing_status": "processing"}
+
+    follow_up = {
+        "linked_attachment_ids": uploaded["uploaded_attachment_ids"],
+        "created_attachment_ids": uploaded["uploaded_attachment_ids"],
+        "ocr_jobs": ocr_jobs,
+        "process_job": process_job,
+    }
+    _patch_business_update_attachment_ingest_metadata(db, row["id"], follow_up)
+    db.commit()
+    business_update = _append_ingest_metadata(dict(row), follow_up)
+    return {
+        "business_update": business_update,
+        "uploaded_attachment_ids": uploaded["uploaded_attachment_ids"],
+        "ocr_attachment_ids": uploaded["ocr_attachment_ids"],
+        "multimodal_image_attachment_ids": uploaded["multimodal_image_attachment_ids"],
+        "skipped_ocr_attachment_ids": uploaded["skipped_ocr_attachment_ids"],
+        "ocr_jobs": ocr_jobs,
+        "process_job": process_job,
+    }
 
 
 @router.post("/{business_update_id}/process", response_model=BusinessUpdateProcessOut)
@@ -436,6 +533,143 @@ def _ingest_business_update_attachments(
     return result
 
 
+def _insert_business_update_row(
+    db: Session,
+    *,
+    raw_text: str,
+    input_type: str,
+    metadata_json: dict[str, Any],
+) -> dict[str, Any]:
+    statement = text(
+        """
+        insert into business_update (
+          team_id, workspace_id, raw_text, input_type, processing_status,
+          bound_seller_target_ids_json, bound_buyer_party_ids_json, bound_buyer_intent_ids_json,
+          created_by, metadata_json
+        )
+        values (
+          :team_id, :workspace_id, :raw_text, :input_type, 'pending',
+          '[]'::jsonb, '[]'::jsonb, '[]'::jsonb,
+          :created_by, :metadata_json
+        )
+        returning
+          id, raw_text, input_type, processing_status,
+          bound_seller_target_ids_json, bound_buyer_party_ids_json, bound_buyer_intent_ids_json,
+          bound_recommendation_session_id, created_by,
+          created_at::text as created_at, metadata_json
+        """
+    ).bindparams(bindparam("metadata_json", type_=JSONB))
+    return dict(
+        db.execute(
+            statement,
+            {
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+                "raw_text": raw_text,
+                "input_type": input_type,
+                "created_by": DEFAULT_ADMIN_USER_ID,
+                "metadata_json": metadata_json,
+            },
+        )
+        .mappings()
+        .one()
+    )
+
+
+def _save_business_update_upload_files(
+    db: Session,
+    files: list[UploadFile],
+    *,
+    settings: Any,
+) -> dict[str, list[UUID]]:
+    uploaded_attachment_ids: list[UUID] = []
+    ocr_attachment_ids: list[UUID] = []
+    multimodal_image_attachment_ids: list[UUID] = []
+    skipped_ocr_attachment_ids: list[UUID] = []
+
+    for file in files:
+        attachment_id = uuid4()
+        original_file_name = file.filename or "upload.bin"
+        try:
+            uploaded = save_upload_file(
+                file.file,
+                attachment_id=attachment_id,
+                original_file_name=original_file_name,
+                content_type=file.content_type,
+                storage_dir=settings.attachment_storage_dir,
+                storage_backend=settings.effective_attachment_storage_backend,
+                max_bytes=settings.attachment_max_upload_bytes,
+                text_capture_max_bytes=settings.attachment_text_capture_max_bytes,
+                s3_endpoint_url=settings.effective_attachment_s3_endpoint_url,
+                s3_region=settings.effective_attachment_s3_region,
+                s3_bucket=settings.effective_attachment_s3_bucket,
+                s3_access_key_id=settings.effective_attachment_s3_access_key_id,
+                s3_secret_access_key=settings.effective_attachment_s3_secret_access_key,
+                s3_force_path_style=settings.attachment_s3_force_path_style,
+            )
+        except AttachmentTooLargeError as exc:
+            raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
+        except AttachmentStorageError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "error": "business_update_upload_failed",
+                    "file_name": original_file_name,
+                    "message": _truncate_review_text(str(exc), 500),
+                },
+            ) from exc
+
+        metadata = {
+            **uploaded.metadata_json(),
+            "uploaded_via": "business_update_multipart_upload",
+            "ocr_policy": _upload_ocr_policy(uploaded.file_type, file.content_type),
+        }
+        row = db.execute(
+            text(
+                """
+                insert into attachment (
+                  id, team_id, workspace_id, visibility, file_name, file_type, mime_type,
+                  file_size, storage_path, uploaded_by, metadata_json
+                )
+                values (
+                  :id, :team_id, :workspace_id, 'workspace', :file_name, :file_type, :mime_type,
+                  :file_size, :storage_path, :uploaded_by, :metadata_json
+                )
+                returning id, file_type, mime_type, file_size, metadata_json
+                """
+            ).bindparams(bindparam("metadata_json", type_=JSONB)),
+            {
+                "id": attachment_id,
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+                "file_name": original_file_name[:500],
+                "file_type": uploaded.file_type,
+                "mime_type": file.content_type,
+                "file_size": uploaded.file_size,
+                "storage_path": uploaded.storage_uri,
+                "uploaded_by": DEFAULT_ADMIN_USER_ID,
+                "metadata_json": metadata,
+            },
+        ).mappings().one()
+        attachment = dict(row)
+        uploaded_attachment_ids.append(attachment_id)
+        if is_supported_multimodal_image(attachment):
+            multimodal_image_attachment_ids.append(attachment_id)
+        if _should_auto_ocr_uploaded_attachment(attachment):
+            ocr_attachment_ids.append(attachment_id)
+        else:
+            skipped_ocr_attachment_ids.append(attachment_id)
+
+    return {
+        "uploaded_attachment_ids": uploaded_attachment_ids,
+        "ocr_attachment_ids": ocr_attachment_ids,
+        "multimodal_image_attachment_ids": multimodal_image_attachment_ids,
+        "skipped_ocr_attachment_ids": skipped_ocr_attachment_ids,
+    }
+
+
 def _append_ingest_metadata(row: dict[str, Any], follow_up: dict[str, Any]) -> dict[str, Any]:
     metadata = dict(row.get("metadata_json") or {})
     if follow_up["linked_attachment_ids"] or follow_up["process_job"]:
@@ -490,6 +724,34 @@ def _created_attachment_payload(
         if created_id == attachment_id:
             return payload
     return None
+
+
+def _upload_ocr_policy(file_type: str | None, mime_type: str | None) -> str:
+    attachment = {"file_type": file_type, "mime_type": mime_type}
+    if is_supported_multimodal_image(attachment):
+        return "multimodal_image_only"
+    if _should_auto_ocr_uploaded_attachment(attachment):
+        return "auto_ocr"
+    return "skip_ocr"
+
+
+def _should_auto_ocr_uploaded_attachment(attachment: dict[str, Any]) -> bool:
+    file_type = str(attachment.get("file_type") or "").lower()
+    mime_type = str(attachment.get("mime_type") or "").split(";")[0].strip().lower()
+    if is_supported_multimodal_image(attachment):
+        return False
+    if file_type in {"txt", "md", "csv", "json", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx"}:
+        return True
+    return mime_type.startswith("text/") or mime_type in {
+        "application/json",
+        "application/pdf",
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-powerpoint",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    }
 
 
 def _create_attachment_for_business_update(db: Session, payload: BusinessUpdateAttachmentCreate) -> UUID:
@@ -623,7 +885,7 @@ def _enqueue_business_update_process_job(
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
             "business_update_id": business_update_id,
-            "idempotency_key": f"business_update_extract_actions:{business_update_id}",
+            "idempotency_key": f"business_update_extract_actions:{business_update_id}:{uuid4()}",
             "payload_json": {
                 "business_update_id": str(business_update_id),
                 "include_attachment_text": include_attachment_text,
@@ -815,6 +1077,32 @@ def _validate_parse_entity_types(parse_entity_types: list[str]) -> None:
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Unsupported OCR auto-parse entity types: {', '.join(invalid)}",
         )
+
+
+def _validate_business_update_input_type(input_type: str) -> None:
+    if input_type not in BUSINESS_UPDATE_INPUT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Unsupported business update input_type: {input_type}",
+        )
+
+
+def _parse_entity_types_form(value: str | None) -> list[str]:
+    if not value or not value.strip():
+        return []
+    stripped = value.strip()
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        parsed = [item.strip() for item in stripped.split(",")]
+    if isinstance(parsed, str):
+        return [parsed]
+    if isinstance(parsed, list):
+        return [str(item).strip() for item in parsed if str(item).strip()]
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail="parse_entity_types must be a JSON array or comma-separated string.",
+    )
 
 
 def _unique_uuid_list(items: list[UUID]) -> list[UUID]:

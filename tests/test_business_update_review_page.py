@@ -8,9 +8,13 @@ from backend.app.api.routes.business_updates import (
     _compact_review_job,
     _enrich_review_action,
     _entity_ref,
+    _parse_entity_types_form,
     _review_action_group_key,
     _review_page_overview,
+    _should_auto_ocr_uploaded_attachment,
+    _upload_ocr_policy,
     _unique_uuid_list,
+    _validate_business_update_input_type,
     _validate_parse_entity_types,
 )
 
@@ -212,6 +216,28 @@ def test_validate_parse_entity_types_rejects_unsupported_values() -> None:
 
     with pytest.raises(HTTPException) as exc_info:
         _validate_parse_entity_types(["buyer_party"])
+
+    assert exc_info.value.status_code == 422
+
+
+def test_business_update_upload_helpers_classify_images_as_multimodal_only() -> None:
+    image = {"file_type": "jpg", "mime_type": "image/jpeg"}
+    pdf = {"file_type": "pdf", "mime_type": "application/pdf"}
+    text = {"file_type": "txt", "mime_type": "text/plain"}
+
+    assert _upload_ocr_policy("jpg", "image/jpeg") == "multimodal_image_only"
+    assert _should_auto_ocr_uploaded_attachment(image) is False
+    assert _should_auto_ocr_uploaded_attachment(pdf) is True
+    assert _should_auto_ocr_uploaded_attachment(text) is True
+
+
+def test_business_update_form_helpers_parse_entity_types_and_validate_input_type() -> None:
+    assert _parse_entity_types_form("seller_target,buyer_intent") == ["seller_target", "buyer_intent"]
+    assert _parse_entity_types_form('["seller_target"]') == ["seller_target"]
+    _validate_business_update_input_type("mixed")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_business_update_input_type("attachment_validation")
 
     assert exc_info.value.status_code == 422
 
