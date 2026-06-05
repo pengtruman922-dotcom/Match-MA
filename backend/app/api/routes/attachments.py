@@ -240,6 +240,11 @@ def upload_attachment(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(exc),
         ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=_upload_failure_detail(exc),
+        ) from exc
 
     metadata = {
         **form_metadata,
@@ -503,6 +508,14 @@ def _ocr_job_out(row: dict[str, Any]) -> dict[str, Any]:
         "queue_name": row["queue_name"],
         "attachment_id": row["entity_id"],
         "reused_existing": row.get("reused_existing", False),
+    }
+
+
+def _upload_failure_detail(exc: Exception) -> dict[str, Any]:
+    return {
+        "error": "attachment_upload_failed",
+        "error_type": exc.__class__.__name__,
+        "message": _truncate_text(str(exc), 500) or "Unexpected upload failure.",
     }
 
 
