@@ -76,16 +76,19 @@ class Settings(BaseSettings):
 
     @property
     def effective_attachment_s3_endpoint_url(self) -> str | None:
-        return self.attachment_s3_endpoint_url or _first_env(
-            "S3_ENDPOINT_URL",
-            "S3_ENDPOINT",
-            "AWS_ENDPOINT_URL",
-            "AWS_S3_ENDPOINT_URL",
-            "AWS_S3_ENDPOINT",
-            "BUCKET_ENDPOINT_URL",
-            "RAILWAY_S3_ENDPOINT_URL",
-            "R2_ENDPOINT_URL",
-            "MINIO_ENDPOINT",
+        return _normalize_s3_text(
+            self.attachment_s3_endpoint_url
+            or _first_env(
+                "S3_ENDPOINT_URL",
+                "S3_ENDPOINT",
+                "AWS_ENDPOINT_URL",
+                "AWS_S3_ENDPOINT_URL",
+                "AWS_S3_ENDPOINT",
+                "BUCKET_ENDPOINT_URL",
+                "RAILWAY_S3_ENDPOINT_URL",
+                "R2_ENDPOINT_URL",
+                "MINIO_ENDPOINT",
+            )
         )
 
     @property
@@ -98,40 +101,49 @@ class Settings(BaseSettings):
 
     @property
     def effective_attachment_s3_bucket(self) -> str | None:
-        return self.attachment_s3_bucket or _first_env(
-            "S3_BUCKET",
-            "S3_BUCKET_NAME",
-            "AWS_BUCKET_NAME",
-            "AWS_S3_BUCKET",
-            "AWS_S3_BUCKET_NAME",
-            "BUCKET_NAME",
-            "RAILWAY_S3_BUCKET",
-            "R2_BUCKET_NAME",
-            "MINIO_BUCKET",
+        return _normalize_s3_text(
+            self.attachment_s3_bucket
+            or _first_env(
+                "S3_BUCKET",
+                "S3_BUCKET_NAME",
+                "AWS_BUCKET_NAME",
+                "AWS_S3_BUCKET",
+                "AWS_S3_BUCKET_NAME",
+                "BUCKET_NAME",
+                "RAILWAY_S3_BUCKET",
+                "R2_BUCKET_NAME",
+                "MINIO_BUCKET",
+            )
         )
 
     @property
     def effective_attachment_s3_access_key_id(self) -> str | None:
-        return self.attachment_s3_access_key_id or _first_env(
-            "S3_ACCESS_KEY_ID",
-            "AWS_ACCESS_KEY_ID",
-            "AWS_S3_ACCESS_KEY_ID",
-            "BUCKET_ACCESS_KEY_ID",
-            "RAILWAY_S3_ACCESS_KEY_ID",
-            "R2_ACCESS_KEY_ID",
-            "MINIO_ACCESS_KEY",
+        return _normalize_s3_text(
+            self.attachment_s3_access_key_id
+            or _first_env(
+                "S3_ACCESS_KEY_ID",
+                "AWS_ACCESS_KEY_ID",
+                "AWS_S3_ACCESS_KEY_ID",
+                "BUCKET_ACCESS_KEY_ID",
+                "RAILWAY_S3_ACCESS_KEY_ID",
+                "R2_ACCESS_KEY_ID",
+                "MINIO_ACCESS_KEY",
+            )
         )
 
     @property
     def effective_attachment_s3_secret_access_key(self) -> str | None:
-        return self.attachment_s3_secret_access_key or _first_env(
-            "S3_SECRET_ACCESS_KEY",
-            "AWS_SECRET_ACCESS_KEY",
-            "AWS_S3_SECRET_ACCESS_KEY",
-            "BUCKET_SECRET_ACCESS_KEY",
-            "RAILWAY_S3_SECRET_ACCESS_KEY",
-            "R2_SECRET_ACCESS_KEY",
-            "MINIO_SECRET_KEY",
+        return _normalize_s3_text(
+            self.attachment_s3_secret_access_key
+            or _first_env(
+                "S3_SECRET_ACCESS_KEY",
+                "AWS_SECRET_ACCESS_KEY",
+                "AWS_S3_SECRET_ACCESS_KEY",
+                "BUCKET_SECRET_ACCESS_KEY",
+                "RAILWAY_S3_SECRET_ACCESS_KEY",
+                "R2_SECRET_ACCESS_KEY",
+                "MINIO_SECRET_KEY",
+            )
         )
 
 
@@ -146,6 +158,13 @@ def _first_env(*names: str) -> str | None:
 def _normalize_s3_region(value: str | None) -> str:
     region = (value or "auto").strip().strip("<>").strip()
     return region or "auto"
+
+
+def _normalize_s3_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().strip("<>").strip()
+    return normalized or None
 
 
 @lru_cache
