@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -120,6 +121,17 @@ class BusinessUpdateReviewPageOut(BaseModel):
     attachments: list[dict[str, Any]]
     bound_entities: dict[str, Any]
     quick_actions: list[dict[str, Any]]
+    debug_ref: dict[str, Any]
+
+
+class BusinessUpdateSampleRunsOut(BaseModel):
+    generated_at: str
+    lookback_hours: int
+    limit: int
+    include_all: bool
+    sample_label: str | None
+    total_count: int
+    runs: list[dict[str, Any]]
     debug_ref: dict[str, Any]
 
 
@@ -375,6 +387,225 @@ def list_business_updates(
         params,
     ).mappings().all()
     return [dict(row) for row in rows]
+
+
+@router.get("/summary/sample-runs", response_model=BusinessUpdateSampleRunsOut)
+def summarize_business_update_sample_runs(
+    db: Session = Depends(get_db),
+    lookback_hours: int = Query(default=720, ge=1, le=8760),
+    limit: int = Query(default=50, ge=1, le=200),
+    include_all: bool = False,
+    sample_label: str | None = Query(default=None, max_length=200),
+) -> dict[str, Any]:
+    generated_at = datetime.now(UTC)
+    created_after = generated_at - timedelta(hours=lookback_hours)
+    where = [
+        "bu.team_id = :team_id",
+        "bu.workspace_id = :workspace_id",
+        "bu.created_at >= :created_after",
+    ]
+    params: dict[str, Any] = {
+        "team_id": DEFAULT_TEAM_ID,
+        "workspace_id": DEFAULT_WORKSPACE_ID,
+        "created_after": created_after,
+        "limit": limit,
+    }
+    if not include_all:
+        where.append(
+            """
+            (
+              lower(coalesce(bu.metadata_json ->> 'test_data', '')) in ('true', '1', 'yes')
+              or lower(coalesce(bu.metadata_json ->> 'is_test_data', '')) in ('true', '1', 'yes')
+            )
+            """
+        )
+    if sample_label:
+        where.append("bu.metadata_json ->> 'sample_label' = :sample_label")
+        params["sample_label"] = sample_label
+
+    rows = db.execute(
+        text(
+            f"""
+            select
+              bu.id, bu.raw_text, bu.input_type, bu.processing_status,
+              bu.created_at::text as created_at, bu.metadata_json,
+              (count(*) over ())::int as total_count,
+              coalesce(action_stats.action_count, 0) as action_count,
+              coalesce(action_stats.pending_review_count, 0) as pending_review_count,
+              coalesce(action_stats.auto_applied_count, 0) as auto_applied_count,
+              coalesce(action_stats.applied_action_count, 0) as applied_action_count,
+              coalesce(job_stats.job_count, 0) as job_count,
+              coalesce(job_stats.failed_job_count, 0) as failed_job_count,
+              coalesce(job_stats.ignored_failed_job_count, 0) as ignored_failed_job_count,
+              coalesce(job_stats.running_job_count, 0) as running_job_count,
+              job_stats.latest_failed_job,
+              coalesce(trace_stats.trace_count, 0) as trace_count,
+              coalesce(trace_stats.failed_trace_count, 0) as failed_trace_count,
+              coalesce(attachment_stats.attachment_count, 0) as attachment_count,
+              coalesce(attachment_stats.parsed_attachment_count, 0) as parsed_attachment_count,
+              coalesce(attachment_stats.multimodal_image_count, 0) as multimodal_image_count,
+              coalesce(attachment_stats.parsing_attachment_count, 0) as parsing_attachment_count,
+              coalesce(attachment_stats.failed_attachment_count, 0) as failed_attachment_count,
+              coalesce(attachment_preview.attachments, '[]'::jsonb) as attachment_preview
+            from business_update bu
+            left join lateral (
+              select
+                count(*)::int as action_count,
+                count(*) filter (where a.review_status = 'pending_review')::int as pending_review_count,
+                count(*) filter (
+                  where a.review_status = 'auto_accepted' and a.applied_at is not null
+                )::int as auto_applied_count,
+                count(*) filter (where a.applied_at is not null)::int as applied_action_count
+              from extracted_action a
+              where a.team_id = bu.team_id
+                and a.workspace_id = bu.workspace_id
+                and a.business_update_id = bu.id
+            ) action_stats on true
+            left join lateral (
+              select
+                count(*)::int as job_count,
+                count(*) filter (
+                  where bj.status = 'failed'
+                    and not coalesce((bj.metadata_json ->> 'failure_ignored') = 'true', false)
+                )::int as failed_job_count,
+                count(*) filter (
+                  where bj.status = 'failed'
+                    and coalesce((bj.metadata_json ->> 'failure_ignored') = 'true', false)
+                )::int as ignored_failed_job_count,
+                count(*) filter (where bj.status in ('queued', 'running', 'retry_waiting'))::int as running_job_count,
+                (
+                  select jsonb_build_object(
+                    'id', bj2.id,
+                    'job_type', bj2.job_type,
+                    'status', bj2.status,
+                    'queue_name', bj2.queue_name,
+                    'error_code', bj2.error_code,
+                    'error_message', bj2.error_message,
+                    'created_at', bj2.created_at::text,
+                    'finished_at', bj2.finished_at::text
+                  )
+                  from background_job bj2
+                  where bj2.team_id = bu.team_id
+                    and bj2.workspace_id = bu.workspace_id
+                    and (
+                      (bj2.entity_type = 'business_update' and bj2.entity_id = bu.id)
+                      or bj2.payload_json ->> 'business_update_id' = bu.id::text
+                    )
+                    and bj2.status = 'failed'
+                    and not coalesce((bj2.metadata_json ->> 'failure_ignored') = 'true', false)
+                  order by bj2.created_at desc
+                  limit 1
+                ) as latest_failed_job
+              from background_job bj
+              where bj.team_id = bu.team_id
+                and bj.workspace_id = bu.workspace_id
+                and (
+                  (bj.entity_type = 'business_update' and bj.entity_id = bu.id)
+                  or bj.payload_json ->> 'business_update_id' = bu.id::text
+                )
+            ) job_stats on true
+            left join lateral (
+              select
+                count(*)::int as trace_count,
+                count(*) filter (where trace.status = 'failed' or trace.error_code is not null)::int as failed_trace_count
+              from ai_trace trace
+              where trace.team_id = bu.team_id
+                and trace.workspace_id = bu.workspace_id
+                and (
+                  (trace.entity_type = 'business_update' and trace.entity_id = bu.id)
+                  or trace.job_id in (
+                    select bj3.id
+                    from background_job bj3
+                    where bj3.team_id = bu.team_id
+                      and bj3.workspace_id = bu.workspace_id
+                      and (
+                        (bj3.entity_type = 'business_update' and bj3.entity_id = bu.id)
+                        or bj3.payload_json ->> 'business_update_id' = bu.id::text
+                      )
+                  )
+                )
+            ) trace_stats on true
+            left join lateral (
+              select
+                count(*)::int as attachment_count,
+                count(*) filter (
+                  where a.parse_status = 'parsed'
+                    or a.metadata_json ? 'last_parsed_document_id'
+                )::int as parsed_attachment_count,
+                count(*) filter (
+                  where lower(coalesce(a.file_type, '')) in ('jpg', 'jpeg', 'png', 'webp')
+                    or lower(split_part(coalesce(a.mime_type, ''), ';', 1)) in ('image/jpeg', 'image/png', 'image/webp')
+                )::int as multimodal_image_count,
+                count(*) filter (where a.parse_status = 'parsing')::int as parsing_attachment_count,
+                count(*) filter (where a.parse_status = 'failed')::int as failed_attachment_count
+              from attachment_link al
+              join attachment a on a.id = al.attachment_id
+              where al.team_id = bu.team_id
+                and al.workspace_id = bu.workspace_id
+                and al.entity_type = 'business_update'
+                and al.entity_id = bu.id
+                and a.deleted_at is null
+            ) attachment_stats on true
+            left join lateral (
+              select jsonb_agg(
+                jsonb_build_object(
+                  'id', item.id,
+                  'file_name', item.file_name,
+                  'file_type', item.file_type,
+                  'mime_type', item.mime_type,
+                  'file_size', item.file_size,
+                  'parse_status', item.parse_status,
+                  'linked_at', item.linked_at,
+                  'parsed_document_id', item.parsed_document_id,
+                  'parsed_text_length', item.parsed_text_length,
+                  'multimodal_image_supported', item.multimodal_image_supported
+                )
+                order by item.linked_at asc
+              ) as attachments
+              from (
+                select
+                  a.id, a.file_name, a.file_type, a.mime_type, a.file_size,
+                  a.parse_status, al.created_at::text as linked_at,
+                  a.metadata_json ->> 'last_parsed_document_id' as parsed_document_id,
+                  a.metadata_json ->> 'last_text_length' as parsed_text_length,
+                  (
+                    lower(coalesce(a.file_type, '')) in ('jpg', 'jpeg', 'png', 'webp')
+                    or lower(split_part(coalesce(a.mime_type, ''), ';', 1)) in ('image/jpeg', 'image/png', 'image/webp')
+                  ) as multimodal_image_supported
+                from attachment_link al
+                join attachment a on a.id = al.attachment_id
+                where al.team_id = bu.team_id
+                  and al.workspace_id = bu.workspace_id
+                  and al.entity_type = 'business_update'
+                  and al.entity_id = bu.id
+                  and a.deleted_at is null
+                order by al.created_at asc
+                limit 20
+              ) item
+            ) attachment_preview on true
+            where {' and '.join(where)}
+            order by bu.created_at desc
+            limit :limit
+            """
+        ),
+        params,
+    ).mappings().all()
+    runs = [_compact_sample_run(dict(row)) for row in rows]
+    total_count = int(rows[0]["total_count"]) if rows else 0
+    return {
+        "generated_at": generated_at.isoformat(),
+        "lookback_hours": lookback_hours,
+        "limit": limit,
+        "include_all": include_all,
+        "sample_label": sample_label,
+        "total_count": total_count,
+        "runs": runs,
+        "debug_ref": {
+            "entity_type": "business_update_sample_runs",
+            "entity_id": "summary",
+            "route": "/business-updates/summary/sample-runs",
+        },
+    }
 
 
 @router.get("/{business_update_id}", response_model=BusinessUpdateOut)
@@ -1715,6 +1946,104 @@ def _review_page_overview(
         "mode": "auto_apply_then_review",
         "needs_review": pending_count > 0 or auto_applied_count > 0 or failed_job_count > 0 or failed_trace_count > 0,
     }
+
+
+def _compact_sample_run(row: dict[str, Any]) -> dict[str, Any]:
+    metadata = row.get("metadata_json") if isinstance(row.get("metadata_json"), dict) else {}
+    overview = {
+        "processing_status": row.get("processing_status"),
+        "action_count": int(row.get("action_count") or 0),
+        "pending_review_count": int(row.get("pending_review_count") or 0),
+        "auto_applied_count": int(row.get("auto_applied_count") or 0),
+        "applied_action_count": int(row.get("applied_action_count") or 0),
+        "job_count": int(row.get("job_count") or 0),
+        "failed_job_count": int(row.get("failed_job_count") or 0),
+        "ignored_failed_job_count": int(row.get("ignored_failed_job_count") or 0),
+        "running_job_count": int(row.get("running_job_count") or 0),
+        "trace_count": int(row.get("trace_count") or 0),
+        "failed_trace_count": int(row.get("failed_trace_count") or 0),
+        "attachment_count": int(row.get("attachment_count") or 0),
+        "parsed_attachment_count": int(row.get("parsed_attachment_count") or 0),
+        "multimodal_image_count": int(row.get("multimodal_image_count") or 0),
+        "parsing_attachment_count": int(row.get("parsing_attachment_count") or 0),
+        "failed_attachment_count": int(row.get("failed_attachment_count") or 0),
+    }
+    overview["needs_attention"] = (
+        overview["failed_job_count"] > 0
+        or overview["failed_trace_count"] > 0
+        or overview["failed_attachment_count"] > 0
+        or overview["running_job_count"] > 0
+        or overview["parsing_attachment_count"] > 0
+    )
+    latest_failed_job = _compact_sample_failed_job(row.get("latest_failed_job"))
+    attachments = row.get("attachment_preview") if isinstance(row.get("attachment_preview"), list) else []
+    business_update_id = row["id"]
+    return {
+        "business_update_id": business_update_id,
+        "input_type": row.get("input_type"),
+        "processing_status": row.get("processing_status"),
+        "created_at": row.get("created_at"),
+        "raw_text_preview": _truncate_review_text(row.get("raw_text"), 240),
+        "sample_metadata": {
+            "test_data": _metadata_truthy(metadata.get("test_data")) or _metadata_truthy(metadata.get("is_test_data")),
+            "sample_label": metadata.get("sample_label") or metadata.get("label"),
+            "sample_object": metadata.get("sample_object") or metadata.get("sample_entity") or metadata.get("object"),
+            "sample_group": metadata.get("sample_group"),
+            "source": metadata.get("source"),
+        },
+        "overview": overview,
+        "latest_failed_job": latest_failed_job,
+        "attachments": [_compact_sample_attachment(item) for item in attachments],
+        "review_route": f"/business-updates/{business_update_id}/review-page",
+        "debug_ref": _debug_ref("business_update", business_update_id),
+    }
+
+
+def _compact_sample_failed_job(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or not value.get("id"):
+        return None
+    return {
+        "id": value.get("id"),
+        "job_type": value.get("job_type"),
+        "status": value.get("status"),
+        "queue_name": value.get("queue_name"),
+        "error_code": value.get("error_code"),
+        "error_message": _truncate_review_text(value.get("error_message"), 240),
+        "created_at": value.get("created_at"),
+        "finished_at": value.get("finished_at"),
+        "debug_ref": _debug_ref("background_job", value.get("id")),
+    }
+
+
+def _compact_sample_attachment(value: Any) -> dict[str, Any]:
+    item = value if isinstance(value, dict) else {}
+    parsed_text_length = item.get("parsed_text_length")
+    try:
+        parsed_text_length = int(parsed_text_length) if parsed_text_length is not None else None
+    except (TypeError, ValueError):
+        parsed_text_length = None
+    attachment_id = item.get("id")
+    return {
+        "id": attachment_id,
+        "file_name": item.get("file_name"),
+        "file_type": item.get("file_type"),
+        "mime_type": item.get("mime_type"),
+        "file_size": item.get("file_size"),
+        "parse_status": item.get("parse_status"),
+        "linked_at": item.get("linked_at"),
+        "parsed_document_id": item.get("parsed_document_id"),
+        "parsed_text_length": parsed_text_length,
+        "multimodal_image_supported": item.get("multimodal_image_supported") is True,
+        "debug_ref": _debug_ref("attachment", attachment_id) if attachment_id else None,
+    }
+
+
+def _metadata_truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"true", "1", "yes", "y"}
 
 
 def _job_failure_ignored(job: dict[str, Any]) -> bool:

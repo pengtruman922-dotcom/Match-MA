@@ -6,6 +6,7 @@ from fastapi import HTTPException
 from backend.app.api.routes.business_updates import (
     _compact_review_attachment,
     _compact_review_job,
+    _compact_sample_run,
     _enrich_review_action,
     _entity_ref,
     _parse_metadata_json_form,
@@ -211,6 +212,77 @@ def test_compact_review_job_exposes_ignore_metadata() -> None:
     assert compacted["ignore_reason"] == "historical validation data"
     assert compacted["ignored_at"] == "2026-06-03T11:01:55+00:00"
     assert compacted["debug_ref"]["route"] == f"/debug/entities/background_job/{job_id}"
+
+
+def test_compact_sample_run_exposes_pressure_test_summary() -> None:
+    attachment_id = UUID("00000000-0000-0000-0000-000000000011")
+    failed_job_id = UUID("00000000-0000-0000-0000-000000000012")
+
+    compacted = _compact_sample_run(
+        {
+            "id": BUSINESS_UPDATE_ID,
+            "raw_text": "sample raw text",
+            "input_type": "mixed",
+            "processing_status": "parsed",
+            "created_at": "2026-06-05T10:00:00+00:00",
+            "metadata_json": {
+                "test_data": "true",
+                "sample_label": "pinda_mixed_validation",
+                "sample_object": "pinda_chuxing",
+            },
+            "action_count": 2,
+            "pending_review_count": 2,
+            "auto_applied_count": 0,
+            "applied_action_count": 0,
+            "job_count": 3,
+            "failed_job_count": 1,
+            "ignored_failed_job_count": 0,
+            "running_job_count": 0,
+            "trace_count": 2,
+            "failed_trace_count": 0,
+            "attachment_count": 2,
+            "parsed_attachment_count": 1,
+            "multimodal_image_count": 1,
+            "parsing_attachment_count": 0,
+            "failed_attachment_count": 0,
+            "latest_failed_job": {
+                "id": failed_job_id,
+                "job_type": "business_update_extract_actions",
+                "status": "failed",
+                "queue_name": "llm",
+                "error_code": "schema_validation",
+                "error_message": "Some actions are invalid.",
+                "created_at": "2026-06-05T10:01:00+00:00",
+                "finished_at": "2026-06-05T10:02:00+00:00",
+            },
+            "attachment_preview": [
+                {
+                    "id": attachment_id,
+                    "file_name": "teaser.pdf",
+                    "file_type": "pdf",
+                    "mime_type": "application/pdf",
+                    "file_size": 1200,
+                    "parse_status": "parsed",
+                    "linked_at": "2026-06-05T10:00:30+00:00",
+                    "parsed_document_id": "parsed-doc-1",
+                    "parsed_text_length": "901",
+                    "multimodal_image_supported": False,
+                }
+            ],
+        }
+    )
+
+    assert compacted["business_update_id"] == BUSINESS_UPDATE_ID
+    assert compacted["sample_metadata"]["test_data"] is True
+    assert compacted["sample_metadata"]["sample_label"] == "pinda_mixed_validation"
+    assert compacted["overview"]["action_count"] == 2
+    assert compacted["overview"]["failed_job_count"] == 1
+    assert compacted["overview"]["needs_attention"] is True
+    assert compacted["latest_failed_job"]["debug_ref"]["route"] == f"/debug/entities/background_job/{failed_job_id}"
+    assert compacted["attachments"][0]["parsed_text_length"] == 901
+    assert compacted["attachments"][0]["debug_ref"]["route"] == f"/debug/entities/attachment/{attachment_id}"
+    assert compacted["review_route"] == f"/business-updates/{BUSINESS_UPDATE_ID}/review-page"
+
 
 def test_validate_parse_entity_types_rejects_unsupported_values() -> None:
     _validate_parse_entity_types(["seller_target", "buyer_intent"])
