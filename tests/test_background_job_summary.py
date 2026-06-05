@@ -286,7 +286,8 @@ def test_failure_category_and_summary_map_common_errors() -> None:
     assert _failure_category("job_failed", "violates check constraint seller_target_listed_status_check") == "db_constraint"
     assert _failure_category("job_failed", "name 'x' is not defined") == "code_error"
     assert _failure_category("job_failed", "Some actions are invalid.") == "schema_validation"
-    assert _failure_category("llm_failed", "LLM HTTP 401") == "provider_or_llm"
+    assert _failure_category("llm_failed", "LLM HTTP 401") == "provider_auth"
+    assert _failure_category("job_failed", 'Doc2X HTTP 401: {"code":"unauthorized","msg":"认证失败"}') == "provider_auth"
     assert _failure_summary_text("db_constraint", "raw") == (
         "Database constraint failed while applying extracted data. Check enum/normalized field values."
     )

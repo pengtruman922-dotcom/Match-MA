@@ -146,6 +146,10 @@ class Settings(BaseSettings):
             )
         )
 
+    @property
+    def effective_doc2x_api_key(self) -> str | None:
+        return _normalize_secret_text(self.doc2x_api_key or _first_env("DOC2X_SECRET", "DOC2X_TOKEN"))
+
 
 def _first_env(*names: str) -> str | None:
     for name in names:
@@ -164,6 +168,20 @@ def _normalize_s3_text(value: str | None) -> str | None:
     if value is None:
         return None
     normalized = value.strip().strip("<>").strip()
+    return normalized or None
+
+
+def _normalize_secret_text(value: str | None) -> str | None:
+    normalized = _normalize_s3_text(value)
+    if not normalized:
+        return None
+    if normalized.lower().startswith("bearer "):
+        normalized = normalized[7:].strip()
+    if (
+        (normalized.startswith('"') and normalized.endswith('"'))
+        or (normalized.startswith("'") and normalized.endswith("'"))
+    ):
+        normalized = normalized[1:-1].strip()
     return normalized or None
 
 

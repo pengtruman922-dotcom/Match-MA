@@ -1174,6 +1174,14 @@ def _failure_category(error_code: Any, error_message: Any) -> str:
         return "code_error"
     if "schema" in message or "invalid" in message or code in {"schema_validation_failed", "invalid_output"}:
         return "schema_validation"
+    if (
+        "unauthorized" in message
+        or "authentication" in message
+        or "认证失败" in message
+        or "http 401" in message
+        or code in {"auth_failed", "unauthorized"}
+    ):
+        return "provider_auth"
     if "llm" in message or "provider" in message or "http " in message or code in {"llm_failed", "provider_failed"}:
         return "provider_or_llm"
     if code:
@@ -1189,6 +1197,8 @@ def _failure_summary_text(category: str, error_message: Any) -> str:
         return "Backend code error occurred while running the job. Check deploy version and stack trace."
     if category == "schema_validation":
         return "AI output or extracted action payload failed validation. Check trace output and prompt/schema."
+    if category == "provider_auth":
+        return "Provider authentication failed. Check API key formatting, secret binding, and provider account status."
     if category == "provider_or_llm":
         return "Model provider call failed or returned an unusable response. Check model config and trace."
     return message or "Job failed without a detailed error message."

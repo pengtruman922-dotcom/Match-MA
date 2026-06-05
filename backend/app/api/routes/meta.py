@@ -245,6 +245,14 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
             "s3_access_key_configured": bool(settings.effective_attachment_s3_access_key_id),
             "s3_secret_key_configured": bool(settings.effective_attachment_s3_secret_access_key),
         },
+        "ocr": {
+            "provider": settings.ocr_provider,
+            "doc2x_configured": bool(settings.effective_doc2x_api_key),
+            "doc2x_base_url_configured": bool(settings.doc2x_base_url),
+            "doc2x_model": settings.doc2x_model,
+            "pdf_text_detection_page_limit": settings.pdf_text_detection_page_limit,
+            "pdf_text_detection_min_chars": settings.pdf_text_detection_min_chars,
+        },
     }
 
 

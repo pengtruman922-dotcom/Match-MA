@@ -669,7 +669,8 @@ def _handle_attachment_ocr_poll(db: Session, job: JobClaim) -> dict[str, object]
     uid = str(job.payload_json.get("doc2x_uid") or "").strip()
     if not uid:
         raise ValueError("attachment_ocr_poll job requires doc2x_uid.")
-    if not settings.doc2x_api_key:
+    doc2x_api_key = settings.effective_doc2x_api_key
+    if not doc2x_api_key:
         raise ValueError("DOC2X_API_KEY is required for Doc2X OCR polling.")
 
     started_at = float(job.payload_json.get("doc2x_started_epoch") or time.time())
@@ -692,7 +693,7 @@ def _handle_attachment_ocr_poll(db: Session, job: JobClaim) -> dict[str, object]
     try:
         status_result = poll_doc2x_status(
             base_url=settings.doc2x_base_url,
-            api_key=settings.doc2x_api_key,
+            api_key=doc2x_api_key,
             uid=uid,
             timeout_seconds=30,
         )
@@ -2124,12 +2125,13 @@ def _handle_pdf_attachment_ocr(
 
     if settings.ocr_provider.strip().lower() != "doc2x":
         return None
-    if not settings.doc2x_api_key:
+    doc2x_api_key = settings.effective_doc2x_api_key
+    if not doc2x_api_key:
         raise ValueError("DOC2X_API_KEY is required when OCR_PROVIDER=doc2x.")
 
     submit_result = submit_doc2x_pdf(
         base_url=settings.doc2x_base_url,
-        api_key=settings.doc2x_api_key,
+        api_key=doc2x_api_key,
         file_bytes=file_bytes,
         model=settings.doc2x_model,
         timeout_seconds=60,
