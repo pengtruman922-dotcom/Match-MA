@@ -5,13 +5,19 @@ from backend.app.api.routes.background_jobs import (
     BackgroundJobIgnoreRequest,
     _compact_queue_job,
     _compact_failure_job,
+    _archive_metadata,
     _failure_category,
     _failure_job_type_item,
     _ignore_metadata,
+    _job_archived,
     _job_failure_ignored,
+    _job_test_data,
     _retry_metadata,
+    _test_data_metadata,
     _retry_preview_warnings,
+    _unarchive_metadata,
     _unignore_metadata,
+    _untest_data_metadata,
     _failure_summary_text,
     _failure_summary_totals,
     _queue_health_status,
@@ -168,6 +174,8 @@ def test_compact_failure_job_truncates_error_and_links_related_entity() -> None:
         "preview_retry",
         "retry_job",
         "ignore_job",
+        "archive_job",
+        "mark_test_data",
     ]
 
 
@@ -202,7 +210,7 @@ def test_compact_failure_job_exposes_ignore_metadata() -> None:
     assert compact["ignore_reason"] == "test garbage"
     assert compact["ignore_route"] is None
     assert compact["unignore_route"] == f"/background-jobs/{job_id}/unignore"
-    assert compact["recommended_actions"][-1]["key"] == "unignore_job"
+    assert "unignore_job" in [item["key"] for item in compact["recommended_actions"]]
 
 
 
@@ -237,6 +245,25 @@ def test_retry_ignore_metadata_helpers_preserve_audit_snapshot() -> None:
     assert unignored_metadata["source"] == "test"
     assert "failure_ignored" not in unignored_metadata
     assert unignored_metadata["failure_unignored_by"]
+
+    archived_metadata = _archive_metadata({"source": "test"}, reason="old failure")
+    assert archived_metadata["source"] == "test"
+    assert archived_metadata["archived"] is True
+    assert archived_metadata["archive_reason"] == "old failure"
+    assert _job_archived({"metadata_json": archived_metadata}) is True
+
+    unarchived_metadata = _unarchive_metadata(archived_metadata)
+    assert "archived" not in unarchived_metadata
+    assert unarchived_metadata["unarchived_by"]
+
+    test_data_metadata = _test_data_metadata({"source": "test"}, label="demo", reason="sample")
+    assert test_data_metadata["is_test_data"] is True
+    assert test_data_metadata["test_data_label"] == "demo"
+    assert _job_test_data({"metadata_json": test_data_metadata}) is True
+
+    untest_data_metadata = _untest_data_metadata(test_data_metadata)
+    assert "is_test_data" not in untest_data_metadata
+    assert untest_data_metadata["test_data_unmarked_by"]
 
 def test_retry_preview_warnings_flag_missing_trace_and_existing_logs() -> None:
     warnings = _retry_preview_warnings(

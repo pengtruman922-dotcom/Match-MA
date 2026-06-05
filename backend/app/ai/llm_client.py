@@ -27,7 +27,7 @@ def call_openai_compatible_chat(
     base_url: str,
     api_key_secret_ref: str | None,
     model_name: str,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     temperature: float | None,
     top_p: float | None,
     max_tokens: int | None,
