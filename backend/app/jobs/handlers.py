@@ -5128,8 +5128,7 @@ def _patch_attachment_metadata(db: Session, attachment_id: UUID, metadata_patch:
         text(
             """
             update attachment
-            set metadata_json = metadata_json || :metadata_patch,
-                updated_at = now()
+            set metadata_json = metadata_json || :metadata_patch
             where id = :attachment_id
               and team_id = :team_id
               and workspace_id = :workspace_id
