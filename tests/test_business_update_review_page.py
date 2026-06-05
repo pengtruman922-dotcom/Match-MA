@@ -244,6 +244,7 @@ def test_compact_sample_run_exposes_pressure_test_summary() -> None:
             "parsed_attachment_count": 1,
             "multimodal_image_count": 1,
             "parsing_attachment_count": 0,
+            "skipped_attachment_count": 0,
             "failed_attachment_count": 0,
             "latest_failed_job": {
                 "id": failed_job_id,
@@ -282,6 +283,50 @@ def test_compact_sample_run_exposes_pressure_test_summary() -> None:
     assert compacted["attachments"][0]["parsed_text_length"] == 901
     assert compacted["attachments"][0]["debug_ref"]["route"] == f"/debug/entities/attachment/{attachment_id}"
     assert compacted["review_route"] == f"/business-updates/{BUSINESS_UPDATE_ID}/review-page"
+
+
+def test_compact_sample_run_marks_skipped_attachment_as_attention() -> None:
+    compacted = _compact_sample_run(
+        {
+            "id": BUSINESS_UPDATE_ID,
+            "raw_text": "sample raw text",
+            "input_type": "attachment",
+            "processing_status": "failed",
+            "created_at": "2026-06-05T10:00:00+00:00",
+            "metadata_json": {"test_data": True, "sample_label": "docx"},
+            "action_count": 0,
+            "pending_review_count": 0,
+            "auto_applied_count": 0,
+            "applied_action_count": 0,
+            "job_count": 1,
+            "failed_job_count": 0,
+            "ignored_failed_job_count": 0,
+            "running_job_count": 0,
+            "trace_count": 1,
+            "failed_trace_count": 0,
+            "attachment_count": 1,
+            "parsed_attachment_count": 0,
+            "multimodal_image_count": 0,
+            "parsing_attachment_count": 0,
+            "skipped_attachment_count": 1,
+            "failed_attachment_count": 0,
+            "latest_failed_job": None,
+            "attachment_preview": [
+                {
+                    "id": UUID("00000000-0000-0000-0000-000000000013"),
+                    "file_name": "need-parser.docx",
+                    "parse_status": "skipped",
+                    "parsed_document_id": None,
+                    "parsed_text_length": 0,
+                    "multimodal_image_supported": False,
+                }
+            ],
+        }
+    )
+
+    assert compacted["overview"]["parsed_attachment_count"] == 0
+    assert compacted["overview"]["skipped_attachment_count"] == 1
+    assert compacted["overview"]["needs_attention"] is True
 
 
 def test_validate_parse_entity_types_rejects_unsupported_values() -> None:

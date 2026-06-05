@@ -12,6 +12,7 @@ from backend.app.api.routes.field_sources import _field_value_source_out
 from backend.app.jobs.handlers import (
     _approx_token_count,
     _attachment_mock_extracted_text,
+    _build_business_update_image_context,
     _business_update_action_evidence_id,
     _business_update_raw_text_with_attachments,
     _parse_requested_entity_types,
@@ -23,6 +24,26 @@ from backend.app.services.attachment_storage import decode_text_bytes, is_text_u
 ATTACHMENT_ID = UUID("00000000-0000-0000-0000-000000000001")
 JOB_ID = UUID("00000000-0000-0000-0000-000000000002")
 SELLER_TARGET_ID = UUID("00000000-0000-0000-0000-000000000003")
+BUSINESS_UPDATE_ID = UUID("00000000-0000-0000-0000-000000000004")
+
+
+class _SqlCaptureResult:
+    def mappings(self):
+        return self
+
+    def all(self) -> list[dict]:
+        return []
+
+
+class _SqlCaptureDb:
+    def __init__(self) -> None:
+        self.sql_text = ""
+        self.params = {}
+
+    def execute(self, statement, params=None):
+        self.sql_text = str(statement)
+        self.params = params or {}
+        return _SqlCaptureResult()
 
 
 def test_attachment_mock_text_prefers_job_payload() -> None:
@@ -144,6 +165,30 @@ def test_attachment_parse_readiness_blocks_binary_without_text() -> None:
     assert readiness["expected_parse_status"] == "skipped"
     assert readiness["is_binary_or_document"] is True
     assert "PDF OCR requires object storage" in readiness["blocking_reasons"][1]
+
+
+def test_attachment_parse_readiness_does_not_treat_zero_text_document_as_parsed() -> None:
+    readiness = _attachment_parse_readiness(
+        {
+            "id": ATTACHMENT_ID,
+            "file_name": "need-parser.docx",
+            "file_type": "docx",
+            "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "storage_path": "s3://bucket/need-parser.docx",
+            "parse_status": "skipped",
+            "metadata_json": {
+                "storage_backend": "s3",
+                "last_parsed_document_id": "pd-empty",
+                "last_text_length": 0,
+            },
+            "links": [],
+        }
+    )
+
+    assert readiness["readiness_status"] == "blocked"
+    assert readiness["text_available"] is False
+    assert readiness["parsed_document_id"] == "pd-empty"
+    assert readiness["parsed_text_length"] == 0
 
 
 def test_attachment_parse_readiness_marks_parsed_binary_as_parsed() -> None:
@@ -310,6 +355,16 @@ def test_parse_source_context_carries_attachment_evidence() -> None:
 def test_parse_requested_entity_types_defaults_to_supported_objects() -> None:
     assert _parse_requested_entity_types([]) == {"seller_target", "buyer_intent"}
     assert _parse_requested_entity_types(["seller_target", "unsupported"]) == {"seller_target"}
+
+
+def test_business_update_image_context_omits_null_trigger_uuid_predicate() -> None:
+    db = _SqlCaptureDb()
+
+    context = _build_business_update_image_context(db, BUSINESS_UPDATE_ID)
+
+    assert context["images"] == []
+    assert ":trigger_attachment_id is null" not in db.sql_text
+    assert "and a.id = :trigger_attachment_id" not in db.sql_text
 
 
 def test_business_update_raw_text_appends_attachment_evidence() -> None:
