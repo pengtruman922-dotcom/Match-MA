@@ -120,7 +120,7 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
         """
         select count(*)
         from model_node_config
-        where model_name = 'qwen3.6-flash'
+        where model_name = 'qwen3.6-plus'
           and node_type = 'llm'
           and is_default = true
           and is_active = true
