@@ -2222,11 +2222,11 @@ def _attachment_file_bytes(attachment: dict[str, Any], *, max_bytes: int | None 
         attachment,
         storage_dir=settings.attachment_storage_dir,
         max_bytes=max_bytes or settings.attachment_max_upload_bytes,
-        s3_endpoint_url=settings.attachment_s3_endpoint_url,
-        s3_region=settings.attachment_s3_region,
-        s3_bucket=settings.attachment_s3_bucket,
-        s3_access_key_id=settings.attachment_s3_access_key_id,
-        s3_secret_access_key=settings.attachment_s3_secret_access_key,
+        s3_endpoint_url=settings.effective_attachment_s3_endpoint_url,
+        s3_region=settings.effective_attachment_s3_region,
+        s3_bucket=settings.effective_attachment_s3_bucket,
+        s3_access_key_id=settings.effective_attachment_s3_access_key_id,
+        s3_secret_access_key=settings.effective_attachment_s3_secret_access_key,
         s3_force_path_style=settings.attachment_s3_force_path_style,
     )
     if data is None:
@@ -5219,16 +5219,16 @@ def _save_ocr_text_artifact(
     document_part = str(parsed_document_id) if parsed_document_id else "pending"
     return save_generated_text(
         content,
-        storage_backend=settings.attachment_storage_backend,
+        storage_backend=settings.effective_attachment_storage_backend,
         storage_dir=settings.attachment_storage_dir,
         key_prefix=f"parsed-documents/{attachment_id}/{document_part}",
         file_name=suffix,
         content_type=content_type,
-        s3_endpoint_url=settings.attachment_s3_endpoint_url,
-        s3_region=settings.attachment_s3_region,
-        s3_bucket=settings.attachment_s3_bucket,
-        s3_access_key_id=settings.attachment_s3_access_key_id,
-        s3_secret_access_key=settings.attachment_s3_secret_access_key,
+        s3_endpoint_url=settings.effective_attachment_s3_endpoint_url,
+        s3_region=settings.effective_attachment_s3_region,
+        s3_bucket=settings.effective_attachment_s3_bucket,
+        s3_access_key_id=settings.effective_attachment_s3_access_key_id,
+        s3_secret_access_key=settings.effective_attachment_s3_secret_access_key,
         s3_force_path_style=settings.attachment_s3_force_path_style,
     )
 

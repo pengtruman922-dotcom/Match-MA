@@ -220,14 +220,14 @@ def upload_attachment(
             original_file_name=original_file_name,
             content_type=file.content_type,
             storage_dir=settings.attachment_storage_dir,
-            storage_backend=settings.attachment_storage_backend,
+            storage_backend=settings.effective_attachment_storage_backend,
             max_bytes=settings.attachment_max_upload_bytes,
             text_capture_max_bytes=settings.attachment_text_capture_max_bytes,
-            s3_endpoint_url=settings.attachment_s3_endpoint_url,
-            s3_region=settings.attachment_s3_region,
-            s3_bucket=settings.attachment_s3_bucket,
-            s3_access_key_id=settings.attachment_s3_access_key_id,
-            s3_secret_access_key=settings.attachment_s3_secret_access_key,
+            s3_endpoint_url=settings.effective_attachment_s3_endpoint_url,
+            s3_region=settings.effective_attachment_s3_region,
+            s3_bucket=settings.effective_attachment_s3_bucket,
+            s3_access_key_id=settings.effective_attachment_s3_access_key_id,
+            s3_secret_access_key=settings.effective_attachment_s3_secret_access_key,
             s3_force_path_style=settings.attachment_s3_force_path_style,
         )
     except AttachmentTooLargeError as exc:
@@ -237,7 +237,7 @@ def upload_attachment(
         ) from exc
     except AttachmentStorageError as exc:
         raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(exc),
         ) from exc
 

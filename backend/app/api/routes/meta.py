@@ -65,6 +65,7 @@ def seed_status(db: Session = Depends(get_db)) -> dict[str, Any]:
 
 @router.get("/ai-infra-status")
 def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
+    settings = get_settings()
     required_tables = [
         "model_provider_config",
         "model_node_config",
@@ -235,6 +236,14 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
             "default_ocr_nodes": default_ocr_nodes,
             "default_embedding_nodes": default_embedding_nodes,
             "default_prompts": default_prompts,
+        },
+        "storage": {
+            "attachment_storage_backend": settings.effective_attachment_storage_backend,
+            "s3_configured": settings.attachment_s3_configured,
+            "s3_endpoint_configured": bool(settings.effective_attachment_s3_endpoint_url),
+            "s3_bucket_configured": bool(settings.effective_attachment_s3_bucket),
+            "s3_access_key_configured": bool(settings.effective_attachment_s3_access_key_id),
+            "s3_secret_key_configured": bool(settings.effective_attachment_s3_secret_access_key),
         },
     }
 
