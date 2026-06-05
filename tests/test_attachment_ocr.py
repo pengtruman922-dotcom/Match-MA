@@ -146,6 +146,36 @@ def test_attachment_parse_readiness_blocks_binary_without_text() -> None:
     assert "PDF OCR requires object storage" in readiness["blocking_reasons"][1]
 
 
+def test_attachment_parse_readiness_marks_parsed_binary_as_parsed() -> None:
+    readiness = _attachment_parse_readiness(
+        {
+            "id": ATTACHMENT_ID,
+            "file_name": "teaser.pdf",
+            "file_type": "pdf",
+            "mime_type": "application/pdf",
+            "storage_path": "s3://bucket/teaser.pdf",
+            "parse_status": "parsed",
+            "metadata_json": {
+                "storage_backend": "s3",
+                "last_parsed_document_id": "pd-1",
+                "last_evidence_id": "ev-1",
+                "last_text_length": 21802,
+            },
+            "links": [],
+        }
+    )
+
+    assert readiness["readiness_status"] == "parsed"
+    assert readiness["can_parse_now"] is False
+    assert readiness["expected_parse_status"] == "parsed"
+    assert readiness["available_text_source"] == "parsed_document"
+    assert readiness["text_available"] is True
+    assert readiness["blocking_reasons"] == []
+    assert readiness["parsed_document_id"] == "pd-1"
+    assert readiness["evidence_id"] == "ev-1"
+    assert readiness["parsed_text_length"] == 21802
+
+
 def test_attachment_parse_readiness_needs_text_for_non_binary_without_text() -> None:
     readiness = _attachment_parse_readiness(
         {

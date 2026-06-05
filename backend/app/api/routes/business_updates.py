@@ -1002,7 +1002,7 @@ def _review_page_attachments(db: Session, business_update_id: UUID) -> list[dict
               from background_job
               where team_id = al.team_id
                 and workspace_id = al.workspace_id
-                and job_type = 'attachment_ocr_parse'
+                and job_type in ('attachment_ocr_parse', 'attachment_ocr_poll')
                 and entity_type = 'attachment'
                 and entity_id = al.attachment_id
               order by created_at desc
@@ -1630,8 +1630,20 @@ def _review_attachment_parse_readiness(row: dict[str, Any]) -> dict[str, Any]:
     )
     blocking_reasons: list[str] = []
     recommended_actions: list[str] = []
+    already_parsed = (
+        row.get("parse_status") == "parsed"
+        or row.get("latest_parsed_document_status") == "parsed"
+        or bool(metadata_json.get("last_parsed_document_id"))
+    )
 
-    if text_available:
+    if already_parsed:
+        readiness_status = "parsed"
+        expected_parse_status = "parsed"
+        text_source = "parsed_document"
+        recommended_actions.append("View the parsed document/evidence or continue business update processing.")
+        if text_value:
+            recommended_actions.append("Retry OCR only if the parsed text looks incomplete or stale.")
+    elif text_available:
         readiness_status = "ready"
         expected_parse_status = "parsed"
         recommended_actions.append("Start OCR parsing; v0.1 will use the available text as OCR output.")
@@ -1663,11 +1675,15 @@ def _review_attachment_parse_readiness(row: dict[str, Any]) -> dict[str, Any]:
         "can_parse_now": text_available,
         "expected_parse_status": expected_parse_status,
         "available_text_source": text_source,
-        "text_available": text_available,
+        "text_available": text_available or already_parsed,
         "text_preview": _truncate_review_text(text_value, 240) if text_value else None,
         "storage_backend": metadata_json.get("storage_backend"),
         "storage_uri": metadata_json.get("storage_uri") or row.get("storage_path"),
         "content_sha256": metadata_json.get("content_sha256"),
+        "parsed_document_id": str(row.get("latest_parsed_document_id") or metadata_json.get("last_parsed_document_id") or "")
+        or None,
+        "evidence_id": str(row.get("latest_evidence_id") or metadata_json.get("last_evidence_id") or "") or None,
+        "parsed_text_length": metadata_json.get("last_text_length"),
         "is_binary_or_document": binary_or_document,
         "multimodal_image_supported": image_supported,
         "multimodal_image_constraints": image_constraints,
