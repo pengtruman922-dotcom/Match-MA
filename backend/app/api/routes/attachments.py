@@ -537,7 +537,12 @@ def _attachment_parse_readiness(attachment: dict[str, Any]) -> dict[str, Any]:
     )
     blocking_reasons: list[str] = []
     recommended_actions: list[str] = []
-    already_parsed = attachment.get("parse_status") == "parsed" or bool(metadata_json.get("last_parsed_document_id"))
+    parsed_text_length = _optional_int(metadata_json.get("last_text_length"))
+    already_parsed = (
+        attachment.get("parse_status") == "parsed"
+        or parsed_text_length > 0
+        or bool(metadata_json.get("last_evidence_id"))
+    )
 
     if already_parsed:
         readiness_status = "parsed"
@@ -586,7 +591,7 @@ def _attachment_parse_readiness(attachment: dict[str, Any]) -> dict[str, Any]:
         "content_sha256": metadata_json.get("content_sha256"),
         "parsed_document_id": metadata_json.get("last_parsed_document_id"),
         "evidence_id": metadata_json.get("last_evidence_id"),
-        "parsed_text_length": metadata_json.get("last_text_length"),
+        "parsed_text_length": parsed_text_length,
         "is_binary_or_document": binary_or_document,
         "multimodal_image_supported": image_supported,
         "multimodal_image_constraints": image_constraints,
@@ -1157,6 +1162,15 @@ def _truncate_text(value: Any, max_length: int) -> str | None:
     if len(text_value) <= max_length:
         return text_value
     return text_value[: max_length - 3] + "..."
+
+
+def _optional_int(value: Any) -> int:
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _json_safe_value(value: Any) -> Any:

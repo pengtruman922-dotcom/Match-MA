@@ -445,6 +445,7 @@ def summarize_business_update_sample_runs(
               coalesce(attachment_stats.parsed_attachment_count, 0) as parsed_attachment_count,
               coalesce(attachment_stats.multimodal_image_count, 0) as multimodal_image_count,
               coalesce(attachment_stats.parsing_attachment_count, 0) as parsing_attachment_count,
+              coalesce(attachment_stats.skipped_attachment_count, 0) as skipped_attachment_count,
               coalesce(attachment_stats.failed_attachment_count, 0) as failed_attachment_count,
               coalesce(attachment_preview.attachments, '[]'::jsonb) as attachment_preview
             from business_update bu
@@ -528,15 +529,13 @@ def summarize_business_update_sample_runs(
             left join lateral (
               select
                 count(*)::int as attachment_count,
-                count(*) filter (
-                  where a.parse_status = 'parsed'
-                    or a.metadata_json ? 'last_parsed_document_id'
-                )::int as parsed_attachment_count,
+                count(*) filter (where a.parse_status = 'parsed')::int as parsed_attachment_count,
                 count(*) filter (
                   where lower(coalesce(a.file_type, '')) in ('jpg', 'jpeg', 'png', 'webp')
                     or lower(split_part(coalesce(a.mime_type, ''), ';', 1)) in ('image/jpeg', 'image/png', 'image/webp')
                 )::int as multimodal_image_count,
                 count(*) filter (where a.parse_status = 'parsing')::int as parsing_attachment_count,
+                count(*) filter (where a.parse_status = 'skipped')::int as skipped_attachment_count,
                 count(*) filter (where a.parse_status = 'failed')::int as failed_attachment_count
               from attachment_link al
               join attachment a on a.id = al.attachment_id
@@ -1966,12 +1965,14 @@ def _compact_sample_run(row: dict[str, Any]) -> dict[str, Any]:
         "parsed_attachment_count": int(row.get("parsed_attachment_count") or 0),
         "multimodal_image_count": int(row.get("multimodal_image_count") or 0),
         "parsing_attachment_count": int(row.get("parsing_attachment_count") or 0),
+        "skipped_attachment_count": int(row.get("skipped_attachment_count") or 0),
         "failed_attachment_count": int(row.get("failed_attachment_count") or 0),
     }
     overview["needs_attention"] = (
         overview["failed_job_count"] > 0
         or overview["failed_trace_count"] > 0
         or overview["failed_attachment_count"] > 0
+        or overview["skipped_attachment_count"] > 0
         or overview["running_job_count"] > 0
         or overview["parsing_attachment_count"] > 0
     )
@@ -2268,10 +2269,12 @@ def _review_attachment_parse_readiness(row: dict[str, Any]) -> dict[str, Any]:
     )
     blocking_reasons: list[str] = []
     recommended_actions: list[str] = []
+    parsed_text_length = _optional_int(metadata_json.get("last_text_length"))
     already_parsed = (
         row.get("parse_status") == "parsed"
         or row.get("latest_parsed_document_status") == "parsed"
-        or bool(metadata_json.get("last_parsed_document_id"))
+        or parsed_text_length > 0
+        or bool(metadata_json.get("last_evidence_id"))
     )
 
     if already_parsed:
@@ -2321,7 +2324,7 @@ def _review_attachment_parse_readiness(row: dict[str, Any]) -> dict[str, Any]:
         "parsed_document_id": str(row.get("latest_parsed_document_id") or metadata_json.get("last_parsed_document_id") or "")
         or None,
         "evidence_id": str(row.get("latest_evidence_id") or metadata_json.get("last_evidence_id") or "") or None,
-        "parsed_text_length": metadata_json.get("last_text_length"),
+        "parsed_text_length": parsed_text_length,
         "is_binary_or_document": binary_or_document,
         "multimodal_image_supported": image_supported,
         "multimodal_image_constraints": image_constraints,
@@ -2456,6 +2459,15 @@ def _optional_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _optional_int(value: Any) -> int:
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _clean_optional_text(value: str | None) -> str | None:

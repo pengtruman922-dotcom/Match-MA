@@ -575,15 +575,25 @@ def _handle_attachment_ocr_parse(db: Session, job: JobClaim) -> dict[str, object
     ocr_result = call_attachment_ocr(node_config=node_config, ocr_input=ocr_input)
     extracted_text = ocr_result.extracted_text
 
-    parsed_document_id = _insert_parsed_document_for_ocr(
-        db,
-        attachment_id=attachment_id,
-        parse_status=ocr_result.terminal_parse_status,
-        extracted_text=extracted_text,
-        error_message=ocr_result.error_message,
-    )
-    evidence_id = None
+    parsed_document_id = None
     if extracted_text:
+        parsed_document_id = _insert_parsed_document_for_ocr(
+            db,
+            attachment_id=attachment_id,
+            parse_status=ocr_result.terminal_parse_status,
+            extracted_text=extracted_text,
+            error_message=ocr_result.error_message,
+        )
+    elif ocr_result.terminal_parse_status == "parsed":
+        parsed_document_id = _insert_parsed_document_for_ocr(
+            db,
+            attachment_id=attachment_id,
+            parse_status="parsed",
+            extracted_text="",
+            error_message=ocr_result.error_message,
+        )
+    evidence_id = None
+    if extracted_text and parsed_document_id:
         evidence_id = _insert_ocr_evidence_span(
             db,
             attachment_id=attachment_id,
@@ -592,15 +602,33 @@ def _handle_attachment_ocr_parse(db: Session, job: JobClaim) -> dict[str, object
             text_excerpt=extracted_text,
         )
 
-    _update_attachment_parse_terminal(
-        db,
-        attachment_id=attachment_id,
-        parse_status=ocr_result.terminal_parse_status,
-        job_id=job.id,
-        parsed_document_id=parsed_document_id,
-        evidence_id=evidence_id,
-        text_length=len(extracted_text) if extracted_text else 0,
-    )
+    if parsed_document_id:
+        _update_attachment_parse_terminal(
+            db,
+            attachment_id=attachment_id,
+            parse_status=ocr_result.terminal_parse_status,
+            job_id=job.id,
+            parsed_document_id=parsed_document_id,
+            evidence_id=evidence_id,
+            text_length=len(extracted_text) if extracted_text else 0,
+        )
+    else:
+        _update_attachment_parse_terminal_without_document(
+            db,
+            attachment_id=attachment_id,
+            parse_status=ocr_result.terminal_parse_status,
+            job_id=job.id,
+            metadata_patch={
+                "last_text_length": 0,
+                "last_ocr_error": ocr_result.error_message,
+            },
+        )
+        _mark_business_updates_blocked_by_attachment_ocr(
+            db,
+            attachment_id=attachment_id,
+            job_id=job.id,
+            error_message=ocr_result.error_message,
+        )
     touched_seller_target_count = _touch_seller_targets_linked_to_attachment(db, attachment_id)
     child_parse_jobs = _enqueue_linked_parse_jobs_after_ocr(
         db,
@@ -627,7 +655,7 @@ def _handle_attachment_ocr_parse(db: Session, job: JobClaim) -> dict[str, object
         raw_output_text=ocr_result.raw_output_text,
         parsed_output_json={
             **ocr_result.parsed_output_json,
-            "parsed_document_id": str(parsed_document_id),
+            "parsed_document_id": str(parsed_document_id) if parsed_document_id else None,
             "evidence_id": str(evidence_id) if evidence_id else None,
             "terminal_parse_status": ocr_result.terminal_parse_status,
             "child_parse_jobs": child_parse_jobs,
@@ -643,7 +671,7 @@ def _handle_attachment_ocr_parse(db: Session, job: JobClaim) -> dict[str, object
         "attachment_id": str(attachment_id),
         "parse_status": ocr_result.terminal_parse_status,
         "trace_status": ocr_result.trace_status,
-        "parsed_document_id": str(parsed_document_id),
+        "parsed_document_id": str(parsed_document_id) if parsed_document_id else None,
         "evidence_id": str(evidence_id) if evidence_id else None,
         "text_length": len(extracted_text) if extracted_text else 0,
         "touched_seller_target_count": touched_seller_target_count,
@@ -3032,9 +3060,10 @@ def _build_business_update_image_context(
         max_side=settings.image_multimodal_max_side,
         target_bytes=settings.image_multimodal_target_bytes,
     )
+    trigger_filter_sql = "and a.id = :trigger_attachment_id" if trigger_attachment_id else ""
     rows = db.execute(
         text(
-            """
+            f"""
             select
               a.id, a.file_name, a.file_type, a.mime_type, a.file_size,
               a.storage_path, a.metadata_json, al.link_type
@@ -3044,7 +3073,7 @@ def _build_business_update_image_context(
               and al.workspace_id = :workspace_id
               and al.entity_type = 'business_update'
               and al.entity_id = :business_update_id
-              and (:trigger_attachment_id is null or a.id = :trigger_attachment_id)
+              {trigger_filter_sql}
               and a.deleted_at is null
             order by al.created_at asc
             limit 50
@@ -4475,6 +4504,86 @@ def _mark_business_update_failed(
     )
 
 
+def _mark_business_updates_blocked_by_attachment_ocr(
+    db: Session,
+    *,
+    attachment_id: UUID,
+    job_id: UUID,
+    error_message: str | None,
+) -> None:
+    rows = db.execute(
+        text(
+            """
+            select entity_id as business_update_id
+            from attachment_link
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and attachment_id = :attachment_id
+              and entity_type = 'business_update'
+            """
+        ),
+        {
+            "attachment_id": attachment_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    for row in rows:
+        business_update_id = row["business_update_id"]
+        active = db.execute(
+            text(
+                """
+                select 1
+                from background_job bj
+                where bj.team_id = :team_id
+                  and bj.workspace_id = :workspace_id
+                  and bj.id <> :job_id
+                  and bj.status in ('queued', 'running', 'retry_waiting')
+                  and (
+                    (bj.entity_type = 'business_update' and bj.entity_id = :business_update_id)
+                    or bj.payload_json ->> 'business_update_id' = :business_update_id_text
+                  )
+                limit 1
+                """
+            ),
+            {
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+                "job_id": job_id,
+                "business_update_id": business_update_id,
+                "business_update_id_text": str(business_update_id),
+            },
+        ).first()
+        if active:
+            continue
+        db.execute(
+            text(
+                """
+                update business_update
+                set processing_status = 'failed',
+                    metadata_json = metadata_json || :metadata_patch
+                where id = :business_update_id
+                  and team_id = :team_id
+                  and workspace_id = :workspace_id
+                  and processing_status = 'processing'
+                """
+            ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+            {
+                "business_update_id": business_update_id,
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+                "metadata_patch": {
+                    "last_processed_job_id": str(job_id),
+                    "last_processing_result": "attachment_ocr_blocked",
+                    "last_error_message": error_message
+                    or "Attachment OCR did not produce text, so business update processing could not continue.",
+                    "last_ocr_blocked_attachment_id": str(attachment_id),
+                    "last_ocr_blocked_job_id": str(job_id),
+                },
+            },
+        )
+
+
 def _insert_llm_trace(
     db: Session,
     *,
@@ -5273,7 +5382,7 @@ def _enqueue_linked_parse_jobs_after_ocr(
     *,
     job: JobClaim,
     attachment_id: UUID,
-    parsed_document_id: UUID,
+    parsed_document_id: UUID | None,
     evidence_id: UUID | None,
     extracted_text: str,
 ) -> list[dict[str, Any]]:
