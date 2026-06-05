@@ -108,7 +108,10 @@ def save_upload_file(
         raise AttachmentStorageError(f"Attachment storage backend '{storage_backend}' is not supported.")
 
     target_dir = attachment_storage_root(storage_dir) / str(attachment_id)
-    target_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise AttachmentStorageError(f"Failed to create local attachment directory: {exc}") from exc
     target_path = target_dir / safe_file_name
     storage_uri = f"local://attachments/{attachment_id}/{safe_file_name}"
     capture_text = is_text_upload(safe_file_name, content_type)
@@ -275,6 +278,9 @@ def _write_local_file(
     except AttachmentTooLargeError:
         target_path.unlink(missing_ok=True)
         raise
+    except OSError as exc:
+        target_path.unlink(missing_ok=True)
+        raise AttachmentStorageError(f"Failed to write local attachment file: {exc}") from exc
 
     return {
         "file_size": total,
