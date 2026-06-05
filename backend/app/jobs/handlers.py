@@ -9,6 +9,7 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
+from backend.app.ai.doc2x_client import Doc2xCallError, poll_doc2x_status, submit_doc2x_pdf
 from backend.app.ai.embedding_client import (
     EmbeddingCallError,
     call_openai_compatible_embedding,
@@ -33,7 +34,18 @@ from backend.app.services.search_docs import (
     rebuild_buyer_intent_search_doc,
     rebuild_seller_target_search_doc,
 )
-from backend.app.services.attachment_storage import read_local_text_content
+from backend.app.services.attachment_storage import (
+    AttachmentStorageError,
+    read_attachment_bytes,
+    read_local_text_content,
+    save_generated_text,
+)
+from backend.app.services.image_inputs import (
+    is_supported_multimodal_image,
+    multimodal_image_constraints,
+    prepare_image_for_multimodal,
+)
+from backend.app.services.pdf_inspection import inspect_pdf_text_layer
 
 ALLOWED_ACTION_TYPES = {
     "seller_fact_update",
@@ -301,6 +313,8 @@ def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
         return _handle_buyer_intent_parse(db, job)
     if job.job_type == "attachment_ocr_parse":
         return _handle_attachment_ocr_parse(db, job)
+    if job.job_type == "attachment_ocr_poll":
+        return _handle_attachment_ocr_poll(db, job)
     if job.job_type == "seller_search_doc_rebuild":
         return _handle_seller_search_doc_rebuild(db, job)
     if job.job_type == "buyer_intent_search_doc_rebuild":
@@ -368,7 +382,7 @@ def _handle_seller_target_parse(db: Session, job: JobClaim) -> dict[str, object]
             node_config=node_config,
             status="failed",
             input_json=input_json,
-            prompt_messages_json=prompt_messages,
+            prompt_messages_json=_safe_prompt_messages_for_trace(prompt_messages),
             raw_output_text=None,
             parsed_output_json=None,
             schema_validation_json={"valid": False, "error": str(exc)},
@@ -389,7 +403,7 @@ def _handle_seller_target_parse(db: Session, job: JobClaim) -> dict[str, object]
         node_config=node_config,
         status="succeeded" if schema_validation_json["valid"] else "failed",
         input_json=input_json,
-        prompt_messages_json=prompt_messages,
+        prompt_messages_json=_safe_prompt_messages_for_trace(prompt_messages),
         raw_output_text=llm_result.raw_output_text,
         parsed_output_json=parsed_output_json,
         schema_validation_json=schema_validation_json,
@@ -479,7 +493,7 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
             node_config=node_config,
             status="failed",
             input_json=input_json,
-            prompt_messages_json=prompt_messages,
+            prompt_messages_json=_safe_prompt_messages_for_trace(prompt_messages),
             raw_output_text=None,
             parsed_output_json=None,
             schema_validation_json={"valid": False, "error": str(exc)},
@@ -554,6 +568,10 @@ def _handle_attachment_ocr_parse(db: Session, job: JobClaim) -> dict[str, object
     node_config = _get_default_ocr_node_config(db, "ocr_attachment_parser")
     ocr_input = _attachment_ocr_input(job, attachment_id=attachment_id, attachment=attachment)
     input_json = build_attachment_ocr_input_json(node_config=node_config, ocr_input=ocr_input)
+    pdf_result = _handle_pdf_attachment_ocr(db, job, attachment_id=attachment_id, attachment=attachment, node_config=node_config)
+    if pdf_result is not None:
+        return pdf_result
+
     ocr_result = call_attachment_ocr(node_config=node_config, ocr_input=ocr_input)
     extracted_text = ocr_result.extracted_text
 
@@ -639,6 +657,253 @@ def _handle_attachment_ocr_parse(db: Session, job: JobClaim) -> dict[str, object
     }
 
 
+def _handle_attachment_ocr_poll(db: Session, job: JobClaim) -> dict[str, object]:
+    attachment_id = _resolve_entity_id(job, expected_entity_type="attachment")
+    if attachment_id is None:
+        attachment_id = _optional_uuid(job.payload_json.get("attachment_id"))
+    if attachment_id is None:
+        raise ValueError("attachment_ocr_poll job requires an attachment entity_id.")
+
+    attachment = _get_attachment_for_ocr(db, attachment_id)
+    settings = get_settings()
+    uid = str(job.payload_json.get("doc2x_uid") or "").strip()
+    if not uid:
+        raise ValueError("attachment_ocr_poll job requires doc2x_uid.")
+    if not settings.doc2x_api_key:
+        raise ValueError("DOC2X_API_KEY is required for Doc2X OCR polling.")
+
+    started_at = float(job.payload_json.get("doc2x_started_epoch") or time.time())
+    elapsed_seconds = int(time.time() - started_at)
+    if elapsed_seconds > settings.doc2x_max_wait_seconds:
+        _update_attachment_parse_terminal_without_document(
+            db,
+            attachment_id=attachment_id,
+            parse_status="failed",
+            job_id=job.id,
+            metadata_patch={
+                "last_ocr_status": "failed",
+                "last_ocr_provider": "doc2x",
+                "last_doc2x_uid": uid,
+                "last_doc2x_error": "Doc2X polling exceeded max wait seconds.",
+            },
+        )
+        raise ValueError("Doc2X polling exceeded max wait seconds.")
+
+    try:
+        status_result = poll_doc2x_status(
+            base_url=settings.doc2x_base_url,
+            api_key=settings.doc2x_api_key,
+            uid=uid,
+            timeout_seconds=30,
+        )
+    except Doc2xCallError as exc:
+        raise ValueError(str(exc)) from exc
+
+    _patch_attachment_metadata(
+        db,
+        attachment_id,
+        {
+            "last_ocr_status": "provider_processing"
+            if status_result.status == "processing"
+            else status_result.status,
+            "last_ocr_provider": "doc2x",
+            "last_doc2x_uid": uid,
+            "last_doc2x_progress": status_result.progress,
+        },
+    )
+
+    if status_result.status == "processing":
+        next_job = _enqueue_doc2x_poll_job(
+            db,
+            parent_job_id=job.payload_json.get("submitted_by_job_id") or job.id,
+            attachment_id=attachment_id,
+            business_update_id=_optional_uuid(job.payload_json.get("business_update_id")),
+            doc2x_uid=uid,
+            started_epoch=started_at,
+            source_payload=job.payload_json,
+            run_after_seconds=settings.doc2x_poll_interval_seconds,
+        )
+        _insert_ocr_trace(
+            db,
+            job=job,
+            attachment_id=attachment_id,
+            node_config={
+                "provider_config_id": None,
+                "node_config_id": None,
+                "provider_name": "doc2x",
+                "model_name": settings.doc2x_model,
+                "node_name": "ocr_attachment_parser",
+            },
+            status="succeeded",
+            input_json={
+                "attachment_id": str(attachment_id),
+                "provider": "doc2x",
+                "doc2x_uid": uid,
+                "poll_status": "processing",
+            },
+            raw_output_text=None,
+            parsed_output_json={
+                "provider": "doc2x",
+                "status": status_result.status,
+                "progress": status_result.progress,
+                "next_poll_job": _json_safe_dict(next_job),
+            },
+            latency_ms=status_result.latency_ms,
+            error_message=None,
+        )
+        return {
+            "handled": True,
+            "job_type": job.job_type,
+            "attachment_id": str(attachment_id),
+            "provider": "doc2x",
+            "provider_status": "processing",
+            "progress": status_result.progress,
+            "next_poll_job": _json_safe_dict(next_job),
+        }
+
+    if status_result.status == "failed":
+        detail = status_result.detail or "Doc2X parsing failed."
+        _update_attachment_parse_terminal_without_document(
+            db,
+            attachment_id=attachment_id,
+            parse_status="failed",
+            job_id=job.id,
+            metadata_patch={
+                "last_ocr_status": "failed",
+                "last_ocr_provider": "doc2x",
+                "last_doc2x_uid": uid,
+                "last_doc2x_error": str(detail),
+            },
+        )
+        _insert_ocr_trace(
+            db,
+            job=job,
+            attachment_id=attachment_id,
+            node_config={
+                "provider_config_id": None,
+                "node_config_id": None,
+                "provider_name": "doc2x",
+                "model_name": settings.doc2x_model,
+                "node_name": "ocr_attachment_parser",
+            },
+            status="failed",
+            input_json={"attachment_id": str(attachment_id), "provider": "doc2x", "doc2x_uid": uid},
+            raw_output_text=None,
+            parsed_output_json={"provider": "doc2x", "status": "failed", "detail": detail},
+            latency_ms=status_result.latency_ms,
+            error_message=str(detail),
+        )
+        raise ValueError(f"Doc2X parse failed: {detail}")
+
+    if status_result.status != "success":
+        raise ValueError(f"Unsupported Doc2X status: {status_result.status}")
+
+    extracted_text = status_result.markdown_text.strip()
+    if not extracted_text:
+        extracted_text = _doc2x_status_text_fallback(status_result.raw_response)
+    text_path = _save_ocr_text_artifact(
+        attachment_id=attachment_id,
+        parsed_document_id=None,
+        content=extracted_text,
+        suffix="doc2x.md",
+        content_type="text/markdown; charset=utf-8",
+    )
+    parsed_document_id = _insert_parsed_document_for_ocr(
+        db,
+        attachment_id=attachment_id,
+        parse_status="parsed" if extracted_text else "skipped",
+        extracted_text=extracted_text,
+        error_message=None if extracted_text else "Doc2X returned no markdown text.",
+        parser_name="doc2x",
+        parser_version=settings.doc2x_model,
+        text_path=text_path,
+        markdown_path=text_path,
+        page_count=status_result.page_count,
+    )
+    evidence_id = None
+    if extracted_text:
+        evidence_id = _insert_ocr_evidence_span(
+            db,
+            attachment_id=attachment_id,
+            parsed_document_id=parsed_document_id,
+            job_id=job.id,
+            text_excerpt=extracted_text,
+        )
+    _update_attachment_parse_terminal(
+        db,
+        attachment_id=attachment_id,
+        parse_status="parsed" if extracted_text else "skipped",
+        job_id=job.id,
+        parsed_document_id=parsed_document_id,
+        evidence_id=evidence_id,
+        text_length=len(extracted_text),
+        metadata_patch={
+            "last_ocr_provider": "doc2x",
+            "last_doc2x_uid": uid,
+            "last_doc2x_progress": status_result.progress,
+            "last_pdf_kind": "scanned_pdf",
+        },
+    )
+    touched_seller_target_count = _touch_seller_targets_linked_to_attachment(db, attachment_id)
+    child_parse_jobs = _enqueue_linked_parse_jobs_after_ocr(
+        db,
+        job=job,
+        attachment_id=attachment_id,
+        parsed_document_id=parsed_document_id,
+        evidence_id=evidence_id,
+        extracted_text=extracted_text,
+    )
+    business_update_process_job = _enqueue_business_update_process_after_ocr(
+        db,
+        job=job,
+        attachment_id=attachment_id,
+        evidence_id=evidence_id,
+        extracted_text=extracted_text,
+    )
+    _insert_ocr_trace(
+        db,
+        job=job,
+        attachment_id=attachment_id,
+        node_config={
+            "provider_config_id": None,
+            "node_config_id": None,
+            "provider_name": "doc2x",
+            "model_name": settings.doc2x_model,
+            "node_name": "ocr_attachment_parser",
+        },
+        status="succeeded" if extracted_text else "skipped",
+        input_json={"attachment_id": str(attachment_id), "provider": "doc2x", "doc2x_uid": uid},
+        raw_output_text=extracted_text,
+        parsed_output_json={
+            "provider": "doc2x",
+            "status": status_result.status,
+            "progress": status_result.progress,
+            "page_count": status_result.page_count,
+            "parsed_document_id": str(parsed_document_id),
+            "evidence_id": str(evidence_id) if evidence_id else None,
+            "child_parse_jobs": child_parse_jobs,
+            "business_update_process_job": business_update_process_job,
+        },
+        latency_ms=status_result.latency_ms,
+        error_message=None if extracted_text else "Doc2X returned no markdown text.",
+    )
+    return {
+        "handled": True,
+        "job_type": job.job_type,
+        "attachment_id": str(attachment_id),
+        "provider": "doc2x",
+        "provider_status": status_result.status,
+        "parse_status": "parsed" if extracted_text else "skipped",
+        "parsed_document_id": str(parsed_document_id),
+        "evidence_id": str(evidence_id) if evidence_id else None,
+        "text_length": len(extracted_text),
+        "touched_seller_target_count": touched_seller_target_count,
+        "child_parse_jobs": child_parse_jobs,
+        "child_parse_job_count": len(child_parse_jobs),
+        "business_update_process_job": business_update_process_job,
+    }
+
+
 def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[str, object]:
     business_update_id = _resolve_business_update_id(job)
     if business_update_id is None:
@@ -663,6 +928,17 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
     }
     context_json = _build_business_update_context(db, business_update)
     context_json["attachments"] = attachment_context.get("attachments", [])
+    image_context = _build_business_update_image_context(
+        db,
+        business_update_id,
+        trigger_attachment_id=_optional_uuid(job.payload_json.get("trigger_attachment_id")),
+    )
+    if image_context["images"]:
+        context_json["image_attachments"] = image_context["summaries"]
+        context_json["image_input_constraints"] = image_context["constraints"]
+        business_update_for_normalization["image_evidence_attachment_ids"] = [
+            item["attachment_id"] for item in image_context["summaries"]
+        ]
     prompt_messages = _render_prompt_messages(
         node_config,
         {
@@ -670,12 +946,16 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
             "raw_text": raw_text,
         },
     )
+    if image_context["images"]:
+        prompt_messages = _attach_multimodal_images(prompt_messages, image_context["images"])
     input_json = {
         "business_update_id": str(business_update["id"]),
         "raw_text": raw_text,
         "original_raw_text": business_update["raw_text"],
         "input_type": business_update["input_type"],
         "attachment_count": len(attachment_context.get("attachments", [])),
+        "image_attachment_count": len(image_context["summaries"]),
+        "image_attachments": image_context["summaries"],
         "bound_seller_target_ids": business_update["bound_seller_target_ids_json"],
         "bound_buyer_party_ids": business_update["bound_buyer_party_ids_json"],
         "bound_buyer_intent_ids": business_update["bound_buyer_intent_ids_json"],
@@ -726,6 +1006,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
     actions = _normalize_actions(parsed_output_json, business_update_for_normalization)
     if not actions:
         actions = [_build_unresolved_action(parsed_output_json, llm_result.raw_output_text)]
+    actions = _attach_image_evidence_to_actions(db, job, actions, image_context["summaries"])
     _insert_llm_trace(
         db,
         job=job,
@@ -733,7 +1014,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
         node_config=node_config,
         status="succeeded",
         input_json=input_json,
-        prompt_messages_json=prompt_messages,
+        prompt_messages_json=_safe_prompt_messages_for_trace(prompt_messages),
         raw_output_text=llm_result.raw_output_text,
         parsed_output_json=parsed_output_json,
         schema_validation_json=schema_validation_json,
@@ -1707,6 +1988,225 @@ def _attachment_ocr_input(
     )
 
 
+def _handle_pdf_attachment_ocr(
+    db: Session,
+    job: JobClaim,
+    *,
+    attachment_id: UUID,
+    attachment: dict[str, Any],
+    node_config: dict[str, Any],
+) -> dict[str, object] | None:
+    if not _is_pdf_attachment(attachment):
+        return None
+
+    settings = get_settings()
+    file_bytes = _attachment_file_bytes(attachment, max_bytes=settings.attachment_max_upload_bytes)
+    inspection = inspect_pdf_text_layer(
+        file_bytes,
+        page_limit=settings.pdf_text_detection_page_limit,
+        min_total_chars=settings.pdf_text_detection_min_chars,
+        max_chars=settings.attachment_text_capture_max_bytes,
+    )
+    _patch_attachment_metadata(
+        db,
+        attachment_id,
+        {
+            "last_pdf_kind": inspection.pdf_kind,
+            "last_pdf_text_detection": {
+                "pdf_kind": inspection.pdf_kind,
+                "page_count": inspection.page_count,
+                "sampled_page_count": inspection.sampled_page_count,
+                "extracted_char_count": inspection.extracted_char_count,
+                "threshold_chars": inspection.threshold_chars,
+                "error_message": inspection.error_message,
+            },
+        },
+    )
+
+    if inspection.is_text_pdf:
+        text_path = _save_ocr_text_artifact(
+            attachment_id=attachment_id,
+            parsed_document_id=None,
+            content=inspection.extracted_text,
+            suffix="pdf-text.txt",
+        )
+        parsed_document_id = _insert_parsed_document_for_ocr(
+            db,
+            attachment_id=attachment_id,
+            parse_status="parsed",
+            extracted_text=inspection.extracted_text,
+            error_message=None,
+            parser_name="pdf_text_layer",
+            parser_version="pypdf",
+            text_path=text_path,
+            page_count=inspection.page_count,
+        )
+        evidence_id = _insert_ocr_evidence_span(
+            db,
+            attachment_id=attachment_id,
+            parsed_document_id=parsed_document_id,
+            job_id=job.id,
+            text_excerpt=inspection.extracted_text,
+        )
+        _update_attachment_parse_terminal(
+            db,
+            attachment_id=attachment_id,
+            parse_status="parsed",
+            job_id=job.id,
+            parsed_document_id=parsed_document_id,
+            evidence_id=evidence_id,
+            text_length=len(inspection.extracted_text),
+            metadata_patch={
+                "last_ocr_provider": "pdf_text_layer",
+                "last_pdf_kind": inspection.pdf_kind,
+            },
+        )
+        touched_seller_target_count = _touch_seller_targets_linked_to_attachment(db, attachment_id)
+        child_parse_jobs = _enqueue_linked_parse_jobs_after_ocr(
+            db,
+            job=job,
+            attachment_id=attachment_id,
+            parsed_document_id=parsed_document_id,
+            evidence_id=evidence_id,
+            extracted_text=inspection.extracted_text,
+        )
+        business_update_process_job = _enqueue_business_update_process_after_ocr(
+            db,
+            job=job,
+            attachment_id=attachment_id,
+            evidence_id=evidence_id,
+            extracted_text=inspection.extracted_text,
+        )
+        _insert_ocr_trace(
+            db,
+            job=job,
+            attachment_id=attachment_id,
+            node_config=node_config,
+            status="succeeded",
+            input_json={
+                "attachment_id": str(attachment_id),
+                "provider": "pdf_text_layer",
+                "pdf_text_detection": {
+                    "pdf_kind": inspection.pdf_kind,
+                    "page_count": inspection.page_count,
+                    "sampled_page_count": inspection.sampled_page_count,
+                    "extracted_char_count": inspection.extracted_char_count,
+                    "threshold_chars": inspection.threshold_chars,
+                },
+            },
+            raw_output_text=inspection.extracted_text,
+            parsed_output_json={
+                "execution_mode": "pdf_text_layer",
+                "pdf_kind": inspection.pdf_kind,
+                "parsed_document_id": str(parsed_document_id),
+                "evidence_id": str(evidence_id),
+                "child_parse_jobs": child_parse_jobs,
+                "business_update_process_job": business_update_process_job,
+            },
+            latency_ms=0,
+            error_message=None,
+        )
+        return {
+            "handled": True,
+            "job_type": job.job_type,
+            "attachment_id": str(attachment_id),
+            "parse_status": "parsed",
+            "provider": "pdf_text_layer",
+            "pdf_kind": inspection.pdf_kind,
+            "parsed_document_id": str(parsed_document_id),
+            "evidence_id": str(evidence_id),
+            "text_length": len(inspection.extracted_text),
+            "touched_seller_target_count": touched_seller_target_count,
+            "child_parse_jobs": child_parse_jobs,
+            "child_parse_job_count": len(child_parse_jobs),
+            "business_update_process_job": business_update_process_job,
+        }
+
+    if settings.ocr_provider.strip().lower() != "doc2x":
+        return None
+    if not settings.doc2x_api_key:
+        raise ValueError("DOC2X_API_KEY is required when OCR_PROVIDER=doc2x.")
+
+    submit_result = submit_doc2x_pdf(
+        base_url=settings.doc2x_base_url,
+        api_key=settings.doc2x_api_key,
+        file_bytes=file_bytes,
+        model=settings.doc2x_model,
+        timeout_seconds=60,
+    )
+    poll_job = _enqueue_doc2x_poll_job(
+        db,
+        parent_job_id=job.id,
+        attachment_id=attachment_id,
+        business_update_id=_optional_uuid(job.payload_json.get("business_update_id")),
+        doc2x_uid=submit_result.uid,
+        started_epoch=time.time(),
+        source_payload=job.payload_json,
+        run_after_seconds=settings.doc2x_poll_interval_seconds,
+    )
+    _patch_attachment_metadata(
+        db,
+        attachment_id,
+        {
+            "last_ocr_status": "provider_submitted",
+            "last_ocr_provider": "doc2x",
+            "last_doc2x_uid": submit_result.uid,
+            "last_pdf_kind": inspection.pdf_kind,
+            "last_doc2x_poll_job_id": str(poll_job["id"]),
+        },
+    )
+    _insert_ocr_trace(
+        db,
+        job=job,
+        attachment_id=attachment_id,
+        node_config={
+            **node_config,
+            "provider_name": "doc2x",
+            "model_name": settings.doc2x_model,
+        },
+        status="succeeded",
+        input_json={
+            "attachment_id": str(attachment_id),
+            "provider": "doc2x",
+            "doc2x_uid": submit_result.uid,
+            "pdf_text_detection": {
+                "pdf_kind": inspection.pdf_kind,
+                "page_count": inspection.page_count,
+                "sampled_page_count": inspection.sampled_page_count,
+                "extracted_char_count": inspection.extracted_char_count,
+                "threshold_chars": inspection.threshold_chars,
+                "error_message": inspection.error_message,
+            },
+        },
+        raw_output_text=None,
+        parsed_output_json={
+            "provider": "doc2x",
+            "status": "submitted",
+            "doc2x_uid": submit_result.uid,
+            "poll_job": _json_safe_dict(poll_job),
+        },
+        latency_ms=submit_result.latency_ms,
+        error_message=None,
+    )
+    return {
+        "handled": True,
+        "job_type": job.job_type,
+        "attachment_id": str(attachment_id),
+        "parse_status": "parsing",
+        "provider": "doc2x",
+        "provider_status": "submitted",
+        "doc2x_uid": submit_result.uid,
+        "poll_job": _json_safe_dict(poll_job),
+        "pdf_kind": inspection.pdf_kind,
+    }
+
+
+def _is_pdf_attachment(attachment: dict[str, Any]) -> bool:
+    file_type = str(attachment.get("file_type") or "").lower()
+    mime_type = str(attachment.get("mime_type") or "").split(";")[0].strip().lower()
+    return file_type == "pdf" or mime_type == "application/pdf"
+
+
 def _attachment_local_text_content(attachment: dict[str, Any], *, max_chars: int = 200_000) -> str | None:
     settings = get_settings()
     return read_local_text_content(
@@ -1714,6 +2214,24 @@ def _attachment_local_text_content(attachment: dict[str, Any], *, max_chars: int
         storage_dir=settings.attachment_storage_dir,
         max_bytes=max_chars,
     )
+
+
+def _attachment_file_bytes(attachment: dict[str, Any], *, max_bytes: int | None = None) -> bytes:
+    settings = get_settings()
+    data = read_attachment_bytes(
+        attachment,
+        storage_dir=settings.attachment_storage_dir,
+        max_bytes=max_bytes or settings.attachment_max_upload_bytes,
+        s3_endpoint_url=settings.attachment_s3_endpoint_url,
+        s3_region=settings.attachment_s3_region,
+        s3_bucket=settings.attachment_s3_bucket,
+        s3_access_key_id=settings.attachment_s3_access_key_id,
+        s3_secret_access_key=settings.attachment_s3_secret_access_key,
+        s3_force_path_style=settings.attachment_s3_force_path_style,
+    )
+    if data is None:
+        raise AttachmentStorageError("Attachment file bytes are not available from configured storage.")
+    return data
 
 
 def _parse_source_context(
@@ -2497,6 +3015,170 @@ def _build_business_update_attachment_context(
         "combined_text": "\n\n".join(combined_parts),
         "evidence_ids": evidence_ids,
     }
+
+
+def _build_business_update_image_context(
+    db: Session,
+    business_update_id: UUID,
+    *,
+    trigger_attachment_id: UUID | None = None,
+) -> dict[str, Any]:
+    settings = get_settings()
+    constraints = multimodal_image_constraints(
+        max_count=settings.image_multimodal_max_count,
+        max_upload_bytes=settings.image_multimodal_max_upload_bytes,
+        max_side=settings.image_multimodal_max_side,
+        target_bytes=settings.image_multimodal_target_bytes,
+    )
+    rows = db.execute(
+        text(
+            """
+            select
+              a.id, a.file_name, a.file_type, a.mime_type, a.file_size,
+              a.storage_path, a.metadata_json, al.link_type
+            from attachment_link al
+            join attachment a on a.id = al.attachment_id
+            where al.team_id = :team_id
+              and al.workspace_id = :workspace_id
+              and al.entity_type = 'business_update'
+              and al.entity_id = :business_update_id
+              and (:trigger_attachment_id is null or a.id = :trigger_attachment_id)
+              and a.deleted_at is null
+            order by al.created_at asc
+            limit 50
+            """
+        ),
+        {
+            "business_update_id": business_update_id,
+            "trigger_attachment_id": trigger_attachment_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+
+    images: list[dict[str, Any]] = []
+    summaries: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for row in rows:
+        attachment = _json_safe_dict(row)
+        if not is_supported_multimodal_image(attachment):
+            continue
+        attachment_id = str(attachment["id"])
+        if len(images) >= settings.image_multimodal_max_count:
+            skipped.append(
+                {
+                    "attachment_id": attachment_id,
+                    "file_name": attachment.get("file_name"),
+                    "reason": "image_count_limit_exceeded",
+                }
+            )
+            continue
+        file_size = int(attachment.get("file_size") or 0)
+        if file_size > settings.image_multimodal_max_upload_bytes:
+            skipped.append(
+                {
+                    "attachment_id": attachment_id,
+                    "file_name": attachment.get("file_name"),
+                    "reason": "image_too_large",
+                    "file_size": file_size,
+                    "max_upload_bytes": settings.image_multimodal_max_upload_bytes,
+                }
+            )
+            continue
+        image_bytes = _attachment_file_bytes(
+            attachment,
+            max_bytes=settings.image_multimodal_max_upload_bytes,
+        )
+        prepared = prepare_image_for_multimodal(
+            image_bytes,
+            attachment_id=attachment_id,
+            file_name=str(attachment.get("file_name") or "image"),
+            mime_type=str(attachment.get("mime_type") or ""),
+            max_side=settings.image_multimodal_max_side,
+            jpeg_quality=settings.image_multimodal_jpeg_quality,
+            target_bytes=settings.image_multimodal_target_bytes,
+        )
+        images.append(
+            {
+                "attachment_id": prepared.attachment_id,
+                "file_name": prepared.file_name,
+                "data_url": prepared.data_url,
+                "mime_type": prepared.mime_type,
+            }
+        )
+        summary = prepared.trace_summary()
+        summary["link_type"] = attachment.get("link_type")
+        summaries.append(summary)
+
+    return {
+        "images": images,
+        "summaries": summaries,
+        "skipped": skipped,
+        "constraints": constraints,
+    }
+
+
+def _attach_multimodal_images(
+    messages: list[dict[str, Any]],
+    images: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not messages or not images:
+        return messages
+    updated = [dict(message) for message in messages]
+    user_index = next((idx for idx in range(len(updated) - 1, -1, -1) if updated[idx].get("role") == "user"), len(updated) - 1)
+    user_message = dict(updated[user_index])
+    content = user_message.get("content")
+    parts: list[dict[str, Any]]
+    if isinstance(content, list):
+        parts = list(content)
+    else:
+        parts = [{"type": "text", "text": str(content or "")}]
+    parts.append(
+        {
+            "type": "text",
+            "text": (
+                "The following images are business update attachments. "
+                "Read them directly, extract only business facts visible in the images, "
+                "and cite the attachment id in raw_evidence_text when relevant."
+            ),
+        }
+    )
+    for image in images:
+        parts.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": image["data_url"]},
+            }
+        )
+    user_message["content"] = parts
+    updated[user_index] = user_message
+    return updated
+
+
+def _safe_prompt_messages_for_trace(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    safe_messages: list[dict[str, Any]] = []
+    for message in messages:
+        safe_message = dict(message)
+        content = safe_message.get("content")
+        if isinstance(content, list):
+            safe_parts: list[dict[str, Any]] = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    image_url = part.get("image_url") if isinstance(part.get("image_url"), dict) else {}
+                    url = str(image_url.get("url") or "")
+                    safe_parts.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"<redacted data url: {len(url)} chars>",
+                            },
+                        }
+                    )
+                else:
+                    safe_parts.append(part if isinstance(part, dict) else {"type": "text", "text": str(part)})
+            safe_message["content"] = safe_parts
+        safe_messages.append(safe_message)
+    return safe_messages
 
 
 def _business_update_raw_text_with_attachments(raw_text: Any, attachment_context: dict[str, Any]) -> str:
@@ -3369,6 +4051,114 @@ def _business_update_action_evidence_id(
     return None
 
 
+def _attach_image_evidence_to_actions(
+    db: Session,
+    job: JobClaim,
+    actions: list[dict[str, Any]],
+    image_summaries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not image_summaries:
+        return actions
+    image_by_id = {str(item.get("attachment_id")): item for item in image_summaries if item.get("attachment_id")}
+    if not image_by_id:
+        return actions
+
+    updated_actions: list[dict[str, Any]] = []
+    for action in actions:
+        if action.get("evidence_id"):
+            updated_actions.append(action)
+            continue
+        raw_evidence_text = str(action.get("raw_evidence_text") or "").strip()
+        if not raw_evidence_text:
+            updated_actions.append(action)
+            continue
+        attachment_id = _match_image_evidence_attachment(action, raw_evidence_text, image_by_id)
+        if attachment_id is None and len(image_by_id) == 1:
+            attachment_id = UUID(next(iter(image_by_id)))
+        if attachment_id is None:
+            updated_actions.append(action)
+            continue
+        evidence_id = _insert_image_llm_evidence_span(
+            db,
+            attachment_id=attachment_id,
+            job_id=job.id,
+            text_excerpt=raw_evidence_text,
+        )
+        updated_actions.append(
+            {
+                **action,
+                "evidence_id": evidence_id,
+                "normalization_notes": [
+                    *action.get("normalization_notes", []),
+                    "evidence_id<-image_llm_excerpt",
+                ],
+            }
+        )
+    return updated_actions
+
+
+def _match_image_evidence_attachment(
+    action: dict[str, Any],
+    raw_evidence_text: str,
+    image_by_id: dict[str, dict[str, Any]],
+) -> UUID | None:
+    candidates = [
+        action.get("attachment_id"),
+        action.get("evidence_attachment_id"),
+        action.get("source_attachment_id"),
+    ]
+    raw_action = action.get("raw_action") if isinstance(action.get("raw_action"), dict) else {}
+    candidates.extend(
+        [
+            raw_action.get("attachment_id"),
+            raw_action.get("evidence_attachment_id"),
+            raw_action.get("source_attachment_id"),
+        ]
+    )
+    for candidate in candidates:
+        attachment_id = _optional_uuid(candidate)
+        if attachment_id and str(attachment_id) in image_by_id:
+            return attachment_id
+    for attachment_id_text, summary in image_by_id.items():
+        file_name = str(summary.get("file_name") or "")
+        if attachment_id_text in raw_evidence_text or (file_name and file_name in raw_evidence_text):
+            return UUID(attachment_id_text)
+    return None
+
+
+def _insert_image_llm_evidence_span(
+    db: Session,
+    *,
+    attachment_id: UUID,
+    job_id: UUID,
+    text_excerpt: str,
+) -> UUID:
+    excerpt = _truncate_text(text_excerpt, 2000) or ""
+    row = db.execute(
+        text(
+            """
+            insert into evidence_span (
+              team_id, workspace_id, source_type, source_id, attachment_id,
+              parsed_document_id, page_no, text_excerpt, char_start, char_end
+            )
+            values (
+              :team_id, :workspace_id, 'image_llm_excerpt', :job_id, :attachment_id,
+              null, null, :text_excerpt, null, null
+            )
+            returning id
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "job_id": job_id,
+            "attachment_id": attachment_id,
+            "text_excerpt": excerpt,
+        },
+    ).mappings().one()
+    return row["id"]
+
+
 def _normalize_change_fields(
     proposed_changes: dict[str, Any],
     *,
@@ -4177,9 +4967,16 @@ def _insert_parsed_document_for_ocr(
     parse_status: str,
     extracted_text: str,
     error_message: str | None,
+    parser_name: str = "ocr_attachment_parser",
+    parser_version: str = "v0.1.0-skeleton",
+    text_path: str | None = None,
+    markdown_path: str | None = None,
+    manifest_path: str | None = None,
+    page_count: int | None = None,
 ) -> UUID:
     parsed_document_id = uuid4()
     token_count = _approx_token_count(extracted_text) if extracted_text else None
+    resolved_text_path = text_path or (f"mock://parsed-documents/{parsed_document_id}.txt" if extracted_text else None)
     row = db.execute(
         text(
             """
@@ -4189,8 +4986,8 @@ def _insert_parsed_document_for_ocr(
               token_count, error_message
             )
             values (
-              :id, :team_id, :workspace_id, :attachment_id, 'ocr_attachment_parser',
-              'v0.1.0-skeleton', :parse_status, :text_path, null, null, :page_count,
+              :id, :team_id, :workspace_id, :attachment_id, :parser_name,
+              :parser_version, :parse_status, :text_path, :markdown_path, :manifest_path, :page_count,
               :token_count, :error_message
             )
             returning id
@@ -4201,9 +4998,13 @@ def _insert_parsed_document_for_ocr(
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
             "attachment_id": attachment_id,
+            "parser_name": parser_name,
+            "parser_version": parser_version,
             "parse_status": parse_status,
-            "text_path": f"mock://parsed-documents/{parsed_document_id}.txt" if extracted_text else None,
-            "page_count": 1 if extracted_text else None,
+            "text_path": resolved_text_path,
+            "markdown_path": markdown_path,
+            "manifest_path": manifest_path,
+            "page_count": page_count if page_count is not None else (1 if extracted_text else None),
             "token_count": token_count,
             "error_message": error_message,
         },
@@ -4256,7 +5057,17 @@ def _update_attachment_parse_terminal(
     parsed_document_id: UUID,
     evidence_id: UUID | None,
     text_length: int,
+    metadata_patch: dict[str, Any] | None = None,
 ) -> None:
+    patch = {
+        "last_ocr_job_id": str(job_id),
+        "last_ocr_status": parse_status,
+        "last_parsed_document_id": str(parsed_document_id),
+        "last_evidence_id": str(evidence_id) if evidence_id else None,
+        "last_text_length": text_length,
+    }
+    if metadata_patch:
+        patch.update(metadata_patch)
     db.execute(
         text(
             """
@@ -4274,15 +5085,159 @@ def _update_attachment_parse_terminal(
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
             "parse_status": parse_status,
-            "metadata_patch": {
-                "last_ocr_job_id": str(job_id),
-                "last_ocr_status": parse_status,
-                "last_parsed_document_id": str(parsed_document_id),
-                "last_evidence_id": str(evidence_id) if evidence_id else None,
-                "last_text_length": text_length,
-            },
+            "metadata_patch": patch,
         },
     )
+
+
+def _update_attachment_parse_terminal_without_document(
+    db: Session,
+    *,
+    attachment_id: UUID,
+    parse_status: str,
+    job_id: UUID,
+    metadata_patch: dict[str, Any] | None = None,
+) -> None:
+    patch = {"last_ocr_job_id": str(job_id), "last_ocr_status": parse_status}
+    if metadata_patch:
+        patch.update(metadata_patch)
+    db.execute(
+        text(
+            """
+            update attachment
+            set parse_status = :parse_status,
+                metadata_json = metadata_json || :metadata_patch
+            where id = :attachment_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+        {
+            "attachment_id": attachment_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "parse_status": parse_status,
+            "metadata_patch": patch,
+        },
+    )
+
+
+def _patch_attachment_metadata(db: Session, attachment_id: UUID, metadata_patch: dict[str, Any]) -> None:
+    db.execute(
+        text(
+            """
+            update attachment
+            set metadata_json = metadata_json || :metadata_patch,
+                updated_at = now()
+            where id = :attachment_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+        {
+            "attachment_id": attachment_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "metadata_patch": metadata_patch,
+        },
+    )
+
+
+def _enqueue_doc2x_poll_job(
+    db: Session,
+    *,
+    parent_job_id: Any,
+    attachment_id: UUID,
+    business_update_id: UUID | None,
+    doc2x_uid: str,
+    started_epoch: float,
+    source_payload: dict[str, Any],
+    run_after_seconds: int,
+) -> dict[str, Any]:
+    payload_json = {
+        **source_payload,
+        "attachment_id": str(attachment_id),
+        "business_update_id": str(business_update_id) if business_update_id else source_payload.get("business_update_id"),
+        "doc2x_uid": doc2x_uid,
+        "doc2x_started_epoch": started_epoch,
+        "submitted_by_job_id": str(parent_job_id),
+    }
+    row = db.execute(
+        text(
+            """
+            insert into background_job (
+              team_id, workspace_id, job_type, priority, queue_name,
+              entity_type, entity_id, idempotency_key, payload_json,
+              max_attempts, run_after, parent_job_id, correlation_id, created_by, metadata_json
+            )
+            values (
+              :team_id, :workspace_id, 'attachment_ocr_poll', 100, 'ocr',
+              'attachment', :attachment_id, :idempotency_key, :payload_json,
+              1, now() + (:run_after_seconds * interval '1 second'),
+              :parent_job_id, :correlation_id, :created_by, :metadata_json
+            )
+            returning id, job_type, status, queue_name, entity_type, entity_id, run_after::text as run_after
+            """
+        ).bindparams(
+            bindparam("payload_json", type_=JSONB),
+            bindparam("metadata_json", type_=JSONB),
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "attachment_id": attachment_id,
+            "idempotency_key": f"attachment_ocr_poll:doc2x:{doc2x_uid}:{uuid4()}",
+            "payload_json": payload_json,
+            "run_after_seconds": max(int(run_after_seconds), 1),
+            "parent_job_id": _optional_uuid(parent_job_id),
+            "correlation_id": business_update_id or _optional_uuid(source_payload.get("business_update_id")) or attachment_id,
+            "created_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_json": {
+                "source": "doc2x_poll",
+                "attachment_id": str(attachment_id),
+                "business_update_id": str(business_update_id) if business_update_id else source_payload.get("business_update_id"),
+                "doc2x_uid": doc2x_uid,
+            },
+        },
+    ).mappings().one()
+    return _json_safe_dict(row)
+
+
+def _save_ocr_text_artifact(
+    *,
+    attachment_id: UUID,
+    parsed_document_id: UUID | None,
+    content: str,
+    suffix: str,
+    content_type: str = "text/plain; charset=utf-8",
+) -> str | None:
+    if not content:
+        return None
+    settings = get_settings()
+    document_part = str(parsed_document_id) if parsed_document_id else "pending"
+    return save_generated_text(
+        content,
+        storage_backend=settings.attachment_storage_backend,
+        storage_dir=settings.attachment_storage_dir,
+        key_prefix=f"parsed-documents/{attachment_id}/{document_part}",
+        file_name=suffix,
+        content_type=content_type,
+        s3_endpoint_url=settings.attachment_s3_endpoint_url,
+        s3_region=settings.attachment_s3_region,
+        s3_bucket=settings.attachment_s3_bucket,
+        s3_access_key_id=settings.attachment_s3_access_key_id,
+        s3_secret_access_key=settings.attachment_s3_secret_access_key,
+        s3_force_path_style=settings.attachment_s3_force_path_style,
+    )
+
+
+def _doc2x_status_text_fallback(raw_response: dict[str, Any]) -> str:
+    data = raw_response.get("data") if isinstance(raw_response.get("data"), dict) else {}
+    result = data.get("result") if isinstance(data.get("result"), dict) else {}
+    json_text = _json_dumps({"result": result})
+    return _truncate_text(json_text, 200_000) or json_text
 
 
 def _touch_seller_targets_linked_to_attachment(db: Session, attachment_id: UUID) -> int:

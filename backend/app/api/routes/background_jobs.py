@@ -30,6 +30,15 @@ class BackgroundJobIgnoreRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
 
 
+class BackgroundJobArchiveRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class BackgroundJobTestDataRequest(BaseModel):
+    label: str | None = Field(default=None, max_length=120)
+    reason: str | None = Field(default=None, max_length=500)
+
+
 class BackgroundJobOut(BaseModel):
     id: UUID
     job_type: str
@@ -101,6 +110,8 @@ class FailureSummaryOut(BaseModel):
     generated_at: str
     lookback_hours: int
     include_ignored: bool = False
+    include_archived: bool = False
+    include_test_data: bool = False
     totals: dict[str, Any]
     by_queue: list[dict[str, Any]]
     by_job_type: list[dict[str, Any]]
@@ -168,6 +179,8 @@ def list_background_jobs(
     entity_type: str | None = None,
     entity_id: UUID | None = None,
     include_ignored: bool = Query(default=False),
+    include_archived: bool = Query(default=False),
+    include_test_data: bool = Query(default=False),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
@@ -184,6 +197,10 @@ def list_background_jobs(
         params["status"] = status_filter
         if status_filter == "failed" and not include_ignored:
             where.append(_not_failure_ignored_sql())
+        if status_filter == "failed" and not include_archived:
+            where.append(_not_archived_sql())
+        if status_filter == "failed" and not include_test_data:
+            where.append(_not_test_data_sql())
     if job_type:
         where.append("job_type = :job_type")
         params["job_type"] = job_type
@@ -217,12 +234,16 @@ def get_background_job_queue_summary(
     db: Session = Depends(get_db),
     include_empty: bool = Query(default=True),
     include_ignored: bool = Query(default=False),
+    include_archived: bool = Query(default=False),
+    include_test_data: bool = Query(default=False),
     lookback_hours: int = Query(default=24, ge=1, le=168),
 ) -> dict[str, Any]:
     summary = _queue_summary(
         db,
         include_empty=include_empty,
         include_ignored=include_ignored,
+        include_archived=include_archived,
+        include_test_data=include_test_data,
         lookback_hours=lookback_hours,
     )
     return summary
@@ -234,8 +255,17 @@ def get_background_job_failure_summary(
     lookback_hours: int = Query(default=168, ge=1, le=720),
     limit: int = Query(default=20, ge=1, le=100),
     include_ignored: bool = Query(default=False),
+    include_archived: bool = Query(default=False),
+    include_test_data: bool = Query(default=False),
 ) -> dict[str, Any]:
-    return _failure_summary(db, lookback_hours=lookback_hours, limit=limit, include_ignored=include_ignored)
+    return _failure_summary(
+        db,
+        lookback_hours=lookback_hours,
+        limit=limit,
+        include_ignored=include_ignored,
+        include_archived=include_archived,
+        include_test_data=include_test_data,
+    )
 
 
 @router.get("/{job_id}", response_model=BackgroundJobOut)
@@ -347,6 +377,56 @@ def unignore_background_job(job_id: UUID, db: Session = Depends(get_db)) -> dict
     ).mappings().one()
     db.commit()
     return dict(row)
+
+
+@router.post("/{job_id}/archive", response_model=BackgroundJobOut)
+def archive_background_job(
+    job_id: UUID,
+    payload: BackgroundJobArchiveRequest | None = Body(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    payload = payload or BackgroundJobArchiveRequest()
+    current = _get_job_or_404(db, job_id)
+    metadata_json = _archive_metadata(current.get("metadata_json"), reason=payload.reason)
+    row = _update_job_metadata(db, job_id, metadata_json)
+    db.commit()
+    return row
+
+
+@router.post("/{job_id}/unarchive", response_model=BackgroundJobOut)
+def unarchive_background_job(job_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+    current = _get_job_or_404(db, job_id)
+    metadata_json = _unarchive_metadata(current.get("metadata_json"))
+    row = _update_job_metadata(db, job_id, metadata_json)
+    db.commit()
+    return row
+
+
+@router.post("/{job_id}/mark-test-data", response_model=BackgroundJobOut)
+def mark_background_job_test_data(
+    job_id: UUID,
+    payload: BackgroundJobTestDataRequest | None = Body(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    payload = payload or BackgroundJobTestDataRequest()
+    current = _get_job_or_404(db, job_id)
+    metadata_json = _test_data_metadata(
+        current.get("metadata_json"),
+        label=payload.label,
+        reason=payload.reason,
+    )
+    row = _update_job_metadata(db, job_id, metadata_json)
+    db.commit()
+    return row
+
+
+@router.post("/{job_id}/unmark-test-data", response_model=BackgroundJobOut)
+def unmark_background_job_test_data(job_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+    current = _get_job_or_404(db, job_id)
+    metadata_json = _untest_data_metadata(current.get("metadata_json"))
+    row = _update_job_metadata(db, job_id, metadata_json)
+    db.commit()
+    return row
 
 
 @router.post("/{job_id}/retry", response_model=BackgroundJobOut)
@@ -706,6 +786,76 @@ def _unignore_metadata(metadata_json: Any) -> dict[str, Any]:
     return metadata
 
 
+def _archive_metadata(metadata_json: Any, *, reason: str | None) -> dict[str, Any]:
+    metadata = dict(metadata_json) if isinstance(metadata_json, dict) else {}
+    metadata.update(
+        {
+            "archived": True,
+            "archived_at": _utc_now_text(),
+            "archived_by": str(DEFAULT_ADMIN_USER_ID),
+            "archive_reason": reason,
+        }
+    )
+    return metadata
+
+
+def _unarchive_metadata(metadata_json: Any) -> dict[str, Any]:
+    metadata = _without_keys(metadata_json, {"archived", "archived_at", "archived_by", "archive_reason"})
+    metadata.update({"unarchived_at": _utc_now_text(), "unarchived_by": str(DEFAULT_ADMIN_USER_ID)})
+    return metadata
+
+
+def _test_data_metadata(metadata_json: Any, *, label: str | None, reason: str | None) -> dict[str, Any]:
+    metadata = dict(metadata_json) if isinstance(metadata_json, dict) else {}
+    metadata.update(
+        {
+            "is_test_data": True,
+            "test_data_marked_at": _utc_now_text(),
+            "test_data_marked_by": str(DEFAULT_ADMIN_USER_ID),
+            "test_data_label": label,
+            "test_data_reason": reason,
+        }
+    )
+    return metadata
+
+
+def _untest_data_metadata(metadata_json: Any) -> dict[str, Any]:
+    metadata = _without_keys(
+        metadata_json,
+        {
+            "is_test_data",
+            "test_data_marked_at",
+            "test_data_marked_by",
+            "test_data_label",
+            "test_data_reason",
+        },
+    )
+    metadata.update({"test_data_unmarked_at": _utc_now_text(), "test_data_unmarked_by": str(DEFAULT_ADMIN_USER_ID)})
+    return metadata
+
+
+def _update_job_metadata(db: Session, job_id: UUID, metadata_json: dict[str, Any]) -> dict[str, Any]:
+    row = db.execute(
+        _job_returning_statement(
+            """
+            update background_job
+            set metadata_json = :metadata_json,
+                updated_at = now()
+            where id = :job_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ).bindparams(bindparam("metadata_json", type_=JSONB)),
+        {
+            "job_id": job_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "metadata_json": metadata_json,
+        },
+    ).mappings().one()
+    return dict(row)
+
+
 def _without_keys(metadata_json: Any, keys: set[str]) -> dict[str, Any]:
     metadata = dict(metadata_json) if isinstance(metadata_json, dict) else {}
     for key in keys:
@@ -785,6 +935,8 @@ def _queue_summary(
     *,
     include_empty: bool,
     include_ignored: bool = False,
+    include_archived: bool = False,
+    include_test_data: bool = False,
     lookback_hours: int,
 ) -> dict[str, Any]:
     rows = db.execute(
@@ -799,6 +951,8 @@ def _queue_summary(
               count(*) filter (
                 where status = 'failed'
                   and (:include_ignored or coalesce(metadata_json ->> 'failure_ignored', 'false') <> 'true')
+                  and (:include_archived or coalesce(metadata_json ->> 'archived', 'false') <> 'true')
+                  and (:include_test_data or coalesce(metadata_json ->> 'is_test_data', 'false') <> 'true')
               )::int as failed_count,
               count(*) filter (
                 where status = 'failed'
@@ -817,6 +971,8 @@ def _queue_summary(
                 where finished_at >= now() - (:lookback_hours * interval '1 hour')
                   and status = 'failed'
                   and (:include_ignored or coalesce(metadata_json ->> 'failure_ignored', 'false') <> 'true')
+                  and (:include_archived or coalesce(metadata_json ->> 'archived', 'false') <> 'true')
+                  and (:include_test_data or coalesce(metadata_json ->> 'is_test_data', 'false') <> 'true')
               )::int as recent_failed_count,
               min(run_after) filter (where status in ('queued', 'retry_waiting'))::text as next_run_after,
               max(updated_at)::text as last_updated_at
@@ -831,6 +987,8 @@ def _queue_summary(
             "workspace_id": DEFAULT_WORKSPACE_ID,
             "lookback_hours": lookback_hours,
             "include_ignored": include_ignored,
+            "include_archived": include_archived,
+            "include_test_data": include_test_data,
         },
     ).mappings().all()
     queue_map = {str(row["queue_name"]): dict(row) for row in rows}
@@ -841,6 +999,8 @@ def _queue_summary(
             queue_name=queue_name,
             row=queue_map.get(queue_name),
             include_ignored=include_ignored,
+            include_archived=include_archived,
+            include_test_data=include_test_data,
             lookback_hours=lookback_hours,
         )
         for queue_name in queue_names
@@ -861,6 +1021,8 @@ def _failure_summary(
     lookback_hours: int,
     limit: int,
     include_ignored: bool = False,
+    include_archived: bool = False,
+    include_test_data: bool = False,
 ) -> dict[str, Any]:
     params = {
         "team_id": DEFAULT_TEAM_ID,
@@ -868,6 +1030,8 @@ def _failure_summary(
         "lookback_hours": lookback_hours,
         "limit": limit,
         "include_ignored": include_ignored,
+        "include_archived": include_archived,
+        "include_test_data": include_test_data,
     }
     by_queue_rows = db.execute(
         text(
@@ -878,6 +1042,8 @@ def _failure_summary(
               and workspace_id = :workspace_id
               and status = 'failed'
               and (:include_ignored or coalesce(metadata_json ->> 'failure_ignored', 'false') <> 'true')
+              and (:include_archived or coalesce(metadata_json ->> 'archived', 'false') <> 'true')
+              and (:include_test_data or coalesce(metadata_json ->> 'is_test_data', 'false') <> 'true')
               and updated_at >= now() - (:lookback_hours * interval '1 hour')
             group by queue_name
             order by failed_count desc, latest_failed_at desc
@@ -895,6 +1061,8 @@ def _failure_summary(
               and workspace_id = :workspace_id
               and status = 'failed'
               and (:include_ignored or coalesce(metadata_json ->> 'failure_ignored', 'false') <> 'true')
+              and (:include_archived or coalesce(metadata_json ->> 'archived', 'false') <> 'true')
+              and (:include_test_data or coalesce(metadata_json ->> 'is_test_data', 'false') <> 'true')
               and updated_at >= now() - (:lookback_hours * interval '1 hour')
             group by job_type, queue_name
             order by failed_count desc, latest_failed_at desc
@@ -915,6 +1083,8 @@ def _failure_summary(
               and workspace_id = :workspace_id
               and status = 'failed'
               and (:include_ignored or coalesce(metadata_json ->> 'failure_ignored', 'false') <> 'true')
+              and (:include_archived or coalesce(metadata_json ->> 'archived', 'false') <> 'true')
+              and (:include_test_data or coalesce(metadata_json ->> 'is_test_data', 'false') <> 'true')
               and updated_at >= now() - (:lookback_hours * interval '1 hour')
             order by updated_at desc
             limit :limit
@@ -931,6 +1101,8 @@ def _failure_summary(
         "generated_at": generated_at,
         "lookback_hours": lookback_hours,
         "include_ignored": include_ignored,
+        "include_archived": include_archived,
+        "include_test_data": include_test_data,
         "totals": totals,
         "by_queue": by_queue,
         "by_job_type": by_job_type,
@@ -959,6 +1131,9 @@ def _failure_job_type_item(row: dict[str, Any]) -> dict[str, Any]:
 def _compact_failure_job(row: dict[str, Any]) -> dict[str, Any]:
     compact = _compact_queue_job(row)
     ignored = _job_failure_ignored(row)
+    archived = _job_archived(row)
+    test_data = _job_test_data(row)
+    metadata_json = row.get("metadata_json") or {}
     can_retry = row.get("status") in {"failed", "cancelled"}
     failure_category = _failure_category(row.get("error_code"), row.get("error_message"))
     compact["error_code"] = row.get("error_code")
@@ -969,13 +1144,23 @@ def _compact_failure_job(row: dict[str, Any]) -> dict[str, Any]:
     compact["error_message"] = _truncate_text(row.get("error_message"), 500)
     compact["related_entity_ref"] = _debug_ref(row.get("entity_type"), row.get("entity_id")) if row.get("entity_type") and row.get("entity_id") else None
     compact["ignored"] = ignored
-    compact["ignore_reason"] = (row.get("metadata_json") or {}).get("failure_ignore_reason")
-    compact["ignored_at"] = (row.get("metadata_json") or {}).get("failure_ignored_at")
+    compact["ignore_reason"] = metadata_json.get("failure_ignore_reason")
+    compact["ignored_at"] = metadata_json.get("failure_ignored_at")
+    compact["archived"] = archived
+    compact["archive_reason"] = metadata_json.get("archive_reason")
+    compact["archived_at"] = metadata_json.get("archived_at")
+    compact["is_test_data"] = test_data
+    compact["test_data_label"] = metadata_json.get("test_data_label")
+    compact["test_data_reason"] = metadata_json.get("test_data_reason")
     compact["can_retry"] = can_retry
     compact["retry_route"] = f"/background-jobs/{row['id']}/retry" if can_retry else None
     compact["retry_preview_route"] = f"/background-jobs/{row['id']}/retry-preview" if can_retry else None
     compact["ignore_route"] = None if ignored else f"/background-jobs/{row['id']}/ignore"
     compact["unignore_route"] = f"/background-jobs/{row['id']}/unignore" if ignored else None
+    compact["archive_route"] = None if archived else f"/background-jobs/{row['id']}/archive"
+    compact["unarchive_route"] = f"/background-jobs/{row['id']}/unarchive" if archived else None
+    compact["mark_test_data_route"] = None if test_data else f"/background-jobs/{row['id']}/mark-test-data"
+    compact["unmark_test_data_route"] = f"/background-jobs/{row['id']}/unmark-test-data" if test_data else None
     compact["recommended_actions"] = _failure_recommended_actions(compact)
     return compact
 
@@ -1061,6 +1246,42 @@ def _failure_recommended_actions(job: dict[str, Any]) -> list[dict[str, Any]]:
                 "method": "POST",
             }
         )
+    if job.get("archived"):
+        actions.append(
+            {
+                "key": "unarchive_job",
+                "label": "Unarchive Job",
+                "route": job.get("unarchive_route"),
+                "method": "POST",
+            }
+        )
+    else:
+        actions.append(
+            {
+                "key": "archive_job",
+                "label": "Archive Job",
+                "route": job.get("archive_route"),
+                "method": "POST",
+            }
+        )
+    if job.get("is_test_data"):
+        actions.append(
+            {
+                "key": "unmark_test_data",
+                "label": "Unmark Test Data",
+                "route": job.get("unmark_test_data_route"),
+                "method": "POST",
+            }
+        )
+    else:
+        actions.append(
+            {
+                "key": "mark_test_data",
+                "label": "Mark Test Data",
+                "route": job.get("mark_test_data_route"),
+                "method": "POST",
+            }
+        )
     return actions
 
 
@@ -1090,6 +1311,8 @@ def _queue_summary_item(
     queue_name: str,
     row: dict[str, Any] | None,
     include_ignored: bool,
+    include_archived: bool,
+    include_test_data: bool,
     lookback_hours: int,
 ) -> dict[str, Any]:
     counts = {
@@ -1116,7 +1339,13 @@ def _queue_summary_item(
         "next_run_after": row.get("next_run_after") if row else None,
         "last_updated_at": row.get("last_updated_at") if row else None,
         "next_job": _queue_next_job(db, queue_name),
-        "latest_failed_job": _queue_latest_failed_job(db, queue_name, include_ignored=include_ignored),
+        "latest_failed_job": _queue_latest_failed_job(
+            db,
+            queue_name,
+            include_ignored=include_ignored,
+            include_archived=include_archived,
+            include_test_data=include_test_data,
+        ),
         "debug_ref": {
             "route": f"/background-jobs?queue_name={queue_name}",
             "entity_type": "background_job_queue",
@@ -1158,7 +1387,14 @@ def _queue_next_job(db: Session, queue_name: str) -> dict[str, Any] | None:
     return _compact_queue_job(dict(row)) if row else None
 
 
-def _queue_latest_failed_job(db: Session, queue_name: str, *, include_ignored: bool = False) -> dict[str, Any] | None:
+def _queue_latest_failed_job(
+    db: Session,
+    queue_name: str,
+    *,
+    include_ignored: bool = False,
+    include_archived: bool = False,
+    include_test_data: bool = False,
+) -> dict[str, Any] | None:
     row = db.execute(
         text(
             """
@@ -1171,6 +1407,8 @@ def _queue_latest_failed_job(db: Session, queue_name: str, *, include_ignored: b
               and queue_name = :queue_name
               and status = 'failed'
               and (:include_ignored or coalesce(metadata_json ->> 'failure_ignored', 'false') <> 'true')
+              and (:include_archived or coalesce(metadata_json ->> 'archived', 'false') <> 'true')
+              and (:include_test_data or coalesce(metadata_json ->> 'is_test_data', 'false') <> 'true')
             order by updated_at desc
             limit 1
             """
@@ -1180,6 +1418,8 @@ def _queue_latest_failed_job(db: Session, queue_name: str, *, include_ignored: b
             "workspace_id": DEFAULT_WORKSPACE_ID,
             "queue_name": queue_name,
             "include_ignored": include_ignored,
+            "include_archived": include_archived,
+            "include_test_data": include_test_data,
         },
     ).mappings().one_or_none()
     return _compact_queue_job(dict(row)) if row else None
@@ -1206,8 +1446,24 @@ def _job_failure_ignored(row: dict[str, Any]) -> bool:
     return (row.get("metadata_json") or {}).get("failure_ignored") is True
 
 
+def _job_archived(row: dict[str, Any]) -> bool:
+    return (row.get("metadata_json") or {}).get("archived") is True
+
+
+def _job_test_data(row: dict[str, Any]) -> bool:
+    return (row.get("metadata_json") or {}).get("is_test_data") is True
+
+
 def _not_failure_ignored_sql() -> str:
     return "coalesce(metadata_json ->> 'failure_ignored', 'false') <> 'true'"
+
+
+def _not_archived_sql() -> str:
+    return "coalesce(metadata_json ->> 'archived', 'false') <> 'true'"
+
+
+def _not_test_data_sql() -> str:
+    return "coalesce(metadata_json ->> 'is_test_data', 'false') <> 'true'"
 
 
 def _queue_summary_totals(queues: list[dict[str, Any]]) -> dict[str, Any]:

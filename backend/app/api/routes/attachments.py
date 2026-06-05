@@ -16,6 +16,7 @@ from backend.app.services.attachment_storage import (
     AttachmentTooLargeError,
     save_upload_file,
 )
+from backend.app.services.image_inputs import is_supported_multimodal_image, multimodal_image_constraints
 
 router = APIRouter(prefix="/attachments", tags=["attachments"])
 
@@ -121,6 +122,8 @@ class AttachmentParseReadinessOut(BaseModel):
     storage_uri: str | None
     content_sha256: str | None
     is_binary_or_document: bool
+    multimodal_image_supported: bool
+    multimodal_image_constraints: dict[str, Any]
     blocking_reasons: list[str]
     recommended_actions: list[str]
     debug_ref: dict[str, Any]
@@ -220,6 +223,12 @@ def upload_attachment(
             storage_backend=settings.attachment_storage_backend,
             max_bytes=settings.attachment_max_upload_bytes,
             text_capture_max_bytes=settings.attachment_text_capture_max_bytes,
+            s3_endpoint_url=settings.attachment_s3_endpoint_url,
+            s3_region=settings.attachment_s3_region,
+            s3_bucket=settings.attachment_s3_bucket,
+            s3_access_key_id=settings.attachment_s3_access_key_id,
+            s3_secret_access_key=settings.attachment_s3_secret_access_key,
+            s3_force_path_style=settings.attachment_s3_force_path_style,
         )
     except AttachmentTooLargeError as exc:
         raise HTTPException(
@@ -502,6 +511,14 @@ def _attachment_parse_readiness(attachment: dict[str, Any]) -> dict[str, Any]:
     text_source, text_value = _attachment_available_text(metadata_json)
     text_available = bool(text_value)
     binary_or_document = _is_binary_or_document_attachment(attachment)
+    settings = get_settings()
+    image_supported = is_supported_multimodal_image(attachment)
+    image_constraints = multimodal_image_constraints(
+        max_count=settings.image_multimodal_max_count,
+        max_upload_bytes=settings.image_multimodal_max_upload_bytes,
+        max_side=settings.image_multimodal_max_side,
+        target_bytes=settings.image_multimodal_target_bytes,
+    )
     blocking_reasons: list[str] = []
     recommended_actions: list[str] = []
 
@@ -509,13 +526,23 @@ def _attachment_parse_readiness(attachment: dict[str, Any]) -> dict[str, Any]:
         readiness_status = "ready"
         expected_parse_status = "parsed"
         recommended_actions.append("Start OCR parsing; v0.1 will use the available text as OCR output.")
+    elif image_supported:
+        readiness_status = "ready_for_multimodal"
+        expected_parse_status = "skipped"
+        recommended_actions.append(
+            "Use business update processing with the multimodal LLM; image evidence will be recorded as model excerpts."
+        )
+        if int(attachment.get("file_size") or 0) > settings.image_multimodal_max_upload_bytes:
+            readiness_status = "blocked"
+            blocking_reasons.append("Image exceeds the multimodal per-image upload limit.")
+            recommended_actions.append("Compress the image before processing.")
     elif binary_or_document:
         readiness_status = "blocked"
         expected_parse_status = "skipped"
         blocking_reasons.append("No extracted text is available for this binary/document attachment.")
-        blocking_reasons.append("Real OCR requires durable object storage and an OCR provider integration.")
+        blocking_reasons.append("PDF OCR requires object storage and the configured OCR provider.")
         recommended_actions.append("Upload a text-like file or provide mock_extracted_text for current testing.")
-        recommended_actions.append("Configure object storage and a real OCR provider before parsing PDF/image/Office files.")
+        recommended_actions.append("For PDFs, start OCR; text PDFs are extracted locally and scanned PDFs use Doc2X.")
     else:
         readiness_status = "needs_text"
         expected_parse_status = "skipped"
@@ -534,6 +561,8 @@ def _attachment_parse_readiness(attachment: dict[str, Any]) -> dict[str, Any]:
         "storage_uri": metadata_json.get("storage_uri") or attachment.get("storage_path"),
         "content_sha256": metadata_json.get("content_sha256"),
         "is_binary_or_document": binary_or_document,
+        "multimodal_image_supported": image_supported,
+        "multimodal_image_constraints": image_constraints,
         "blocking_reasons": blocking_reasons,
         "recommended_actions": recommended_actions,
         "debug_ref": _debug_ref("attachment", attachment["id"]),

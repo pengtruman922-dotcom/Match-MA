@@ -143,7 +143,7 @@ def test_attachment_parse_readiness_blocks_binary_without_text() -> None:
     assert readiness["can_parse_now"] is False
     assert readiness["expected_parse_status"] == "skipped"
     assert readiness["is_binary_or_document"] is True
-    assert "Real OCR requires durable object storage" in readiness["blocking_reasons"][1]
+    assert "PDF OCR requires object storage" in readiness["blocking_reasons"][1]
 
 
 def test_attachment_parse_readiness_needs_text_for_non_binary_without_text() -> None:
