@@ -47,6 +47,7 @@ def test_explicit_attachment_storage_backend_wins(monkeypatch) -> None:
 
 
 def test_attachment_s3_region_normalizes_railway_placeholder() -> None:
-    settings = Settings(attachment_s3_region="<auto>")
+    settings = Settings(attachment_s3_region="<auto>", attachment_s3_endpoint_url="<https://t3.storageapi.dev>")
 
     assert settings.effective_attachment_s3_region == "auto"
+    assert settings.effective_attachment_s3_endpoint_url == "https://t3.storageapi.dev"
