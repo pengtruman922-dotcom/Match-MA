@@ -253,6 +253,17 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
             "pdf_text_detection_page_limit": settings.pdf_text_detection_page_limit,
             "pdf_text_detection_min_chars": settings.pdf_text_detection_min_chars,
         },
+        "business_update_upload": {
+            "supported_input_types": ["text", "screenshot", "attachment", "mixed"],
+            "max_upload_bytes_per_attachment": settings.attachment_max_upload_bytes,
+            "image_supported_types": ["image/jpeg", "image/png", "image/webp"],
+            "image_max_count_per_business_update": settings.image_multimodal_max_count,
+            "image_max_upload_bytes_per_image": settings.image_multimodal_max_upload_bytes,
+            "image_model_preprocess_max_side_px": settings.image_multimodal_max_side,
+            "image_model_preprocess_target_bytes": settings.image_multimodal_target_bytes,
+            "image_ocr_policy": "Images are linked as multimodal LLM evidence and are not sent to OCR.",
+            "pdf_policy": "Text PDFs are extracted locally; scanned PDFs are sent to Doc2X when OCR_PROVIDER=doc2x.",
+        },
     }
 
 
