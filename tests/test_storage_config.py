@@ -44,3 +44,9 @@ def test_explicit_attachment_storage_backend_wins(monkeypatch) -> None:
     settings = Settings(attachment_storage_backend="local")
 
     assert settings.effective_attachment_storage_backend == "local"
+
+
+def test_attachment_s3_region_normalizes_railway_placeholder() -> None:
+    settings = Settings(attachment_s3_region="<auto>")
+
+    assert settings.effective_attachment_s3_region == "auto"
