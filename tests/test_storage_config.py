@@ -54,6 +54,6 @@ def test_attachment_s3_region_normalizes_railway_placeholder() -> None:
 
 
 def test_doc2x_api_key_normalizes_bearer_prefix_and_placeholders() -> None:
-    settings = Settings(doc2x_api_key="<Bearer sk-test>")
+    settings = Settings(doc2x_api_key='"<Authorization: Bearer sk-test>"')
 
     assert settings.effective_doc2x_api_key == "sk-test"

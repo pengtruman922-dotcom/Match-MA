@@ -172,16 +172,27 @@ def _normalize_s3_text(value: str | None) -> str | None:
 
 
 def _normalize_secret_text(value: str | None) -> str | None:
-    normalized = _normalize_s3_text(value)
+    normalized = value.strip() if value is not None else None
     if not normalized:
         return None
-    if normalized.lower().startswith("bearer "):
-        normalized = normalized[7:].strip()
-    if (
-        (normalized.startswith('"') and normalized.endswith('"'))
-        or (normalized.startswith("'") and normalized.endswith("'"))
-    ):
-        normalized = normalized[1:-1].strip()
+
+    # Railway variable values are often pasted with surrounding angle brackets,
+    # quotes, or a full Authorization header; normalize those without logging.
+    for _ in range(3):
+        previous = normalized
+        normalized = normalized.strip().strip("<>").strip()
+        if (
+            (normalized.startswith('"') and normalized.endswith('"'))
+            or (normalized.startswith("'") and normalized.endswith("'"))
+        ):
+            normalized = normalized[1:-1].strip()
+        lowered = normalized.lower()
+        if lowered.startswith("authorization:"):
+            normalized = normalized.split(":", 1)[1].strip()
+        if normalized.lower().startswith("bearer "):
+            normalized = normalized[7:].strip()
+        if normalized == previous:
+            break
     return normalized or None
 
 
