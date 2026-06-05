@@ -90,7 +90,7 @@ class Settings(BaseSettings):
 
     @property
     def effective_attachment_s3_region(self) -> str:
-        return (
+        return _normalize_s3_region(
             self.attachment_s3_region
             or _first_env("S3_REGION", "AWS_REGION", "AWS_DEFAULT_REGION", "BUCKET_REGION")
             or "auto"
@@ -141,6 +141,11 @@ def _first_env(*names: str) -> str | None:
         if value and value.strip():
             return value.strip()
     return None
+
+
+def _normalize_s3_region(value: str | None) -> str:
+    region = (value or "auto").strip().strip("<>").strip()
+    return region or "auto"
 
 
 @lru_cache
