@@ -162,6 +162,8 @@ export const backgroundJobs = {
     entity_type?: string;
     entity_id?: string;
     include_ignored?: boolean;
+    include_archived?: boolean;
+    include_test_data?: boolean;
     limit?: number;
     offset?: number;
   }) =>
@@ -176,9 +178,34 @@ export const backgroundJobs = {
       body: JSON.stringify({ reason: reason || null }),
     }),
   unignore: (id: string) => apiRequest<BackgroundJob>(`/background-jobs/${id}/unignore`, { method: 'POST' }),
-  summaryFailures: (params?: { lookback_hours?: number; limit?: number; include_ignored?: boolean }) =>
+  archive: (id: string, reason?: string) =>
+    apiRequest<BackgroundJob>(`/background-jobs/${id}/archive`, {
+      method: 'POST',
+      body: JSON.stringify({ reason: reason || null }),
+    }),
+  unarchive: (id: string) => apiRequest<BackgroundJob>(`/background-jobs/${id}/unarchive`, { method: 'POST' }),
+  markTestData: (id: string, data?: { label?: string; reason?: string }) =>
+    apiRequest<BackgroundJob>(`/background-jobs/${id}/mark-test-data`, {
+      method: 'POST',
+      body: JSON.stringify({ label: data?.label || null, reason: data?.reason || null }),
+    }),
+  unmarkTestData: (id: string) =>
+    apiRequest<BackgroundJob>(`/background-jobs/${id}/unmark-test-data`, { method: 'POST' }),
+  summaryFailures: (params?: {
+    lookback_hours?: number;
+    limit?: number;
+    include_ignored?: boolean;
+    include_archived?: boolean;
+    include_test_data?: boolean;
+  }) =>
     apiRequest<FailureSummary>(`/background-jobs/summary/failures${buildQuery(params || {})}`),
-  summaryQueues: (params?: { include_empty?: boolean; include_ignored?: boolean; lookback_hours?: number }) =>
+  summaryQueues: (params?: {
+    include_empty?: boolean;
+    include_ignored?: boolean;
+    include_archived?: boolean;
+    include_test_data?: boolean;
+    lookback_hours?: number;
+  }) =>
     apiRequest<QueueSummary>(`/background-jobs/summary/queues${buildQuery(params || {})}`),
 };
 

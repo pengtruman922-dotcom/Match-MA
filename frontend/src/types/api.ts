@@ -399,11 +399,21 @@ export interface BackgroundJobFailure extends BackgroundJobCompact {
   ignored: boolean;
   ignore_reason: string | null;
   ignored_at: string | null;
+  archived: boolean;
+  archive_reason: string | null;
+  archived_at: string | null;
+  is_test_data: boolean;
+  test_data_label: string | null;
+  test_data_reason: string | null;
   can_retry: boolean;
   retry_route: string | null;
   retry_preview_route: string | null;
   ignore_route: string | null;
   unignore_route: string | null;
+  archive_route: string | null;
+  unarchive_route: string | null;
+  mark_test_data_route: string | null;
+  unmark_test_data_route: string | null;
   recommended_actions: BackgroundJobRecommendedAction[];
 }
 
@@ -462,6 +472,8 @@ export interface FailureSummary {
   generated_at: string;
   lookback_hours: number;
   include_ignored: boolean;
+  include_archived: boolean;
+  include_test_data: boolean;
   totals: {
     failed_job_count: number;
     failed_queue_count: number;
