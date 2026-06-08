@@ -262,24 +262,38 @@ def handle_failures(*, api_base: str, token: str, args: argparse.Namespace) -> N
 
 
 def _resolve_token(api_base: str) -> str:
+    local_auth = _load_local_auth_file()
     token = _clean_secret(
         os.getenv("MATCH_MA_ADMIN_TOKEN")
         or os.getenv("MATCH_MA_ACCESS_TOKEN")
         or os.getenv("ADMIN_TOKEN")
+        or local_auth.get("token")
+        or local_auth.get("admin_token")
+        or local_auth.get("access_token")
     )
     if token:
         return token
 
-    username = os.getenv("MATCH_MA_SAMPLE_USERNAME") or os.getenv("MATCH_MA_ADMIN_USERNAME") or os.getenv("ADMIN_USERNAME") or "admin"
+    username = (
+        os.getenv("MATCH_MA_SAMPLE_USERNAME")
+        or os.getenv("MATCH_MA_ADMIN_USERNAME")
+        or os.getenv("ADMIN_USERNAME")
+        or str(local_auth.get("username") or "")
+        or "admin"
+    )
     password = _clean_secret(
         os.getenv("MATCH_MA_SAMPLE_PASSWORD")
         or os.getenv("MATCH_MA_ADMIN_PASSWORD")
         or os.getenv("ADMIN_PASSWORD")
+        or local_auth.get("password")
+        or local_auth.get("admin_password")
     )
     if not password:
         raise ApiError(
             "No auth secret found. Set MATCH_MA_ADMIN_TOKEN, or set MATCH_MA_SAMPLE_PASSWORD "
-            "(optionally MATCH_MA_SAMPLE_USERNAME) in this PowerShell session."
+            "(optionally MATCH_MA_SAMPLE_USERNAME) in this PowerShell session. You may also create "
+            ".match-ma-local-auth.json with {\"token\":\"...\"} or {\"username\":\"admin\",\"password\":\"...\"}; "
+            "this file is git-ignored."
         )
     response = _request_json(
         api_base,
@@ -292,6 +306,19 @@ def _resolve_token(api_base: str) -> str:
     if not access_token:
         raise ApiError("Login response did not include access_token.")
     return access_token
+
+
+def _load_local_auth_file() -> dict[str, Any]:
+    path = Path.cwd() / ".match-ma-local-auth.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        raise ApiError(f"Could not read {path.name}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ApiError(f"{path.name} must contain a JSON object.")
+    return data
 
 
 def _request_json(

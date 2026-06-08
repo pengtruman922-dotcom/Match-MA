@@ -7,9 +7,9 @@ __pycache__/
 .env
 .env.*
 !.env.example
+.match-ma-local-auth.json
 dist/
 build/
 *.egg-info/
 node_modules/
 frontend/dist/
-
