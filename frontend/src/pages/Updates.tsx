@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Plus, X, CheckCircle2, XCircle, Clock, Play, ChevronDown, ChevronUp } from 'lucide-react';
 import { businessUpdates, extractedActions, sellerTargets } from '../lib/api';
 import type { BusinessUpdate, ExtractedAction, SellerTarget, BusinessUpdateCreate, ExtractedActionCreate } from '../types/api';
+import BusinessUpdateReviewPanel from '../components/BusinessUpdateReviewPanel';
 
 export default function Updates() {
   const [updates, setUpdates] = useState<BusinessUpdate[]>([]);
@@ -101,6 +102,8 @@ export default function Updates() {
                   )}
                 </div>
               </div>
+
+              <BusinessUpdateReviewPanel businessUpdateId={selectedUpdate.id} onProcessed={fetchData} />
 
               {/* Extracted Actions */}
               <div className="bg-white border border-gray-200">

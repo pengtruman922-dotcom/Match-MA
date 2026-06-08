@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     doc2x_max_wait_seconds: int = 900
     pdf_text_detection_page_limit: int = 5
     pdf_text_detection_min_chars: int = 200
+    business_update_max_upload_files: int = 10
     image_multimodal_max_count: int = 5
     image_multimodal_max_upload_bytes: int = 10 * 1024 * 1024
     image_multimodal_max_side: int = 1600
