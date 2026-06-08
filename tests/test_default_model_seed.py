@@ -17,6 +17,26 @@ def test_business_update_extractor_timeout_seed_allows_long_attachment_jobs() ->
     assert "qwen3.6-plus attachment-backed business updates" in sql
 
 
+def test_buyer_intent_prompt_seed_includes_expanded_requirement_fields() -> None:
+    sql = Path("database/migrations/015_buyer_intent_prompt_v03.sql").read_text(encoding="utf-8")
+
+    assert "buyer_intent_parser" in sql
+    assert "listing_board_requirement_summary" in sql
+    assert "financing_stage_requirement_summary" in sql
+    assert "min_market_cap_yuan" in sql
+    assert "max_debt_ratio" in sql
+    assert "major_risk_tolerance_summary" in sql
+
+
+def test_business_update_prompt_seed_allows_expanded_buyer_intent_fields() -> None:
+    sql = Path("database/migrations/016_business_update_extractor_prompt_v04.sql").read_text(encoding="utf-8")
+
+    assert "business_update_extractor" in sql
+    assert "buyer_intent_update" in sql
+    assert "transaction_types_json" in sql
+    assert "buyer_industry_advantage_summary" in sql
+
+
 def test_meta_ai_infra_status_checks_qwen36_plus() -> None:
     source = Path("backend/app/api/routes/meta.py").read_text(encoding="utf-8")
 

@@ -1665,10 +1665,15 @@ def _buyer_intents_by_ids(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
               bi.intent_summary, bi.industry_primary, bi.industry_secondary,
               bi.region_scope_summary, bi.min_revenue_yuan, bi.min_net_profit_yuan,
               bi.min_total_profit_yuan, bi.max_pe, bi.max_valuation_yuan,
+              bi.min_market_cap_yuan, bi.max_market_cap_yuan, bi.market_cap_range_summary,
               bi.requires_control, bi.requires_consolidation, bi.accepts_minority_investment,
               bi.desired_equity_ratio_min, bi.desired_equity_ratio_max,
               bi.equity_ratio_summary, bi.equity_requirement_type,
-              bi.preferred_listed_status, bi.transaction_type,
+              bi.preferred_listed_status, bi.listing_board_requirement_summary,
+              bi.financing_stage_requirement_summary, bi.transaction_type,
+              bi.transaction_types_json, bi.premium_tolerance_summary, bi.max_premium_rate,
+              bi.max_debt_ratio, bi.debt_ratio_requirement_summary,
+              bi.major_risk_tolerance_summary, bi.buyer_industry_advantage_summary,
               bi.negative_summary, bi.priority_summary, bi.preference_summary,
               bi.unknown_summary, bi.updated_at::text as updated_at
             from buyer_intent bi

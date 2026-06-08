@@ -2097,6 +2097,8 @@ def _candidate_targets_for_intent(
               st.current_net_profit_yuan,
               st.pe_ratio,
               st.valuation_yuan,
+              st.market_cap_yuan,
+              st.current_debt_ratio,
               st.can_control,
               st.can_consolidate,
               st.listed_status,
@@ -2205,6 +2207,9 @@ def _candidate_intents_for_target(
               bi.min_net_profit_yuan,
               bi.max_pe,
               bi.max_valuation_yuan,
+              bi.min_market_cap_yuan,
+              bi.max_market_cap_yuan,
+              bi.max_debt_ratio,
               bi.requires_control,
               bi.requires_consolidation,
               bi.accepts_minority_investment,
@@ -2370,6 +2375,44 @@ def _score_target_against_intent(
         else:
             gaps.append("估值超过买家上限")
 
+    min_market_cap = _optional_decimal(intent.get("min_market_cap_yuan"))
+    max_market_cap = _optional_decimal(intent.get("max_market_cap_yuan"))
+    target_market_cap = _optional_decimal(target.get("market_cap_yuan"))
+    if target_market_cap is not None:
+        if min_market_cap is not None and target_market_cap < min_market_cap:
+            gaps.append("市值低于买家下限")
+        elif max_market_cap is not None and target_market_cap > max_market_cap:
+            gaps.append("市值超过买家上限")
+        elif min_market_cap is not None or max_market_cap is not None:
+            score += 6
+            evidence.append("市值处于买家要求范围")
+    elif min_market_cap is not None or max_market_cap is not None:
+        gaps.append("标的市值缺失")
+
+    max_debt_ratio = _optional_decimal(intent.get("max_debt_ratio"))
+    target_debt_ratio = _optional_decimal(target.get("current_debt_ratio"))
+    if max_debt_ratio is not None and target_debt_ratio is not None:
+        if target_debt_ratio <= max_debt_ratio:
+            score += 5
+            evidence.append("负债率未超过买家上限")
+        else:
+            gaps.append("负债率超过买家上限")
+    elif max_debt_ratio is not None:
+        gaps.append("标的负债率缺失")
+
+    preferred_listed_status = intent.get("preferred_listed_status")
+    target_listed_status = target.get("listed_status")
+    if preferred_listed_status and preferred_listed_status not in {"any", "unknown"}:
+        if preferred_listed_status == target_listed_status or (
+            preferred_listed_status == "preparing_listing" and target_listed_status == "pre_ipo"
+        ):
+            score += 5
+            evidence.append("上市状态符合偏好")
+        elif target_listed_status:
+            gaps.append("上市状态不符合偏好")
+        else:
+            gaps.append("标的上市状态缺失")
+
     return min(score, 100.0), evidence, gaps
 
 
@@ -2381,7 +2424,8 @@ def _get_buyer_intent_anchor(db: Session, buyer_intent_id: UUID | None) -> dict[
               bi.id, bi.buyer_party_id, bp.buyer_name,
               bi.intent_name, bi.industry_primary, bi.industry_secondary,
               bi.region_scope_summary, bi.min_net_profit_yuan, bi.max_pe,
-              bi.max_valuation_yuan, bi.requires_control, bi.requires_consolidation,
+              bi.max_valuation_yuan, bi.min_market_cap_yuan, bi.max_market_cap_yuan,
+              bi.max_debt_ratio, bi.requires_control, bi.requires_consolidation,
               bi.accepts_minority_investment, bi.preferred_listed_status,
               bi.negative_summary, bi.preference_summary
             from buyer_intent bi
@@ -2410,7 +2454,8 @@ def _get_seller_target_anchor(db: Session, seller_target_id: UUID | None) -> dic
             select
               id, target_name, industry_primary, industry_secondary,
               headquarter_province, headquarter_city, current_net_profit_yuan,
-              pe_ratio, valuation_yuan, can_control, can_consolidate,
+              pe_ratio, valuation_yuan, market_cap_yuan, current_debt_ratio,
+              can_control, can_consolidate,
               listed_status, risk_summary, gap_summary, business_summary
             from seller_target
             where id = :seller_target_id

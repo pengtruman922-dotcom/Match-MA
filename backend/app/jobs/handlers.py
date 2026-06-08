@@ -80,6 +80,8 @@ MONEY_YUAN_FIELDS = {
     "min_net_profit_yuan",
     "min_total_profit_yuan",
     "max_valuation_yuan",
+    "min_market_cap_yuan",
+    "max_market_cap_yuan",
 }
 
 _MONEY_UNIT_YI = chr(0x4EBF)
@@ -148,8 +150,12 @@ BUYER_INTENT_CHANGE_FIELDS = {
     "region_scope_summary",
     "min_revenue_yuan",
     "min_net_profit_yuan",
+    "min_total_profit_yuan",
     "max_pe",
     "max_valuation_yuan",
+    "min_market_cap_yuan",
+    "max_market_cap_yuan",
+    "market_cap_range_summary",
     "requires_control",
     "requires_consolidation",
     "accepts_minority_investment",
@@ -158,7 +164,16 @@ BUYER_INTENT_CHANGE_FIELDS = {
     "equity_ratio_summary",
     "equity_requirement_type",
     "preferred_listed_status",
+    "listing_board_requirement_summary",
+    "financing_stage_requirement_summary",
     "transaction_type",
+    "transaction_types_json",
+    "premium_tolerance_summary",
+    "max_premium_rate",
+    "max_debt_ratio",
+    "debt_ratio_requirement_summary",
+    "major_risk_tolerance_summary",
+    "buyer_industry_advantage_summary",
     "negative_summary",
     "priority_summary",
     "preference_summary",
@@ -174,8 +189,27 @@ BUYER_INTENT_FIELD_ALIASES = {
     "min_profit": "min_net_profit_yuan",
     "profit_min": "min_net_profit_yuan",
     "max_valuation": "max_valuation_yuan",
+    "min_market_cap": "min_market_cap_yuan",
+    "max_market_cap": "max_market_cap_yuan",
+    "market_cap": "market_cap_range_summary",
     "control": "requires_control",
     "consolidation": "requires_consolidation",
+    "listing_status_requirement": "preferred_listed_status",
+    "listed_status_requirement": "preferred_listed_status",
+    "listing_board": "listing_board_requirement_summary",
+    "listing_board_requirement": "listing_board_requirement_summary",
+    "financing_stage": "financing_stage_requirement_summary",
+    "listing_stage": "financing_stage_requirement_summary",
+    "transaction_types": "transaction_types_json",
+    "deal_types": "transaction_types_json",
+    "premium": "premium_tolerance_summary",
+    "premium_tolerance": "premium_tolerance_summary",
+    "debt_ratio": "debt_ratio_requirement_summary",
+    "max_debt": "max_debt_ratio",
+    "major_risk_tolerance": "major_risk_tolerance_summary",
+    "risk_tolerance": "major_risk_tolerance_summary",
+    "buyer_advantage": "buyer_industry_advantage_summary",
+    "regional_industry_advantage": "buyer_industry_advantage_summary",
 }
 
 BUYER_SELLER_RELATION_CHANGE_FIELDS = {
@@ -247,7 +281,7 @@ BUYER_INTENT_ENUM_FIELDS = {
         "specific_range",
         "unknown",
     },
-    "preferred_listed_status": {"listed", "unlisted", "pre_ipo", "any", "unknown"},
+    "preferred_listed_status": {"listed", "preparing_listing", "pre_ipo", "unlisted", "any", "unknown"},
 }
 
 BUYER_SELLER_RELATION_ENUM_FIELDS = {
@@ -1974,10 +2008,15 @@ def _get_buyer_intent_for_parse(db: Session, buyer_intent_id: UUID) -> dict[str,
               industry_primary, industry_secondary, region_scope_summary,
               region_constraints_json, min_revenue_yuan, min_net_profit_yuan,
               min_total_profit_yuan, max_pe, max_valuation_yuan, market_cap_range_summary,
+              min_market_cap_yuan, max_market_cap_yuan,
               requires_control, requires_consolidation, accepts_minority_investment,
               desired_equity_ratio_min, desired_equity_ratio_max, equity_ratio_summary,
               equity_requirement_type, acceptable_control_paths_json,
-              preferred_listed_status, transaction_type, negative_summary,
+              preferred_listed_status, listing_board_requirement_summary,
+              financing_stage_requirement_summary, transaction_type, transaction_types_json,
+              premium_tolerance_summary, max_premium_rate, max_debt_ratio,
+              debt_ratio_requirement_summary, major_risk_tolerance_summary,
+              buyer_industry_advantage_summary, negative_summary,
               priority_summary, preference_summary, unknown_summary
             from buyer_intent
             where id = :buyer_intent_id
@@ -3456,10 +3495,14 @@ def _fetch_buyer_intents(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
               raw_requirement_text, intent_summary, industry_primary,
               industry_secondary, region_scope_summary, min_revenue_yuan,
               min_net_profit_yuan, max_pe, max_valuation_yuan,
+              min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
               requires_control, requires_consolidation,
               accepts_minority_investment, preferred_listed_status,
-              transaction_type, negative_summary, preference_summary,
-              unknown_summary
+              listing_board_requirement_summary, financing_stage_requirement_summary,
+              transaction_type, transaction_types_json, premium_tolerance_summary,
+              max_premium_rate, max_debt_ratio, debt_ratio_requirement_summary,
+              major_risk_tolerance_summary, buyer_industry_advantage_summary,
+              negative_summary, preference_summary, unknown_summary
             from buyer_intent
             where team_id = :team_id
               and workspace_id = :workspace_id
@@ -3568,6 +3611,8 @@ BUYER_INTENT_PARSE_FIELDS = {
     "min_total_profit_yuan",
     "max_pe",
     "max_valuation_yuan",
+    "min_market_cap_yuan",
+    "max_market_cap_yuan",
     "market_cap_range_summary",
     "requires_control",
     "requires_consolidation",
@@ -3578,7 +3623,16 @@ BUYER_INTENT_PARSE_FIELDS = {
     "equity_requirement_type",
     "acceptable_control_paths_json",
     "preferred_listed_status",
+    "listing_board_requirement_summary",
+    "financing_stage_requirement_summary",
     "transaction_type",
+    "transaction_types_json",
+    "premium_tolerance_summary",
+    "max_premium_rate",
+    "max_debt_ratio",
+    "debt_ratio_requirement_summary",
+    "major_risk_tolerance_summary",
+    "buyer_industry_advantage_summary",
     "negative_summary",
     "priority_summary",
     "preference_summary",
@@ -3691,6 +3745,7 @@ BUYER_INTENT_PARSE_JSON_FIELDS = {
     "parsed_requirement_json",
     "region_constraints_json",
     "acceptable_control_paths_json",
+    "transaction_types_json",
 }
 
 BUYER_INTENT_PARSE_NUMERIC_FIELDS = {
@@ -3699,6 +3754,10 @@ BUYER_INTENT_PARSE_NUMERIC_FIELDS = {
     "min_total_profit_yuan",
     "max_pe",
     "max_valuation_yuan",
+    "min_market_cap_yuan",
+    "max_market_cap_yuan",
+    "max_premium_rate",
+    "max_debt_ratio",
     "desired_equity_ratio_min",
     "desired_equity_ratio_max",
 }
@@ -4093,9 +4152,9 @@ def _diff_json_safe(original: dict[str, Any], changes: dict[str, Any]) -> dict[s
 
 def _normalize_yes_no_like(value: Any) -> str:
     normalized = str(value or "").strip().lower()
-    if normalized in {"yes", "true", "1", "是", "需要", "要求", "必须", "likely"}:
+    if normalized in {"yes", "true", "1", "是", "需要", "要求", "必须", "可以", "可接受", "接受", "likely"}:
         return "likely" if normalized == "likely" else "yes"
-    if normalized in {"no", "false", "0", "否", "不需要", "不要求"}:
+    if normalized in {"no", "false", "0", "否", "不需要", "不要求", "不可以", "不可接受", "不接受"}:
         return "no"
     return "unknown"
 
@@ -4107,6 +4166,8 @@ def _normalize_allowed_enum(value: Any, allowed: set[str]) -> str | None:
 
 def _normalize_seller_listed_status(value: Any) -> str:
     listed_status = _normalize_listed_status(value)
+    if listed_status == "preparing_listing":
+        return "pre_ipo"
     return "unknown" if listed_status == "any" else listed_status
 
 
@@ -4132,7 +4193,14 @@ def _normalize_listed_status(value: Any) -> str:
         "0",
     } or normalized in {"非上市", "未上市"}:
         return "unlisted"
-    if normalized_key in {"pre_ipo", "preipo"} or normalized in {"拟上市"}:
+    if normalized_key in {
+        "preparing_listing",
+        "preparing_to_list",
+        "planned_listing",
+        "ipo_candidate",
+    } or normalized in {"准备上市", "拟上市", "计划上市"}:
+        return "preparing_listing"
+    if normalized_key in {"pre_ipo", "preipo"}:
         return "pre_ipo"
     if normalized_key in {"any", "no_preference", "all"} or normalized in {"不限", "均可"}:
         return "any"

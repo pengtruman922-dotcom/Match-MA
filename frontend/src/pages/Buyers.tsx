@@ -122,17 +122,18 @@ function IntentsList({
               <th className="text-left px-4 py-3 font-medium text-gray-600">意向名称</th>
               <th className="text-left px-4 py-3 font-medium text-gray-600">行业</th>
               <th className="text-left px-4 py-3 font-medium text-gray-600">地区</th>
+              <th className="text-left px-4 py-3 font-medium text-gray-600">上市要求</th>
               <th className="text-right px-4 py-3 font-medium text-gray-600">利润要求</th>
-              <th className="text-right px-4 py-3 font-medium text-gray-600">PE上限</th>
+              <th className="text-right px-4 py-3 font-medium text-gray-600">市值范围</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">状态</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">操作</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {loading ? (
-              <tr><td colSpan={7} className="px-4 py-8 text-center"><div className="w-5 h-5 border-2 border-brand-600 border-t-transparent rounded-full animate-spin mx-auto" /></td></tr>
+              <tr><td colSpan={8} className="px-4 py-8 text-center"><div className="w-5 h-5 border-2 border-brand-600 border-t-transparent rounded-full animate-spin mx-auto" /></td></tr>
             ) : items.length === 0 ? (
-              <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-400">暂无买家意向</td></tr>
+              <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-400">暂无买家意向</td></tr>
             ) : items.map((item) => (
               <IntentRow
                 key={item.id}
@@ -166,11 +167,12 @@ function IntentRow({ item, expanded, onToggle }: { item: BuyerIntent; expanded: 
         </td>
         <td className="px-4 py-3 text-gray-600">{item.industry_primary || '-'}</td>
         <td className="px-4 py-3 text-gray-600">{item.region_scope_summary || '-'}</td>
+        <td className="px-4 py-3 text-gray-600">{listingRequirementLabel(item)}</td>
         <td className="px-4 py-3 text-right text-gray-600 font-mono">
           {item.min_net_profit_yuan ? `${(Number(item.min_net_profit_yuan) / 10000).toFixed(0)}万+` : '-'}
         </td>
         <td className="px-4 py-3 text-right text-gray-600 font-mono">
-          {item.max_pe ? `≤${Number(item.max_pe).toFixed(0)}` : '-'}
+          {marketCapRangeLabel(item)}
         </td>
         <td className="px-4 py-3 text-center">
           <span className={`text-xs px-2 py-0.5 font-medium ${item.status === 'active' ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-600'}`}>
@@ -196,17 +198,57 @@ function IntentRow({ item, expanded, onToggle }: { item: BuyerIntent; expanded: 
       </tr>
       {expanded && (
         <tr className="bg-gray-50/50">
-          <td colSpan={7} className="px-8 py-2.5">
-            <p className="text-xs text-gray-600 line-clamp-2">
-              {item.raw_requirement_text || item.intent_summary || '暂无摘要'}
-              {item.requires_consolidation === 'yes' && <span className="text-gray-500 ml-2">· 需并表</span>}
-              {item.buyer_party_id ? '' : <span className="text-amber-600 ml-2">· 未关联买家主体</span>}
-            </p>
+          <td colSpan={8} className="px-8 py-2.5">
+            <div className="space-y-1">
+              <p className="text-xs text-gray-600 line-clamp-2">
+                {item.raw_requirement_text || item.intent_summary || '暂无摘要'}
+                {item.requires_consolidation === 'yes' && <span className="text-gray-500 ml-2">· 需并表</span>}
+                {item.buyer_party_id ? '' : <span className="text-amber-600 ml-2">· 未关联买家主体</span>}
+              </p>
+              <p className="text-xs text-gray-500 line-clamp-1">{compactRequirementNotes(item)}</p>
+            </div>
           </td>
         </tr>
       )}
     </>
   );
+}
+
+function listingRequirementLabel(item: BuyerIntent): string {
+  const status: Record<string, string> = {
+    listed: '已上市',
+    preparing_listing: '准备上市',
+    pre_ipo: 'pre-IPO',
+    unlisted: '未上市',
+    any: '均可',
+    unknown: '未知',
+  };
+  const parts = [
+    item.preferred_listed_status ? status[item.preferred_listed_status] || item.preferred_listed_status : null,
+    item.listing_board_requirement_summary,
+    item.financing_stage_requirement_summary,
+  ].filter(Boolean);
+  return parts.length ? parts.join(' / ') : '-';
+}
+
+function marketCapRangeLabel(item: BuyerIntent): string {
+  if (item.market_cap_range_summary) return item.market_cap_range_summary;
+  const min = item.min_market_cap_yuan ? `${(Number(item.min_market_cap_yuan) / 100000000).toFixed(1)}亿` : '';
+  const max = item.max_market_cap_yuan ? `${(Number(item.max_market_cap_yuan) / 100000000).toFixed(1)}亿` : '';
+  if (min && max) return `${min}-${max}`;
+  if (min) return `≥${min}`;
+  if (max) return `≤${max}`;
+  return '-';
+}
+
+function compactRequirementNotes(item: BuyerIntent): string {
+  const parts = [
+    item.max_debt_ratio ? `负债率≤${Number(item.max_debt_ratio).toFixed(0)}%` : null,
+    item.max_premium_rate ? `溢价≤${Number(item.max_premium_rate).toFixed(0)}%` : item.premium_tolerance_summary,
+    item.major_risk_tolerance_summary,
+    item.buyer_industry_advantage_summary,
+  ].filter(Boolean);
+  return parts.length ? parts.join(' · ') : '暂无补充约束';
 }
 
 function PartiesList({
@@ -578,13 +620,57 @@ function CreateIntentModal({ onClose, onCreated }: { onClose: () => void; onCrea
               <input type="number" value={form.max_pe || ''} onChange={(e) => setForm({ ...form, max_pe: Number(e.target.value) || undefined })} className="input" placeholder="13" />
             </Field>
           </div>
-          <Field label="并表要求">
-            <select value={form.requires_consolidation || ''} onChange={(e) => setForm({ ...form, requires_consolidation: e.target.value })} className="input">
-              <option value="">未明确</option>
-              <option value="yes">需要并表</option>
-              <option value="no">不需要并表</option>
-              <option value="unknown">未知</option>
-            </select>
+          <div className="grid grid-cols-2 gap-4">
+            <Field label="最低市值 (元)">
+              <input type="number" value={form.min_market_cap_yuan || ''} onChange={(e) => setForm({ ...form, min_market_cap_yuan: Number(e.target.value) || undefined })} className="input" placeholder="500000000" />
+            </Field>
+            <Field label="最高市值 (元)">
+              <input type="number" value={form.max_market_cap_yuan || ''} onChange={(e) => setForm({ ...form, max_market_cap_yuan: Number(e.target.value) || undefined })} className="input" placeholder="3000000000" />
+            </Field>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <Field label="上市状态">
+              <select value={form.preferred_listed_status || ''} onChange={(e) => setForm({ ...form, preferred_listed_status: e.target.value || undefined })} className="input">
+                <option value="">未明确</option>
+                <option value="listed">已上市</option>
+                <option value="preparing_listing">准备上市</option>
+                <option value="unlisted">未上市</option>
+                <option value="any">均可</option>
+                <option value="unknown">未知</option>
+              </select>
+            </Field>
+            <Field label="并表要求">
+              <select value={form.requires_consolidation || ''} onChange={(e) => setForm({ ...form, requires_consolidation: e.target.value || undefined })} className="input">
+                <option value="">未明确</option>
+                <option value="yes">需要并表</option>
+                <option value="no">不需要并表</option>
+                <option value="unknown">未知</option>
+              </select>
+            </Field>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <Field label="上市板块">
+              <input type="text" value={form.listing_board_requirement_summary || ''} onChange={(e) => setForm({ ...form, listing_board_requirement_summary: e.target.value })} className="input" placeholder="主板 / 创业板 / 科创板 / 北交所" />
+            </Field>
+            <Field label="阶段明细">
+              <input type="text" value={form.financing_stage_requirement_summary || ''} onChange={(e) => setForm({ ...form, financing_stage_requirement_summary: e.target.value })} className="input" placeholder="pre-IPO / A轮 / 辅导备案" />
+            </Field>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <Field label="溢价上限 (%)">
+              <input type="number" value={form.max_premium_rate || ''} onChange={(e) => setForm({ ...form, max_premium_rate: Number(e.target.value) || undefined })} className="input" placeholder="20" />
+            </Field>
+            <Field label="负债率上限 (%)">
+              <input type="number" value={form.max_debt_ratio || ''} onChange={(e) => setForm({ ...form, max_debt_ratio: Number(e.target.value) || undefined })} className="input" placeholder="65" />
+            </Field>
+          </div>
+          <Field label="其他要求 / 排除项">
+            <textarea
+              value={form.negative_summary || ''}
+              onChange={(e) => setForm({ ...form, negative_summary: e.target.value })}
+              className="input min-h-[60px] resize-y"
+              placeholder="例如：不接受重大诉讼、冻结、执行或违规违法风险"
+            />
           </Field>
           <div className="flex justify-between pt-2">
             <button type="button" onClick={() => setStep('buyer_link')} className="px-3 py-2 text-sm border border-gray-200 text-gray-700">返回</button>

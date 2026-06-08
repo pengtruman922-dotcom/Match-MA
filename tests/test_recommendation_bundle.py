@@ -5,6 +5,7 @@ from backend.app.api.routes.recommendations import (
     _enrich_candidates_with_selection,
     _extract_recommendation_candidate_sets,
     _optional_uuid,
+    _score_target_against_intent,
     _with_frontend_candidate_fields,
 )
 
@@ -130,6 +131,40 @@ def test_frontend_candidate_fields_include_score_breakdown() -> None:
     assert candidate["score_breakdown"]["rule_score"] == 80
     assert "embedding" in candidate["display_badges"]
     assert "reranked" in candidate["display_badges"]
+
+
+def test_score_target_against_intent_uses_expanded_buyer_filters() -> None:
+    score, evidence, gaps = _score_target_against_intent(
+        {
+            "industry_primary": "医药健康",
+            "headquarter_province": "浙江省",
+            "current_net_profit_yuan": 30_000_000,
+            "pe_ratio": 12,
+            "valuation_yuan": 800_000_000,
+            "market_cap_yuan": 1_200_000_000,
+            "current_debt_ratio": 55,
+            "can_consolidate": "yes",
+            "listed_status": "pre_ipo",
+        },
+        {
+            "industry_primary": "医药健康",
+            "region_scope_summary": "浙江省优先",
+            "min_net_profit_yuan": 20_000_000,
+            "max_pe": 13,
+            "max_valuation_yuan": 1_000_000_000,
+            "min_market_cap_yuan": 500_000_000,
+            "max_market_cap_yuan": 3_000_000_000,
+            "max_debt_ratio": 65,
+            "requires_consolidation": "yes",
+            "preferred_listed_status": "preparing_listing",
+        },
+    )
+
+    assert score > 80
+    assert "市值处于买家要求范围" in evidence
+    assert "负债率未超过买家上限" in evidence
+    assert "上市状态符合偏好" in evidence
+    assert gaps == []
 
 
 def test_rerank_status_without_job_is_not_requested() -> None:

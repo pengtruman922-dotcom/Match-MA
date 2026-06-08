@@ -33,6 +33,8 @@ class BuyerIntentCreate(BaseModel):
     min_total_profit_yuan: Decimal | None = None
     max_pe: Decimal | None = None
     max_valuation_yuan: Decimal | None = None
+    min_market_cap_yuan: Decimal | None = None
+    max_market_cap_yuan: Decimal | None = None
     market_cap_range_summary: str | None = None
     requires_control: str = "unknown"
     requires_consolidation: str = "unknown"
@@ -43,7 +45,16 @@ class BuyerIntentCreate(BaseModel):
     equity_requirement_type: str | None = None
     acceptable_control_paths_json: list[Any] | dict[str, Any] | None = None
     preferred_listed_status: str | None = "unknown"
+    listing_board_requirement_summary: str | None = None
+    financing_stage_requirement_summary: str | None = None
     transaction_type: str | None = None
+    transaction_types_json: list[Any] | dict[str, Any] | None = None
+    premium_tolerance_summary: str | None = None
+    max_premium_rate: Decimal | None = None
+    max_debt_ratio: Decimal | None = None
+    debt_ratio_requirement_summary: str | None = None
+    major_risk_tolerance_summary: str | None = None
+    buyer_industry_advantage_summary: str | None = None
     negative_summary: str | None = None
     priority_summary: str | None = None
     preference_summary: str | None = None
@@ -68,6 +79,8 @@ class BuyerIntentOut(BaseModel):
     min_total_profit_yuan: Decimal | None
     max_pe: Decimal | None
     max_valuation_yuan: Decimal | None
+    min_market_cap_yuan: Decimal | None
+    max_market_cap_yuan: Decimal | None
     market_cap_range_summary: str | None
     requires_control: str
     requires_consolidation: str
@@ -78,7 +91,16 @@ class BuyerIntentOut(BaseModel):
     equity_requirement_type: str | None
     acceptable_control_paths_json: list[Any] | dict[str, Any]
     preferred_listed_status: str | None
+    listing_board_requirement_summary: str | None
+    financing_stage_requirement_summary: str | None
     transaction_type: str | None
+    transaction_types_json: list[Any] | dict[str, Any]
+    premium_tolerance_summary: str | None
+    max_premium_rate: Decimal | None
+    max_debt_ratio: Decimal | None
+    debt_ratio_requirement_summary: str | None
+    major_risk_tolerance_summary: str | None
+    buyer_industry_advantage_summary: str | None
     negative_summary: str | None
     priority_summary: str | None
     preference_summary: str | None
@@ -104,6 +126,8 @@ class BuyerIntentUpdate(BaseModel):
     min_total_profit_yuan: Decimal | None = None
     max_pe: Decimal | None = None
     max_valuation_yuan: Decimal | None = None
+    min_market_cap_yuan: Decimal | None = None
+    max_market_cap_yuan: Decimal | None = None
     market_cap_range_summary: str | None = None
     requires_control: str | None = None
     requires_consolidation: str | None = None
@@ -114,7 +138,16 @@ class BuyerIntentUpdate(BaseModel):
     equity_requirement_type: str | None = None
     acceptable_control_paths_json: list[Any] | dict[str, Any] | None = None
     preferred_listed_status: str | None = None
+    listing_board_requirement_summary: str | None = None
+    financing_stage_requirement_summary: str | None = None
     transaction_type: str | None = None
+    transaction_types_json: list[Any] | dict[str, Any] | None = None
+    premium_tolerance_summary: str | None = None
+    max_premium_rate: Decimal | None = None
+    max_debt_ratio: Decimal | None = None
+    debt_ratio_requirement_summary: str | None = None
+    major_risk_tolerance_summary: str | None = None
+    buyer_industry_advantage_summary: str | None = None
     negative_summary: str | None = None
     priority_summary: str | None = None
     preference_summary: str | None = None
@@ -153,12 +186,16 @@ def create_buyer_intent(payload: BuyerIntentCreate, db: Session = Depends(get_db
               parsed_requirement_json, industry_primary, industry_secondary,
               region_scope_summary, region_constraints_json,
               min_revenue_yuan, min_net_profit_yuan, min_total_profit_yuan,
-              max_pe, max_valuation_yuan, market_cap_range_summary,
+              max_pe, max_valuation_yuan, min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
               requires_control, requires_consolidation, accepts_minority_investment,
               desired_equity_ratio_min, desired_equity_ratio_max, equity_ratio_summary,
               equity_requirement_type, acceptable_control_paths_json,
-              preferred_listed_status, transaction_type,
-              negative_summary, priority_summary, preference_summary, unknown_summary,
+              preferred_listed_status, listing_board_requirement_summary,
+              financing_stage_requirement_summary, transaction_type, transaction_types_json,
+              premium_tolerance_summary, max_premium_rate, max_debt_ratio,
+              debt_ratio_requirement_summary, major_risk_tolerance_summary,
+              buyer_industry_advantage_summary, negative_summary, priority_summary,
+              preference_summary, unknown_summary,
               created_by, updated_by
             )
             values (
@@ -167,12 +204,16 @@ def create_buyer_intent(payload: BuyerIntentCreate, db: Session = Depends(get_db
               :parsed_requirement_json, :industry_primary, :industry_secondary,
               :region_scope_summary, :region_constraints_json,
               :min_revenue_yuan, :min_net_profit_yuan, :min_total_profit_yuan,
-              :max_pe, :max_valuation_yuan, :market_cap_range_summary,
+              :max_pe, :max_valuation_yuan, :min_market_cap_yuan, :max_market_cap_yuan, :market_cap_range_summary,
               :requires_control, :requires_consolidation, :accepts_minority_investment,
               :desired_equity_ratio_min, :desired_equity_ratio_max, :equity_ratio_summary,
               :equity_requirement_type, :acceptable_control_paths_json,
-              :preferred_listed_status, :transaction_type,
-              :negative_summary, :priority_summary, :preference_summary, :unknown_summary,
+              :preferred_listed_status, :listing_board_requirement_summary,
+              :financing_stage_requirement_summary, :transaction_type, :transaction_types_json,
+              :premium_tolerance_summary, :max_premium_rate, :max_debt_ratio,
+              :debt_ratio_requirement_summary, :major_risk_tolerance_summary,
+              :buyer_industry_advantage_summary, :negative_summary, :priority_summary,
+              :preference_summary, :unknown_summary,
               :created_by, :updated_by
             )
             returning
@@ -181,10 +222,15 @@ def create_buyer_intent(payload: BuyerIntentCreate, db: Session = Depends(get_db
               industry_primary, industry_secondary, region_scope_summary,
               region_constraints_json, min_revenue_yuan, min_net_profit_yuan,
               min_total_profit_yuan, max_pe, max_valuation_yuan,
-              market_cap_range_summary, requires_control, requires_consolidation,
+              min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
+              requires_control, requires_consolidation,
               accepts_minority_investment, desired_equity_ratio_min,
               desired_equity_ratio_max, equity_ratio_summary, equity_requirement_type,
-              acceptable_control_paths_json, preferred_listed_status, transaction_type,
+              acceptable_control_paths_json, preferred_listed_status,
+              listing_board_requirement_summary, financing_stage_requirement_summary,
+              transaction_type, transaction_types_json, premium_tolerance_summary,
+              max_premium_rate, max_debt_ratio, debt_ratio_requirement_summary,
+              major_risk_tolerance_summary, buyer_industry_advantage_summary,
               negative_summary, priority_summary, preference_summary, unknown_summary,
               created_at::text as created_at, updated_at::text as updated_at
             """
@@ -192,6 +238,7 @@ def create_buyer_intent(payload: BuyerIntentCreate, db: Session = Depends(get_db
             bindparam("parsed_requirement_json", type_=JSONB),
             bindparam("region_constraints_json", type_=JSONB),
             bindparam("acceptable_control_paths_json", type_=JSONB),
+            bindparam("transaction_types_json", type_=JSONB),
         ),
         _buyer_intent_params(payload),
     ).mappings().one()
@@ -237,10 +284,15 @@ def list_buyer_intents(
               industry_primary, industry_secondary, region_scope_summary,
               region_constraints_json, min_revenue_yuan, min_net_profit_yuan,
               min_total_profit_yuan, max_pe, max_valuation_yuan,
-              market_cap_range_summary, requires_control, requires_consolidation,
+              min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
+              requires_control, requires_consolidation,
               accepts_minority_investment, desired_equity_ratio_min,
               desired_equity_ratio_max, equity_ratio_summary, equity_requirement_type,
-              acceptable_control_paths_json, preferred_listed_status, transaction_type,
+              acceptable_control_paths_json, preferred_listed_status,
+              listing_board_requirement_summary, financing_stage_requirement_summary,
+              transaction_type, transaction_types_json, premium_tolerance_summary,
+              max_premium_rate, max_debt_ratio, debt_ratio_requirement_summary,
+              major_risk_tolerance_summary, buyer_industry_advantage_summary,
               negative_summary, priority_summary, preference_summary, unknown_summary,
               created_at::text as created_at, updated_at::text as updated_at
             from buyer_intent
@@ -404,10 +456,15 @@ def update_buyer_intent(
           industry_primary, industry_secondary, region_scope_summary,
           region_constraints_json, min_revenue_yuan, min_net_profit_yuan,
           min_total_profit_yuan, max_pe, max_valuation_yuan,
-          market_cap_range_summary, requires_control, requires_consolidation,
+          min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
+          requires_control, requires_consolidation,
           accepts_minority_investment, desired_equity_ratio_min,
           desired_equity_ratio_max, equity_ratio_summary, equity_requirement_type,
-          acceptable_control_paths_json, preferred_listed_status, transaction_type,
+          acceptable_control_paths_json, preferred_listed_status,
+          listing_board_requirement_summary, financing_stage_requirement_summary,
+          transaction_type, transaction_types_json, premium_tolerance_summary,
+          max_premium_rate, max_debt_ratio, debt_ratio_requirement_summary,
+          major_risk_tolerance_summary, buyer_industry_advantage_summary,
           negative_summary, priority_summary, preference_summary, unknown_summary,
           created_at::text as created_at, updated_at::text as updated_at
         """
@@ -416,6 +473,7 @@ def update_buyer_intent(
         "parsed_requirement_json",
         "region_constraints_json",
         "acceptable_control_paths_json",
+        "transaction_types_json",
     }
     bind_params = [bindparam(field, type_=JSONB) for field in changes if field in json_fields]
     if bind_params:
@@ -496,10 +554,15 @@ def _get_buyer_intent_or_404(db: Session, buyer_intent_id: UUID) -> dict[str, An
               industry_primary, industry_secondary, region_scope_summary,
               region_constraints_json, min_revenue_yuan, min_net_profit_yuan,
               min_total_profit_yuan, max_pe, max_valuation_yuan,
-              market_cap_range_summary, requires_control, requires_consolidation,
+              min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
+              requires_control, requires_consolidation,
               accepts_minority_investment, desired_equity_ratio_min,
               desired_equity_ratio_max, equity_ratio_summary, equity_requirement_type,
-              acceptable_control_paths_json, preferred_listed_status, transaction_type,
+              acceptable_control_paths_json, preferred_listed_status,
+              listing_board_requirement_summary, financing_stage_requirement_summary,
+              transaction_type, transaction_types_json, premium_tolerance_summary,
+              max_premium_rate, max_debt_ratio, debt_ratio_requirement_summary,
+              major_risk_tolerance_summary, buyer_industry_advantage_summary,
               negative_summary, priority_summary, preference_summary, unknown_summary,
               created_at::text as created_at, updated_at::text as updated_at
             from buyer_intent
@@ -542,6 +605,8 @@ def _buyer_intent_params(payload: BuyerIntentCreate) -> dict[str, Any]:
         "min_total_profit_yuan": payload.min_total_profit_yuan,
         "max_pe": payload.max_pe,
         "max_valuation_yuan": payload.max_valuation_yuan,
+        "min_market_cap_yuan": payload.min_market_cap_yuan,
+        "max_market_cap_yuan": payload.max_market_cap_yuan,
         "market_cap_range_summary": payload.market_cap_range_summary,
         "requires_control": payload.requires_control,
         "requires_consolidation": payload.requires_consolidation,
@@ -552,7 +617,16 @@ def _buyer_intent_params(payload: BuyerIntentCreate) -> dict[str, Any]:
         "equity_requirement_type": payload.equity_requirement_type,
         "acceptable_control_paths_json": payload.acceptable_control_paths_json or [],
         "preferred_listed_status": payload.preferred_listed_status,
+        "listing_board_requirement_summary": payload.listing_board_requirement_summary,
+        "financing_stage_requirement_summary": payload.financing_stage_requirement_summary,
         "transaction_type": payload.transaction_type,
+        "transaction_types_json": payload.transaction_types_json or [],
+        "premium_tolerance_summary": payload.premium_tolerance_summary,
+        "max_premium_rate": payload.max_premium_rate,
+        "max_debt_ratio": payload.max_debt_ratio,
+        "debt_ratio_requirement_summary": payload.debt_ratio_requirement_summary,
+        "major_risk_tolerance_summary": payload.major_risk_tolerance_summary,
+        "buyer_industry_advantage_summary": payload.buyer_industry_advantage_summary,
         "negative_summary": payload.negative_summary,
         "priority_summary": payload.priority_summary,
         "preference_summary": payload.preference_summary,

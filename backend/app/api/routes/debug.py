@@ -513,11 +513,16 @@ BUSINESS_OBJECT_SELECTS = {
           contact_name, raw_requirement_text, intent_summary, parsed_requirement_json,
           industry_primary, industry_secondary, region_scope_summary,
           region_constraints_json, min_revenue_yuan, min_net_profit_yuan,
-          min_total_profit_yuan, max_pe, max_valuation_yuan, market_cap_range_summary,
+          min_total_profit_yuan, max_pe, max_valuation_yuan,
+          min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
           requires_control, requires_consolidation, accepts_minority_investment,
           desired_equity_ratio_min, desired_equity_ratio_max, equity_ratio_summary,
           equity_requirement_type, acceptable_control_paths_json, preferred_listed_status,
-          transaction_type, negative_summary, priority_summary, preference_summary,
+          listing_board_requirement_summary, financing_stage_requirement_summary,
+          transaction_type, transaction_types_json, premium_tolerance_summary,
+          max_premium_rate, max_debt_ratio, debt_ratio_requirement_summary,
+          major_risk_tolerance_summary, buyer_industry_advantage_summary,
+          negative_summary, priority_summary, preference_summary,
           unknown_summary, created_at::text as created_at, updated_at::text as updated_at,
           metadata_json
         from buyer_intent
