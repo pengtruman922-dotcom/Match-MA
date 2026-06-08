@@ -15,6 +15,7 @@ from backend.app.jobs.handlers import (
     _build_business_update_image_context,
     _business_update_action_evidence_id,
     _business_update_raw_text_with_attachments,
+    _mark_business_update_failed_if_final_attempt,
     _parse_requested_entity_types,
     _parse_source_context,
 )
@@ -413,6 +414,45 @@ def test_business_update_action_evidence_id_skips_ambiguous_attachment_evidence(
     )
 
     assert resolved is None
+
+
+def test_business_update_retry_attempt_does_not_mark_failed() -> None:
+    db = _SqlCaptureDb()
+    job = JobClaim(
+        id=JOB_ID,
+        job_type="business_update_extract_actions",
+        queue_name="llm",
+        entity_type="business_update",
+        entity_id=BUSINESS_UPDATE_ID,
+        correlation_id=None,
+        payload_json={},
+        attempt_count=1,
+        max_attempts=3,
+    )
+
+    _mark_business_update_failed_if_final_attempt(db, job, BUSINESS_UPDATE_ID, "timeout")
+
+    assert db.sql_text == ""
+
+
+def test_business_update_final_attempt_marks_failed() -> None:
+    db = _SqlCaptureDb()
+    job = JobClaim(
+        id=JOB_ID,
+        job_type="business_update_extract_actions",
+        queue_name="llm",
+        entity_type="business_update",
+        entity_id=BUSINESS_UPDATE_ID,
+        correlation_id=None,
+        payload_json={},
+        attempt_count=3,
+        max_attempts=3,
+    )
+
+    _mark_business_update_failed_if_final_attempt(db, job, BUSINESS_UPDATE_ID, "timeout")
+
+    assert "set processing_status = 'failed'" in db.sql_text
+    assert db.params["metadata_patch"]["last_processing_result"] == "failed"
 
 
 def test_compact_child_parse_job_links_debug_refs() -> None:
