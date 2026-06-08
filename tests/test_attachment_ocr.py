@@ -1,3 +1,4 @@
+from decimal import Decimal
 from uuid import UUID
 
 from backend.app.api.routes.attachments import (
@@ -16,6 +17,7 @@ from backend.app.jobs.handlers import (
     _business_update_action_evidence_id,
     _business_update_raw_text_with_attachments,
     _mark_business_update_failed_if_final_attempt,
+    _normalize_actions,
     _parse_requested_entity_types,
     _parse_source_context,
 )
@@ -453,6 +455,64 @@ def test_business_update_final_attempt_marks_failed() -> None:
 
     assert "set processing_status = 'failed'" in db.sql_text
     assert db.params["metadata_patch"]["last_processing_result"] == "failed"
+
+
+def test_business_update_money_unit_normalization_corrects_100_yi_off_by_ten() -> None:
+    actions = _normalize_actions(
+        {
+            "actions": [
+                {
+                    "action_type": "buyer_intent_update",
+                    "target_entity_type": "buyer_intent",
+                    "target_entity_id": None,
+                    "proposed_changes_json": {
+                        "max_valuation_yuan": 100000000000,
+                        "raw_requirement_text": "市值范围：50亿元以内，可适当放宽到100亿。",
+                    },
+                    "raw_evidence_text": "市值范围\n50亿元以内，可适当放宽到100亿，具体视标的情况确定",
+                    "confidence": 0.95,
+                }
+            ]
+        },
+        {
+            "bound_seller_target_ids_json": [],
+            "bound_buyer_party_ids_json": [],
+            "bound_buyer_intent_ids_json": [],
+        },
+    )
+
+    assert actions[0]["proposed_changes_json"]["max_valuation_yuan"] == Decimal("10000000000")
+    assert actions[0]["normalization_notes"] == [
+        "max_valuation_yuan:evidence_money_unit:100000000000->10000000000"
+    ]
+
+
+def test_business_update_money_unit_normalization_leaves_matching_amount() -> None:
+    actions = _normalize_actions(
+        {
+            "actions": [
+                {
+                    "action_type": "buyer_intent_update",
+                    "target_entity_type": "buyer_intent",
+                    "target_entity_id": None,
+                    "proposed_changes_json": {
+                        "max_valuation_yuan": 1500000000,
+                        "raw_requirement_text": "预算10-15亿。",
+                    },
+                    "raw_evidence_text": "上市公司收购款预算约10-15亿，可通过并购贷操作。",
+                    "confidence": 0.95,
+                }
+            ]
+        },
+        {
+            "bound_seller_target_ids_json": [],
+            "bound_buyer_party_ids_json": [],
+            "bound_buyer_intent_ids_json": [],
+        },
+    )
+
+    assert actions[0]["proposed_changes_json"]["max_valuation_yuan"] == 1500000000
+    assert actions[0]["normalization_notes"] == []
 
 
 def test_compact_child_parse_job_links_debug_refs() -> None:

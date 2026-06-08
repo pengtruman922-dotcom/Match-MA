@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from decimal import Decimal
 from typing import Any
@@ -67,6 +68,31 @@ ALLOWED_TARGET_ENTITY_TYPES = {
 }
 
 _SKIP_FIELD = object()
+
+MONEY_YUAN_FIELDS = {
+    "market_cap_yuan",
+    "current_revenue_yuan",
+    "current_net_profit_yuan",
+    "current_total_profit_yuan",
+    "valuation_yuan",
+    "asking_price_yuan",
+    "min_revenue_yuan",
+    "min_net_profit_yuan",
+    "min_total_profit_yuan",
+    "max_valuation_yuan",
+}
+
+_MONEY_UNIT_YI = chr(0x4EBF)
+_MONEY_UNIT_WAN = chr(0x4E07)
+_MONEY_UNIT_YUAN = chr(0x5143)
+_MONEY_RANGE_SEPARATORS = "-~" + chr(0x2013) + chr(0x2014) + chr(0x81F3) + chr(0x5230)
+
+MONEY_UNIT_PATTERN = re.compile(
+    "(?<![\\d.])(\\d+(?:,\\d{3})*(?:\\.\\d+)?)"
+    f"(?:\\s*(?:[{re.escape(_MONEY_RANGE_SEPARATORS)}])\\s*(\\d+(?:,\\d{{3}})*(?:\\.\\d+)?))?"
+    f"\\s*({_MONEY_UNIT_YI}{_MONEY_UNIT_YUAN}|{_MONEY_UNIT_YI}|"
+    f"{_MONEY_UNIT_WAN}{_MONEY_UNIT_YUAN}|{_MONEY_UNIT_WAN}|{_MONEY_UNIT_YUAN})"
+)
 
 SELLER_TARGET_CHANGE_FIELDS = {
     "target_name",
@@ -4161,6 +4187,11 @@ def _normalize_actions(
             action_type,
             proposed_changes,
         )
+        money_notes = _normalize_money_fields_from_action_evidence(
+            normalized_changes,
+            action,
+        )
+        normalization_notes.extend(money_notes)
         if action_type in {"buyer_seller_relation_update", "buyer_intent_target_exclusion"}:
             relation_context_changes, relation_context_notes = _relation_context_changes(
                 business_update,
@@ -4218,6 +4249,98 @@ def _normalize_proposed_changes(
             enum_fields=BUYER_SELLER_RELATION_ENUM_FIELDS,
         )
     return proposed_changes, []
+
+
+def _normalize_money_fields_from_action_evidence(
+    changes: dict[str, Any],
+    action: dict[str, Any],
+) -> list[str]:
+    notes: list[str] = []
+    evidence_text = _action_money_evidence_text(action)
+    if not evidence_text:
+        return notes
+    evidence_amounts = _money_amounts_from_chinese_units(evidence_text)
+    if not evidence_amounts:
+        return notes
+
+    for field in MONEY_YUAN_FIELDS.intersection(changes):
+        current = _optional_decimal(changes.get(field))
+        if current is None:
+            continue
+        replacement = _closest_evidence_money_amount(current, evidence_amounts)
+        if replacement is None or replacement == current:
+            continue
+        changes[field] = _decimal_to_json_number(replacement)
+        notes.append(f"{field}:evidence_money_unit:{current}->{replacement}")
+    return notes
+
+
+def _action_money_evidence_text(action: dict[str, Any]) -> str:
+    pieces: list[str] = []
+    for key in ("raw_evidence_text", "reason"):
+        value = action.get(key)
+        if value:
+            pieces.append(str(value))
+    proposed_changes = action.get("proposed_changes_json")
+    if isinstance(proposed_changes, dict):
+        for key in ("raw_requirement_text", "intent_summary", "business_summary", "transaction_summary"):
+            value = proposed_changes.get(key)
+            if value:
+                pieces.append(str(value))
+    return "\n".join(pieces)
+
+
+def _money_amounts_from_chinese_units(text_value: str) -> list[Decimal]:
+    amounts: list[Decimal] = []
+    seen: set[Decimal] = set()
+    for match in MONEY_UNIT_PATTERN.finditer(text_value):
+        unit = match.group(3)
+        for number_text in (match.group(1), match.group(2)):
+            if not number_text:
+                continue
+            try:
+                number = Decimal(number_text.replace(",", ""))
+            except Exception:
+                continue
+            multiplier = Decimal("100000000") if unit in {"亿元", "亿"} else Decimal("10000") if unit in {"万元", "万"} else Decimal("1")
+            amount = number * multiplier
+            if amount > 0 and amount not in seen:
+                amounts.append(amount)
+                seen.add(amount)
+    return amounts
+
+
+def _closest_evidence_money_amount(current: Decimal, evidence_amounts: list[Decimal]) -> Decimal | None:
+    if current <= 0:
+        return None
+    exact_or_close = [amount for amount in evidence_amounts if _decimal_ratio(current, amount) <= Decimal("1.02")]
+    if exact_or_close:
+        return None
+    candidates = [
+        amount
+        for amount in evidence_amounts
+        if _decimal_ratio(current, amount) in {Decimal("10"), Decimal("100")}
+    ]
+    if len(candidates) != 1:
+        return None
+    return candidates[0]
+
+
+def _decimal_ratio(left: Decimal, right: Decimal) -> Decimal:
+    if left <= 0 or right <= 0:
+        return Decimal("0")
+    bigger = max(left, right)
+    smaller = min(left, right)
+    try:
+        return bigger / smaller
+    except Exception:
+        return Decimal("0")
+
+
+def _decimal_to_json_number(value: Decimal) -> int | float:
+    if value == value.to_integral_value():
+        return int(value)
+    return float(value)
 
 
 def _business_update_action_evidence_id(
