@@ -66,7 +66,7 @@ Return JSON in this shape:
     "premium_tolerance_summary": "可接受合理溢价，需视估值确认",
     "max_premium_rate": 20,
     "max_debt_ratio": 65,
-    "debt_ratio_requirement_summary": "资产负债率不高于65%",
+    "debt_ratio_requirement_summary": "资产负债率不高于65 percent",
     "major_risk_tolerance_summary": "不接受重大诉讼、冻结、执行、违规违法",
     "buyer_industry_advantage_summary": "收购方所在地有医药产业资源",
     "negative_summary": "...",
