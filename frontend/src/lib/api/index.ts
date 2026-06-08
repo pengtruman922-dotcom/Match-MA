@@ -2,6 +2,7 @@ import type {
   SellerTarget,
   SellerTargetCreate,
   SellerTargetUpdate,
+  AttachmentUploadPolicy,
   BackgroundJob,
   BackgroundJobRetryPreview,
   BusinessUpdate,
@@ -100,6 +101,10 @@ export const businessUpdates = {
       `/business-updates/${id}/process`,
       { method: 'POST' }
     ),
+};
+
+export const attachments = {
+  uploadPolicy: () => apiRequest<AttachmentUploadPolicy>('/attachments/upload-policy'),
 };
 
 export const extractedActions = {

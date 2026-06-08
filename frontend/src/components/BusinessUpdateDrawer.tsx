@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Loader2, Upload, X } from 'lucide-react';
-import { businessUpdates } from '../lib/api';
+import { AlertCircle, FileText, Image, Loader2, Upload, X } from 'lucide-react';
+import { attachments, businessUpdates } from '../lib/api';
+import type { AttachmentUploadPolicy } from '../types/api';
 
 interface Props {
   open: boolean;
@@ -29,6 +30,9 @@ export default function BusinessUpdateDrawer({
   const [boundTargetIds, setBoundTargetIds] = useState<string[]>([]);
   const [boundBuyerPartyIds, setBoundBuyerPartyIds] = useState<string[]>([]);
   const [boundIntentIds, setBoundIntentIds] = useState<string[]>([]);
+  const [uploadPolicy, setUploadPolicy] = useState<AttachmentUploadPolicy | null>(null);
+  const [policyLoading, setPolicyLoading] = useState(false);
+  const [policyError, setPolicyError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -40,6 +44,27 @@ export default function BusinessUpdateDrawer({
     setBoundIntentIds(defaultIntentId ? [defaultIntentId] : []);
     setError(null);
   }, [defaultBuyerPartyId, defaultIntentId, defaultTargetId, open]);
+
+  useEffect(() => {
+    if (!open || uploadPolicy) return;
+    let cancelled = false;
+    setPolicyLoading(true);
+    setPolicyError(null);
+    attachments
+      .uploadPolicy()
+      .then((policy) => {
+        if (!cancelled) setUploadPolicy(policy);
+      })
+      .catch((err) => {
+        if (!cancelled) setPolicyError(err instanceof Error ? err.message : '读取上传规则失败');
+      })
+      .finally(() => {
+        if (!cancelled) setPolicyLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, uploadPolicy]);
 
   if (!open) return null;
 
@@ -76,7 +101,9 @@ export default function BusinessUpdateDrawer({
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <div>
             <h2 className="text-base font-semibold text-gray-900">录入业务更新</h2>
-            <p className="mt-0.5 text-xs text-gray-500">提交后自动进入 AI 拆解，结果会进入复核工作台。</p>
+            <p className="mt-0.5 text-xs text-gray-500">
+              提交后自动进入 AI 拆解，结果会进入复核工作台。
+            </p>
           </div>
           <button onClick={onClose} className="p-1 text-gray-400 hover:text-gray-600">
             <X className="w-5 h-5" />
@@ -89,7 +116,7 @@ export default function BusinessUpdateDrawer({
             <div className="space-y-2 border border-gray-100 bg-gray-50 px-3 py-2.5">
               <ContextRow label="标的" value={defaultTargetName || '未选择'} muted={!defaultTargetName} />
               <ContextRow
-                label="买家"
+                label="买方"
                 value={defaultBuyerPartyName || '未选择'}
                 muted={!defaultBuyerPartyName}
               />
@@ -102,7 +129,7 @@ export default function BusinessUpdateDrawer({
             <textarea
               value={rawText}
               onChange={(event) => setRawText(event.target.value)}
-              placeholder="粘贴聊天记录、会议纪要、截图说明或业务进展。例如：5月28日已推荐给广工，对方希望先看财务资料。"
+              placeholder="粘贴聊天记录、会议纪要、截图说明或业务进展。例如：5月28日已推荐给广州，对方希望先看财务资料。"
               rows={9}
               className="w-full px-3 py-2.5 text-sm border border-gray-200 focus:outline-none focus:border-brand-500 placeholder:text-gray-400 resize-none"
             />
@@ -110,9 +137,12 @@ export default function BusinessUpdateDrawer({
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">附件/截图</label>
-            <div className="border border-dashed border-gray-300 px-4 py-6 text-center text-sm text-gray-400">
-              <Upload className="w-5 h-5 mx-auto mb-1.5 text-gray-300" />
-              附件上传、OCR 和解析任务已预留 Worker，前端入口后续接入。
+            <div className="border border-dashed border-gray-300 bg-gray-50 px-4 py-4 text-sm text-gray-600">
+              <div className="flex items-center gap-2 text-gray-800 font-medium">
+                <Upload className="w-4 h-4 text-brand-600" />
+                文件上传入口即将接入，当前先展示后端支持策略
+              </div>
+              <UploadPolicyCard policy={uploadPolicy} loading={policyLoading} error={policyError} />
             </div>
           </div>
 
@@ -138,6 +168,103 @@ export default function BusinessUpdateDrawer({
         </div>
       </div>
     </>
+  );
+}
+
+function UploadPolicyCard({
+  policy,
+  loading,
+  error,
+}: {
+  policy: AttachmentUploadPolicy | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  if (loading) {
+    return (
+      <div className="mt-3 flex items-center gap-2 text-xs text-gray-500">
+        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+        正在读取上传规则...
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="mt-3 flex items-start gap-2 border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+        <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+        <span>{error}</span>
+      </div>
+    );
+  }
+
+  if (!policy) {
+    return <p className="mt-3 text-xs text-gray-400">上传规则暂不可用。</p>;
+  }
+
+  const image = policy.image_policy.constraints;
+  const pdf = policy.pdf_policy.text_detection;
+  const doc2xStatus = policy.pdf_policy.scanned_pdf.doc2x_configured ? '已配置' : '未配置';
+
+  return (
+    <div className="mt-3 space-y-3">
+      <div className="grid grid-cols-2 gap-2">
+        <PolicyStat label="单文件上限" value={`${policy.max_upload_mb} MB`} />
+        <PolicyStat label="图片数量" value={`${image.max_count_per_business_update} 张/次`} />
+      </div>
+
+      <div className="grid grid-cols-1 gap-2 text-xs">
+        <PolicyLine
+          icon={Image}
+          title="截图 / 图片"
+          body={`支持 ${image.supported_types.join('、')}；不走 OCR，直接交给多模态模型；会压缩到最长边 ${image.model_preprocess_max_side_px}px。`}
+        />
+        <PolicyLine
+          icon={FileText}
+          title="PDF"
+          body={`前 ${pdf.sample_page_limit} 页累计文本不少于 ${pdf.min_total_chars_for_text_pdf} 字按文本 PDF 本地解析；扫描件走 Doc2X 异步 OCR（${doc2xStatus}）。`}
+        />
+      </div>
+
+      <div className="flex flex-wrap gap-1.5">
+        {policy.supported_uploads.text_extensions.slice(0, 8).map((item) => (
+          <span key={item} className="bg-white border border-gray-200 px-1.5 py-0.5 text-[11px] text-gray-500">
+            {item}
+          </span>
+        ))}
+        <span className="bg-white border border-gray-200 px-1.5 py-0.5 text-[11px] text-gray-500">pdf</span>
+        <span className="bg-white border border-gray-200 px-1.5 py-0.5 text-[11px] text-gray-500">docx/xlsx/pptx</span>
+      </div>
+    </div>
+  );
+}
+
+function PolicyStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="bg-white border border-gray-200 px-3 py-2">
+      <p className="text-[11px] text-gray-400">{label}</p>
+      <p className="mt-0.5 text-sm font-semibold text-gray-900">{value}</p>
+    </div>
+  );
+}
+
+function PolicyLine({
+  icon: Icon,
+  title,
+  body,
+}: {
+  icon: typeof Image;
+  title: string;
+  body: string;
+}) {
+  return (
+    <div className="flex gap-2 bg-white border border-gray-200 px-3 py-2">
+      <Icon className="w-3.5 h-3.5 text-brand-600 mt-0.5 shrink-0" />
+      <div>
+        <p className="font-medium text-gray-800">{title}</p>
+        <p className="mt-0.5 text-gray-500 leading-relaxed">{body}</p>
+      </div>
+    </div>
   );
 }
 

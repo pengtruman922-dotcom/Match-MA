@@ -234,6 +234,73 @@ export interface BusinessUpdateCreate {
   metadata_json?: Record<string, unknown>;
 }
 
+export interface AttachmentUploadPolicy {
+  max_upload_bytes: number;
+  max_upload_mb: number;
+  storage_backend: string;
+  object_storage_configured: boolean;
+  text_capture_max_bytes: number;
+  supported_uploads: {
+    text_extensions: string[];
+    text_mime_types: string[];
+    text_mime_prefixes: string[];
+    document_extensions: string[];
+    image_mime_types: string[];
+    binary_uploads_allowed: boolean;
+  };
+  pdf_policy: {
+    text_detection: {
+      sample_page_limit: number;
+      min_total_chars_for_text_pdf: number;
+    };
+    text_pdf: {
+      strategy: string;
+      ocr_provider_required: boolean;
+    };
+    scanned_pdf: {
+      strategy: string;
+      ocr_provider_required: boolean;
+      requires_object_storage: boolean;
+      doc2x_configured: boolean;
+    };
+  };
+  image_policy: {
+    strategy: string;
+    auto_ocr: boolean;
+    constraints: {
+      supported_types: string[];
+      max_count_per_business_update: number;
+      max_upload_bytes_per_image: number;
+      max_upload_mb_per_image: number;
+      model_preprocess_max_side_px: number;
+      model_preprocess_target_bytes: number;
+      evidence_policy: string;
+    };
+    preprocess: {
+      output_mime_type: string;
+      max_side_px: number;
+      jpeg_quality: number;
+      target_bytes: number;
+    };
+  };
+  ocr_policy: {
+    provider: string;
+    doc2x: {
+      configured: boolean;
+      model: string;
+      poll_interval_seconds: number;
+      max_wait_seconds: number;
+    };
+  };
+  upload_form_defaults: {
+    visibility: string;
+    auto_start_ocr: boolean;
+    process_after_ocr: boolean;
+    auto_process: boolean;
+  };
+  user_guidance: string[];
+}
+
 export interface ExtractedAction {
   id: string;
   business_update_id: string;
