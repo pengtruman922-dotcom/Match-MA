@@ -11,6 +11,7 @@ from backend.app.api.routes.business_updates import (
     _entity_ref,
     _parse_metadata_json_form,
     _parse_entity_types_form,
+    _parse_uuid_list_form,
     _review_action_group_key,
     _review_page_overview,
     _should_auto_ocr_uploaded_attachment,
@@ -350,8 +351,13 @@ def test_business_update_upload_helpers_classify_images_as_multimodal_only() -> 
 
 
 def test_business_update_form_helpers_parse_entity_types_and_validate_input_type() -> None:
+    first = "00000000-0000-0000-0000-000000000008"
+    second = "00000000-0000-0000-0000-000000000009"
+
     assert _parse_entity_types_form("seller_target,buyer_intent") == ["seller_target", "buyer_intent"]
     assert _parse_entity_types_form('["seller_target"]') == ["seller_target"]
+    assert [str(item) for item in _parse_uuid_list_form(f'["{first}", "{second}"]')] == [first, second]
+    assert [str(item) for item in _parse_uuid_list_form(f"{first},{first}")] == [first]
     assert _parse_metadata_json_form('{"test_data": true, "label": "pinda"}') == {
         "test_data": True,
         "label": "pinda",

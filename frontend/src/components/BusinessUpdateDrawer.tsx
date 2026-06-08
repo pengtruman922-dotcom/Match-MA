@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
-import { AlertCircle, FileText, Image, Loader2, Upload, X } from 'lucide-react';
+import { ChangeEvent, useEffect, useRef, useState } from 'react';
+import { AlertCircle, FileText, Image, Loader2, Paperclip, Upload, X } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { attachments, businessUpdates } from '../lib/api';
 import type { AttachmentUploadPolicy } from '../types/api';
 
@@ -26,23 +27,28 @@ export default function BusinessUpdateDrawer({
   defaultIntentId,
   defaultIntentName,
 }: Props) {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [rawText, setRawText] = useState('');
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [boundTargetIds, setBoundTargetIds] = useState<string[]>([]);
   const [boundBuyerPartyIds, setBoundBuyerPartyIds] = useState<string[]>([]);
   const [boundIntentIds, setBoundIntentIds] = useState<string[]>([]);
   const [uploadPolicy, setUploadPolicy] = useState<AttachmentUploadPolicy | null>(null);
   const [policyLoading, setPolicyLoading] = useState(false);
   const [policyError, setPolicyError] = useState<string | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
     setRawText('');
+    setSelectedFiles([]);
     setBoundTargetIds(defaultTargetId ? [defaultTargetId] : []);
     setBoundBuyerPartyIds(defaultBuyerPartyId ? [defaultBuyerPartyId] : []);
     setBoundIntentIds(defaultIntentId ? [defaultIntentId] : []);
     setError(null);
+    setFileError(null);
   }, [defaultBuyerPartyId, defaultIntentId, defaultTargetId, open]);
 
   useEffect(() => {
@@ -68,24 +74,91 @@ export default function BusinessUpdateDrawer({
 
   if (!open) return null;
 
+  function handleFileSelect(event: ChangeEvent<HTMLInputElement>) {
+    const incoming = Array.from(event.target.files || []);
+    event.target.value = '';
+    if (!incoming.length) return;
+
+    const nextFiles = [...selectedFiles];
+    const errors: string[] = [];
+    const maxFiles = uploadPolicy?.max_files_per_business_update || 10;
+    const maxBytes = uploadPolicy?.max_upload_bytes || 25 * 1024 * 1024;
+
+    for (const file of incoming) {
+      if (nextFiles.length >= maxFiles) {
+        errors.push(`单次业务更新最多上传 ${maxFiles} 个附件。`);
+        break;
+      }
+      if (file.size > maxBytes) {
+        errors.push(`${file.name} 超过 ${formatBytes(maxBytes)}。`);
+        continue;
+      }
+      if (nextFiles.some((item) => item.name === file.name && item.size === file.size && item.lastModified === file.lastModified)) {
+        continue;
+      }
+      nextFiles.push(file);
+    }
+
+    setSelectedFiles(nextFiles);
+    setFileError(errors[0] || null);
+  }
+
+  function removeFile(index: number) {
+    setSelectedFiles((files) => files.filter((_, itemIndex) => itemIndex !== index));
+    setFileError(null);
+  }
+
   async function handleSubmit() {
     if (!rawText.trim()) return;
     setSubmitting(true);
     setError(null);
     try {
-      const result = await businessUpdates.create({
-        raw_text: rawText.trim(),
-        input_type: 'text',
-        bound_seller_target_ids: boundTargetIds.length > 0 ? boundTargetIds : undefined,
-        bound_buyer_party_ids: boundBuyerPartyIds.length > 0 ? boundBuyerPartyIds : undefined,
-        bound_buyer_intent_ids: boundIntentIds.length > 0 ? boundIntentIds : undefined,
-      });
-      await businessUpdates.process(result.id);
+      let businessUpdateId: string;
+      if (selectedFiles.length > 0) {
+        const formData = new FormData();
+        formData.set('raw_text', rawText.trim());
+        formData.set('input_type', 'mixed');
+        formData.set('auto_process', 'true');
+        formData.set('process_after_ocr', 'true');
+        formData.set('include_attachment_text', 'true');
+        if (boundTargetIds.length > 0) {
+          formData.set('bound_seller_target_ids', JSON.stringify(boundTargetIds));
+        }
+        if (boundBuyerPartyIds.length > 0) {
+          formData.set('bound_buyer_party_ids', JSON.stringify(boundBuyerPartyIds));
+        }
+        if (boundIntentIds.length > 0) {
+          formData.set('bound_buyer_intent_ids', JSON.stringify(boundIntentIds));
+        }
+        formData.set(
+          'metadata_json',
+          JSON.stringify({
+            source: 'frontend_business_update_drawer',
+            bound_seller_target_ids: boundTargetIds,
+            bound_buyer_party_ids: boundBuyerPartyIds,
+            bound_buyer_intent_ids: boundIntentIds,
+          })
+        );
+        selectedFiles.forEach((file) => formData.append('files', file));
+        const result = await businessUpdates.upload(formData);
+        businessUpdateId = result.business_update.id;
+      } else {
+        const result = await businessUpdates.create({
+          raw_text: rawText.trim(),
+          input_type: 'text',
+          bound_seller_target_ids: boundTargetIds.length > 0 ? boundTargetIds : undefined,
+          bound_buyer_party_ids: boundBuyerPartyIds.length > 0 ? boundBuyerPartyIds : undefined,
+          bound_buyer_intent_ids: boundIntentIds.length > 0 ? boundIntentIds : undefined,
+        });
+        await businessUpdates.process(result.id);
+        businessUpdateId = result.id;
+      }
       setRawText('');
+      setSelectedFiles([]);
       setBoundTargetIds([]);
       setBoundBuyerPartyIds([]);
       setBoundIntentIds([]);
-      onSuccess?.(result.id);
+      onSuccess?.(businessUpdateId);
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : '提交失败');
@@ -97,12 +170,12 @@ export default function BusinessUpdateDrawer({
   return (
     <>
       <div className="fixed inset-0 bg-black/30 z-40" onClick={onClose} />
-      <div className="fixed right-0 top-0 bottom-0 w-full max-w-[520px] bg-white z-50 shadow-xl flex flex-col">
+      <div className="fixed right-0 top-0 bottom-0 w-full max-w-[560px] bg-white z-50 shadow-xl flex flex-col">
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <div>
             <h2 className="text-base font-semibold text-gray-900">录入业务更新</h2>
             <p className="mt-0.5 text-xs text-gray-500">
-              提交后自动进入 AI 拆解，结果会进入复核工作台。
+              提交后自动进入 AI 拆解，附件会按类型进入 OCR 或多模态处理。
             </p>
           </div>
           <button onClick={onClose} className="p-1 text-gray-400 hover:text-gray-600">
@@ -130,7 +203,7 @@ export default function BusinessUpdateDrawer({
               value={rawText}
               onChange={(event) => setRawText(event.target.value)}
               placeholder="粘贴聊天记录、会议纪要、截图说明或业务进展。例如：5月28日已推荐给广州，对方希望先看财务资料。"
-              rows={9}
+              rows={8}
               className="w-full px-3 py-2.5 text-sm border border-gray-200 focus:outline-none focus:border-brand-500 placeholder:text-gray-400 resize-none"
             />
           </div>
@@ -138,11 +211,28 @@ export default function BusinessUpdateDrawer({
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">附件/截图</label>
             <div className="border border-dashed border-gray-300 bg-gray-50 px-4 py-4 text-sm text-gray-600">
-              <div className="flex items-center gap-2 text-gray-800 font-medium">
-                <Upload className="w-4 h-4 text-brand-600" />
-                文件上传入口即将接入，当前先展示后端支持策略
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-2 text-gray-800 font-medium">
+                  <Upload className="w-4 h-4 text-brand-600" />
+                  上传聊天截图、PDF、Office 或文本附件
+                </div>
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="shrink-0 bg-white border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:border-brand-300 hover:text-brand-700"
+                >
+                  选择文件
+                </button>
               </div>
+              <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
               <UploadPolicyCard policy={uploadPolicy} loading={policyLoading} error={policyError} />
+              <SelectedFiles files={selectedFiles} onRemove={removeFile} />
+              {fileError && (
+                <div className="mt-3 flex items-start gap-2 border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                  <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                  <span>{fileError}</span>
+                </div>
+              )}
             </div>
           </div>
 
@@ -153,18 +243,23 @@ export default function BusinessUpdateDrawer({
           )}
         </div>
 
-        <div className="px-6 py-4 border-t border-gray-200 flex items-center justify-end gap-3">
-          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">
-            取消
-          </button>
-          <button
-            onClick={handleSubmit}
-            disabled={!rawText.trim() || submitting}
-            className="px-4 py-2 text-sm font-medium bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-          >
-            {submitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-            {submitting ? '提交并解析中...' : '提交并自动解析'}
-          </button>
+        <div className="px-6 py-4 border-t border-gray-200 flex items-center justify-between gap-3">
+          <p className="text-xs text-gray-400">
+            {selectedFiles.length > 0 ? `将随业务更新上传 ${selectedFiles.length} 个附件` : '仅提交文本更新'}
+          </p>
+          <div className="flex items-center gap-3">
+            <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">
+              取消
+            </button>
+            <button
+              onClick={handleSubmit}
+              disabled={!rawText.trim() || submitting}
+              className="px-4 py-2 text-sm font-medium bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            >
+              {submitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+              {submitting ? '提交并解析中...' : selectedFiles.length > 0 ? '上传并自动解析' : '提交并自动解析'}
+            </button>
+          </div>
         </div>
       </div>
     </>
@@ -208,8 +303,9 @@ function UploadPolicyCard({
 
   return (
     <div className="mt-3 space-y-3">
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid grid-cols-3 gap-2">
         <PolicyStat label="单文件上限" value={`${policy.max_upload_mb} MB`} />
+        <PolicyStat label="附件数量" value={`${policy.max_files_per_business_update} 个/次`} />
         <PolicyStat label="图片数量" value={`${image.max_count_per_business_update} 张/次`} />
       </div>
 
@@ -239,6 +335,32 @@ function UploadPolicyCard({
   );
 }
 
+function SelectedFiles({ files, onRemove }: { files: File[]; onRemove: (index: number) => void }) {
+  if (!files.length) return null;
+  return (
+    <div className="mt-3 space-y-2">
+      {files.map((file, index) => (
+        <div key={`${file.name}-${file.size}-${file.lastModified}`} className="flex items-center justify-between gap-3 bg-white border border-gray-200 px-3 py-2">
+          <div className="min-w-0 flex items-center gap-2">
+            <Paperclip className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+            <div className="min-w-0">
+              <p className="truncate text-xs font-medium text-gray-800">{file.name}</p>
+              <p className="text-[11px] text-gray-400">{formatBytes(file.size)}</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => onRemove(index)}
+            className="shrink-0 text-xs text-gray-400 hover:text-red-600"
+          >
+            移除
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function PolicyStat({ label, value }: { label: string; value: string }) {
   return (
     <div className="bg-white border border-gray-200 px-3 py-2">
@@ -248,15 +370,7 @@ function PolicyStat({ label, value }: { label: string; value: string }) {
   );
 }
 
-function PolicyLine({
-  icon: Icon,
-  title,
-  body,
-}: {
-  icon: typeof Image;
-  title: string;
-  body: string;
-}) {
+function PolicyLine({ icon: Icon, title, body }: { icon: LucideIcon; title: string; body: string }) {
   return (
     <div className="flex gap-2 bg-white border border-gray-200 px-3 py-2">
       <Icon className="w-3.5 h-3.5 text-brand-600 mt-0.5 shrink-0" />
@@ -275,4 +389,10 @@ function ContextRow({ label, value, muted }: { label: string; value: string; mut
       <span className={muted ? 'text-gray-400' : 'text-gray-900'}>{value}</span>
     </div>
   );
+}
+
+function formatBytes(value: number) {
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${value} B`;
 }

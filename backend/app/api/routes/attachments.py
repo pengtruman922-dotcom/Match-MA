@@ -138,6 +138,7 @@ class AttachmentParseReadinessOut(BaseModel):
 class AttachmentUploadPolicyOut(BaseModel):
     max_upload_bytes: int
     max_upload_mb: float
+    max_files_per_business_update: int
     storage_backend: str
     object_storage_configured: bool
     text_capture_max_bytes: int
@@ -559,6 +560,7 @@ def _attachment_upload_policy() -> dict[str, Any]:
     return {
         "max_upload_bytes": settings.attachment_max_upload_bytes,
         "max_upload_mb": max_upload_mb,
+        "max_files_per_business_update": settings.business_update_max_upload_files,
         "storage_backend": settings.effective_attachment_storage_backend,
         "object_storage_configured": object_storage_configured,
         "text_capture_max_bytes": settings.attachment_text_capture_max_bytes,

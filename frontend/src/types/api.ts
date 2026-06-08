@@ -234,9 +234,20 @@ export interface BusinessUpdateCreate {
   metadata_json?: Record<string, unknown>;
 }
 
+export interface BusinessUpdateUploadResponse {
+  business_update: BusinessUpdate;
+  uploaded_attachment_ids: string[];
+  ocr_attachment_ids: string[];
+  multimodal_image_attachment_ids: string[];
+  skipped_ocr_attachment_ids: string[];
+  ocr_jobs: Array<Record<string, unknown>>;
+  process_job: Record<string, unknown> | null;
+}
+
 export interface AttachmentUploadPolicy {
   max_upload_bytes: number;
   max_upload_mb: number;
+  max_files_per_business_update: number;
   storage_backend: string;
   object_storage_configured: boolean;
   text_capture_max_bytes: number;

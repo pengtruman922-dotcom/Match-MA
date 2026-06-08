@@ -214,6 +214,9 @@ def upload_business_update(
     raw_text: str = Form(..., min_length=1),
     input_type: str = Form(default="mixed"),
     files: list[UploadFile] | None = File(default=None),
+    bound_seller_target_ids: str | None = Form(default=None),
+    bound_buyer_party_ids: str | None = Form(default=None),
+    bound_buyer_intent_ids: str | None = Form(default=None),
     auto_process: bool = Form(default=True),
     process_after_ocr: bool = Form(default=True),
     include_attachment_text: bool = Form(default=True),
@@ -225,6 +228,9 @@ def upload_business_update(
     _validate_business_update_input_type(input_type)
     parse_types = _parse_entity_types_form(parse_entity_types)
     _validate_parse_entity_types(parse_types)
+    seller_target_ids = _parse_uuid_list_form(bound_seller_target_ids)
+    buyer_party_ids = _parse_uuid_list_form(bound_buyer_party_ids)
+    buyer_intent_ids = _parse_uuid_list_form(bound_buyer_intent_ids)
     form_metadata = _parse_metadata_json_form(metadata_json)
     settings = get_settings()
 
@@ -232,6 +238,9 @@ def upload_business_update(
         db,
         raw_text=raw_text,
         input_type=input_type,
+        bound_seller_target_ids=seller_target_ids,
+        bound_buyer_party_ids=buyer_party_ids,
+        bound_buyer_intent_ids=buyer_intent_ids,
         metadata_json={
             **form_metadata,
             "source": "business_update_multipart_upload",
@@ -771,6 +780,9 @@ def _insert_business_update_row(
     *,
     raw_text: str,
     input_type: str,
+    bound_seller_target_ids: list[UUID] | None = None,
+    bound_buyer_party_ids: list[UUID] | None = None,
+    bound_buyer_intent_ids: list[UUID] | None = None,
     metadata_json: dict[str, Any],
 ) -> dict[str, Any]:
     statement = text(
@@ -782,7 +794,7 @@ def _insert_business_update_row(
         )
         values (
           :team_id, :workspace_id, :raw_text, :input_type, 'pending',
-          '[]'::jsonb, '[]'::jsonb, '[]'::jsonb,
+          :bound_seller_target_ids_json, :bound_buyer_party_ids_json, :bound_buyer_intent_ids_json,
           :created_by, :metadata_json
         )
         returning
@@ -791,7 +803,12 @@ def _insert_business_update_row(
           bound_recommendation_session_id, created_by,
           created_at::text as created_at, metadata_json
         """
-    ).bindparams(bindparam("metadata_json", type_=JSONB))
+    ).bindparams(
+        bindparam("bound_seller_target_ids_json", type_=JSONB),
+        bindparam("bound_buyer_party_ids_json", type_=JSONB),
+        bindparam("bound_buyer_intent_ids_json", type_=JSONB),
+        bindparam("metadata_json", type_=JSONB),
+    )
     return dict(
         db.execute(
             statement,
@@ -800,6 +817,9 @@ def _insert_business_update_row(
                 "workspace_id": DEFAULT_WORKSPACE_ID,
                 "raw_text": raw_text,
                 "input_type": input_type,
+                "bound_seller_target_ids_json": [str(item) for item in (bound_seller_target_ids or [])],
+                "bound_buyer_party_ids_json": [str(item) for item in (bound_buyer_party_ids or [])],
+                "bound_buyer_intent_ids_json": [str(item) for item in (bound_buyer_intent_ids or [])],
                 "created_by": DEFAULT_ADMIN_USER_ID,
                 "metadata_json": metadata_json,
             },
@@ -815,6 +835,15 @@ def _save_business_update_upload_files(
     *,
     settings: Any,
 ) -> dict[str, list[UUID]]:
+    if len(files) > settings.business_update_max_upload_files:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=(
+                "Too many attachments for one business update. "
+                f"Maximum is {settings.business_update_max_upload_files} files."
+            ),
+        )
+
     uploaded_attachment_ids: list[UUID] = []
     ocr_attachment_ids: list[UUID] = []
     multimodal_image_attachment_ids: list[UUID] = []
@@ -1336,6 +1365,37 @@ def _parse_entity_types_form(value: str | None) -> list[str]:
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail="parse_entity_types must be a JSON array or comma-separated string.",
     )
+
+
+def _parse_uuid_list_form(value: str | None) -> list[UUID]:
+    if not value or not value.strip():
+        return []
+    stripped = value.strip()
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        parsed = [item.strip() for item in stripped.split(",")]
+    if isinstance(parsed, str):
+        parsed = [parsed]
+    if not isinstance(parsed, list):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Bound ids must be a JSON array or comma-separated string.",
+        )
+    result: list[UUID] = []
+    invalid: list[str] = []
+    for item in parsed:
+        item_uuid = _optional_uuid(item)
+        if item_uuid:
+            result.append(item_uuid)
+        elif str(item).strip():
+            invalid.append(str(item))
+    if invalid:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Invalid bound ids: {', '.join(invalid)}",
+        )
+    return _unique_uuid_list(result)
 
 
 def _parse_metadata_json_form(value: str | None) -> dict[str, Any]:

@@ -10,6 +10,7 @@ from backend.app.api.routes.attachments import (
     _linked_entity_refs,
     _parse_entity_types_form,
 )
+from backend.app.api.routes.business_updates import _save_business_update_upload_files
 from backend.app.api.routes.field_sources import _field_value_source_out
 from backend.app.config import get_settings
 from backend.app.jobs.handlers import (
@@ -134,6 +135,7 @@ def test_attachment_upload_policy_explains_pdf_image_and_ocr(monkeypatch) -> Non
 
     try:
         assert policy["max_upload_bytes"] > 0
+        assert policy["max_files_per_business_update"] == 10
         assert policy["storage_backend"] == "s3"
         assert policy["object_storage_configured"] is True
         assert ".txt" in policy["supported_uploads"]["text_extensions"]
@@ -146,6 +148,19 @@ def test_attachment_upload_policy_explains_pdf_image_and_ocr(monkeypatch) -> Non
         assert policy["ocr_policy"]["doc2x"]["max_wait_seconds"] > 0
     finally:
         get_settings.cache_clear()
+
+
+def test_business_update_upload_rejects_too_many_files() -> None:
+    class _Settings:
+        business_update_max_upload_files = 1
+
+    try:
+        _save_business_update_upload_files(None, [object(), object()], settings=_Settings())
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 413
+        assert "Maximum is 1 files" in str(getattr(exc, "detail", ""))
+    else:
+        raise AssertionError("Expected too many files to be rejected.")
 
 
 def test_decode_text_bytes_supports_utf8_and_gb18030() -> None:
