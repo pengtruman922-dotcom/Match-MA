@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, Archive, Eye, RefreshCw, RotateCcw, X } from 'lucide-react';
+import { AlertTriangle, Archive, Eye, FlaskConical, RefreshCw, RotateCcw, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { backgroundJobs } from '../lib/api';
 import type { BackgroundJobFailure, BackgroundJobRetryPreview, FailureSummary } from '../types/api';
@@ -9,6 +9,8 @@ const DEFAULT_LOOKBACK_HOURS = 720;
 export default function BackgroundJobFailurePanel() {
   const [summary, setSummary] = useState<FailureSummary | null>(null);
   const [includeIgnored, setIncludeIgnored] = useState(false);
+  const [includeArchived, setIncludeArchived] = useState(false);
+  const [includeTestData, setIncludeTestData] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<BackgroundJobRetryPreview | null>(null);
@@ -19,11 +21,17 @@ export default function BackgroundJobFailurePanel() {
     setLoading(true);
     setError(null);
     backgroundJobs
-      .summaryFailures({ lookback_hours: DEFAULT_LOOKBACK_HOURS, limit: 10, include_ignored: includeIgnored })
+      .summaryFailures({
+        lookback_hours: DEFAULT_LOOKBACK_HOURS,
+        limit: 10,
+        include_ignored: includeIgnored,
+        include_archived: includeArchived,
+        include_test_data: includeTestData,
+      })
       .then(setSummary)
       .catch((err) => setError(errorText(err)))
       .finally(() => setLoading(false));
-  }, [includeIgnored]);
+  }, [includeArchived, includeIgnored, includeTestData]);
 
   useEffect(() => {
     loadSummary();
@@ -114,6 +122,73 @@ export default function BackgroundJobFailurePanel() {
     }
   }
 
+  async function archiveJob(job: BackgroundJobFailure) {
+    const reason = window.prompt('请输入归档原因（例如：历史失败，保留审计但不再处理）', job.archive_reason || '');
+    if (reason === null) return;
+    setOperatingJobId(job.id);
+    setError(null);
+    try {
+      await backgroundJobs.archive(job.id, reason.trim() || undefined);
+      setPreview(null);
+      loadSummary();
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setOperatingJobId(null);
+    }
+  }
+
+  async function unarchiveJob(job: BackgroundJobFailure) {
+    const confirmed = window.confirm(`确认取消归档失败任务？\n\nJob ID: ${job.id}`);
+    if (!confirmed) return;
+    setOperatingJobId(job.id);
+    setError(null);
+    try {
+      await backgroundJobs.unarchive(job.id);
+      loadSummary();
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setOperatingJobId(null);
+    }
+  }
+
+  async function markTestData(job: BackgroundJobFailure) {
+    const label = window.prompt('请输入测试数据标签（例如：demo / sample / 历史压测）', job.test_data_label || '');
+    if (label === null) return;
+    const reason = window.prompt('请输入标记为测试数据的原因', job.test_data_reason || '');
+    if (reason === null) return;
+    setOperatingJobId(job.id);
+    setError(null);
+    try {
+      await backgroundJobs.markTestData(job.id, {
+        label: label.trim() || undefined,
+        reason: reason.trim() || undefined,
+      });
+      setPreview(null);
+      loadSummary();
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setOperatingJobId(null);
+    }
+  }
+
+  async function unmarkTestData(job: BackgroundJobFailure) {
+    const confirmed = window.confirm(`确认取消测试数据标记？\n\nJob ID: ${job.id}`);
+    if (!confirmed) return;
+    setOperatingJobId(job.id);
+    setError(null);
+    try {
+      await backgroundJobs.unmarkTestData(job.id);
+      loadSummary();
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setOperatingJobId(null);
+    }
+  }
+
   const failures = summary?.recent_failures || [];
   const failedCount = summary?.totals.failed_job_count || 0;
 
@@ -143,15 +218,11 @@ export default function BackgroundJobFailurePanel() {
         <Metric label="任务类型" value={summary?.totals.failed_job_type_count || 0} />
       </div>
 
-      <label className="mt-3 flex items-center gap-2 text-xs text-gray-500">
-        <input
-          type="checkbox"
-          checked={includeIgnored}
-          onChange={(event) => setIncludeIgnored(event.target.checked)}
-          className="h-3.5 w-3.5 accent-brand-600"
-        />
-        包含已忽略失败
-      </label>
+      <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-gray-500">
+        <FilterCheckbox checked={includeIgnored} onChange={setIncludeIgnored} label="包含已忽略" />
+        <FilterCheckbox checked={includeArchived} onChange={setIncludeArchived} label="包含已归档" />
+        <FilterCheckbox checked={includeTestData} onChange={setIncludeTestData} label="包含测试数据" />
+      </div>
 
       {error && (
         <div className="mt-3 border border-red-100 bg-red-50 px-3 py-2 text-xs text-red-700">
@@ -176,6 +247,10 @@ export default function BackgroundJobFailurePanel() {
               onRetry={() => retryJob(job)}
               onIgnore={() => ignoreJob(job)}
               onUnignore={() => unignoreJob(job)}
+              onArchive={() => archiveJob(job)}
+              onUnarchive={() => unarchiveJob(job)}
+              onMarkTestData={() => markTestData(job)}
+              onUnmarkTestData={() => unmarkTestData(job)}
             />
           ))}
         </div>
@@ -200,6 +275,10 @@ function FailureItem({
   onRetry,
   onIgnore,
   onUnignore,
+  onArchive,
+  onUnarchive,
+  onMarkTestData,
+  onUnmarkTestData,
 }: {
   job: BackgroundJobFailure;
   busy: boolean;
@@ -207,9 +286,13 @@ function FailureItem({
   onRetry: () => void;
   onIgnore: () => void;
   onUnignore: () => void;
+  onArchive: () => void;
+  onUnarchive: () => void;
+  onMarkTestData: () => void;
+  onUnmarkTestData: () => void;
 }) {
   return (
-    <div className={`border p-3 ${job.ignored ? 'border-gray-100 bg-gray-50' : 'border-red-100 bg-red-50/30'}`}>
+    <div className={`border p-3 ${job.ignored || job.archived || job.is_test_data ? 'border-gray-100 bg-gray-50' : 'border-red-100 bg-red-50/30'}`}>
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
@@ -221,6 +304,14 @@ function FailureItem({
             </span>
             {job.ignored && (
               <span className="text-xs px-1.5 py-0.5 bg-gray-200 text-gray-600 font-medium">已忽略</span>
+            )}
+            {job.archived && (
+              <span className="text-xs px-1.5 py-0.5 bg-slate-200 text-slate-600 font-medium">已归档</span>
+            )}
+            {job.is_test_data && (
+              <span className="text-xs px-1.5 py-0.5 bg-blue-50 text-blue-700 font-medium">
+                测试数据{job.test_data_label ? ` · ${job.test_data_label}` : ''}
+              </span>
             )}
           </div>
           <p className="text-sm font-medium text-gray-900 mt-2 truncate">{job.job_type}</p>
@@ -248,6 +339,24 @@ function FailureItem({
         ) : (
           <SmallButton onClick={onIgnore} disabled={busy} icon={Archive}>
             忽略
+          </SmallButton>
+        )}
+        {job.archived ? (
+          <SmallButton onClick={onUnarchive} disabled={busy} icon={Archive}>
+            取消归档
+          </SmallButton>
+        ) : (
+          <SmallButton onClick={onArchive} disabled={busy} icon={Archive}>
+            归档
+          </SmallButton>
+        )}
+        {job.is_test_data ? (
+          <SmallButton onClick={onUnmarkTestData} disabled={busy} icon={FlaskConical}>
+            取消测试标记
+          </SmallButton>
+        ) : (
+          <SmallButton onClick={onMarkTestData} disabled={busy} icon={FlaskConical}>
+            标记测试数据
           </SmallButton>
         )}
       </div>
@@ -364,6 +473,28 @@ function Metric({ label, value, tone = 'normal' }: { label: string; value: numbe
         {value}
       </p>
     </div>
+  );
+}
+
+function FilterCheckbox({
+  checked,
+  onChange,
+  label,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  label: string;
+}) {
+  return (
+    <label className="flex items-center gap-2">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+        className="h-3.5 w-3.5 accent-brand-600"
+      />
+      {label}
+    </label>
   );
 }
 
