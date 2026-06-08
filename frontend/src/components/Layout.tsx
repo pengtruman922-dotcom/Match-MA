@@ -2,6 +2,7 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { Search, Bug } from 'lucide-react';
 import { useState } from 'react';
 import { useDebugMode } from '../lib/debug';
+import { clearAuthSession, getStoredUser } from '../lib/auth';
 
 const navItems = [
   { to: '/', label: '工作台', end: true },
@@ -16,12 +17,18 @@ export default function Layout() {
   const [searchQuery, setSearchQuery] = useState('');
   const navigate = useNavigate();
   const { isAdmin, debugEnabled, toggleDebug } = useDebugMode();
+  const user = getStoredUser();
 
   function handleSearch(e: React.KeyboardEvent<HTMLInputElement>) {
     if (e.key === 'Enter' && searchQuery.trim()) {
       navigate(`/targets?q=${encodeURIComponent(searchQuery.trim())}`);
       setSearchQuery('');
     }
+  }
+
+  function handleLogout() {
+    clearAuthSession();
+    navigate('/login', { replace: true });
   }
 
   return (
@@ -51,10 +58,13 @@ export default function Layout() {
             </div>
             <div className="flex items-center gap-2">
               <div className="w-7 h-7 bg-brand-600 flex items-center justify-center text-white text-xs font-semibold">
-                张
+                {user?.display_name?.slice(0, 1) || 'A'}
               </div>
-              <span className="text-sm text-gray-700">张三</span>
+              <span className="text-sm text-gray-700">{user?.display_name || 'Admin'}</span>
             </div>
+            <button onClick={handleLogout} className="text-xs text-gray-500 hover:text-brand-600">
+              退出
+            </button>
             {isAdmin && (
               <button
                 onClick={toggleDebug}

@@ -1,4 +1,5 @@
 import os
+import hashlib
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -10,6 +11,10 @@ class Settings(BaseSettings):
     debug: bool = True
     database_url: str | None = None
     cors_origins: str = "*"
+    auth_enabled: bool = False
+    admin_username: str = "admin"
+    admin_password: str = "match-ma-admin"
+    admin_token: str | None = None
     railway_git_commit_sha: str | None = None
     railway_git_branch: str | None = None
     railway_service_name: str | None = None
@@ -149,6 +154,17 @@ class Settings(BaseSettings):
     @property
     def effective_doc2x_api_key(self) -> str | None:
         return _normalize_secret_text(self.doc2x_api_key or _first_env("DOC2X_SECRET", "DOC2X_TOKEN"))
+
+    @property
+    def effective_admin_token(self) -> str:
+        token = _normalize_secret_text(
+            self.admin_token
+            or _first_env("MATCH_MA_ADMIN_TOKEN", "MATCH_MA_ACCESS_TOKEN", "ADMIN_TOKEN")
+        )
+        if token:
+            return token
+        seed = f"{self.admin_username}:{self.admin_password}:{self.app_name}"
+        return hashlib.sha256(seed.encode("utf-8")).hexdigest()
 
 
 def _first_env(*names: str) -> str | None:

@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from backend.app.api.routes import (
+    auth,
     attachments,
     background_jobs,
     business_updates,
@@ -21,6 +22,7 @@ from backend.app.api.routes import (
 )
 
 api_router = APIRouter()
+api_router.include_router(auth.router)
 api_router.include_router(health.router)
 api_router.include_router(meta.router)
 api_router.include_router(model_config.router)

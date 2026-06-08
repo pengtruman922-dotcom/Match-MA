@@ -35,7 +35,14 @@ import type {
   FailureSummary,
   QueueSummary,
 } from '../../types/api';
+import type { AuthUser, LoginResponse } from '../auth';
 import { apiRequest, buildQuery } from './client';
+
+export const auth = {
+  login: (data: { username: string; password: string }) =>
+    apiRequest<LoginResponse>('/auth/login', { method: 'POST', body: JSON.stringify(data) }),
+  me: () => apiRequest<AuthUser>('/auth/me'),
+};
 
 export const sellerTargets = {
   list: (params?: { q?: string; limit?: number; offset?: number }) =>
