@@ -135,12 +135,24 @@ def rebuild_buyer_intent_search_doc(db: Session, buyer_intent_id: UUID) -> dict[
             _money("最低营收", intent.get("min_revenue_yuan")),
             _money("最低净利润", intent.get("min_net_profit_yuan")),
             _money("最高估值", intent.get("max_valuation_yuan")),
+            _money("最低市值", intent.get("min_market_cap_yuan")),
+            _money("最高市值", intent.get("max_market_cap_yuan")),
+            _kv("市值范围", intent.get("market_cap_range_summary")),
             _kv("PE上限", _decimal_text(intent.get("max_pe"))),
             _kv("需要控股", intent.get("requires_control")),
             _kv("需要并表", intent.get("requires_consolidation")),
             _kv("接受少数股权", intent.get("accepts_minority_investment")),
             _kv("上市状态偏好", intent.get("preferred_listed_status")),
+            _kv("上市板块要求", intent.get("listing_board_requirement_summary")),
+            _kv("融资/上市阶段", intent.get("financing_stage_requirement_summary")),
             _kv("交易类型", intent.get("transaction_type")),
+            _kv("交易类型多选", _json_text(intent.get("transaction_types_json"))),
+            _kv("溢价要求", intent.get("premium_tolerance_summary")),
+            _kv("溢价上限", _decimal_text(intent.get("max_premium_rate"))),
+            _kv("负债率上限", _decimal_text(intent.get("max_debt_ratio"))),
+            _kv("负债率要求", intent.get("debt_ratio_requirement_summary")),
+            _kv("重大风险容忍", intent.get("major_risk_tolerance_summary")),
+            _kv("收购方产业优势", intent.get("buyer_industry_advantage_summary")),
         ]
     )
     preference_text = _join_lines([intent.get("preference_summary"), intent.get("priority_summary")])
@@ -434,8 +446,13 @@ def _get_buyer_intent(db: Session, buyer_intent_id: UUID) -> dict[str, Any]:
               id, buyer_party_id, intent_name, raw_requirement_text, intent_summary,
               industry_primary, industry_secondary, region_scope_summary,
               min_revenue_yuan, min_net_profit_yuan, max_pe, max_valuation_yuan,
+              min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
               requires_control, requires_consolidation, accepts_minority_investment,
-              preferred_listed_status, transaction_type, negative_summary,
+              preferred_listed_status, listing_board_requirement_summary,
+              financing_stage_requirement_summary, transaction_type, transaction_types_json,
+              premium_tolerance_summary, max_premium_rate, max_debt_ratio,
+              debt_ratio_requirement_summary, major_risk_tolerance_summary,
+              buyer_industry_advantage_summary, negative_summary,
               priority_summary, preference_summary, unknown_summary
             from buyer_intent
             where id = :buyer_intent_id
@@ -533,4 +550,14 @@ def _decimal_text(value: Any) -> str | None:
         return None
     if isinstance(value, Decimal):
         return format(value.normalize(), "f")
+    return str(value)
+
+
+def _json_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return "、".join(str(item) for item in value if str(item).strip()) or None
+    if isinstance(value, dict):
+        return "、".join(f"{key}:{item}" for key, item in value.items() if item is not None) or None
     return str(value)

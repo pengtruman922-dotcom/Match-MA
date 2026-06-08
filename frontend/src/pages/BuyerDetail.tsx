@@ -280,16 +280,23 @@ function IntentPanel({ intent, onClose }: { intent: BuyerIntent; onClose: () => 
             {intent.region_scope_summary && <CondRow icon={MapPin} label="区域" value={intent.region_scope_summary} />}
             {intent.min_net_profit_yuan && <CondRow icon={TrendingUp} label="利润" value={`>=${(Number(intent.min_net_profit_yuan) / 10000).toFixed(0)}万`} />}
             {intent.max_pe && <CondRow icon={Star} label="PE" value={`<=${Number(intent.max_pe).toFixed(0)}`} />}
+            {marketCapRangeLabel(intent) !== '-' && <CondRow icon={TrendingUp} label="市值" value={marketCapRangeLabel(intent)} />}
+            {listingRequirementLabel(intent) !== '-' && <CondRow icon={Star} label="上市" value={listingRequirementLabel(intent)} />}
+            {intent.max_debt_ratio && <CondRow icon={TrendingUp} label="负债" value={`<=${Number(intent.max_debt_ratio).toFixed(0)}%`} />}
             {intent.requires_consolidation && intent.requires_consolidation !== 'unknown' && (
               <CondRow icon={CheckCircle2} label="并表" value={intent.requires_consolidation === 'yes' ? '需要' : '不需要'} />
             )}
           </div>
         </div>
 
-        {intent.preference_summary && (
+        {(intent.preference_summary || intent.premium_tolerance_summary || intent.buyer_industry_advantage_summary) && (
           <div>
             <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Preference</h4>
-            <p className="text-sm text-gray-600">{intent.preference_summary}</p>
+            <div className="space-y-1.5 text-sm text-gray-600">
+              {intent.preference_summary && <p>{intent.preference_summary}</p>}
+              {intent.premium_tolerance_summary && <p>溢价：{intent.premium_tolerance_summary}</p>}
+              {intent.buyer_industry_advantage_summary && <p>收购方优势：{intent.buyer_industry_advantage_summary}</p>}
+            </div>
           </div>
         )}
 
@@ -300,6 +307,9 @@ function IntentPanel({ intent, onClose }: { intent: BuyerIntent; onClose: () => 
               <Ban className="w-3.5 h-3.5 text-gray-400" />
               {intent.negative_summary}
             </div>
+            {intent.major_risk_tolerance_summary && (
+              <p className="mt-1.5 text-sm text-gray-600">风险容忍：{intent.major_risk_tolerance_summary}</p>
+            )}
           </div>
         )}
 
@@ -326,6 +336,33 @@ function IntentPanel({ intent, onClose }: { intent: BuyerIntent; onClose: () => 
       </div>
     </div>
   );
+}
+
+function listingRequirementLabel(intent: BuyerIntent): string {
+  const status: Record<string, string> = {
+    listed: '已上市',
+    preparing_listing: '准备上市',
+    pre_ipo: 'pre-IPO',
+    unlisted: '未上市',
+    any: '均可',
+    unknown: '未知',
+  };
+  const parts = [
+    intent.preferred_listed_status ? status[intent.preferred_listed_status] || intent.preferred_listed_status : null,
+    intent.listing_board_requirement_summary,
+    intent.financing_stage_requirement_summary,
+  ].filter(Boolean);
+  return parts.length ? parts.join(' / ') : '-';
+}
+
+function marketCapRangeLabel(intent: BuyerIntent): string {
+  if (intent.market_cap_range_summary) return intent.market_cap_range_summary;
+  const min = intent.min_market_cap_yuan ? `${(Number(intent.min_market_cap_yuan) / 100000000).toFixed(1)}亿` : '';
+  const max = intent.max_market_cap_yuan ? `${(Number(intent.max_market_cap_yuan) / 100000000).toFixed(1)}亿` : '';
+  if (min && max) return `${min}-${max}`;
+  if (min) return `≥${min}`;
+  if (max) return `≤${max}`;
+  return '-';
 }
 
 function CondRow({ icon: Icon, label, value }: { icon: typeof Building2; label: string; value: string }) {

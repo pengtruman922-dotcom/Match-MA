@@ -30,6 +30,14 @@ def test_buyer_intent_parse_changes_normalize_common_enums_and_numbers() -> None
                 "min_net_profit_yuan": "20000000",
                 "requires_consolidation": "需要",
                 "preferred_listed_status": "非上市",
+                "listing_board_requirement_summary": "北交所或创业板均可",
+                "financing_stage_requirement_summary": "pre-IPO",
+                "min_market_cap_yuan": "500000000",
+                "max_market_cap_yuan": "3000000000",
+                "transaction_types_json": ["control", "minority"],
+                "max_debt_ratio": "65",
+                "major_risk_tolerance_summary": "不接受重大诉讼、冻结、执行",
+                "buyer_industry_advantage_summary": "浙江本地国资有医药产业资源",
                 "equity_requirement_type": "可并表即可",
                 "region_constraints_json": [{"province": "浙江省", "constraint_type": "hard"}],
                 "unsupported_field": "ignored",
@@ -41,6 +49,14 @@ def test_buyer_intent_parse_changes_normalize_common_enums_and_numbers() -> None
     assert changes["min_net_profit_yuan"] == 20000000
     assert changes["requires_consolidation"] == "yes"
     assert changes["preferred_listed_status"] == "unlisted"
+    assert changes["listing_board_requirement_summary"] == "北交所或创业板均可"
+    assert changes["financing_stage_requirement_summary"] == "pre-IPO"
+    assert changes["min_market_cap_yuan"] == 500000000
+    assert changes["max_market_cap_yuan"] == 3000000000
+    assert changes["transaction_types_json"] == ["control", "minority"]
+    assert changes["max_debt_ratio"] == 65
+    assert changes["major_risk_tolerance_summary"] == "不接受重大诉讼、冻结、执行"
+    assert changes["buyer_industry_advantage_summary"] == "浙江本地国资有医药产业资源"
     assert changes["equity_requirement_type"] == "consolidation_required"
     assert changes["region_constraints_json"][0]["province"] == "浙江省"
     assert notes == ["ignored_unsupported_field:unsupported_field"]
@@ -48,8 +64,12 @@ def test_buyer_intent_parse_changes_normalize_common_enums_and_numbers() -> None
 
 def test_buyer_intent_parser_enum_helpers_are_tolerant() -> None:
     assert _normalize_yes_no_like("否") == "no"
+    assert _normalize_yes_no_like("可接受") == "yes"
+    assert _normalize_yes_no_like("不接受") == "no"
     assert _normalize_yes_no_like("可能") == "unknown"
     assert _normalize_listed_status("不限") == "any"
+    assert _normalize_listed_status("准备上市") == "preparing_listing"
+    assert _normalize_listed_status("pre IPO") == "pre_ipo"
     assert _normalize_equity_requirement_type("参股也可以") == "minority_acceptable"
 
 

@@ -146,8 +146,13 @@ def list_buyer_party_intents(
               id, buyer_party_id, intent_name, status, contact_name,
               raw_requirement_text, intent_summary, industry_primary, industry_secondary,
               region_scope_summary, min_revenue_yuan, min_net_profit_yuan, max_pe,
-              max_valuation_yuan, requires_control, requires_consolidation,
-              accepts_minority_investment, preferred_listed_status, transaction_type,
+              max_valuation_yuan, min_market_cap_yuan, max_market_cap_yuan,
+              market_cap_range_summary, requires_control, requires_consolidation,
+              accepts_minority_investment, preferred_listed_status,
+              listing_board_requirement_summary, financing_stage_requirement_summary,
+              transaction_type, transaction_types_json, premium_tolerance_summary,
+              max_premium_rate, max_debt_ratio, debt_ratio_requirement_summary,
+              major_risk_tolerance_summary, buyer_industry_advantage_summary,
               negative_summary, preference_summary, unknown_summary,
               created_at::text as created_at, updated_at::text as updated_at
             from buyer_intent

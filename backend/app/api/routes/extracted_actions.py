@@ -413,6 +413,7 @@ def apply_buyer_intent_update_action(
         "parsed_requirement_json",
         "region_constraints_json",
         "acceptable_control_paths_json",
+        "transaction_types_json",
     }
     bind_params = [bindparam(field, type_=JSONB) for field in diff if field in json_fields]
     if bind_params:
@@ -778,11 +779,16 @@ def _get_buyer_intent_snapshot_or_404(db: Session, buyer_intent_id: UUID) -> dic
               raw_requirement_text, intent_summary, parsed_requirement_json,
               industry_primary, industry_secondary, region_scope_summary,
               region_constraints_json, min_revenue_yuan, min_net_profit_yuan,
-              min_total_profit_yuan, max_pe, max_valuation_yuan, market_cap_range_summary,
+              min_total_profit_yuan, max_pe, max_valuation_yuan,
+              min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
               requires_control, requires_consolidation, accepts_minority_investment,
               desired_equity_ratio_min, desired_equity_ratio_max, equity_ratio_summary,
               equity_requirement_type, acceptable_control_paths_json,
-              preferred_listed_status, transaction_type, negative_summary,
+              preferred_listed_status, listing_board_requirement_summary,
+              financing_stage_requirement_summary, transaction_type, transaction_types_json,
+              premium_tolerance_summary, max_premium_rate, max_debt_ratio,
+              debt_ratio_requirement_summary, major_risk_tolerance_summary,
+              buyer_industry_advantage_summary, negative_summary,
               priority_summary, preference_summary, unknown_summary
             from buyer_intent
             where id = :buyer_intent_id
@@ -935,6 +941,8 @@ def _allowed_buyer_intent_changes(changes: dict[str, Any]) -> dict[str, Any]:
         "min_total_profit_yuan",
         "max_pe",
         "max_valuation_yuan",
+        "min_market_cap_yuan",
+        "max_market_cap_yuan",
         "market_cap_range_summary",
         "requires_control",
         "requires_consolidation",
@@ -945,7 +953,16 @@ def _allowed_buyer_intent_changes(changes: dict[str, Any]) -> dict[str, Any]:
         "equity_requirement_type",
         "acceptable_control_paths_json",
         "preferred_listed_status",
+        "listing_board_requirement_summary",
+        "financing_stage_requirement_summary",
         "transaction_type",
+        "transaction_types_json",
+        "premium_tolerance_summary",
+        "max_premium_rate",
+        "max_debt_ratio",
+        "debt_ratio_requirement_summary",
+        "major_risk_tolerance_summary",
+        "buyer_industry_advantage_summary",
         "negative_summary",
         "priority_summary",
         "preference_summary",
