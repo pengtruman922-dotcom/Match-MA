@@ -45,6 +45,7 @@ from backend.app.services.image_inputs import (
     multimodal_image_constraints,
     prepare_image_for_multimodal,
 )
+from backend.app.services.office_inspection import inspect_office_text, office_document_kind
 from backend.app.services.pdf_inspection import inspect_pdf_text_layer
 
 ALLOWED_ACTION_TYPES = {
@@ -571,6 +572,15 @@ def _handle_attachment_ocr_parse(db: Session, job: JobClaim) -> dict[str, object
     pdf_result = _handle_pdf_attachment_ocr(db, job, attachment_id=attachment_id, attachment=attachment, node_config=node_config)
     if pdf_result is not None:
         return pdf_result
+    office_result = _handle_office_attachment_ocr(
+        db,
+        job,
+        attachment_id=attachment_id,
+        attachment=attachment,
+        node_config=node_config,
+    )
+    if office_result is not None:
+        return office_result
 
     ocr_result = call_attachment_ocr(node_config=node_config, ocr_input=ocr_input)
     extracted_text = ocr_result.extracted_text
@@ -2228,6 +2238,148 @@ def _handle_pdf_attachment_ocr(
         "doc2x_uid": submit_result.uid,
         "poll_job": _json_safe_dict(poll_job),
         "pdf_kind": inspection.pdf_kind,
+    }
+
+
+def _handle_office_attachment_ocr(
+    db: Session,
+    job: JobClaim,
+    *,
+    attachment_id: UUID,
+    attachment: dict[str, Any],
+    node_config: dict[str, Any],
+) -> dict[str, object] | None:
+    document_kind = office_document_kind(
+        file_name=str(attachment.get("file_name") or ""),
+        file_type=str(attachment.get("file_type") or ""),
+        mime_type=str(attachment.get("mime_type") or ""),
+    )
+    if document_kind is None:
+        return None
+
+    settings = get_settings()
+    file_bytes = _attachment_file_bytes(attachment, max_bytes=settings.attachment_max_upload_bytes)
+    inspection = inspect_office_text(
+        file_bytes,
+        file_name=str(attachment.get("file_name") or ""),
+        file_type=str(attachment.get("file_type") or ""),
+        mime_type=str(attachment.get("mime_type") or ""),
+        max_chars=settings.attachment_text_capture_max_bytes,
+    )
+    _patch_attachment_metadata(
+        db,
+        attachment_id,
+        {
+            "last_office_kind": inspection.document_kind,
+            "last_office_text_extraction": {
+                "document_kind": inspection.document_kind,
+                "parser_name": inspection.parser_name,
+                "parser_version": inspection.parser_version,
+                "extracted_char_count": inspection.extracted_char_count,
+                "item_count": inspection.item_count,
+                "error_message": inspection.error_message,
+            },
+        },
+    )
+    if not inspection.has_text:
+        return None
+
+    text_path = _save_ocr_text_artifact(
+        attachment_id=attachment_id,
+        parsed_document_id=None,
+        content=inspection.extracted_text,
+        suffix=f"{inspection.document_kind}-text.txt",
+    )
+    parsed_document_id = _insert_parsed_document_for_ocr(
+        db,
+        attachment_id=attachment_id,
+        parse_status="parsed",
+        extracted_text=inspection.extracted_text,
+        error_message=None,
+        parser_name=inspection.parser_name,
+        parser_version=inspection.parser_version,
+        text_path=text_path,
+        page_count=inspection.item_count or None,
+    )
+    evidence_id = _insert_ocr_evidence_span(
+        db,
+        attachment_id=attachment_id,
+        parsed_document_id=parsed_document_id,
+        job_id=job.id,
+        text_excerpt=inspection.extracted_text,
+    )
+    _update_attachment_parse_terminal(
+        db,
+        attachment_id=attachment_id,
+        parse_status="parsed",
+        job_id=job.id,
+        parsed_document_id=parsed_document_id,
+        evidence_id=evidence_id,
+        text_length=len(inspection.extracted_text),
+        metadata_patch={
+            "last_ocr_provider": "office_text_layer",
+            "last_office_kind": inspection.document_kind,
+        },
+    )
+    touched_seller_target_count = _touch_seller_targets_linked_to_attachment(db, attachment_id)
+    child_parse_jobs = _enqueue_linked_parse_jobs_after_ocr(
+        db,
+        job=job,
+        attachment_id=attachment_id,
+        parsed_document_id=parsed_document_id,
+        evidence_id=evidence_id,
+        extracted_text=inspection.extracted_text,
+    )
+    business_update_process_job = _enqueue_business_update_process_after_ocr(
+        db,
+        job=job,
+        attachment_id=attachment_id,
+        evidence_id=evidence_id,
+        extracted_text=inspection.extracted_text,
+    )
+    _insert_ocr_trace(
+        db,
+        job=job,
+        attachment_id=attachment_id,
+        node_config=node_config,
+        status="succeeded",
+        input_json={
+            "attachment_id": str(attachment_id),
+            "provider": "office_text_layer",
+            "office_text_extraction": {
+                "document_kind": inspection.document_kind,
+                "parser_name": inspection.parser_name,
+                "parser_version": inspection.parser_version,
+                "extracted_char_count": inspection.extracted_char_count,
+                "item_count": inspection.item_count,
+            },
+        },
+        raw_output_text=inspection.extracted_text,
+        parsed_output_json={
+            "execution_mode": "office_text_layer",
+            "office_kind": inspection.document_kind,
+            "parsed_document_id": str(parsed_document_id),
+            "evidence_id": str(evidence_id),
+            "child_parse_jobs": child_parse_jobs,
+            "business_update_process_job": business_update_process_job,
+        },
+        latency_ms=0,
+        error_message=None,
+    )
+    return {
+        "handled": True,
+        "job_type": job.job_type,
+        "attachment_id": str(attachment_id),
+        "parse_status": "parsed",
+        "provider": "office_text_layer",
+        "office_kind": inspection.document_kind,
+        "parsed_document_id": str(parsed_document_id),
+        "evidence_id": str(evidence_id),
+        "text_length": len(inspection.extracted_text),
+        "touched_seller_target_count": touched_seller_target_count,
+        "child_parse_jobs": child_parse_jobs,
+        "child_parse_job_count": len(child_parse_jobs),
+        "business_update_process_job": business_update_process_job,
     }
 
 
