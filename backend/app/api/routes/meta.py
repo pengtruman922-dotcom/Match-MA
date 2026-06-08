@@ -263,6 +263,7 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
             "image_model_preprocess_target_bytes": settings.image_multimodal_target_bytes,
             "image_ocr_policy": "Images are linked as multimodal LLM evidence and are not sent to OCR.",
             "pdf_policy": "Text PDFs are extracted locally; scanned PDFs are sent to Doc2X when OCR_PROVIDER=doc2x.",
+            "office_policy": "DOCX/XLSX/PPTX files are extracted locally from OOXML text before business update processing.",
         },
     }
 
