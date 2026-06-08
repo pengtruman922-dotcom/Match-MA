@@ -14,6 +14,9 @@ from backend.app.db import get_db
 from backend.app.services.attachment_storage import (
     AttachmentStorageError,
     AttachmentTooLargeError,
+    TEXT_FILE_EXTENSIONS,
+    TEXT_MIME_PREFIXES,
+    TEXT_MIME_TYPES,
     save_upload_file,
 )
 from backend.app.services.image_inputs import is_supported_multimodal_image, multimodal_image_constraints
@@ -130,6 +133,20 @@ class AttachmentParseReadinessOut(BaseModel):
     blocking_reasons: list[str]
     recommended_actions: list[str]
     debug_ref: dict[str, Any]
+
+
+class AttachmentUploadPolicyOut(BaseModel):
+    max_upload_bytes: int
+    max_upload_mb: float
+    storage_backend: str
+    object_storage_configured: bool
+    text_capture_max_bytes: int
+    supported_uploads: dict[str, Any]
+    pdf_policy: dict[str, Any]
+    image_policy: dict[str, Any]
+    ocr_policy: dict[str, Any]
+    upload_form_defaults: dict[str, Any]
+    user_guidance: list[str]
 
 
 ATTACHMENT_SELECT_COLUMNS = """
@@ -370,6 +387,11 @@ def list_attachments(
     return [_attach_links_to_row(db, dict(row)) for row in rows]
 
 
+@router.get("/upload-policy", response_model=AttachmentUploadPolicyOut)
+def get_attachment_upload_policy() -> dict[str, Any]:
+    return _attachment_upload_policy()
+
+
 @router.get("/{attachment_id}", response_model=AttachmentOut)
 def get_attachment(attachment_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
     return _attachment_with_links(db, attachment_id)
@@ -519,6 +541,84 @@ def _upload_failure_detail(exc: Exception) -> dict[str, Any]:
         "error": "attachment_upload_failed",
         "error_type": exc.__class__.__name__,
         "message": _truncate_text(str(exc), 500) or "Unexpected upload failure.",
+    }
+
+
+def _attachment_upload_policy() -> dict[str, Any]:
+    settings = get_settings()
+    max_upload_mb = round(settings.attachment_max_upload_bytes / 1024 / 1024, 2)
+    ocr_provider = settings.ocr_provider.strip().lower()
+    doc2x_configured = bool(settings.effective_doc2x_api_key)
+    object_storage_configured = settings.effective_attachment_storage_backend in {"s3", "railway_s3"}
+    image_constraints = multimodal_image_constraints(
+        max_count=settings.image_multimodal_max_count,
+        max_upload_bytes=settings.image_multimodal_max_upload_bytes,
+        max_side=settings.image_multimodal_max_side,
+        target_bytes=settings.image_multimodal_target_bytes,
+    )
+    return {
+        "max_upload_bytes": settings.attachment_max_upload_bytes,
+        "max_upload_mb": max_upload_mb,
+        "storage_backend": settings.effective_attachment_storage_backend,
+        "object_storage_configured": object_storage_configured,
+        "text_capture_max_bytes": settings.attachment_text_capture_max_bytes,
+        "supported_uploads": {
+            "text_extensions": sorted(TEXT_FILE_EXTENSIONS),
+            "text_mime_types": sorted(TEXT_MIME_TYPES),
+            "text_mime_prefixes": list(TEXT_MIME_PREFIXES),
+            "document_extensions": ["pdf", "docx", "xlsx", "pptx"],
+            "image_mime_types": image_constraints["supported_types"],
+            "binary_uploads_allowed": True,
+        },
+        "pdf_policy": {
+            "text_detection": {
+                "sample_page_limit": settings.pdf_text_detection_page_limit,
+                "min_total_chars_for_text_pdf": settings.pdf_text_detection_min_chars,
+            },
+            "text_pdf": {
+                "strategy": "local_text_layer_extraction",
+                "ocr_provider_required": False,
+            },
+            "scanned_pdf": {
+                "strategy": "doc2x_async_ocr" if ocr_provider == "doc2x" else "not_configured",
+                "ocr_provider_required": True,
+                "requires_object_storage": True,
+                "doc2x_configured": doc2x_configured,
+            },
+        },
+        "image_policy": {
+            "strategy": "multimodal_llm_direct",
+            "auto_ocr": False,
+            "constraints": image_constraints,
+            "preprocess": {
+                "output_mime_type": "image/jpeg",
+                "max_side_px": settings.image_multimodal_max_side,
+                "jpeg_quality": settings.image_multimodal_jpeg_quality,
+                "target_bytes": settings.image_multimodal_target_bytes,
+            },
+        },
+        "ocr_policy": {
+            "provider": ocr_provider,
+            "doc2x": {
+                "configured": doc2x_configured,
+                "model": settings.doc2x_model,
+                "poll_interval_seconds": settings.doc2x_poll_interval_seconds,
+                "max_wait_seconds": settings.doc2x_max_wait_seconds,
+            },
+        },
+        "upload_form_defaults": {
+            "visibility": "workspace",
+            "auto_start_ocr": False,
+            "process_after_ocr": True,
+            "auto_process": True,
+        },
+        "user_guidance": [
+            f"Each attachment must be no larger than {max_upload_mb} MB.",
+            "Text-like files are captured directly and can be parsed immediately.",
+            "Text PDFs are extracted locally when the first sampled pages contain enough text.",
+            "Scanned PDFs use the configured async OCR provider before downstream extraction.",
+            "Images are sent directly to the multimodal LLM and evidence is stored as image attachment plus model excerpt.",
+        ],
     }
 
 
