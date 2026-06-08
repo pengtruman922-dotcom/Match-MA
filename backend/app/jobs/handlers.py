@@ -1036,7 +1036,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
             error_code="llm_call_failed",
             error_message=str(exc),
         )
-        _mark_business_update_failed(db, business_update_id, job.id, str(exc))
+        _mark_business_update_failed_if_final_attempt(db, job, business_update_id, str(exc))
         db.commit()
         raise
 
@@ -1105,7 +1105,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
         )
     except Exception as exc:
         db.rollback()
-        _mark_business_update_failed(db, business_update_id, job.id, str(exc))
+        _mark_business_update_failed_if_final_attempt(db, job, business_update_id, str(exc))
         db.commit()
         raise
 
@@ -4654,6 +4654,17 @@ def _mark_business_update_failed(
             },
         },
     )
+
+
+def _mark_business_update_failed_if_final_attempt(
+    db: Session,
+    job: JobClaim,
+    business_update_id: UUID,
+    error_message: str,
+) -> None:
+    if job.attempt_count < job.max_attempts:
+        return
+    _mark_business_update_failed(db, business_update_id, job.id, error_message)
 
 
 def _mark_business_updates_blocked_by_attachment_ocr(

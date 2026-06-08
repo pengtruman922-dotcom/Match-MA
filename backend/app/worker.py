@@ -30,19 +30,37 @@ def run_once(*, queue_name: str, worker_id: str) -> bool:
             mark_job_succeeded(db, job_id=job.id, result_json=result)
     except Exception as exc:  # pragma: no cover - defensive worker boundary
         with session_scope() as db:
-            _mark_related_business_update_failed(db, job, str(exc))
             mark_job_failed(db, job_id=job.id, error_message=str(exc))
+            _mark_related_business_update_failed_if_final(db, job, str(exc))
         raise
 
     return True
 
 
-def _mark_related_business_update_failed(db, job, error_message: str) -> None:
+def _mark_related_business_update_failed_if_final(db, job, error_message: str) -> None:
     if (
         job.job_type != "business_update_extract_actions"
         or job.entity_type != "business_update"
         or job.entity_id is None
     ):
+        return
+    failed_job = db.execute(
+        text(
+            """
+            select status
+            from background_job
+            where id = :job_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {
+            "job_id": job.id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    if not failed_job or failed_job["status"] != "failed":
         return
     db.execute(
         text(
