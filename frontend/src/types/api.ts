@@ -244,6 +244,20 @@ export interface BusinessUpdateUploadResponse {
   process_job: Record<string, unknown> | null;
 }
 
+export interface BusinessUpdateReviewPage {
+  business_update: Record<string, unknown>;
+  overview: Record<string, unknown>;
+  action_groups: Array<Record<string, unknown>>;
+  actions: Array<Record<string, unknown>>;
+  application_logs: Array<Record<string, unknown>>;
+  jobs: Array<Record<string, unknown>>;
+  traces: Array<Record<string, unknown>>;
+  attachments: Array<Record<string, unknown>>;
+  bound_entities: Record<string, unknown>;
+  quick_actions: Array<Record<string, unknown>>;
+  debug_ref: DebugRef;
+}
+
 export interface AttachmentUploadPolicy {
   max_upload_bytes: number;
   max_upload_mb: number;

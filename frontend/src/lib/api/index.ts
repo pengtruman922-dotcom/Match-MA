@@ -7,6 +7,7 @@ import type {
   BackgroundJobRetryPreview,
   BusinessUpdate,
   BusinessUpdateCreate,
+  BusinessUpdateReviewPage,
   BusinessUpdateUploadResponse,
   BuyerIntent,
   BuyerIntentCreate,
@@ -99,6 +100,7 @@ export const businessUpdates = {
     apiRequest<BusinessUpdate>('/business-updates', { method: 'POST', body: JSON.stringify(data) }),
   upload: (data: FormData) =>
     apiRequest<BusinessUpdateUploadResponse>('/business-updates/upload', { method: 'POST', body: data }),
+  reviewPage: (id: string) => apiRequest<BusinessUpdateReviewPage>(`/business-updates/${id}/review-page`),
   process: (id: string) =>
     apiRequest<{ job_id: string; job_type: string; status: string; queue_name: string; business_update_id: string }>(
       `/business-updates/${id}/process`,
