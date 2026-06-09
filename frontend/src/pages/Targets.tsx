@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { Plus, Search, X, ChevronDown, ChevronUp, Sparkles, MessageSquarePlus } from 'lucide-react';
 import { sellerTargets } from '../lib/api';
 import type { SellerTarget, SellerTargetCreate } from '../types/api';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
 
 export default function Targets() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [items, setItems] = useState<SellerTarget[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
@@ -22,6 +23,14 @@ export default function Targets() {
   };
 
   useEffect(() => { fetchTargets(); }, []);
+  useEffect(() => {
+    if (searchParams.get('action') === 'new') {
+      setShowCreateModal(true);
+      const next = new URLSearchParams(searchParams);
+      next.delete('action');
+      setSearchParams(next, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
 
   const handleSearch = () => { fetchTargets(searchQuery); };
 

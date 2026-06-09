@@ -16,12 +16,12 @@ from backend.app.api.routes.workbench import (
 )
 
 
-def test_workbench_task_priority_uses_confidence_thresholds() -> None:
+def test_workbench_task_priority_ignores_confidence_without_analysis() -> None:
     assert _task_priority({"action_type": "seller_fact_update", "confidence": 0.9}) == "normal"
-    assert _task_priority({"action_type": "seller_fact_update", "confidence": 0.7}) == "medium"
-    assert _task_priority({"action_type": "seller_fact_update", "confidence": 0.5}) == "high"
+    assert _task_priority({"action_type": "seller_fact_update", "confidence": 0.7}) == "normal"
+    assert _task_priority({"action_type": "seller_fact_update", "confidence": 0.5}) == "normal"
     assert _task_priority({"action_type": "unresolved_item", "confidence": 0.95}) == "high"
-    assert _task_priority({"action_type": "seller_fact_update", "confidence": None}) == "high"
+    assert _task_priority({"action_type": "seller_fact_update", "confidence": None}) == "normal"
 
 
 def test_workbench_action_grouping_matches_frontend_task_board() -> None:

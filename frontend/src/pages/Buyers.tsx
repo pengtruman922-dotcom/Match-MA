@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { Plus, Search, X, ChevronDown, ChevronUp, Sparkles, MessageSquarePlus } from 'lucide-react';
 import { buyerParties, buyerIntents } from '../lib/api';
 import type { BuyerParty, BuyerPartyCreate, BuyerIntent, BuyerIntentCreate } from '../types/api';
@@ -7,11 +7,29 @@ import type { BuyerParty, BuyerPartyCreate, BuyerIntent, BuyerIntentCreate } fro
 type Tab = 'intents' | 'parties';
 
 export default function Buyers() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [tab, setTab] = useState<Tab>('intents');
   const [showCreateIntent, setShowCreateIntent] = useState(false);
   const [showCreateParty, setShowCreateParty] = useState(false);
   const [intentRefreshKey, setIntentRefreshKey] = useState(0);
   const [partyRefreshKey, setPartyRefreshKey] = useState(0);
+
+  useEffect(() => {
+    const action = searchParams.get('action');
+    if (action === 'new-intent') {
+      setTab('intents');
+      setShowCreateIntent(true);
+    }
+    if (action === 'new-party') {
+      setTab('parties');
+      setShowCreateParty(true);
+    }
+    if (action === 'new-intent' || action === 'new-party') {
+      const next = new URLSearchParams(searchParams);
+      next.delete('action');
+      setSearchParams(next, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
 
   return (
     <div className="space-y-5">

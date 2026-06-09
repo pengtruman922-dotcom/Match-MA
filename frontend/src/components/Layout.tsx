@@ -1,5 +1,5 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
-import { Search, Bug } from 'lucide-react';
+import { Bug, ChevronDown, LogOut, Search } from 'lucide-react';
 import { useState } from 'react';
 import { useDebugMode } from '../lib/debug';
 import { clearAuthSession, getStoredUser } from '../lib/auth';
@@ -15,13 +15,16 @@ const navItems = [
 
 export default function Layout() {
   const [searchQuery, setSearchQuery] = useState('');
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
   const navigate = useNavigate();
   const { isAdmin, debugEnabled, toggleDebug } = useDebugMode();
   const user = getStoredUser();
+  const displayName = normalizedDisplayName(user?.display_name || user?.username || '管理员');
+  const avatarText = displayName.slice(0, 3);
 
   function handleSearch(e: React.KeyboardEvent<HTMLInputElement>) {
     if (e.key === 'Enter' && searchQuery.trim()) {
-      navigate(`/targets?q=${encodeURIComponent(searchQuery.trim())}`);
+      navigate(`/search?q=${encodeURIComponent(searchQuery.trim())}`);
       setSearchQuery('');
     }
   }
@@ -35,14 +38,7 @@ export default function Layout() {
     <div className="min-h-screen bg-gray-50">
       <header className="sticky top-0 z-50 bg-white border-b border-gray-200">
         <div className="max-w-[1440px] mx-auto px-6 flex items-center justify-between h-14">
-          <div className="flex items-center gap-8">
-            <NavLink to="/" className="flex items-center gap-2">
-              <div className="w-7 h-7 bg-brand-600 flex items-center justify-center">
-                <span className="text-white font-bold text-xs">M</span>
-              </div>
-              <span className="text-base font-bold text-gray-900 tracking-tight">Match-MA</span>
-            </NavLink>
-          </div>
+          <div />
 
           <div className="flex items-center gap-3">
             <div className="relative">
@@ -53,18 +49,37 @@ export default function Layout() {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 onKeyDown={handleSearch}
-                className="w-56 pl-8 pr-3 py-1.5 text-sm bg-gray-50 border border-gray-200 placeholder:text-gray-400 focus:outline-none focus:border-brand-500 focus:bg-white transition-colors"
+                className="w-64 pl-8 pr-3 py-1.5 text-sm bg-gray-50 border border-gray-200 placeholder:text-gray-400 focus:outline-none focus:border-brand-500 focus:bg-white transition-colors"
               />
             </div>
-            <div className="flex items-center gap-2">
-              <div className="w-7 h-7 bg-brand-600 flex items-center justify-center text-white text-xs font-semibold">
-                {user?.display_name?.slice(0, 1) || 'A'}
-              </div>
-              <span className="text-sm text-gray-700">{user?.display_name || 'Admin'}</span>
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setUserMenuOpen((open) => !open)}
+                className="flex items-center gap-2 text-sm text-gray-700 hover:text-gray-900"
+              >
+                <span className="min-w-12 h-7 px-2 bg-red-600 text-white flex items-center justify-center text-xs font-semibold tracking-wide">
+                  {avatarText}
+                </span>
+                <ChevronDown className={`w-3.5 h-3.5 text-gray-400 transition-transform ${userMenuOpen ? 'rotate-180' : ''}`} />
+              </button>
+              {userMenuOpen && (
+                <div className="absolute right-0 mt-2 w-44 bg-white border border-gray-200 shadow-lg py-2">
+                  <div className="px-3 pb-2 border-b border-gray-100">
+                    <p className="text-sm font-medium text-gray-900 truncate">{displayName}</p>
+                    <p className="text-xs text-gray-400 mt-0.5">{user?.role === 'admin' ? '管理员' : user?.role || '用户'}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleLogout}
+                    className="w-full px-3 py-2 text-left text-sm text-gray-600 hover:bg-gray-50 hover:text-red-600 flex items-center gap-2"
+                  >
+                    <LogOut className="w-3.5 h-3.5" />
+                    退出登录
+                  </button>
+                </div>
+              )}
             </div>
-            <button onClick={handleLogout} className="text-xs text-gray-500 hover:text-brand-600">
-              退出
-            </button>
             {isAdmin && (
               <button
                 onClick={toggleDebug}
@@ -107,4 +122,10 @@ export default function Layout() {
       </main>
     </div>
   );
+}
+
+function normalizedDisplayName(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === 'Match-MA Admin') return '管理员';
+  return trimmed;
 }

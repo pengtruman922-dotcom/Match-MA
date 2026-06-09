@@ -1,5 +1,12 @@
 import { businessUpdates, extractedActions, workbench } from './api';
-import type { BusinessUpdate, ExtractedAction, FailureSummary, QueueSummary } from '../types/api';
+import type {
+  BusinessUpdate,
+  ExtractedAction,
+  FailureSummary,
+  QueueSummary,
+  WorkbenchActivity,
+  WorkbenchOverview,
+} from '../types/api';
 
 export interface ActionGroup {
   key: string;
@@ -11,6 +18,8 @@ export interface ActionGroup {
 export interface WorkbenchData {
   groups: ActionGroup[];
   recentUpdates: BusinessUpdate[];
+  recentActivity: WorkbenchActivity[];
+  overview: WorkbenchOverview | null;
   failureSummary: FailureSummary | null;
   queueSummary: QueueSummary | null;
   loading: boolean;
@@ -42,15 +51,17 @@ const GROUP_ORDER = [
 
 export async function fetchWorkbenchData(): Promise<Omit<WorkbenchData, 'loading'>> {
   try {
-    const data = await workbench.get();
+    const data = await workbench.taskBoard();
     return {
       groups: data.groups,
-      recentUpdates: data.recent_updates,
-      failureSummary: null,
-      queueSummary: null,
+      recentUpdates: [],
+      recentActivity: data.recent_activity,
+      overview: data.overview,
+      failureSummary: data.failure_summary,
+      queueSummary: data.queue_summary,
     };
   } catch {
-    // Keep the Bolt UI usable against older API deployments while Railway catches up.
+    // Keep the UI usable against older API deployments while Railway catches up.
   }
 
   const [actions, updates] = await Promise.all([
@@ -72,5 +83,42 @@ export async function fetchWorkbenchData(): Promise<Omit<WorkbenchData, 'loading
     items: grouped[key] || [],
   })).filter((g) => g.count > 0);
 
-  return { groups, recentUpdates: updates, failureSummary: null, queueSummary: null };
+  return {
+    groups,
+    recentUpdates: updates,
+    recentActivity: updates.map((update) => ({
+      activity_type: 'business_update',
+      entity_id: update.id,
+      status: update.processing_status,
+      activity_label: businessUpdateActivityLabel(update),
+      object_name: '未绑定对象',
+      summary: businessUpdateStatusLabel(update.processing_status),
+      title: `${businessUpdateActivityLabel(update)}：未绑定对象`,
+      subtitle: businessUpdateStatusLabel(update.processing_status),
+      happened_at: update.created_at,
+      route: `/updates/${update.id}`,
+    })),
+    overview: null,
+    failureSummary: null,
+    queueSummary: null,
+  };
+}
+
+function businessUpdateActivityLabel(update: BusinessUpdate): string {
+  if (update.processing_status === 'failed') return '解析异常';
+  if (update.bound_seller_target_ids_json.length > 0) return '标的更新';
+  if (update.bound_buyer_party_ids_json.length > 0 || update.bound_buyer_intent_ids_json.length > 0) return '买家更新';
+  return '业务更新';
+}
+
+function businessUpdateStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    pending: '处理中',
+    processing: '处理中',
+    parsed: '已解析，待复核',
+    partially_applied: '已部分应用',
+    applied: '已应用',
+    failed: '需要查看异常',
+  };
+  return labels[status] || status;
 }
