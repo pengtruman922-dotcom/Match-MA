@@ -29,7 +29,7 @@ export default function SearchResults() {
         if (!cancelled) setResult(data);
       })
       .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : '????');
+        if (!cancelled) setError(err instanceof Error ? err.message : '搜索失败');
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -56,18 +56,18 @@ export default function SearchResults() {
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               className="input pl-9"
-              placeholder="????????????..."
+              placeholder="搜索标的、买家或买家意向..."
               autoFocus
             />
           </div>
           <button type="submit" className="px-4 py-2 bg-brand-600 text-white text-sm font-medium hover:bg-brand-700">
-            ??
+            搜索
           </button>
         </form>
       </div>
 
       {!initialQuery.trim() ? (
-        <EmptyState title="?????????" description="???????????????????????????" />
+        <EmptyState title="请输入搜索关键词" description="可模糊搜索标的、买家主体和买家意向。" />
       ) : loading ? (
         <div className="flex items-center justify-center py-20">
           <div className="w-5 h-5 border-2 border-brand-600 border-t-transparent rounded-full animate-spin" />
@@ -77,14 +77,14 @@ export default function SearchResults() {
       ) : result && result.total_count > 0 ? (
         <div className="space-y-5">
           <div className="text-sm text-gray-500">
-            ?? <span className="text-gray-900 font-medium">{result.query}</span>???? {result.total_count} ???
+            搜索 <span className="text-gray-900 font-medium">{result.query}</span>，共找到 {result.total_count} 条结果
           </div>
           {result.groups.map((group) => (
             <ResultGroup key={group.key} group={group} />
           ))}
         </div>
       ) : (
-        <EmptyState title="????????" description="?????????????????????/?????" />
+        <EmptyState title="暂无搜索结果" description="可以尝试更换关键词，或先新建标的/买家意向。" />
       )}
     </div>
   );

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, Archive, Eye, FlaskConical, RefreshCw, RotateCcw, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { backgroundJobs } from '../lib/api';
 import type { BackgroundJobFailure, BackgroundJobRetryPreview, FailureSummary } from '../types/api';
 
@@ -326,6 +327,13 @@ function FailureItem({
       </div>
 
       <div className="mt-3 flex items-center gap-2 flex-wrap">
+        <Link
+          to={job.debug_ref.route}
+          className="inline-flex items-center gap-1 px-2 py-1 text-xs border bg-white text-gray-600 border-gray-200 hover:text-brand-600 hover:border-brand-200"
+        >
+          <Eye className="w-3 h-3" />
+          详情
+        </Link>
         <SmallButton onClick={onPreview} disabled={busy || !job.can_retry} icon={Eye}>
           预览
         </SmallButton>
@@ -431,7 +439,14 @@ function RetryPreviewModal({
 
           {preview.related.business_update && (
             <div>
-              <h4 className="text-xs font-semibold text-gray-700 mb-2">关联业务更新</h4>
+              <div className="flex items-center justify-between mb-2">
+                <h4 className="text-xs font-semibold text-gray-700">关联业务更新</h4>
+                {preview.related.entity_ref && (
+                  <Link to={preview.related.entity_ref.route} className="text-xs text-brand-600 hover:text-brand-700">
+                    Debug 详情
+                  </Link>
+                )}
+              </div>
               <div className="border border-gray-100 bg-gray-50 p-3 text-xs text-gray-600 space-y-1">
                 <p>状态：{preview.related.business_update.processing_status}</p>
                 <p>拆分动作数：{preview.related.business_update.action_count}</p>

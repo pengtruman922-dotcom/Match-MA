@@ -49,7 +49,7 @@ export default function Home() {
         <div className="bg-white border border-gray-200">
           <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
             <div className="flex items-center gap-2">
-              <h2 className="text-sm font-semibold text-gray-900">????</h2>
+              <h2 className="text-sm font-semibold text-gray-900">待我处理</h2>
               {totalPending > 0 && (
                 <span className="text-xs bg-red-50 text-red-600 px-1.5 py-0.5 font-medium">
                   {totalPending}
@@ -57,7 +57,7 @@ export default function Home() {
               )}
             </div>
             <Link to="/updates" className="text-xs text-brand-600 hover:text-brand-700 font-medium flex items-center gap-0.5">
-              ???? <ChevronRight className="w-3 h-3" />
+              查看全部 <ChevronRight className="w-3 h-3" />
             </Link>
           </div>
 
@@ -66,7 +66,7 @@ export default function Home() {
           ) : groups.length === 0 ? (
             <div className="px-5 py-10 text-center">
               <CheckCircle2 className="w-8 h-8 text-emerald-400 mx-auto mb-2" />
-              <p className="text-sm text-gray-500">???????</p>
+              <p className="text-sm text-gray-500">暂无待处理事项</p>
             </div>
           ) : (
             <div className="divide-y divide-gray-100">
@@ -79,15 +79,15 @@ export default function Home() {
 
         <div className="bg-white border border-gray-200">
           <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-            <h2 className="text-sm font-semibold text-gray-900">????</h2>
+            <h2 className="text-sm font-semibold text-gray-900">最近动态</h2>
             <Link to="/updates" className="text-xs text-brand-600 hover:text-brand-700 font-medium flex items-center gap-0.5">
-              ???? <ChevronRight className="w-3 h-3" />
+              查看全部 <ChevronRight className="w-3 h-3" />
             </Link>
           </div>
           {loading ? (
             <LoadingPlaceholder />
           ) : recentActivity.length === 0 ? (
-            <p className="text-sm text-gray-400 py-6 text-center">????</p>
+            <p className="text-sm text-gray-400 py-6 text-center">暂无动态</p>
           ) : (
             <div className="divide-y divide-gray-100">
               {recentActivity.slice(0, 8).map((activity) => (
@@ -116,30 +116,30 @@ export default function Home() {
 
       <div className="col-span-4 space-y-5">
         <div className="bg-white border border-gray-200 p-5">
-          <h2 className="text-sm font-semibold text-gray-900 mb-3">????</h2>
+          <h2 className="text-sm font-semibold text-gray-900 mb-3">快捷操作</h2>
           <div className="space-y-2">
-            <QuickAction icon={Plus} label="????" onClick={() => navigate('/targets?action=new')} />
-            <QuickAction icon={UserPlus} label="??????" onClick={() => navigate('/buyers?action=new-intent')} />
-            <QuickAction icon={MessageSquarePlus} label="??????" onClick={() => setDrawerOpen(true)} />
-            <QuickAction icon={Sparkles} label="????" onClick={() => navigate('/recommendations')} />
+            <QuickAction icon={Plus} label="新建标的" onClick={() => navigate('/targets?action=new')} />
+            <QuickAction icon={UserPlus} label="新建买家意向" onClick={() => navigate('/buyers?action=new-intent')} />
+            <QuickAction icon={MessageSquarePlus} label="录入业务更新" onClick={() => setDrawerOpen(true)} />
+            <QuickAction icon={Sparkles} label="智能推荐" onClick={() => navigate('/recommendations')} />
           </div>
         </div>
 
         <div className="bg-white border border-gray-200 p-5">
-          <h2 className="text-sm font-semibold text-gray-900 mb-3">????</h2>
+          <h2 className="text-sm font-semibold text-gray-900 mb-3">本周概览</h2>
           <div className="space-y-2.5">
-            <StatRow label="????" value={numberValue(overview?.weekly_new_target_count)} />
-            <StatRow label="??????" value={numberValue(overview?.weekly_new_buyer_intent_count)} />
-            <StatRow label="????" value={numberValue(overview?.weekly_updated_target_count)} />
-            <StatRow label="????" value={numberValue(overview?.weekly_business_update_count ?? overview?.recent_update_count)} />
+            <StatRow label="新增标的" value={numberValue(overview?.weekly_new_target_count)} />
+            <StatRow label="新增买家意向" value={numberValue(overview?.weekly_new_buyer_intent_count)} />
+            <StatRow label="更新标的" value={numberValue(overview?.weekly_updated_target_count)} />
+            <StatRow label="更新动态" value={numberValue(overview?.weekly_business_update_count ?? overview?.recent_update_count)} />
           </div>
         </div>
 
         {debugEnabled && <BackgroundJobFailurePanel />}
 
         <div className="bg-white border border-gray-200 p-5">
-          <h2 className="text-sm font-semibold text-gray-900 mb-3">??????</h2>
-          <p className="text-xs text-gray-400">??????????</p>
+          <h2 className="text-sm font-semibold text-gray-900 mb-3">使用提示</h2>
+          <p className="text-xs text-gray-400">可从快捷操作录入自然语言更新，系统会拆解为待复核动作。</p>
         </div>
       </div>
 
@@ -175,7 +175,7 @@ function GroupSection({ group, onOpenAction }: { group: ActionGroup; onOpenActio
           >
             <div className="min-w-0 flex-1">
               <p className="text-sm text-gray-800 line-clamp-1">{item.task_title || actionTypeLabel(item.action_type)}</p>
-              <p className="text-xs text-gray-500 mt-0.5 line-clamp-1">{item.task_subtitle || item.raw_evidence_text || '????????'}</p>
+              <p className="text-xs text-gray-500 mt-0.5 line-clamp-1">{item.task_subtitle || item.raw_evidence_text || '暂无摘要'}</p>
             </div>
             <div className="flex items-center gap-2 shrink-0 ml-3">
               <span className="text-xs text-gray-400">{formatDateTime(item.created_at)}</span>
@@ -191,9 +191,9 @@ function GroupSection({ group, onOpenAction }: { group: ActionGroup; onOpenActio
               className="text-xs text-brand-600 hover:text-brand-700 font-medium inline-flex items-center gap-1"
             >
               {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-              {expanded ? '??' : `?????? ${group.count} ?`}
+              {expanded ? '收起' : `展开全部 ${group.count} 条`}
             </button>
-            <Link to="/updates" className="text-xs text-gray-500 hover:text-brand-700 font-medium">????</Link>
+            <Link to="/updates" className="text-xs text-gray-500 hover:text-brand-700 font-medium">去复核页</Link>
           </div>
         )}
       </div>
@@ -245,19 +245,19 @@ function numberValue(value: unknown): number {
 }
 
 function buildActivityTitle(activity: WorkbenchActivity): string {
-  const label = activity.activity_label || '??';
-  const name = activity.object_name || '?????';
-  return `${label}?${name}`;
+  const label = activity.activity_label || '更新';
+  const name = activity.object_name || '未命名对象';
+  return `${label}：${name}`;
 }
 
 function actionTypeLabel(type: string): string {
   const labels: Record<string, string> = {
-    seller_fact_update: '???????',
-    seller_event: '???????',
-    buyer_intent_update: '??/???????',
-    buyer_seller_relation_update: '???????',
-    buyer_intent_target_exclusion: '???????',
-    unresolved_item: '????',
+    seller_fact_update: '标的信息更新',
+    seller_event: '标的事件更新',
+    buyer_intent_update: '买家/意向更新',
+    buyer_seller_relation_update: '推荐关系更新',
+    buyer_intent_target_exclusion: '排除标的',
+    unresolved_item: '待人工判断',
   };
-  return labels[type] || '???';
+  return labels[type] || '待处理';
 }

@@ -469,6 +469,144 @@ export interface DebugRef {
   route: string;
 }
 
+export interface DebugCenterOverview {
+  failed_job_count: number;
+  queued_job_count: number;
+  running_job_count: number;
+  retry_waiting_job_count: number;
+  failed_trace_count: number;
+  recent_trace_count: number;
+  failed_model_node_test_count: number;
+  failed_business_update_count: number;
+  recent_business_update_count: number;
+  recent_recommendation_session_count: number;
+  active_job_count: number;
+  health_level: 'ok' | 'warning' | 'error' | string;
+  mode: string;
+  generated_at: string;
+  [key: string]: string | number;
+}
+
+export interface DebugCenterJob {
+  id: string;
+  title: string;
+  job_type: string | null;
+  status: string | null;
+  queue_name: string | null;
+  priority: number | null;
+  entity_type: string | null;
+  entity_id: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  attempt_count: number | null;
+  max_attempts: number | null;
+  run_after: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  debug_ref: DebugRef;
+  related_entity_ref: DebugRef | null;
+  node_id?: string | null;
+  node_name?: string | null;
+  node_type?: string | null;
+  model_name?: string | null;
+  provider_name?: string | null;
+  provider_type?: string | null;
+  node_debug_ref?: DebugRef | null;
+}
+
+export interface DebugCenterTrace {
+  id: string;
+  title: string;
+  trace_type: string | null;
+  node_name: string | null;
+  status: string | null;
+  provider_name: string | null;
+  model_name: string | null;
+  prompt_version: string | null;
+  entity_type: string | null;
+  entity_id: string | null;
+  job_id: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  raw_output_preview: string | null;
+  latency_ms: number | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
+  started_at: string | null;
+  finished_at: string | null;
+  debug_ref: DebugRef | null;
+  related_entity_ref: DebugRef | null;
+}
+
+export interface DebugCenterBusinessUpdate {
+  id: string;
+  title: string;
+  raw_text_preview: string | null;
+  input_type: string | null;
+  processing_status: string | null;
+  action_count: number;
+  pending_action_count: number;
+  application_log_count: number;
+  job_count: number;
+  failed_job_count: number;
+  trace_count: number;
+  created_at: string | null;
+  review_route: string;
+  debug_ref: DebugRef;
+}
+
+export interface DebugCenterRecommendationSession {
+  id: string;
+  title: string;
+  mode: string | null;
+  status: string | null;
+  selected_count: number;
+  report_count: number;
+  job_count: number;
+  failed_job_count: number;
+  trace_count: number;
+  buyer_intent_id: string | null;
+  buyer_intent_name: string | null;
+  buyer_party_id: string | null;
+  buyer_name: string | null;
+  seller_target_id: string | null;
+  seller_target_name: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  status_route: string;
+  debug_ref: DebugRef;
+}
+
+export interface DebugCenterQuickAction {
+  key: string;
+  label: string;
+  route: string;
+  action: string;
+  badge_count: number | null;
+}
+
+export interface DebugCenterData {
+  overview: DebugCenterOverview;
+  failed_jobs: DebugCenterJob[];
+  running_jobs: DebugCenterJob[];
+  recent_traces: DebugCenterTrace[];
+  failed_traces: DebugCenterTrace[];
+  recent_business_updates: DebugCenterBusinessUpdate[];
+  recent_recommendation_sessions: DebugCenterRecommendationSession[];
+  model_node_test_failures: DebugCenterJob[];
+  quick_actions: DebugCenterQuickAction[];
+}
+
+export interface DebugEntity {
+  entity_type: string;
+  entity_id: string;
+  summary: Record<string, unknown>;
+  payload: Record<string, unknown>;
+}
+
 export interface BackgroundJobCompact {
   id: string;
   job_type: string;
