@@ -19,6 +19,7 @@ router = APIRouter(prefix="/seller-targets", tags=["seller-targets"])
 class SellerTargetCreate(BaseModel):
     target_name: str = Field(min_length=1, max_length=300)
     target_type: str = "company"
+    target_subject_name: str | None = Field(default=None, max_length=300)
     owner_user_id: UUID | None = None
     industry_primary: str | None = None
     industry_secondary: str | None = None
@@ -28,7 +29,9 @@ class SellerTargetCreate(BaseModel):
     current_revenue_yuan: Decimal | None = None
     current_net_profit_yuan: Decimal | None = None
     valuation_yuan: Decimal | None = None
+    valuation_date: str | None = Field(default=None, max_length=80)
     asking_price_yuan: Decimal | None = None
+    asking_price_date: str | None = Field(default=None, max_length=80)
     pe_ratio: Decimal | None = None
     is_for_sale: str = "unknown"
     can_control: str = "unknown"
@@ -42,6 +45,7 @@ class SellerTargetOut(BaseModel):
     id: UUID
     target_name: str
     target_type: str
+    target_subject_name: str | None
     recommendation_status: str
     information_status: str
     industry_primary: str | None
@@ -65,7 +69,9 @@ class SellerTargetOut(BaseModel):
     cash_flow_status: str | None
     operation_stability_status: str | None
     valuation_yuan: Decimal | None
+    valuation_date: str | None
     asking_price_yuan: Decimal | None
+    asking_price_date: str | None
     pe_ratio: Decimal | None
     pe_source_type: str | None
     premium_rate: Decimal | None
@@ -94,6 +100,7 @@ class SellerTargetOut(BaseModel):
 class SellerTargetUpdate(BaseModel):
     target_name: str | None = Field(default=None, min_length=1, max_length=300)
     target_type: str | None = None
+    target_subject_name: str | None = Field(default=None, max_length=300)
     industry_primary: str | None = None
     industry_secondary: str | None = None
     registered_province: str | None = None
@@ -115,7 +122,9 @@ class SellerTargetUpdate(BaseModel):
     cash_flow_status: str | None = None
     operation_stability_status: str | None = None
     valuation_yuan: Decimal | None = None
+    valuation_date: str | None = Field(default=None, max_length=80)
     asking_price_yuan: Decimal | None = None
+    asking_price_date: str | None = Field(default=None, max_length=80)
     pe_ratio: Decimal | None = None
     pe_source_type: str | None = None
     premium_rate: Decimal | None = None
@@ -163,13 +172,14 @@ class SellerTargetParseStatusOut(BaseModel):
 
 
 SELLER_TARGET_OUT_COLUMNS = """
-              id, target_name, target_type, recommendation_status, information_status,
+              id, target_name, target_type, target_subject_name, recommendation_status, information_status,
               industry_primary, industry_secondary, registered_province, registered_city,
               headquarter_province, headquarter_city, raw_region_text, region_granularity,
               listed_status, market_cap_yuan, current_revenue_yuan, current_net_profit_yuan,
               current_total_profit_yuan, current_assets_yuan, current_debt_ratio,
               current_operating_cash_flow_yuan, financial_period_label, profitability_status,
-              cash_flow_status, operation_stability_status, valuation_yuan, asking_price_yuan,
+              cash_flow_status, operation_stability_status, valuation_yuan, valuation_date,
+              asking_price_yuan, asking_price_date,
               pe_ratio, pe_source_type, premium_rate, is_for_sale, can_control, can_consolidate,
               accepts_minority_investment, transfer_ratio_min, transfer_ratio_max, transfer_ratio_text,
               transfer_flexibility_type, consolidation_path_summary, accepts_relocation,
@@ -185,19 +195,19 @@ def create_seller_target(payload: SellerTargetCreate, db: Session = Depends(get_
         text(
             f"""
             insert into seller_target (
-              team_id, workspace_id, target_name, target_type, owner_user_id,
+              team_id, workspace_id, target_name, target_type, target_subject_name, owner_user_id,
               industry_primary, industry_secondary, headquarter_province, headquarter_city,
               listed_status, current_revenue_yuan, current_net_profit_yuan,
-              valuation_yuan, asking_price_yuan, pe_ratio,
+              valuation_yuan, valuation_date, asking_price_yuan, asking_price_date, pe_ratio,
               is_for_sale, can_control, can_consolidate,
               business_summary, transaction_summary, risk_summary,
               created_by, updated_by
             )
             values (
-              :team_id, :workspace_id, :target_name, :target_type, :owner_user_id,
+              :team_id, :workspace_id, :target_name, :target_type, :target_subject_name, :owner_user_id,
               :industry_primary, :industry_secondary, :headquarter_province, :headquarter_city,
               :listed_status, :current_revenue_yuan, :current_net_profit_yuan,
-              :valuation_yuan, :asking_price_yuan, :pe_ratio,
+              :valuation_yuan, :valuation_date, :asking_price_yuan, :asking_price_date, :pe_ratio,
               :is_for_sale, :can_control, :can_consolidate,
               :business_summary, :transaction_summary, :risk_summary,
               :created_by, :updated_by
@@ -234,7 +244,7 @@ def list_seller_targets(
     }
 
     if q:
-        where.append("(target_name ilike :q or business_summary ilike :q)")
+        where.append("(target_name ilike :q or target_subject_name ilike :q or business_summary ilike :q)")
         params["q"] = f"%{q}%"
 
     rows = db.execute(
@@ -355,6 +365,9 @@ def update_seller_target(
 
     if "target_name" in changes and changes["target_name"] is not None:
         changes["target_name"] = changes["target_name"].strip()
+    for text_field in ("target_subject_name", "valuation_date", "asking_price_date"):
+        if text_field in changes and changes[text_field] is not None:
+            changes[text_field] = _normalize_optional_text(changes[text_field])
 
     if not changes:
         return original
@@ -469,21 +482,29 @@ def _get_seller_target_or_404(db: Session, seller_target_id: UUID) -> dict[str, 
 
 
 def _seller_target_params(payload: SellerTargetCreate) -> dict[str, Any]:
+    target_name = payload.target_name.strip()
+    target_type = payload.target_type or "company"
+    target_subject_name = _normalize_optional_text(payload.target_subject_name)
+    if target_type == "company" and not target_subject_name:
+        target_subject_name = target_name
     return {
         "team_id": DEFAULT_TEAM_ID,
         "workspace_id": DEFAULT_WORKSPACE_ID,
-        "target_name": payload.target_name.strip(),
-        "target_type": payload.target_type,
+        "target_name": target_name,
+        "target_type": target_type,
+        "target_subject_name": target_subject_name,
         "owner_user_id": payload.owner_user_id or DEFAULT_ADMIN_USER_ID,
-        "industry_primary": payload.industry_primary,
-        "industry_secondary": payload.industry_secondary,
-        "headquarter_province": payload.headquarter_province,
-        "headquarter_city": payload.headquarter_city,
+        "industry_primary": _normalize_optional_text(payload.industry_primary),
+        "industry_secondary": _normalize_optional_text(payload.industry_secondary),
+        "headquarter_province": _normalize_optional_text(payload.headquarter_province),
+        "headquarter_city": _normalize_optional_text(payload.headquarter_city),
         "listed_status": payload.listed_status,
         "current_revenue_yuan": payload.current_revenue_yuan,
         "current_net_profit_yuan": payload.current_net_profit_yuan,
         "valuation_yuan": payload.valuation_yuan,
+        "valuation_date": _normalize_optional_text(payload.valuation_date),
         "asking_price_yuan": payload.asking_price_yuan,
+        "asking_price_date": _normalize_optional_text(payload.asking_price_date),
         "pe_ratio": payload.pe_ratio,
         "is_for_sale": payload.is_for_sale,
         "can_control": payload.can_control,
@@ -499,11 +520,19 @@ def _seller_target_params(payload: SellerTargetCreate) -> dict[str, Any]:
 def _seller_target_parse_fallback_text(target: dict[str, Any]) -> str:
     parts = [
         target.get("target_name"),
+        target.get("target_subject_name"),
         target.get("business_summary"),
         target.get("transaction_summary"),
         target.get("risk_summary"),
     ]
     return "\n".join(str(part).strip() for part in parts if part is not None and str(part).strip())
+
+
+def _normalize_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def _latest_active_parse_job(db: Session, seller_target_id: UUID) -> dict[str, Any] | None:

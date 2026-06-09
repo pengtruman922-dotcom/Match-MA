@@ -893,6 +893,7 @@ def _get_or_create_relation(
 def _allowed_seller_target_changes(changes: dict[str, Any]) -> dict[str, Any]:
     allowed_fields = {
         "target_name",
+        "target_subject_name",
         "industry_primary",
         "industry_secondary",
         "headquarter_province",
@@ -901,8 +902,11 @@ def _allowed_seller_target_changes(changes: dict[str, Any]) -> dict[str, Any]:
         "current_revenue_yuan",
         "current_net_profit_yuan",
         "current_total_profit_yuan",
+        "financial_period_label",
         "valuation_yuan",
+        "valuation_date",
         "asking_price_yuan",
+        "asking_price_date",
         "pe_ratio",
         "is_for_sale",
         "can_control",

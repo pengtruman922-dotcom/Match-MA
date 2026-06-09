@@ -140,6 +140,7 @@ ROLLBACK_FIELDS_BY_ENTITY = {
     "seller_target": {
         "target_name",
         "target_type",
+        "target_subject_name",
         "industry_primary",
         "industry_secondary",
         "registered_province",
@@ -161,7 +162,9 @@ ROLLBACK_FIELDS_BY_ENTITY = {
         "cash_flow_status",
         "operation_stability_status",
         "valuation_yuan",
+        "valuation_date",
         "asking_price_yuan",
+        "asking_price_date",
         "pe_ratio",
         "pe_source_type",
         "premium_rate",
