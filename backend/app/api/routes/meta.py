@@ -171,8 +171,9 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
         select count(*)
         from prompt_template
         where (
-            (node_name = 'business_update_extractor' and version in ('v0.2.0', 'v0.3.0'))
-            or (node_name = 'buyer_intent_parser' and version in ('v0.1.0', 'v0.2.0'))
+            (node_name = 'business_update_extractor' and version in ('v0.2.0', 'v0.3.0', 'v0.4.0', 'v0.5.0'))
+            or (node_name = 'buyer_intent_parser' and version in ('v0.1.0', 'v0.2.0', 'v0.3.0'))
+            or (node_name = 'seller_target_parser' and version in ('v0.1.0', 'v0.2.0'))
           )
           and is_default = true
           and is_active = true
@@ -186,7 +187,7 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
           select 1
           from prompt_template
           where node_name = 'business_update_extractor'
-            and version in ('v0.2.0', 'v0.3.0')
+            and version in ('v0.2.0', 'v0.3.0', 'v0.4.0', 'v0.5.0')
             and is_default = true
             and is_active = true
         )
@@ -204,7 +205,7 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
         "default_rerank_nodes": default_rerank_nodes >= 1,
         "default_ocr_nodes": default_ocr_nodes >= 1,
         "default_embedding_nodes": default_embedding_nodes >= 2,
-        "default_prompts": default_prompts >= 2,
+        "default_prompts": default_prompts >= 3,
         "real_business_update_prompt": real_business_update_prompt,
         "buyer_intent_update_allowed": buyer_intent_update_allowed,
         "buyer_intent_suggestion_removed": not buyer_intent_suggestion_allowed,
@@ -217,7 +218,7 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
         and default_rerank_nodes >= 1
         and default_ocr_nodes >= 1
         and default_embedding_nodes >= 2
-        and default_prompts >= 2
+        and default_prompts >= 3
         and real_business_update_prompt
         and buyer_intent_update_allowed
         and not buyer_intent_suggestion_allowed

@@ -78,7 +78,7 @@ export default function TargetDetail() {
               {target.industry_primary && <span>{target.industry_primary}</span>}
               {target.headquarter_province && <span>· {target.headquarter_province}{target.headquarter_city || ''}</span>}
               {target.current_net_profit_yuan && <span>· 利润{formatYuan(target.current_net_profit_yuan)}</span>}
-              {target.pe_ratio && <span>· PE{Number(target.pe_ratio).toFixed(1)}</span>}
+              {target.asking_price_yuan && <span>· 报价{formatYuan(target.asking_price_yuan)}*</span>}
               <StatusBadge status={target.recommendation_status} type="recommendation" />
               <StatusBadge status={target.information_status} type="information" />
             </p>
@@ -180,7 +180,9 @@ function InfoTab({ target }: { target: SellerTarget }) {
       label: '身份',
       fields: [
         { label: '标的名称', value: target.target_name },
+        { label: '标的主体', value: getSubjectDisplay(target) },
         { label: '类型', value: target.target_type || '公司整体' },
+        { label: '上市状态', value: formatListedStatus(target.listed_status) },
       ],
     },
     {
@@ -202,8 +204,11 @@ function InfoTab({ target }: { target: SellerTarget }) {
       label: '估值交易',
       fields: [
         { label: '估值', value: target.valuation_yuan ? formatYuan(target.valuation_yuan) : null },
+        { label: '估值时间', value: target.valuation_date },
         { label: '报价', value: target.asking_price_yuan ? formatYuan(target.asking_price_yuan) : null },
+        { label: '报价时间', value: target.asking_price_date },
         { label: 'PE', value: target.pe_ratio ? Number(target.pe_ratio).toFixed(1) : null },
+        { label: '出售比例', value: target.transfer_ratio_text || formatTransferRatio(target) },
         { label: '是否还卖', value: target.is_for_sale },
         { label: '可控股', value: target.can_control },
         { label: '可并表', value: target.can_consolidate },
@@ -401,7 +406,37 @@ function StatusBadge({ status, type }: { status: string; type: 'recommendation' 
 
 function formatYuan(val: string): string {
   const num = Number(val);
-  if (num >= 100000000) return `${(num / 100000000).toFixed(1)}亿`;
-  if (num >= 10000) return `${(num / 10000).toFixed(0)}万`;
+  if (!Number.isFinite(num)) return '-';
+  const sign = num < 0 ? '-' : '';
+  const abs = Math.abs(num);
+  if (abs >= 100000000) return `${sign}${(abs / 100000000).toFixed(1)}亿`;
+  if (abs >= 10000) return `${sign}${Math.round(abs / 10000)}万`;
   return String(num);
+}
+
+function formatListedStatus(status: string | null): string {
+  if (status === 'listed') return '已上市';
+  if (status === 'unlisted' || status === 'pre_ipo') return '未上市';
+  return '未知';
+}
+
+function getSubjectDisplay(target: SellerTarget): string {
+  const subject = target.target_subject_name?.trim();
+  if (target.target_type === 'company' && (!subject || subject === target.target_name)) return '同标的';
+  return subject || '-';
+}
+
+function formatTransferRatio(target: SellerTarget): string | null {
+  if (target.transfer_ratio_min && target.transfer_ratio_max) {
+    return `${formatRatio(target.transfer_ratio_min)}-${formatRatio(target.transfer_ratio_max)}`;
+  }
+  if (target.transfer_ratio_min) return `>=${formatRatio(target.transfer_ratio_min)}`;
+  if (target.transfer_ratio_max) return `<=${formatRatio(target.transfer_ratio_max)}`;
+  return null;
+}
+
+function formatRatio(value: string): string {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return value;
+  return `${Number(num.toFixed(1))}%`;
 }

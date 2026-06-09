@@ -37,6 +37,24 @@ def test_business_update_prompt_seed_allows_expanded_buyer_intent_fields() -> No
     assert "buyer_industry_advantage_summary" in sql
 
 
+def test_seller_target_prompt_seed_includes_subject_and_price_dates() -> None:
+    sql = Path("database/migrations/018_seller_target_parser_prompt_v02.sql").read_text(encoding="utf-8")
+
+    assert "seller_target_parser" in sql
+    assert "target_subject_name" in sql
+    assert "asking_price_date" in sql
+    assert "valuation_date" in sql
+
+
+def test_business_update_prompt_seed_allows_seller_subject_and_price_dates() -> None:
+    sql = Path("database/migrations/019_business_update_extractor_prompt_v05.sql").read_text(encoding="utf-8")
+
+    assert "business_update_extractor" in sql
+    assert "target_subject_name" in sql
+    assert "asking_price_date" in sql
+    assert "valuation_date" in sql
+
+
 def test_meta_ai_infra_status_checks_qwen36_plus() -> None:
     source = Path("backend/app/api/routes/meta.py").read_text(encoding="utf-8")
 

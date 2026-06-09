@@ -23,8 +23,10 @@ def test_seller_target_parse_changes_normalize_enums_and_numbers() -> None:
         {
             "fields": {
                 "target_name": "Hangzhou Qiyuan medical device project",
+                "target_subject_name": "Hangzhou Qiyuan Medical Device Co., Ltd.",
                 "current_net_profit_yuan": "25000000",
                 "pe_ratio": "12.8",
+                "asking_price_date": "2025 Q1",
                 "listed_status": "unlisted",
                 "is_for_sale": "yes",
                 "can_consolidate": "unknown",
@@ -36,8 +38,10 @@ def test_seller_target_parse_changes_normalize_enums_and_numbers() -> None:
     )
 
     assert changes["target_name"] == "Hangzhou Qiyuan medical device project"
+    assert changes["target_subject_name"] == "Hangzhou Qiyuan Medical Device Co., Ltd."
     assert changes["current_net_profit_yuan"] == 25000000
     assert str(changes["pe_ratio"]) == "12.8"
+    assert changes["asking_price_date"] == "2025 Q1"
     assert changes["listed_status"] == "unlisted"
     assert changes["is_for_sale"] == "yes"
     assert changes["can_consolidate"] == "unknown"

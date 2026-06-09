@@ -20,6 +20,7 @@ def rebuild_seller_target_search_doc(db: Session, seller_target_id: UUID) -> dic
     structured_summary = _join_lines(
         [
             f"标的：{target['target_name']}",
+            _kv("标的主体", target.get("target_subject_name")),
             f"类型：{target['target_type']}",
             _kv("一级行业", target.get("industry_primary")),
             _kv("二级行业", target.get("industry_secondary")),
@@ -34,7 +35,9 @@ def rebuild_seller_target_search_doc(db: Session, seller_target_id: UUID) -> dic
             _money("营收", target.get("current_revenue_yuan")),
             _money("净利润", target.get("current_net_profit_yuan")),
             _money("估值", target.get("valuation_yuan")),
+            _kv("估值时间", target.get("valuation_date")),
             _money("报价", target.get("asking_price_yuan")),
+            _kv("报价时间", target.get("asking_price_date")),
             _kv("PE", _decimal_text(target.get("pe_ratio"))),
         ]
     )
@@ -370,10 +373,10 @@ def _get_seller_target(db: Session, seller_target_id: UUID) -> dict[str, Any]:
         text(
             """
             select
-              id, target_name, target_type, industry_primary, industry_secondary,
+              id, target_name, target_type, target_subject_name, industry_primary, industry_secondary,
               headquarter_province, headquarter_city, listed_status,
-              current_revenue_yuan, current_net_profit_yuan, valuation_yuan,
-              asking_price_yuan, pe_ratio, is_for_sale, can_control,
+              current_revenue_yuan, current_net_profit_yuan, valuation_yuan, valuation_date,
+              asking_price_yuan, asking_price_date, pe_ratio, is_for_sale, can_control,
               can_consolidate, business_summary, transaction_summary,
               risk_summary, gap_summary
             from seller_target

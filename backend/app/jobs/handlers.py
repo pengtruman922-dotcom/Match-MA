@@ -98,6 +98,7 @@ MONEY_UNIT_PATTERN = re.compile(
 
 SELLER_TARGET_CHANGE_FIELDS = {
     "target_name",
+    "target_subject_name",
     "industry_primary",
     "industry_secondary",
     "headquarter_province",
@@ -106,8 +107,11 @@ SELLER_TARGET_CHANGE_FIELDS = {
     "current_revenue_yuan",
     "current_net_profit_yuan",
     "current_total_profit_yuan",
+    "financial_period_label",
     "valuation_yuan",
+    "valuation_date",
     "asking_price_yuan",
+    "asking_price_date",
     "pe_ratio",
     "is_for_sale",
     "can_control",
@@ -129,6 +133,12 @@ SELLER_TARGET_FIELD_ALIASES = {
     "summary": "business_summary",
     "target_summary": "business_summary",
     "business": "business_summary",
+    "subject": "target_subject_name",
+    "subject_name": "target_subject_name",
+    "target_subject": "target_subject_name",
+    "target_subject_name": "target_subject_name",
+    "owner_company": "target_subject_name",
+    "company_name": "target_subject_name",
     "industry": "industry_secondary",
     "location": "raw_region_text",
     "province": "headquarter_province",
@@ -137,7 +147,12 @@ SELLER_TARGET_FIELD_ALIASES = {
     "profit": "current_net_profit_yuan",
     "net_profit": "current_net_profit_yuan",
     "valuation": "valuation_yuan",
+    "valuation_time": "valuation_date",
+    "valuation_date": "valuation_date",
     "asking_price": "asking_price_yuan",
+    "asking_price_time": "asking_price_date",
+    "asking_price_date": "asking_price_date",
+    "price_date": "asking_price_date",
     "pe": "pe_ratio",
     "pe_multiple": "pe_ratio",
 }
@@ -1941,7 +1956,7 @@ def _get_seller_target_for_parse(db: Session, seller_target_id: UUID) -> dict[st
         text(
             """
             select
-              id, target_name, target_type, recommendation_status, information_status,
+              id, target_name, target_type, target_subject_name, recommendation_status, information_status,
               industry_primary, industry_secondary, registered_country,
               registered_province, registered_city, headquarter_province,
               headquarter_city, raw_region_text, region_granularity, listed_status,
@@ -1949,7 +1964,8 @@ def _get_seller_target_for_parse(db: Session, seller_target_id: UUID) -> dict[st
               current_total_profit_yuan, current_assets_yuan, current_debt_ratio,
               current_operating_cash_flow_yuan, financial_period_label,
               profitability_status, cash_flow_status, operation_stability_status,
-              valuation_yuan, asking_price_yuan, pe_ratio, pe_source_type,
+              valuation_yuan, valuation_date, asking_price_yuan, asking_price_date,
+              pe_ratio, pe_source_type,
               premium_rate, is_for_sale, can_control, can_consolidate,
               accepts_minority_investment, transfer_ratio_min, transfer_ratio_max,
               transfer_ratio_text, transfer_flexibility_type, consolidation_path_summary,
@@ -1990,6 +2006,7 @@ def _seller_target_parse_fallback_text(seller_target: dict[str, Any]) -> str:
     return _join_lines(
         [
             seller_target.get("target_name"),
+            seller_target.get("target_subject_name"),
             seller_target.get("business_summary"),
             seller_target.get("transaction_summary"),
             seller_target.get("risk_summary"),
@@ -3446,10 +3463,10 @@ def _fetch_seller_targets(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
         text(
             """
             select
-              id, target_name, target_type, industry_primary, industry_secondary,
+              id, target_name, target_type, target_subject_name, industry_primary, industry_secondary,
               headquarter_province, headquarter_city, listed_status,
               current_revenue_yuan, current_net_profit_yuan, valuation_yuan,
-              asking_price_yuan, pe_ratio, is_for_sale, can_control,
+              valuation_date, asking_price_yuan, asking_price_date, pe_ratio, is_for_sale, can_control,
               can_consolidate, business_summary, transaction_summary, risk_summary
             from seller_target
             where team_id = :team_id
@@ -3642,6 +3659,7 @@ BUYER_INTENT_PARSE_FIELDS = {
 SELLER_TARGET_PARSE_FIELDS = {
     "target_name",
     "target_type",
+    "target_subject_name",
     "industry_primary",
     "industry_secondary",
     "registered_province",
@@ -3663,7 +3681,9 @@ SELLER_TARGET_PARSE_FIELDS = {
     "cash_flow_status",
     "operation_stability_status",
     "valuation_yuan",
+    "valuation_date",
     "asking_price_yuan",
+    "asking_price_date",
     "pe_ratio",
     "pe_source_type",
     "premium_rate",
@@ -3739,6 +3759,9 @@ SELLER_TARGET_PARSE_ENUM_FIELDS = {
 
 SELLER_TARGET_TEXT_LIMITS = {
     "target_name": 300,
+    "target_subject_name": 300,
+    "valuation_date": 80,
+    "asking_price_date": 80,
 }
 
 BUYER_INTENT_PARSE_JSON_FIELDS = {
