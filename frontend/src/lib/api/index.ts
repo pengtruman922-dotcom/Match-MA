@@ -17,6 +17,8 @@ import type {
   BuyerPartyCreate,
   BuyerSellerRelation,
   BusinessUpdateDebugBundle,
+  DebugCenterData,
+  DebugEntity,
   ExtractedAction,
   ExtractedActionCreate,
   RelationEvent,
@@ -239,6 +241,9 @@ export const debugApi = {
   businessUpdate: (id: string) => apiRequest<BusinessUpdateDebugBundle>(`/debug/business-updates/${id}`),
   recommendationSession: (id: string) =>
     apiRequest<RecommendationSessionDebugBundle>(`/debug/recommendation-sessions/${id}`),
+  center: (params?: { limit?: number }) => apiRequest<DebugCenterData>(`/debug/center${buildQuery(params || {})}`),
+  entity: (entityType: string, entityId: string) =>
+    apiRequest<DebugEntity>(`/debug/entities/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}`),
 };
 
 export const recommendations = {

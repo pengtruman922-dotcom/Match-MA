@@ -133,7 +133,7 @@ export default function Recommend() {
       try {
         await recommendations.cancelSelectedItem(item.selectedItemId);
       } catch (err) {
-        setGenerationError(err instanceof Error ? err.message : '?????????');
+        setGenerationError(err instanceof Error ? err.message : '取消推荐项失败');
         return;
       }
     }
