@@ -1,10 +1,13 @@
 import { useState, useEffect } from 'react';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { Plus, X, CheckCircle2, XCircle, Clock, Play, ChevronDown, ChevronUp } from 'lucide-react';
 import { businessUpdates, extractedActions, sellerTargets } from '../lib/api';
 import type { BusinessUpdate, ExtractedAction, SellerTarget, BusinessUpdateCreate, ExtractedActionCreate } from '../types/api';
 import BusinessUpdateReviewPanel from '../components/BusinessUpdateReviewPanel';
 
 export default function Updates() {
+  const { id: routeUpdateId } = useParams<{ id: string }>();
+  const [searchParams] = useSearchParams();
   const [updates, setUpdates] = useState<BusinessUpdate[]>([]);
   const [actions, setActions] = useState<ExtractedAction[]>([]);
   const [targets, setTargets] = useState<SellerTarget[]>([]);
@@ -12,6 +15,7 @@ export default function Updates() {
   const [showCreate, setShowCreate] = useState(false);
   const [selectedUpdateId, setSelectedUpdateId] = useState<string | null>(null);
   const [showCreateAction, setShowCreateAction] = useState(false);
+  const highlightedActionId = searchParams.get('actionId');
 
   const fetchData = () => {
     setLoading(true);
@@ -20,12 +24,26 @@ export default function Updates() {
       extractedActions.list({ limit: 50 }),
       sellerTargets.list({ limit: 50 }),
     ])
-      .then(([u, a, t]) => { setUpdates(u); setActions(a); setTargets(t); })
+      .then(async ([u, a, t]) => {
+        let nextUpdates = u;
+        if (routeUpdateId && !u.some((update) => update.id === routeUpdateId)) {
+          try {
+            const selected = await businessUpdates.get(routeUpdateId);
+            nextUpdates = [selected, ...u];
+          } catch {
+            // Keep the list usable even if a stale direct link no longer exists.
+          }
+        }
+        setUpdates(nextUpdates);
+        setActions(a);
+        setTargets(t);
+        if (routeUpdateId) setSelectedUpdateId(routeUpdateId);
+      })
       .catch(() => {})
       .finally(() => setLoading(false));
   };
 
-  useEffect(() => { fetchData(); }, []);
+  useEffect(() => { fetchData(); }, [routeUpdateId]);
 
   const selectedUpdate = updates.find((u) => u.id === selectedUpdateId);
   const updateActions = selectedUpdateId
@@ -122,7 +140,12 @@ export default function Updates() {
                 ) : (
                   <div className="divide-y divide-gray-100">
                     {updateActions.map((action) => (
-                      <ActionCard key={action.id} action={action} onUpdated={fetchData} />
+                      <ActionCard
+                        key={action.id}
+                        action={action}
+                        highlighted={highlightedActionId === action.id}
+                        onUpdated={fetchData}
+                      />
                     ))}
                   </div>
                 )}
@@ -152,9 +175,21 @@ export default function Updates() {
   );
 }
 
-function ActionCard({ action, onUpdated }: { action: ExtractedAction; onUpdated: () => void }) {
-  const [expanded, setExpanded] = useState(false);
+function ActionCard({
+  action,
+  highlighted,
+  onUpdated,
+}: {
+  action: ExtractedAction;
+  highlighted: boolean;
+  onUpdated: () => void;
+}) {
+  const [expanded, setExpanded] = useState(highlighted);
   const [applying, setApplying] = useState(false);
+
+  useEffect(() => {
+    if (highlighted) setExpanded(true);
+  }, [highlighted]);
 
   const handleStatusChange = async (newStatus: string) => {
     await extractedActions.update(action.id, { review_status: newStatus });
@@ -174,7 +209,7 @@ function ActionCard({ action, onUpdated }: { action: ExtractedAction; onUpdated:
   };
 
   return (
-    <div className="px-5 py-3">
+    <div className={`px-5 py-3 ${highlighted ? 'bg-amber-50/50' : ''}`}>
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <ActionTypeBadge type={action.action_type} />

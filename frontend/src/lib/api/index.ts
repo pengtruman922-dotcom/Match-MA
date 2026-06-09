@@ -36,6 +36,7 @@ import type {
   WorkbenchData,
   WorkbenchTaskBoardData,
   FailureSummary,
+  GlobalSearchResponse,
   QueueSummary,
 } from '../../types/api';
 import type { AuthUser, LoginResponse } from '../auth';
@@ -227,6 +228,11 @@ export const updateLogs = {
 export const workbench = {
   get: () => apiRequest<WorkbenchData>('/workbench'),
   taskBoard: () => apiRequest<WorkbenchTaskBoardData>('/workbench/task-board'),
+};
+
+export const globalSearch = {
+  query: (params: { q: string; limit_per_type?: number }) =>
+    apiRequest<GlobalSearchResponse>(`/search${buildQuery(params)}`),
 };
 
 export const debugApi = {

@@ -341,6 +341,16 @@ export interface ExtractedAction {
   applied_at: string | null;
   metadata_json: Record<string, unknown> | null;
   created_at: string;
+  task_title?: string;
+  task_subtitle?: string | null;
+  task_group_key?: string;
+  task_group_label?: string;
+  task_priority?: 'high' | 'medium' | 'normal' | string;
+  target_display_name?: string;
+  proposed_field_labels?: string[];
+  proposed_field_count?: number;
+  review_route?: string;
+  debug_ref?: DebugRef;
 }
 
 export interface ExtractedActionCreate {
@@ -660,17 +670,40 @@ export interface WorkbenchActionGroup {
   items: ExtractedAction[];
 }
 
+export interface WorkbenchOverview {
+  pending_review_count: number;
+  recent_update_count: number;
+  failed_job_count: number;
+  running_job_count: number;
+  active_relation_count: number;
+  weekly_new_target_count?: number;
+  weekly_new_buyer_intent_count?: number;
+  weekly_updated_target_count?: number;
+  weekly_business_update_count?: number;
+  auto_applied_review_count?: number;
+  exception_count?: number;
+  mode?: string;
+  [key: string]: unknown;
+}
+
+export interface WorkbenchActivity {
+  activity_type: string;
+  entity_id: string;
+  status: string;
+  activity_label?: string;
+  object_name?: string | null;
+  summary?: string | null;
+  title?: string;
+  subtitle?: string | null;
+  happened_at: string | null;
+  route?: string | null;
+}
+
 export interface WorkbenchData {
   groups: WorkbenchActionGroup[];
   recent_updates: BusinessUpdate[];
   recent_relations: BuyerSellerRelation[];
-  overview: {
-    pending_review_count: number;
-    recent_update_count: number;
-    failed_job_count: number;
-    running_job_count: number;
-    active_relation_count: number;
-  };
+  overview: WorkbenchOverview;
 }
 
 export interface BusinessUpdateDebugBundle {
@@ -846,9 +879,34 @@ export interface WorkbenchTaskBoardData {
   groups: WorkbenchActionGroup[];
   auto_applied_recent: ExtractedAction[];
   exception_items: Record<string, unknown>[];
-  recent_activity: Record<string, unknown>[];
+  recent_activity: WorkbenchActivity[];
   quick_actions: Record<string, unknown>[];
-  overview: Record<string, unknown>;
+  overview: WorkbenchOverview;
   queue_summary: QueueSummary;
   failure_summary: FailureSummary;
+}
+
+export interface GlobalSearchItem {
+  entity_type: 'seller_target' | 'buyer_party' | 'buyer_intent' | string;
+  entity_id: string;
+  title: string;
+  subtitle: string | null;
+  snippet: string | null;
+  route: string;
+  updated_at: string | null;
+  match_reason: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface GlobalSearchGroup {
+  key: string;
+  label: string;
+  count: number;
+  items: GlobalSearchItem[];
+}
+
+export interface GlobalSearchResponse {
+  query: string;
+  groups: GlobalSearchGroup[];
+  total_count: number;
 }

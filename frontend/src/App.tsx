@@ -11,6 +11,7 @@ import Recommend from './pages/Recommend';
 import Dashboard from './pages/Dashboard';
 import Settings from './pages/Settings';
 import Login from './pages/Login';
+import SearchResults from './pages/SearchResults';
 
 function App() {
   return (
@@ -26,6 +27,7 @@ function App() {
             <Route path="buyers" element={<Buyers />} />
             <Route path="buyers/:id" element={<BuyerDetail />} />
             <Route path="recommendations" element={<Recommend />} />
+            <Route path="search" element={<SearchResults />} />
             <Route path="updates" element={<Updates />} />
             <Route path="updates/:id" element={<Updates />} />
             <Route path="dashboard" element={<Dashboard />} />
