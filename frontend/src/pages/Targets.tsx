@@ -121,7 +121,7 @@ export default function Targets() {
             <thead>
               <tr className="border-b border-gray-100 bg-gray-50">
                 <th className="sticky left-0 z-20 w-[220px] bg-gray-50 text-left px-4 py-3 font-medium text-gray-600">标的名称</th>
-                <th className="w-[200px] text-left px-4 py-3 font-medium text-gray-600">标的主体</th>
+                <th className="w-20 max-w-20 text-left px-3 py-3 font-medium text-gray-600">标的主体</th>
                 <th className="w-[110px] text-center px-4 py-3 font-medium text-gray-600">推荐状态</th>
                 <th className="w-[92px] text-left px-4 py-3 font-medium text-gray-600">类型</th>
                 <th className="w-[96px] text-left px-4 py-3 font-medium text-gray-600">上市状态</th>
@@ -211,7 +211,7 @@ function TargetRow({
         <ClampedLink to={`/targets/${item.id}`} value={item.target_name} className="font-medium text-gray-900 hover:text-brand-600 transition-colors" />
         {item.business_summary && <ClampedText value={item.business_summary} className="mt-1 text-xs text-gray-400" />}
       </td>
-      <td className="px-4 py-3 text-gray-600"><ClampedText value={subject} /></td>
+      <td className="w-20 max-w-20 px-3 py-3 text-gray-600"><ClampedText value={subject} /></td>
       <td className="px-4 py-3 text-center"><StatusBadge status={item.recommendation_status} type="recommendation" /></td>
       <td className="px-4 py-3 text-gray-600"><ClampedText value={formatTargetType(item.target_type)} /></td>
       <td className="px-4 py-3 text-gray-600"><ClampedText value={formatListedStatus(item.listed_status)} /></td>
@@ -563,7 +563,7 @@ function CreateTargetModal({ onClose, onCreated }: { onClose: () => void; onCrea
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <Field label="标的名称 *" required>
+          <Field label="标的名称" required>
             <input
               type="text"
               value={form.targetName}
@@ -574,7 +574,7 @@ function CreateTargetModal({ onClose, onCreated }: { onClose: () => void; onCrea
             />
             {nameWarning && <p className="text-xs text-amber-600 mt-1">{nameWarning}</p>}
           </Field>
-          <Field label="类型 *" required>
+          <Field label="类型">
             <select value={form.targetType} onChange={(event) => updateForm('targetType', event.target.value)} className="input">
               <option value="company">公司</option>
               <option value="project">项目</option>
@@ -868,7 +868,7 @@ function buildCreateTargetRawText(form: CreateTargetForm, payload: SellerTargetC
     form.askingPrice.trim() ? `报价：${form.askingPrice.trim()}` : null,
     form.askingPriceDate.trim() ? `报价时间：${form.askingPriceDate.trim()}` : null,
     '',
-    '解析要求：如果附件或正式文件识别到更完整的标的名称、主体名称、一级/二级行业或行业标签，请以正式材料为准，可以覆盖上述初始输入。不要臆造材料中没有的信息。',
+    '解析要求：如果附件或正式文件识别到更完整的标的名称、主体名称、一级/二级行业、行业标签或地区，请以正式材料为准，可以覆盖上述初始输入；行业和地区字段请输出中文。不要臆造材料中没有的信息。',
   ].filter((line): line is string => line !== null);
 
   if (form.supplement.trim()) {
