@@ -57,3 +57,7 @@ def test_doc2x_api_key_normalizes_bearer_prefix_and_placeholders() -> None:
     settings = Settings(doc2x_api_key='"<Authorization: Bearer sk-test>"')
 
     assert settings.effective_doc2x_api_key == "sk-test"
+
+
+def test_doc2x_upload_timeout_defaults_to_three_minutes() -> None:
+    assert Settings().doc2x_upload_timeout_seconds == 180

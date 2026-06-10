@@ -1,7 +1,11 @@
+from backend.app.api.routes.extracted_actions import (
+    _seller_target_changes_with_post_parse_status as _action_seller_target_changes_with_post_parse_status,
+)
 from backend.app.jobs.handlers import (
     _normalize_change_fields,
     _normalize_seller_listed_status,
     _normalize_seller_target_parse_changes,
+    _seller_target_changes_with_post_parse_status,
     _validate_seller_target_parse_output,
     SELLER_TARGET_CHANGE_FIELDS,
     SELLER_TARGET_ENUM_FIELDS,
@@ -80,3 +84,35 @@ def test_seller_target_parse_supports_rollback_fields() -> None:
     from backend.app.jobs.handlers import SELLER_TARGET_PARSE_FIELDS
 
     assert SELLER_TARGET_PARSE_FIELDS <= ROLLBACK_FIELDS_BY_ENTITY["seller_target"]
+
+
+
+def test_seller_target_parse_success_promotes_parsing_target_status() -> None:
+    changes = _seller_target_changes_with_post_parse_status(
+        {"information_status": "parsing", "recommendation_status": "not_recommendable"},
+        {"business_summary": "parsed summary"},
+    )
+
+    assert changes["business_summary"] == "parsed summary"
+    assert changes["information_status"] == "normal"
+    assert changes["recommendation_status"] == "recommendable"
+
+
+def test_extracted_action_apply_success_promotes_parsing_target_status() -> None:
+    changes = _action_seller_target_changes_with_post_parse_status(
+        {"information_status": "parsing", "recommendation_status": "not_recommendable"},
+        {"business_summary": "parsed summary"},
+    )
+
+    assert changes["business_summary"] == "parsed summary"
+    assert changes["information_status"] == "normal"
+    assert changes["recommendation_status"] == "recommendable"
+
+
+def test_post_parse_status_does_not_override_manual_recommendability() -> None:
+    changes = _action_seller_target_changes_with_post_parse_status(
+        {"information_status": "normal", "recommendation_status": "not_recommendable"},
+        {"business_summary": "later update"},
+    )
+
+    assert changes == {"business_summary": "later update"}

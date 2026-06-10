@@ -282,6 +282,9 @@ SELLER_TARGET_ENUM_FIELDS = {
     "recommendation_status": {"recommendable", "not_recommendable"},
 }
 
+SELLER_TARGET_POST_PARSE_STATUSES = {"parsing", "pending_review", "insufficient", "parse_failed"}
+SELLER_TARGET_PARSE_FAILURE_STATUSES = {"parsing"}
+
 BUYER_INTENT_ENUM_FIELDS = {
     "status": {"active", "paused"},
     "requires_control": {"yes", "no", "unknown", "likely"},
@@ -466,6 +469,7 @@ def _handle_seller_target_parse(db: Session, job: JobClaim) -> dict[str, object]
             error_code="llm_call_failed",
             error_message=str(exc),
         )
+        _mark_seller_target_parse_failed_if_final_attempt(db, job, seller_target_id, str(exc))
         db.commit()
         raise
 
@@ -492,6 +496,13 @@ def _handle_seller_target_parse(db: Session, job: JobClaim) -> dict[str, object]
     )
     db.commit()
     if not schema_validation_json["valid"]:
+        _mark_seller_target_parse_failed_if_final_attempt(
+            db,
+            job,
+            seller_target_id,
+            schema_validation_json.get("error") or "Seller target parser output is invalid.",
+        )
+        db.commit()
         raise ValueError(schema_validation_json.get("error") or "Seller target parser output is invalid.")
 
     applied_fields: list[str] = []
@@ -801,6 +812,12 @@ def _handle_attachment_ocr_poll(db: Session, job: JobClaim) -> dict[str, object]
                 "last_doc2x_error": "Doc2X polling exceeded max wait seconds.",
             },
         )
+        _mark_business_updates_blocked_by_attachment_ocr(
+            db,
+            attachment_id=attachment_id,
+            job_id=job.id,
+            error_message="Doc2X polling exceeded max wait seconds.",
+        )
         raise ValueError("Doc2X polling exceeded max wait seconds.")
 
     try:
@@ -906,6 +923,12 @@ def _handle_attachment_ocr_poll(db: Session, job: JobClaim) -> dict[str, object]
             parsed_output_json={"provider": "doc2x", "status": "failed", "detail": detail},
             latency_ms=status_result.latency_ms,
             error_message=str(detail),
+        )
+        _mark_business_updates_blocked_by_attachment_ocr(
+            db,
+            attachment_id=attachment_id,
+            job_id=job.id,
+            error_message=f"Doc2X parse failed: {detail}",
         )
         raise ValueError(f"Doc2X parse failed: {detail}")
 
@@ -1112,6 +1135,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
             error_message=str(exc),
         )
         _mark_business_update_failed_if_final_attempt(db, job, business_update_id, str(exc))
+        _mark_bound_seller_targets_parse_failed_if_final_attempt(db, job, business_update, str(exc))
         db.commit()
         raise
 
@@ -1142,6 +1166,12 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
     try:
         created_actions = _insert_extracted_actions(db, business_update_id, actions, job.id)
         auto_apply_results = _auto_apply_safe_actions(db, created_actions)
+        pending_review_target_count = _mark_bound_seller_targets_pending_review_after_business_update_parse(
+            db,
+            business_update,
+            auto_apply_results,
+            job.id,
+        )
 
         db.execute(
             text(
@@ -1174,6 +1204,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
                     "last_processing_result": "llm_parsed",
                     "last_actions_created": len(created_actions),
                     "last_auto_applied_actions": len(auto_apply_results),
+                    "last_bound_seller_targets_pending_review": pending_review_target_count,
                     "last_schema_valid": schema_validation_json["valid"],
                 },
             },
@@ -1181,6 +1212,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
     except Exception as exc:
         db.rollback()
         _mark_business_update_failed_if_final_attempt(db, job, business_update_id, str(exc))
+        _mark_bound_seller_targets_parse_failed_if_final_attempt(db, job, business_update, str(exc))
         db.commit()
         raise
 
@@ -1195,6 +1227,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
         "prompt_version": node_config["prompt_version"],
         "schema_valid": schema_validation_json["valid"],
         "auto_applied_actions": len(auto_apply_results),
+        "bound_seller_targets_pending_review": pending_review_target_count,
     }
 
 
@@ -2249,13 +2282,34 @@ def _handle_pdf_attachment_ocr(
     if not doc2x_api_key:
         raise ValueError("DOC2X_API_KEY is required when OCR_PROVIDER=doc2x.")
 
-    submit_result = submit_doc2x_pdf(
-        base_url=settings.doc2x_base_url,
-        api_key=doc2x_api_key,
-        file_bytes=file_bytes,
-        model=settings.doc2x_model,
-        timeout_seconds=60,
-    )
+    try:
+        submit_result = submit_doc2x_pdf(
+            base_url=settings.doc2x_base_url,
+            api_key=doc2x_api_key,
+            file_bytes=file_bytes,
+            model=settings.doc2x_model,
+            timeout_seconds=settings.doc2x_upload_timeout_seconds,
+        )
+    except Doc2xCallError as exc:
+        _update_attachment_parse_terminal_without_document(
+            db,
+            attachment_id=attachment_id,
+            parse_status="failed",
+            job_id=job.id,
+            metadata_patch={
+                "last_ocr_status": "failed",
+                "last_ocr_provider": "doc2x",
+                "last_pdf_kind": inspection.pdf_kind,
+                "last_doc2x_error": str(exc),
+            },
+        )
+        _mark_business_updates_blocked_by_attachment_ocr(
+            db,
+            attachment_id=attachment_id,
+            job_id=job.id,
+            error_message=str(exc),
+        )
+        raise
     poll_job = _enqueue_doc2x_poll_job(
         db,
         parent_job_id=job.id,
@@ -3857,6 +3911,7 @@ def _apply_seller_target_parse_changes(
     normalization_notes: list[str],
     source_context: dict[str, Any],
 ) -> list[str]:
+    changes = _seller_target_changes_with_post_parse_status(seller_target, changes)
     diff = _diff_json_safe(seller_target, changes)
     if not diff:
         return []
@@ -3899,6 +3954,26 @@ def _apply_seller_target_parse_changes(
         source="seller_target_parse",
     )
     return list(diff.keys())
+
+
+def _seller_target_changes_with_post_parse_status(
+    seller_target: dict[str, Any],
+    changes: dict[str, Any],
+) -> dict[str, Any]:
+    next_changes = dict(changes)
+    original_information_status = seller_target.get("information_status")
+    if (
+        "information_status" not in next_changes
+        and original_information_status in SELLER_TARGET_POST_PARSE_STATUSES
+    ):
+        next_changes["information_status"] = "normal"
+    if (
+        "recommendation_status" not in next_changes
+        and seller_target.get("recommendation_status") == "not_recommendable"
+        and original_information_status in SELLER_TARGET_POST_PARSE_STATUSES
+    ):
+        next_changes["recommendation_status"] = "recommendable"
+    return next_changes
 
 
 def _write_seller_target_parse_logs(
@@ -4881,6 +4956,126 @@ def _mark_business_update_failed_if_final_attempt(
     _mark_business_update_failed(db, business_update_id, job.id, error_message)
 
 
+def _mark_seller_target_parse_failed_if_final_attempt(
+    db: Session,
+    job: JobClaim,
+    seller_target_id: UUID,
+    error_message: str,
+) -> int:
+    if job.attempt_count < job.max_attempts:
+        return 0
+    return _mark_seller_targets_parse_failed(
+        db,
+        seller_target_ids=[seller_target_id],
+        job_id=job.id,
+        error_message=error_message,
+    )
+
+
+def _mark_bound_seller_targets_parse_failed_if_final_attempt(
+    db: Session,
+    job: JobClaim,
+    business_update: dict[str, Any],
+    error_message: str,
+) -> int:
+    if job.attempt_count < job.max_attempts:
+        return 0
+    return _mark_seller_targets_parse_failed(
+        db,
+        seller_target_ids=_uuid_list(business_update.get("bound_seller_target_ids_json")),
+        job_id=job.id,
+        error_message=error_message,
+    )
+
+
+def _mark_bound_seller_targets_pending_review_after_business_update_parse(
+    db: Session,
+    business_update: dict[str, Any],
+    auto_apply_results: list[dict[str, Any]],
+    job_id: UUID,
+) -> int:
+    seller_target_ids = set(_uuid_list(business_update.get("bound_seller_target_ids_json")))
+    if not seller_target_ids:
+        return 0
+    auto_applied_target_ids = {
+        _optional_uuid(result.get("entity_id"))
+        for result in auto_apply_results
+        if result.get("entity_type") == "seller_target"
+    }
+    remaining_ids = [item for item in seller_target_ids if item not in auto_applied_target_ids]
+    if not remaining_ids:
+        return 0
+    result = db.execute(
+        text(
+            """
+            update seller_target
+            set information_status = 'pending_review',
+                recommendation_status = 'not_recommendable',
+                updated_at = now(),
+                updated_by = :updated_by,
+                metadata_json = metadata_json || :metadata_patch
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and id = any(:seller_target_ids)
+              and deleted_at is null
+              and information_status = 'parsing'
+            """
+        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "seller_target_ids": remaining_ids,
+            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_patch": {
+                "last_parse_pending_review_job_id": str(job_id),
+                "last_parse_pending_review_reason": "business_update_parsed_without_auto_apply",
+            },
+        },
+    )
+    return int(result.rowcount or 0)
+
+
+def _mark_seller_targets_parse_failed(
+    db: Session,
+    *,
+    seller_target_ids: list[UUID],
+    job_id: UUID,
+    error_message: str | None,
+) -> int:
+    unique_ids = list(dict.fromkeys(seller_target_ids))
+    if not unique_ids:
+        return 0
+    result = db.execute(
+        text(
+            """
+            update seller_target
+            set information_status = 'parse_failed',
+                recommendation_status = 'not_recommendable',
+                updated_at = now(),
+                updated_by = :updated_by,
+                metadata_json = metadata_json || :metadata_patch
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and id = any(:seller_target_ids)
+              and deleted_at is null
+              and information_status = any(:failure_statuses)
+            """
+        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "seller_target_ids": unique_ids,
+            "failure_statuses": list(SELLER_TARGET_PARSE_FAILURE_STATUSES),
+            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_patch": {
+                "last_parse_failed_job_id": str(job_id),
+                "last_parse_error_message": _truncate_text(error_message, 500),
+            },
+        },
+    )
+    return int(result.rowcount or 0)
+
+
 def _mark_business_updates_blocked_by_attachment_ocr(
     db: Session,
     *,
@@ -4891,12 +5086,16 @@ def _mark_business_updates_blocked_by_attachment_ocr(
     rows = db.execute(
         text(
             """
-            select entity_id as business_update_id
-            from attachment_link
-            where team_id = :team_id
-              and workspace_id = :workspace_id
-              and attachment_id = :attachment_id
-              and entity_type = 'business_update'
+            select bu.id as business_update_id, bu.bound_seller_target_ids_json
+            from attachment_link al
+            join business_update bu
+              on bu.id = al.entity_id
+             and bu.team_id = al.team_id
+             and bu.workspace_id = al.workspace_id
+            where al.team_id = :team_id
+              and al.workspace_id = :workspace_id
+              and al.attachment_id = :attachment_id
+              and al.entity_type = 'business_update'
             """
         ),
         {
@@ -4933,6 +5132,13 @@ def _mark_business_updates_blocked_by_attachment_ocr(
         ).first()
         if active:
             continue
+        target_failed_count = _mark_seller_targets_parse_failed(
+            db,
+            seller_target_ids=_uuid_list(row.get("bound_seller_target_ids_json")),
+            job_id=job_id,
+            error_message=error_message
+            or "Attachment OCR did not produce text, so business update processing could not continue.",
+        )
         db.execute(
             text(
                 """
@@ -4956,6 +5162,7 @@ def _mark_business_updates_blocked_by_attachment_ocr(
                     or "Attachment OCR did not produce text, so business update processing could not continue.",
                     "last_ocr_blocked_attachment_id": str(attachment_id),
                     "last_ocr_blocked_job_id": str(job_id),
+                    "last_ocr_blocked_target_parse_failed_count": target_failed_count,
                 },
             },
         )

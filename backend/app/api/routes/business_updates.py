@@ -250,6 +250,13 @@ def upload_business_update(
     uploaded = _save_business_update_upload_files(db, files or [], settings=settings)
     for attachment_id in uploaded["uploaded_attachment_ids"]:
         _link_attachment_if_missing(db, attachment_id, "business_update", row["id"], "source_document")
+        for entity_type, ids in _bound_attachment_link_targets(
+            seller_target_ids=seller_target_ids,
+            buyer_party_ids=buyer_party_ids,
+            buyer_intent_ids=buyer_intent_ids,
+        ):
+            for entity_id in ids:
+                _link_attachment_if_missing(db, attachment_id, entity_type, entity_id, "business_update_context")
 
     ocr_jobs: list[dict[str, Any]] = []
     if uploaded["ocr_attachment_ids"]:

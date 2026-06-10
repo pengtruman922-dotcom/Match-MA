@@ -145,6 +145,7 @@ def test_attachment_upload_policy_explains_pdf_image_and_ocr(monkeypatch) -> Non
         assert policy["pdf_policy"]["scanned_pdf"]["doc2x_configured"] is True
         assert policy["image_policy"]["strategy"] == "multimodal_llm_direct"
         assert policy["image_policy"]["auto_ocr"] is False
+        assert policy["ocr_policy"]["doc2x"]["upload_timeout_seconds"] == 180
         assert policy["ocr_policy"]["doc2x"]["max_wait_seconds"] > 0
     finally:
         get_settings.cache_clear()

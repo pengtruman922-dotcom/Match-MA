@@ -263,12 +263,12 @@ def apply_seller_fact_update_action(
             detail="Action must be accepted before apply.",
         )
 
+    seller_target_id = action["target_entity_id"]
+    original = _get_seller_target_snapshot_or_404(db, seller_target_id)
     changes = _allowed_seller_target_changes(action["proposed_changes_json"])
     if not changes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No supported changes to apply.")
-
-    seller_target_id = action["target_entity_id"]
-    original = _get_seller_target_snapshot_or_404(db, seller_target_id)
+    changes = _seller_target_changes_with_post_parse_status(original, changes)
     diff = diff_payload(original, changes)
     if not diff:
         _mark_action_applied(db, action["id"], review_status="auto_accepted")
@@ -924,6 +924,26 @@ def _allowed_seller_target_changes(changes: dict[str, Any]) -> dict[str, Any]:
         "gap_summary",
     }
     return {key: value for key, value in changes.items() if key in allowed_fields}
+
+
+def _seller_target_changes_with_post_parse_status(
+    original: dict[str, Any],
+    changes: dict[str, Any],
+) -> dict[str, Any]:
+    next_changes = dict(changes)
+    original_information_status = original.get("information_status")
+    if "information_status" not in next_changes and original_information_status in _POST_PARSE_INFORMATION_STATUSES:
+        next_changes["information_status"] = "normal"
+    if (
+        "recommendation_status" not in next_changes
+        and original.get("recommendation_status") == "not_recommendable"
+        and original_information_status in _POST_PARSE_INFORMATION_STATUSES
+    ):
+        next_changes["recommendation_status"] = "recommendable"
+    return next_changes
+
+
+_POST_PARSE_INFORMATION_STATUSES = {"parsing", "pending_review", "insufficient", "parse_failed"}
 
 
 def _allowed_buyer_intent_changes(changes: dict[str, Any]) -> dict[str, Any]:

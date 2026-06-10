@@ -36,7 +36,7 @@ def submit_doc2x_pdf(
     api_key: str,
     file_bytes: bytes,
     model: str | None = None,
-    timeout_seconds: int = 60,
+    timeout_seconds: int = 180,
 ) -> Doc2xPreuploadResult:
     started = time.perf_counter()
     preupload = _preupload(

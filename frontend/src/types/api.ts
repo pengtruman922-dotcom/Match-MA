@@ -58,6 +58,8 @@ export interface SellerTargetCreate {
   target_name: string;
   target_type?: string;
   target_subject_name?: string;
+  recommendation_status?: string;
+  information_status?: string;
   industry_primary?: string;
   industry_secondary?: string;
   headquarter_province?: string;
@@ -350,6 +352,7 @@ export interface AttachmentUploadPolicy {
     doc2x: {
       configured: boolean;
       model: string;
+      upload_timeout_seconds: number;
       poll_interval_seconds: number;
       max_wait_seconds: number;
     };

@@ -20,6 +20,7 @@ import type { LucideIcon } from 'lucide-react';
 import { attachments, businessUpdates, sellerTargets } from '../lib/api';
 import type { AttachmentUploadPolicy, SellerTarget, SellerTargetCreate } from '../types/api';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
+import { sellerTargetStatusClass, sellerTargetStatusLabel } from '../lib/sellerTargetStatus';
 
 export default function Targets() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -260,21 +261,8 @@ function TargetRow({
 }
 
 function StatusBadge({ status, type }: { status: string; type: 'recommendation' | 'information' }) {
-  const colors =
-    type === 'recommendation'
-      ? status === 'recommendable'
-        ? 'bg-emerald-50 text-emerald-700'
-        : 'bg-gray-100 text-gray-600'
-      : status === 'normal'
-        ? 'bg-emerald-50 text-emerald-700'
-        : status === 'insufficient'
-          ? 'bg-amber-50 text-amber-700'
-          : 'bg-gray-100 text-gray-600';
-
-  const label =
-    type === 'recommendation'
-      ? status === 'recommendable' ? '可推荐' : '暂不推荐'
-      : status === 'normal' ? '信息完善' : status === 'insufficient' ? '信息不足' : status;
+  const colors = sellerTargetStatusClass(status, type);
+  const label = sellerTargetStatusLabel(status, type);
 
   return <span className={`text-xs px-2 py-0.5 font-medium ${colors}`}>{label}</span>;
 }
@@ -497,10 +485,13 @@ function CreateTargetModal({ onClose, onCreated }: { onClose: () => void; onCrea
     setSubmitError(null);
     try {
       const region = parseRegion(form.region);
+      const shouldParse = selectedFiles.length > 0 || form.supplement.trim().length > 0;
       const payload: SellerTargetCreate = {
         target_name: targetName,
         target_type: form.targetType,
         target_subject_name: normalizeOptional(form.targetSubjectName),
+        recommendation_status: 'not_recommendable',
+        information_status: shouldParse ? 'parsing' : 'pending_review',
         industry_primary: normalizeOptional(form.industry),
         headquarter_province: region.province,
         headquarter_city: region.city,
@@ -510,7 +501,6 @@ function CreateTargetModal({ onClose, onCreated }: { onClose: () => void; onCrea
       };
 
       const created = await sellerTargets.create(payload);
-      const shouldParse = selectedFiles.length > 0 || form.supplement.trim().length > 0;
       if (shouldParse) {
         const rawText = buildCreateTargetRawText(form, payload);
         if (selectedFiles.length > 0) {

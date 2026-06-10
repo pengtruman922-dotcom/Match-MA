@@ -13,6 +13,7 @@ import {
 import { relations, sellerTargets, updateLogs } from '../lib/api';
 import type { BuyerSellerRelation, RelationEvent, SellerTarget, UpdateLog } from '../types/api';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
+import { sellerTargetStatusClass, sellerTargetStatusLabel } from '../lib/sellerTargetStatus';
 
 type Tab = 'info' | 'attachments' | 'relations' | 'history';
 
@@ -385,21 +386,8 @@ function HistoryTab({ logs }: { logs: UpdateLog[] }) {
 }
 
 function StatusBadge({ status, type }: { status: string; type: 'recommendation' | 'information' }) {
-  const colors =
-    type === 'recommendation'
-      ? status === 'recommendable'
-        ? 'bg-emerald-50 text-emerald-700'
-        : 'bg-gray-100 text-gray-600'
-      : status === 'normal'
-        ? 'bg-emerald-50 text-emerald-700'
-        : status === 'insufficient'
-          ? 'bg-amber-50 text-amber-700'
-          : 'bg-gray-100 text-gray-600';
-
-  const label =
-    type === 'recommendation'
-      ? status === 'recommendable' ? '可推荐' : '暂不推荐'
-      : status === 'normal' ? '信息完善' : status === 'insufficient' ? '信息不足' : status;
+  const colors = sellerTargetStatusClass(status, type);
+  const label = sellerTargetStatusLabel(status, type);
 
   return <span className={`text-xs px-1.5 py-0.5 font-medium ${colors}`}>{label}</span>;
 }

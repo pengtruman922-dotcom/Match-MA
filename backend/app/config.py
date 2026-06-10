@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     doc2x_base_url: str = "https://v2.doc2x.noedgeai.com"
     doc2x_api_key: str | None = None
     doc2x_model: str = "v3-2026"
+    doc2x_upload_timeout_seconds: int = 180
     doc2x_poll_interval_seconds: int = 5
     doc2x_max_wait_seconds: int = 900
     pdf_text_detection_page_limit: int = 5

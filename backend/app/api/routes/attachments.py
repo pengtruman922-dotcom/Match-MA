@@ -604,6 +604,7 @@ def _attachment_upload_policy() -> dict[str, Any]:
             "doc2x": {
                 "configured": doc2x_configured,
                 "model": settings.doc2x_model,
+                "upload_timeout_seconds": settings.doc2x_upload_timeout_seconds,
                 "poll_interval_seconds": settings.doc2x_poll_interval_seconds,
                 "max_wait_seconds": settings.doc2x_max_wait_seconds,
             },

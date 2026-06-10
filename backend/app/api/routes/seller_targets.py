@@ -1,5 +1,5 @@
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -21,6 +21,15 @@ class SellerTargetCreate(BaseModel):
     target_type: str = "company"
     target_subject_name: str | None = Field(default=None, max_length=300)
     owner_user_id: UUID | None = None
+    recommendation_status: Literal["recommendable", "not_recommendable"] = "not_recommendable"
+    information_status: Literal[
+        "normal",
+        "insufficient",
+        "pending_review",
+        "parsing",
+        "researching",
+        "parse_failed",
+    ] = "pending_review"
     industry_primary: str | None = None
     industry_secondary: str | None = None
     headquarter_province: str | None = None
@@ -196,6 +205,7 @@ def create_seller_target(payload: SellerTargetCreate, db: Session = Depends(get_
             f"""
             insert into seller_target (
               team_id, workspace_id, target_name, target_type, target_subject_name, owner_user_id,
+              recommendation_status, information_status,
               industry_primary, industry_secondary, headquarter_province, headquarter_city,
               listed_status, current_revenue_yuan, current_net_profit_yuan,
               valuation_yuan, valuation_date, asking_price_yuan, asking_price_date, pe_ratio,
@@ -205,6 +215,7 @@ def create_seller_target(payload: SellerTargetCreate, db: Session = Depends(get_
             )
             values (
               :team_id, :workspace_id, :target_name, :target_type, :target_subject_name, :owner_user_id,
+              :recommendation_status, :information_status,
               :industry_primary, :industry_secondary, :headquarter_province, :headquarter_city,
               :listed_status, :current_revenue_yuan, :current_net_profit_yuan,
               :valuation_yuan, :valuation_date, :asking_price_yuan, :asking_price_date, :pe_ratio,
@@ -494,6 +505,8 @@ def _seller_target_params(payload: SellerTargetCreate) -> dict[str, Any]:
         "target_type": target_type,
         "target_subject_name": target_subject_name,
         "owner_user_id": payload.owner_user_id or DEFAULT_ADMIN_USER_ID,
+        "recommendation_status": payload.recommendation_status,
+        "information_status": payload.information_status,
         "industry_primary": _normalize_optional_text(payload.industry_primary),
         "industry_secondary": _normalize_optional_text(payload.industry_secondary),
         "headquarter_province": _normalize_optional_text(payload.headquarter_province),
