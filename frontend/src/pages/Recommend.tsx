@@ -69,8 +69,8 @@ export default function Recommend() {
 
   useEffect(() => {
     sellerTargets.list({ limit: 50 }).then((response) => setTargetsList(response.items)).catch(() => {});
-    buyerIntents.list({ limit: 50 }).then(setIntentsList).catch(() => {});
-    buyerParties.list({ limit: 50 }).then(setPartiesList).catch(() => {});
+    buyerIntents.list({ limit: 50 }).then((response) => setIntentsList(response.items)).catch(() => {});
+    buyerParties.list({ limit: 50 }).then((response) => setPartiesList(response.items)).catch(() => {});
   }, []);
 
   useEffect(() => {

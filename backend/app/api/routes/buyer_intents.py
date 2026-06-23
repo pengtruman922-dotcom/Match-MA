@@ -1,5 +1,5 @@
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -64,6 +64,7 @@ class BuyerIntentCreate(BaseModel):
 class BuyerIntentOut(BaseModel):
     id: UUID
     buyer_party_id: UUID | None
+    buyer_name: str | None = None
     intent_name: str
     status: str
     contact_name: str | None
@@ -107,6 +108,13 @@ class BuyerIntentOut(BaseModel):
     unknown_summary: str | None
     created_at: str
     updated_at: str
+
+
+class BuyerIntentListOut(BaseModel):
+    items: list[BuyerIntentOut]
+    total: int
+    limit: int
+    offset: int
 
 
 class BuyerIntentUpdate(BaseModel):
@@ -175,6 +183,71 @@ class BuyerIntentParseStatusOut(BaseModel):
     debug_ref: dict[str, Any]
 
 
+class BuyerIntentFilterOptionOut(BaseModel):
+    value: str
+    label: str
+    count: int
+
+
+class BuyerIntentFilterOptionsOut(BaseModel):
+    industries: list[BuyerIntentFilterOptionOut]
+    regions: list[BuyerIntentFilterOptionOut]
+    statuses: list[BuyerIntentFilterOptionOut]
+    listed_statuses: list[BuyerIntentFilterOptionOut]
+    consolidation_requirements: list[BuyerIntentFilterOptionOut]
+
+
+class BuyerIntentSuggestionOut(BaseModel):
+    id: UUID
+    search_field: Literal["intent_name", "buyer_name", "raw_requirement_text", "intent_summary"]
+    match_type: Literal["intent", "buyer", "requirement", "summary"]
+    match_label: str
+    match_text: str
+    intent_name: str
+    buyer_party_id: UUID | None
+    buyer_name: str | None
+    snippet: str | None
+
+
+class BuyerIntentBulkDeleteRequest(BaseModel):
+    ids: list[UUID] = Field(min_length=1, max_length=200)
+
+
+class BuyerIntentBulkDeleteOut(BaseModel):
+    status: str
+    deleted_count: int
+    deleted_ids: list[UUID]
+    skipped_ids: list[UUID]
+
+
+BUYER_INTENT_OUT_COLUMNS = """
+              bi.id, bi.buyer_party_id, bp.buyer_name as buyer_name, bi.intent_name, bi.status, bi.contact_name,
+              bi.raw_requirement_text, bi.intent_summary, bi.parsed_requirement_json,
+              bi.industry_primary, bi.industry_secondary, bi.region_scope_summary,
+              bi.region_constraints_json, bi.min_revenue_yuan, bi.min_net_profit_yuan,
+              bi.min_total_profit_yuan, bi.max_pe, bi.max_valuation_yuan,
+              bi.min_market_cap_yuan, bi.max_market_cap_yuan, bi.market_cap_range_summary,
+              bi.requires_control, bi.requires_consolidation,
+              bi.accepts_minority_investment, bi.desired_equity_ratio_min,
+              bi.desired_equity_ratio_max, bi.equity_ratio_summary, bi.equity_requirement_type,
+              bi.acceptable_control_paths_json, bi.preferred_listed_status,
+              bi.listing_board_requirement_summary, bi.financing_stage_requirement_summary,
+              bi.transaction_type, bi.transaction_types_json, bi.premium_tolerance_summary,
+              bi.max_premium_rate, bi.max_debt_ratio, bi.debt_ratio_requirement_summary,
+              bi.major_risk_tolerance_summary, bi.buyer_industry_advantage_summary,
+              bi.negative_summary, bi.priority_summary, bi.preference_summary, bi.unknown_summary,
+              bi.created_at::text as created_at, bi.updated_at::text as updated_at
+"""
+
+
+BUYER_INTENT_SEARCH_COLUMNS = {
+    "intent_name": "bi.intent_name",
+    "buyer_name": "bp.buyer_name",
+    "raw_requirement_text": "bi.raw_requirement_text",
+    "intent_summary": "bi.intent_summary",
+}
+
+
 @router.post("", response_model=BuyerIntentOut, status_code=status.HTTP_201_CREATED)
 def create_buyer_intent(payload: BuyerIntentCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
     row = db.execute(
@@ -216,23 +289,7 @@ def create_buyer_intent(payload: BuyerIntentCreate, db: Session = Depends(get_db
               :preference_summary, :unknown_summary,
               :created_by, :updated_by
             )
-            returning
-              id, buyer_party_id, intent_name, status, contact_name,
-              raw_requirement_text, intent_summary, parsed_requirement_json,
-              industry_primary, industry_secondary, region_scope_summary,
-              region_constraints_json, min_revenue_yuan, min_net_profit_yuan,
-              min_total_profit_yuan, max_pe, max_valuation_yuan,
-              min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
-              requires_control, requires_consolidation,
-              accepts_minority_investment, desired_equity_ratio_min,
-              desired_equity_ratio_max, equity_ratio_summary, equity_requirement_type,
-              acceptable_control_paths_json, preferred_listed_status,
-              listing_board_requirement_summary, financing_stage_requirement_summary,
-              transaction_type, transaction_types_json, premium_tolerance_summary,
-              max_premium_rate, max_debt_ratio, debt_ratio_requirement_summary,
-              major_risk_tolerance_summary, buyer_industry_advantage_summary,
-              negative_summary, priority_summary, preference_summary, unknown_summary,
-              created_at::text as created_at, updated_at::text as updated_at
+            returning id
             """
         ).bindparams(
             bindparam("parsed_requirement_json", type_=JSONB),
@@ -242,25 +299,35 @@ def create_buyer_intent(payload: BuyerIntentCreate, db: Session = Depends(get_db
         ),
         _buyer_intent_params(payload),
     ).mappings().one()
+    db.flush()
+    created = _get_buyer_intent_or_404(db, row["id"])
     create_search_doc_rebuild_job(
         db,
         entity_type="buyer_intent",
-        entity_id=row["id"],
+        entity_id=created["id"],
         source="buyer_intent_create",
     )
     db.commit()
-    return dict(row)
+    return created
 
 
-@router.get("", response_model=list[BuyerIntentOut])
+@router.get("", response_model=BuyerIntentListOut)
 def list_buyer_intents(
     db: Session = Depends(get_db),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     q: str | None = Query(default=None, max_length=200),
+    search_field: Literal["intent_name", "buyer_name", "raw_requirement_text", "intent_summary"] | None = Query(
+        default=None
+    ),
     buyer_party_id: UUID | None = None,
-) -> list[dict[str, Any]]:
-    where = ["team_id = :team_id", "workspace_id = :workspace_id", "deleted_at is null"]
+    industry: str | None = Query(default=None, max_length=200),
+    region: str | None = Query(default=None, max_length=200),
+    status: Literal["active", "paused"] | None = Query(default=None),
+    listed_status: str | None = Query(default=None, max_length=80),
+    requires_consolidation: Literal["yes", "no", "likely", "unknown"] | None = Query(default=None),
+) -> dict[str, Any]:
+    where = ["bi.team_id = :team_id", "bi.workspace_id = :workspace_id", "bi.deleted_at is null"]
     params: dict[str, Any] = {
         "team_id": DEFAULT_TEAM_ID,
         "workspace_id": DEFAULT_WORKSPACE_ID,
@@ -269,41 +336,287 @@ def list_buyer_intents(
     }
 
     if q:
-        where.append("(intent_name ilike :q or raw_requirement_text ilike :q)")
+        if search_field:
+            where.append(f"{BUYER_INTENT_SEARCH_COLUMNS[search_field]} ilike :q")
+        else:
+            where.append(
+                "("
+                "bi.intent_name ilike :q or bp.buyer_name ilike :q or bp.legal_name ilike :q "
+                "or bi.raw_requirement_text ilike :q or bi.intent_summary ilike :q "
+                "or bi.industry_primary ilike :q or bi.industry_secondary ilike :q or bi.region_scope_summary ilike :q"
+                ")"
+            )
         params["q"] = f"%{q}%"
     if buyer_party_id:
-        where.append("buyer_party_id = :buyer_party_id")
+        where.append("bi.buyer_party_id = :buyer_party_id")
         params["buyer_party_id"] = buyer_party_id
+    if industry:
+        where.append("concat_ws(' / ', nullif(bi.industry_primary, ''), nullif(bi.industry_secondary, '')) = :industry")
+        params["industry"] = industry
+    if region:
+        where.append("bi.region_scope_summary = :region")
+        params["region"] = region
+    if status:
+        where.append("bi.status = :status")
+        params["status"] = status
+    if listed_status:
+        where.append("bi.preferred_listed_status = :listed_status")
+        params["listed_status"] = listed_status
+    if requires_consolidation:
+        where.append("bi.requires_consolidation = :requires_consolidation")
+        params["requires_consolidation"] = requires_consolidation
+
+    where_sql = " and ".join(where)
+    total = db.execute(
+        text(
+            f"""
+            select count(*)
+            from buyer_intent bi
+            left join buyer_party bp
+              on bp.id = bi.buyer_party_id
+             and bp.deleted_at is null
+            where {where_sql}
+            """
+        ),
+        params,
+    ).scalar_one()
 
     rows = db.execute(
         text(
             f"""
             select
-              id, buyer_party_id, intent_name, status, contact_name,
-              raw_requirement_text, intent_summary, parsed_requirement_json,
-              industry_primary, industry_secondary, region_scope_summary,
-              region_constraints_json, min_revenue_yuan, min_net_profit_yuan,
-              min_total_profit_yuan, max_pe, max_valuation_yuan,
-              min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
-              requires_control, requires_consolidation,
-              accepts_minority_investment, desired_equity_ratio_min,
-              desired_equity_ratio_max, equity_ratio_summary, equity_requirement_type,
-              acceptable_control_paths_json, preferred_listed_status,
-              listing_board_requirement_summary, financing_stage_requirement_summary,
-              transaction_type, transaction_types_json, premium_tolerance_summary,
-              max_premium_rate, max_debt_ratio, debt_ratio_requirement_summary,
-              major_risk_tolerance_summary, buyer_industry_advantage_summary,
-              negative_summary, priority_summary, preference_summary, unknown_summary,
-              created_at::text as created_at, updated_at::text as updated_at
-            from buyer_intent
-            where {' and '.join(where)}
-            order by updated_at desc
+{BUYER_INTENT_OUT_COLUMNS}
+            from buyer_intent bi
+            left join buyer_party bp
+              on bp.id = bi.buyer_party_id
+             and bp.deleted_at is null
+            where {where_sql}
+            order by bi.updated_at desc
             limit :limit offset :offset
             """
         ),
         params,
     ).mappings().all()
-    return [dict(row) for row in rows]
+    return {"items": [dict(row) for row in rows], "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/filter-options", response_model=BuyerIntentFilterOptionsOut)
+def buyer_intent_filter_options(db: Session = Depends(get_db)) -> dict[str, Any]:
+    params = {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID}
+    industries = _filter_options(
+        db,
+        """
+        select
+          concat_ws(' / ', nullif(industry_primary, ''), nullif(industry_secondary, '')) as value,
+          count(*) as count
+        from buyer_intent
+        where team_id = :team_id
+          and workspace_id = :workspace_id
+          and deleted_at is null
+          and concat_ws(' / ', nullif(industry_primary, ''), nullif(industry_secondary, '')) <> ''
+        group by value
+        order by count desc, value asc
+        limit 80
+        """,
+        params,
+    )
+    regions = _filter_options(
+        db,
+        """
+        select region_scope_summary as value, count(*) as count
+        from buyer_intent
+        where team_id = :team_id
+          and workspace_id = :workspace_id
+          and deleted_at is null
+          and nullif(region_scope_summary, '') is not null
+        group by region_scope_summary
+        order by count desc, region_scope_summary asc
+        limit 80
+        """,
+        params,
+    )
+    statuses = _filter_options(
+        db,
+        """
+        select status as value, count(*) as count
+        from buyer_intent
+        where team_id = :team_id
+          and workspace_id = :workspace_id
+          and deleted_at is null
+        group by status
+        order by count desc, status asc
+        """,
+        params,
+        labels={"active": "持续推荐", "paused": "暂停推荐"},
+    )
+    listed_statuses = _filter_options(
+        db,
+        """
+        select preferred_listed_status as value, count(*) as count
+        from buyer_intent
+        where team_id = :team_id
+          and workspace_id = :workspace_id
+          and deleted_at is null
+          and nullif(preferred_listed_status, '') is not null
+        group by preferred_listed_status
+        order by count desc, preferred_listed_status asc
+        """,
+        params,
+        labels={
+            "listed": "已上市",
+            "unlisted": "未上市",
+            "pre_ipo": "拟上市",
+            "any": "均可",
+            "unknown": "未知",
+        },
+    )
+    consolidation_requirements = _filter_options(
+        db,
+        """
+        select requires_consolidation as value, count(*) as count
+        from buyer_intent
+        where team_id = :team_id
+          and workspace_id = :workspace_id
+          and deleted_at is null
+        group by requires_consolidation
+        order by count desc, requires_consolidation asc
+        """,
+        params,
+        labels={"yes": "需要并表", "likely": "可能需要", "no": "不需要并表", "unknown": "未知"},
+    )
+    return {
+        "industries": industries,
+        "regions": regions,
+        "statuses": statuses,
+        "listed_statuses": listed_statuses,
+        "consolidation_requirements": consolidation_requirements,
+    }
+
+
+@router.get("/suggestions", response_model=list[BuyerIntentSuggestionOut])
+def buyer_intent_suggestions(
+    q: str = Query(min_length=1, max_length=100),
+    limit: int = Query(default=5, ge=1, le=10),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    query = q.strip()
+    if not query:
+        return []
+
+    rows = db.execute(
+        text(
+            """
+            with matches as (
+              select
+                bi.id, bi.intent_name, bi.buyer_party_id, bp.buyer_name,
+                bi.raw_requirement_text, bi.intent_summary, bi.updated_at,
+                'intent_name'::text as search_field,
+                'intent'::text as match_type,
+                bi.intent_name as match_text,
+                1 as priority
+              from buyer_intent bi
+              left join buyer_party bp on bp.id = bi.buyer_party_id and bp.deleted_at is null
+              where bi.team_id = :team_id
+                and bi.workspace_id = :workspace_id
+                and bi.deleted_at is null
+                and bi.intent_name ilike :q
+              union all
+              select
+                bi.id, bi.intent_name, bi.buyer_party_id, bp.buyer_name,
+                bi.raw_requirement_text, bi.intent_summary, bi.updated_at,
+                'buyer_name'::text as search_field,
+                'buyer'::text as match_type,
+                bp.buyer_name as match_text,
+                2 as priority
+              from buyer_intent bi
+              join buyer_party bp on bp.id = bi.buyer_party_id and bp.deleted_at is null
+              where bi.team_id = :team_id
+                and bi.workspace_id = :workspace_id
+                and bi.deleted_at is null
+                and bp.buyer_name ilike :q
+              union all
+              select
+                bi.id, bi.intent_name, bi.buyer_party_id, bp.buyer_name,
+                bi.raw_requirement_text, bi.intent_summary, bi.updated_at,
+                'raw_requirement_text'::text as search_field,
+                'requirement'::text as match_type,
+                bi.raw_requirement_text as match_text,
+                3 as priority
+              from buyer_intent bi
+              left join buyer_party bp on bp.id = bi.buyer_party_id and bp.deleted_at is null
+              where bi.team_id = :team_id
+                and bi.workspace_id = :workspace_id
+                and bi.deleted_at is null
+                and bi.raw_requirement_text ilike :q
+              union all
+              select
+                bi.id, bi.intent_name, bi.buyer_party_id, bp.buyer_name,
+                bi.raw_requirement_text, bi.intent_summary, bi.updated_at,
+                'intent_summary'::text as search_field,
+                'summary'::text as match_type,
+                bi.intent_summary as match_text,
+                4 as priority
+              from buyer_intent bi
+              left join buyer_party bp on bp.id = bi.buyer_party_id and bp.deleted_at is null
+              where bi.team_id = :team_id
+                and bi.workspace_id = :workspace_id
+                and bi.deleted_at is null
+                and bi.intent_summary ilike :q
+            )
+            select distinct on (id)
+              id, intent_name, buyer_party_id, buyer_name, raw_requirement_text,
+              intent_summary, search_field, match_type, match_text
+            from matches
+            order by id, priority, updated_at desc
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "q": f"%{query}%",
+        },
+    ).mappings().all()
+    sorted_rows = sorted(
+        rows,
+        key=lambda row: (
+            {"intent": 1, "buyer": 2, "requirement": 3, "summary": 4}[row["match_type"]],
+            row["intent_name"],
+        ),
+    )
+    labels = {"intent": "意向", "buyer": "买家", "requirement": "需求", "summary": "摘要"}
+    return [
+        {
+            "id": row["id"],
+            "search_field": row["search_field"],
+            "match_type": row["match_type"],
+            "match_label": labels[row["match_type"]],
+            "match_text": row["match_text"],
+            "intent_name": row["intent_name"],
+            "buyer_party_id": row["buyer_party_id"],
+            "buyer_name": row["buyer_name"],
+            "snippet": _truncate_text(row["intent_summary"] or row["raw_requirement_text"], 80),
+        }
+        for row in sorted_rows[:limit]
+        if row["match_text"]
+    ]
+
+
+@router.post("/bulk-delete", response_model=BuyerIntentBulkDeleteOut)
+def bulk_delete_buyer_intents(
+    payload: BuyerIntentBulkDeleteRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    intent_ids = list(dict.fromkeys(payload.ids))
+    deleted_ids = _soft_delete_buyer_intents(db, intent_ids)
+    deleted_id_set = set(deleted_ids)
+    skipped_ids = [intent_id for intent_id in intent_ids if intent_id not in deleted_id_set]
+    db.commit()
+    return {
+        "status": "ok",
+        "deleted_count": len(deleted_ids),
+        "deleted_ids": deleted_ids,
+        "skipped_ids": skipped_ids,
+    }
 
 
 @router.get("/{buyer_intent_id}", response_model=BuyerIntentOut)
@@ -450,23 +763,7 @@ def update_buyer_intent(
           and team_id = :team_id
           and workspace_id = :workspace_id
           and deleted_at is null
-        returning
-          id, buyer_party_id, intent_name, status, contact_name,
-          raw_requirement_text, intent_summary, parsed_requirement_json,
-          industry_primary, industry_secondary, region_scope_summary,
-          region_constraints_json, min_revenue_yuan, min_net_profit_yuan,
-          min_total_profit_yuan, max_pe, max_valuation_yuan,
-          min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
-          requires_control, requires_consolidation,
-          accepts_minority_investment, desired_equity_ratio_min,
-          desired_equity_ratio_max, equity_ratio_summary, equity_requirement_type,
-          acceptable_control_paths_json, preferred_listed_status,
-          listing_board_requirement_summary, financing_stage_requirement_summary,
-          transaction_type, transaction_types_json, premium_tolerance_summary,
-          max_premium_rate, max_debt_ratio, debt_ratio_requirement_summary,
-          major_risk_tolerance_summary, buyer_industry_advantage_summary,
-          negative_summary, priority_summary, preference_summary, unknown_summary,
-          created_at::text as created_at, updated_at::text as updated_at
+        returning id
         """
     )
     json_fields = {
@@ -489,6 +786,8 @@ def update_buyer_intent(
             "workspace_id": DEFAULT_WORKSPACE_ID,
         },
     ).mappings().one()
+    db.flush()
+    updated = _get_buyer_intent_or_404(db, row["id"])
 
     write_action_logs_for_diff(
         db,
@@ -504,13 +803,37 @@ def update_buyer_intent(
     )
 
     db.commit()
-    return dict(row)
+    return updated
 
 
 @router.delete("/{buyer_intent_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_buyer_intent(buyer_intent_id: UUID, db: Session = Depends(get_db)) -> None:
     _get_buyer_intent_or_404(db, buyer_intent_id)
-    db.execute(
+    _soft_delete_buyer_intents(db, [buyer_intent_id])
+    db.commit()
+    return None
+
+
+def _filter_options(
+    db: Session,
+    query: str,
+    params: dict[str, Any],
+    labels: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    rows = db.execute(text(query), params).mappings().all()
+    label_map = labels or {}
+    return [
+        {"value": row["value"], "label": label_map.get(row["value"], row["value"]), "count": int(row["count"])}
+        for row in rows
+        if row["value"]
+    ]
+
+
+def _soft_delete_buyer_intents(db: Session, buyer_intent_ids: list[UUID]) -> list[UUID]:
+    if not buyer_intent_ids:
+        return []
+
+    rows = db.execute(
         text(
             """
             update buyer_intent
@@ -518,58 +841,48 @@ def delete_buyer_intent(buyer_intent_id: UUID, db: Session = Depends(get_db)) ->
                 deleted_by = :deleted_by,
                 updated_at = now(),
                 updated_by = :updated_by
-            where id = :buyer_intent_id
+            where id in :buyer_intent_ids
               and team_id = :team_id
               and workspace_id = :workspace_id
               and deleted_at is null
+            returning id
             """
-        ),
+        ).bindparams(bindparam("buyer_intent_ids", expanding=True)),
         {
             "deleted_by": DEFAULT_ADMIN_USER_ID,
             "updated_by": DEFAULT_ADMIN_USER_ID,
-            "buyer_intent_id": buyer_intent_id,
+            "buyer_intent_ids": buyer_intent_ids,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
         },
-    )
-    write_action_log(
-        db,
-        entity_type="buyer_intent",
-        entity_id=buyer_intent_id,
-        field_path="deleted_at",
-        old_value=None,
-        new_value="now()",
-    )
-    db.commit()
-    return None
+    ).mappings().all()
+    deleted_ids = [row["id"] for row in rows]
+    for deleted_id in deleted_ids:
+        write_action_log(
+            db,
+            entity_type="buyer_intent",
+            entity_id=deleted_id,
+            field_path="deleted_at",
+            old_value=None,
+            new_value="now()",
+        )
+    return deleted_ids
 
 
 def _get_buyer_intent_or_404(db: Session, buyer_intent_id: UUID) -> dict[str, Any]:
     row = db.execute(
         text(
-            """
+            f"""
             select
-              id, buyer_party_id, intent_name, status, contact_name,
-              raw_requirement_text, intent_summary, parsed_requirement_json,
-              industry_primary, industry_secondary, region_scope_summary,
-              region_constraints_json, min_revenue_yuan, min_net_profit_yuan,
-              min_total_profit_yuan, max_pe, max_valuation_yuan,
-              min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
-              requires_control, requires_consolidation,
-              accepts_minority_investment, desired_equity_ratio_min,
-              desired_equity_ratio_max, equity_ratio_summary, equity_requirement_type,
-              acceptable_control_paths_json, preferred_listed_status,
-              listing_board_requirement_summary, financing_stage_requirement_summary,
-              transaction_type, transaction_types_json, premium_tolerance_summary,
-              max_premium_rate, max_debt_ratio, debt_ratio_requirement_summary,
-              major_risk_tolerance_summary, buyer_industry_advantage_summary,
-              negative_summary, priority_summary, preference_summary, unknown_summary,
-              created_at::text as created_at, updated_at::text as updated_at
-            from buyer_intent
-            where id = :buyer_intent_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
-              and deleted_at is null
+{BUYER_INTENT_OUT_COLUMNS}
+            from buyer_intent bi
+            left join buyer_party bp
+              on bp.id = bi.buyer_party_id
+             and bp.deleted_at is null
+            where bi.id = :buyer_intent_id
+              and bi.team_id = :team_id
+              and bi.workspace_id = :workspace_id
+              and bi.deleted_at is null
             """
         ),
         {

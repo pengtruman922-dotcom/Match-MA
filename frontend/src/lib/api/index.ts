@@ -14,12 +14,21 @@ import type {
   BusinessUpdateCreate,
   BusinessUpdateReviewPage,
   BusinessUpdateUploadResponse,
+  BuyerBulkDeleteResponse,
+  BuyerIntentFilterOptions,
+  BuyerIntentListResponse,
+  BuyerIntentSearchField,
+  BuyerIntentSuggestion,
   BuyerIntent,
   BuyerIntentCreate,
   BuyerIntentTargetExclusion,
   BuyerIntentUpdate,
   BuyerParty,
   BuyerPartyCreate,
+  BuyerPartyFilterOptions,
+  BuyerPartyListResponse,
+  BuyerPartySearchField,
+  BuyerPartySuggestion,
   BuyerSellerRelation,
   BusinessUpdateDebugBundle,
   DebugCenterData,
@@ -88,26 +97,60 @@ export const sellerTargets = {
 };
 
 export const buyerParties = {
-  list: (params?: { q?: string; limit?: number; offset?: number }) =>
-    apiRequest<BuyerParty[]>(`/buyer-parties${buildQuery(params || {})}`),
+  list: (params?: {
+    q?: string;
+    search_field?: BuyerPartySearchField;
+    buyer_type?: string;
+    region?: string;
+    listed_status?: string;
+    status?: string;
+    limit?: number;
+    offset?: number;
+  }) => apiRequest<BuyerPartyListResponse>(`/buyer-parties${buildQuery(params || {})}`),
+  filterOptions: () => apiRequest<BuyerPartyFilterOptions>('/buyer-parties/filter-options'),
+  suggestions: (params: { q: string; limit?: number }) =>
+    apiRequest<BuyerPartySuggestion[]>(`/buyer-parties/suggestions${buildQuery(params)}`),
   get: (id: string) => apiRequest<BuyerParty>(`/buyer-parties/${id}`),
   create: (data: BuyerPartyCreate) =>
     apiRequest<BuyerParty>('/buyer-parties', { method: 'POST', body: JSON.stringify(data) }),
   update: (id: string, data: Partial<BuyerPartyCreate>) =>
     apiRequest<BuyerParty>(`/buyer-parties/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   delete: (id: string) => apiRequest<{ status: string }>(`/buyer-parties/${id}`, { method: 'DELETE' }),
+  bulkDelete: (ids: string[]) =>
+    apiRequest<BuyerBulkDeleteResponse>('/buyer-parties/bulk-delete', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    }),
   intents: (id: string) => apiRequest<BuyerIntent[]>(`/buyer-parties/${id}/intents`),
 };
 
 export const buyerIntents = {
-  list: (params?: { q?: string; buyer_party_id?: string; limit?: number; offset?: number }) =>
-    apiRequest<BuyerIntent[]>(`/buyer-intents${buildQuery(params || {})}`),
+  list: (params?: {
+    q?: string;
+    search_field?: BuyerIntentSearchField;
+    buyer_party_id?: string;
+    industry?: string;
+    region?: string;
+    status?: string;
+    listed_status?: string;
+    requires_consolidation?: string;
+    limit?: number;
+    offset?: number;
+  }) => apiRequest<BuyerIntentListResponse>(`/buyer-intents${buildQuery(params || {})}`),
+  filterOptions: () => apiRequest<BuyerIntentFilterOptions>('/buyer-intents/filter-options'),
+  suggestions: (params: { q: string; limit?: number }) =>
+    apiRequest<BuyerIntentSuggestion[]>(`/buyer-intents/suggestions${buildQuery(params)}`),
   get: (id: string) => apiRequest<BuyerIntent>(`/buyer-intents/${id}`),
   create: (data: BuyerIntentCreate) =>
     apiRequest<BuyerIntent>('/buyer-intents', { method: 'POST', body: JSON.stringify(data) }),
   update: (id: string, data: BuyerIntentUpdate) =>
     apiRequest<BuyerIntent>(`/buyer-intents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   delete: (id: string) => apiRequest<{ status: string }>(`/buyer-intents/${id}`, { method: 'DELETE' }),
+  bulkDelete: (ids: string[]) =>
+    apiRequest<BuyerBulkDeleteResponse>('/buyer-intents/bulk-delete', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    }),
 };
 
 export const businessUpdates = {

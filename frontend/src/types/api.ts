@@ -159,6 +159,46 @@ export interface BuyerParty {
   updated_at: string;
 }
 
+export interface BuyerPartyListResponse {
+  items: BuyerParty[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export type BuyerPartySearchField = 'buyer_name' | 'legal_name' | 'main_business' | 'profile_summary';
+
+export interface BuyerFilterOption {
+  value: string;
+  label: string;
+  count: number;
+}
+
+export interface BuyerPartyFilterOptions {
+  buyer_types: BuyerFilterOption[];
+  regions: BuyerFilterOption[];
+  listed_statuses: BuyerFilterOption[];
+  statuses: BuyerFilterOption[];
+}
+
+export interface BuyerPartySuggestion {
+  id: string;
+  search_field: BuyerPartySearchField;
+  match_type: 'buyer' | 'legal' | 'business' | 'profile';
+  match_label: string;
+  match_text: string;
+  buyer_name: string;
+  legal_name: string | null;
+  snippet: string | null;
+}
+
+export interface BuyerBulkDeleteResponse {
+  status: string;
+  deleted_count: number;
+  deleted_ids: string[];
+  skipped_ids: string[];
+}
+
 export interface BuyerPartyCreate {
   buyer_name: string;
   legal_name?: string;
@@ -173,6 +213,7 @@ export interface BuyerPartyCreate {
 export interface BuyerIntent {
   id: string;
   buyer_party_id: string | null;
+  buyer_name?: string | null;
   intent_name: string;
   status: string;
   contact_name: string | null;
@@ -212,6 +253,35 @@ export interface BuyerIntent {
   unknown_summary: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface BuyerIntentListResponse {
+  items: BuyerIntent[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export type BuyerIntentSearchField = 'intent_name' | 'buyer_name' | 'raw_requirement_text' | 'intent_summary';
+
+export interface BuyerIntentFilterOptions {
+  industries: BuyerFilterOption[];
+  regions: BuyerFilterOption[];
+  statuses: BuyerFilterOption[];
+  listed_statuses: BuyerFilterOption[];
+  consolidation_requirements: BuyerFilterOption[];
+}
+
+export interface BuyerIntentSuggestion {
+  id: string;
+  search_field: BuyerIntentSearchField;
+  match_type: 'intent' | 'buyer' | 'requirement' | 'summary';
+  match_label: string;
+  match_text: string;
+  intent_name: string;
+  buyer_party_id: string | null;
+  buyer_name: string | null;
+  snippet: string | null;
 }
 
 export interface BuyerIntentCreate {

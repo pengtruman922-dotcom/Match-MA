@@ -88,7 +88,7 @@ export default function BuyerDetail() {
           <div>
             <h1 className="text-lg font-semibold text-gray-900">{party.buyer_name}</h1>
             <p className="text-xs text-gray-500 mt-0.5 flex items-center gap-2">
-              {party.buyer_type && <span>{party.buyer_type}</span>}
+              {party.buyer_type && <span>{valueLabel('buyer_type', party.buyer_type)}</span>}
               {party.region_province && <span>· {party.region_province}{party.region_city || ''}</span>}
               {party.main_business && <span>· {party.main_business}</span>}
             </p>

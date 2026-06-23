@@ -126,6 +126,72 @@ const RELATION_FIELD_LABELS: Record<string, string> = {
   last_event_summary: '最近进展摘要',
 };
 
+
+
+Object.assign(BUYER_PARTY_FIELD_LABELS, {
+  buyer_name: '买家名称',
+  legal_name: '法律主体',
+  aliases_json: '别名',
+  buyer_type: '买家类型',
+  group_name: '集团名称',
+  listed_status: '上市状态',
+  region_province: '所在省份',
+  region_city: '所在城市',
+  main_business: '主营业务',
+  capital_strength_summary: '资金实力',
+  profile_summary: '买家画像',
+  status: '状态',
+  deleted_at: '删除时间',
+});
+
+Object.assign(BUYER_INTENT_FIELD_LABELS, {
+  buyer_party_id: '关联买家',
+  intent_name: '意向名称',
+  status: '状态',
+  pause_reason: '暂停原因',
+  contact_name: '联系人',
+  contact_info_json: '联系方式',
+  raw_requirement_text: '原始需求',
+  intent_summary: '意向摘要',
+  parsed_requirement_json: '结构化需求',
+  industry_primary: '一级行业',
+  industry_secondary: '二级行业',
+  region_scope_summary: '区域范围',
+  region_constraints_json: '区域约束',
+  min_revenue_yuan: '最低营收',
+  min_net_profit_yuan: '最低净利润',
+  min_total_profit_yuan: '最低利润总额',
+  max_pe: '最高PE',
+  max_valuation_yuan: '最高估值',
+  min_market_cap_yuan: '最低市值',
+  max_market_cap_yuan: '最高市值',
+  market_cap_range_summary: '市值范围',
+  requires_control: '要求控股',
+  requires_consolidation: '要求并表',
+  accepts_minority_investment: '接受少数股权',
+  desired_equity_ratio_min: '期望持股下限',
+  desired_equity_ratio_max: '期望持股上限',
+  equity_ratio_summary: '股权比例要求',
+  equity_requirement_type: '股权要求类型',
+  acceptable_control_paths_json: '可接受控制路径',
+  preferred_listed_status: '偏好上市状态',
+  listing_board_requirement_summary: '板块要求',
+  financing_stage_requirement_summary: '融资阶段要求',
+  transaction_type: '交易类型',
+  transaction_types_json: '交易类型',
+  premium_tolerance_summary: '溢价容忍度',
+  max_premium_rate: '最高溢价率',
+  max_debt_ratio: '最高负债率',
+  debt_ratio_requirement_summary: '负债率要求',
+  major_risk_tolerance_summary: '风险容忍度',
+  buyer_industry_advantage_summary: '买方产业优势',
+  negative_summary: '排除项',
+  priority_summary: '优先级',
+  preference_summary: '偏好说明',
+  unknown_summary: '待确认事项',
+  deleted_at: '删除时间',
+});
+
 const FIELD_LABELS_BY_ENTITY: Record<string, Record<string, string>> = {
   seller_target: SELLER_TARGET_FIELD_LABELS,
   buyer_party: BUYER_PARTY_FIELD_LABELS,
@@ -219,6 +285,57 @@ const YES_NO_LIKE_FIELDS = new Set([
   'requires_consolidation',
 ]);
 
+
+Object.assign(VALUE_LABELS, {
+  status: {
+    active: '??',
+    paused: '??',
+    archived: '???',
+    merged: '???',
+    completed: '???',
+  },
+  buyer_type: {
+    industrial_buyer: '产业买家',
+    listed_company: '上市公司',
+    state_owned_platform: '国资平台',
+    pe_fund: 'PE基金',
+    financial_investor: '财务投资人',
+    government_platform: '政府平台',
+    other: '其他',
+  },
+  buyer_party_status: {
+    active: '活跃',
+    archived: '已归档',
+    merged: '已合并',
+  },
+  buyer_intent_status: {
+    active: '持续推荐',
+    paused: '暂停推荐',
+  },
+  preferred_listed_status: {
+    listed: '已上市',
+    unlisted: '未上市',
+    pre_ipo: '拟上市',
+    any: '均可',
+    unknown: '未知',
+  },
+  listed_status: {
+    listed: '已上市',
+    unlisted: '未上市',
+    pre_ipo: '拟上市',
+    unknown: '未知',
+  },
+  equity_requirement_type: {
+    control_required: '要求控股',
+    consolidation_required: '要求并表',
+    minority_acceptable: '接受少数股权',
+    minority_only: '仅少数股权',
+    flexible: '灵活可谈',
+    specific_range: '指定比例',
+    unknown: '未知',
+  },
+});
+
 export function valueLabel(fieldPath: string, value: unknown): string {
   if (value === null || value === undefined || value === '') return '-';
   if (Array.isArray(value)) return value.length ? value.map((item) => valueLabel(fieldPath, item)).join('、') : '-';
@@ -236,6 +353,16 @@ const SOURCE_TYPE_LABELS: Record<string, string> = {
   update_log_rollback: '更新回滚',
   rollback: '回滚',
 };
+
+
+Object.assign(SOURCE_TYPE_LABELS, {
+  direct_api: '手动编辑',
+  seller_target_parse: '标的解析',
+  buyer_intent_parse: '买家意向解析',
+  business_update_extractor: '业务更新解析',
+  update_log_rollback: '更新回滚',
+  rollback: '回滚',
+});
 
 export function sourceTypeLabel(sourceType: string | null | undefined): string {
   if (!sourceType) return '-';
