@@ -36,7 +36,7 @@ export default function Updates() {
         }
         setUpdates(nextUpdates);
         setActions(a);
-        setTargets(t);
+        setTargets(t.items);
         if (routeUpdateId) setSelectedUpdateId(routeUpdateId);
       })
       .catch(() => {})

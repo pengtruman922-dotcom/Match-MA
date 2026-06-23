@@ -66,6 +66,17 @@ def test_seller_target_prompt_seed_requires_chinese_industry_and_region_values()
     assert "do not output English translated labels" in sql
 
 
+def test_seller_target_prompt_seed_requires_chinese_user_facing_values() -> None:
+    sql = Path("database/migrations/022_seller_target_parser_prompt_v04.sql").read_text(encoding="utf-8")
+
+    assert "seller_target_parser" in sql
+    assert "v0.4.0" in sql
+    assert "Output all user-facing natural-language values in Chinese" in sql
+    assert "business_summary" in sql
+    assert "transfer_ratio_text" in sql
+    assert "controlled enum codes in canonical English" in sql
+
+
 def test_business_update_prompt_seed_requires_chinese_industry_and_region_values() -> None:
     sql = Path("database/migrations/021_business_update_extractor_prompt_v06.sql").read_text(encoding="utf-8")
 

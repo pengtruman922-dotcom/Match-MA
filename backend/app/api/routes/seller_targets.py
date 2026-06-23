@@ -106,6 +106,13 @@ class SellerTargetOut(BaseModel):
     updated_at: str
 
 
+class SellerTargetListOut(BaseModel):
+    items: list[SellerTargetOut]
+    total: int
+    limit: int
+    offset: int
+
+
 class SellerTargetUpdate(BaseModel):
     target_name: str | None = Field(default=None, min_length=1, max_length=300)
     target_type: str | None = None
@@ -180,6 +187,40 @@ class SellerTargetParseStatusOut(BaseModel):
     debug_ref: dict[str, Any]
 
 
+class SellerTargetFilterOptionOut(BaseModel):
+    value: str
+    label: str
+    count: int
+
+
+class SellerTargetFilterOptionsOut(BaseModel):
+    industries: list[SellerTargetFilterOptionOut]
+    regions: list[SellerTargetFilterOptionOut]
+    statuses: list[SellerTargetFilterOptionOut]
+
+
+class SellerTargetSuggestionOut(BaseModel):
+    id: UUID
+    search_field: Literal["target_name", "target_subject_name", "business_summary"]
+    match_type: Literal["target", "subject", "summary"]
+    match_label: str
+    match_text: str
+    target_name: str
+    target_subject_name: str | None
+    snippet: str | None
+
+
+class SellerTargetBulkDeleteRequest(BaseModel):
+    ids: list[UUID] = Field(min_length=1, max_length=200)
+
+
+class SellerTargetBulkDeleteOut(BaseModel):
+    status: str
+    deleted_count: int
+    deleted_ids: list[UUID]
+    skipped_ids: list[UUID]
+
+
 SELLER_TARGET_OUT_COLUMNS = """
               id, target_name, target_type, target_subject_name, recommendation_status, information_status,
               industry_primary, industry_secondary, registered_province, registered_city,
@@ -239,13 +280,24 @@ def create_seller_target(payload: SellerTargetCreate, db: Session = Depends(get_
     return dict(row)
 
 
-@router.get("", response_model=list[SellerTargetOut])
+SELLER_TARGET_SEARCH_COLUMNS = {
+    "target_name": "target_name",
+    "target_subject_name": "target_subject_name",
+    "business_summary": "business_summary",
+}
+
+
+@router.get("", response_model=SellerTargetListOut)
 def list_seller_targets(
     db: Session = Depends(get_db),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     q: str | None = Query(default=None, max_length=200),
-) -> list[dict[str, Any]]:
+    search_field: Literal["target_name", "target_subject_name", "business_summary"] | None = Query(default=None),
+    industry: str | None = Query(default=None, max_length=200),
+    region: str | None = Query(default=None, max_length=200),
+    status: Literal["recommendable", "not_recommendable"] | None = Query(default=None),
+) -> dict[str, Any]:
     where = ["team_id = :team_id", "workspace_id = :workspace_id", "deleted_at is null"]
     params: dict[str, Any] = {
         "team_id": DEFAULT_TEAM_ID,
@@ -255,8 +307,36 @@ def list_seller_targets(
     }
 
     if q:
-        where.append("(target_name ilike :q or target_subject_name ilike :q or business_summary ilike :q)")
+        if search_field:
+            where.append(f"{SELLER_TARGET_SEARCH_COLUMNS[search_field]} ilike :q")
+        else:
+            where.append("(target_name ilike :q or target_subject_name ilike :q or business_summary ilike :q)")
         params["q"] = f"%{q}%"
+    if industry:
+        where.append(
+            "concat_ws(' / ', nullif(industry_primary, ''), nullif(industry_secondary, '')) = :industry"
+        )
+        params["industry"] = industry
+    if region:
+        where.append(
+            "concat_ws(' ', nullif(headquarter_province, ''), nullif(headquarter_city, '')) = :region"
+        )
+        params["region"] = region
+    if status:
+        where.append("recommendation_status = :status")
+        params["status"] = status
+
+    where_sql = " and ".join(where)
+    total = db.execute(
+        text(
+            f"""
+            select count(*)
+            from seller_target
+            where {where_sql}
+            """
+        ),
+        params,
+    ).scalar_one()
 
     rows = db.execute(
         text(
@@ -264,14 +344,165 @@ def list_seller_targets(
             select
 {SELLER_TARGET_OUT_COLUMNS}
             from seller_target
-            where {' and '.join(where)}
+            where {where_sql}
             order by updated_at desc
             limit :limit offset :offset
             """
         ),
         params,
     ).mappings().all()
-    return [dict(row) for row in rows]
+    return {"items": [dict(row) for row in rows], "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/filter-options", response_model=SellerTargetFilterOptionsOut)
+def seller_target_filter_options(db: Session = Depends(get_db)) -> dict[str, Any]:
+    params = {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID}
+    industries = _filter_options(
+        db,
+        """
+        select
+          concat_ws(' / ', nullif(industry_primary, ''), nullif(industry_secondary, '')) as value,
+          count(*) as count
+        from seller_target
+        where team_id = :team_id
+          and workspace_id = :workspace_id
+          and deleted_at is null
+          and concat_ws(' / ', nullif(industry_primary, ''), nullif(industry_secondary, '')) <> ''
+        group by value
+        order by count desc, value asc
+        limit 80
+        """,
+        params,
+    )
+    regions = _filter_options(
+        db,
+        """
+        select
+          concat_ws(' ', nullif(headquarter_province, ''), nullif(headquarter_city, '')) as value,
+          count(*) as count
+        from seller_target
+        where team_id = :team_id
+          and workspace_id = :workspace_id
+          and deleted_at is null
+          and concat_ws(' ', nullif(headquarter_province, ''), nullif(headquarter_city, '')) <> ''
+        group by value
+        order by count desc, value asc
+        limit 80
+        """,
+        params,
+    )
+    statuses = _filter_options(
+        db,
+        """
+        select recommendation_status as value, count(*) as count
+        from seller_target
+        where team_id = :team_id
+          and workspace_id = :workspace_id
+          and deleted_at is null
+        group by recommendation_status
+        order by count desc, recommendation_status asc
+        """,
+        params,
+        labels={"recommendable": "可推荐", "not_recommendable": "暂不可推荐"},
+    )
+    return {"industries": industries, "regions": regions, "statuses": statuses}
+
+
+@router.get("/suggestions", response_model=list[SellerTargetSuggestionOut])
+def seller_target_suggestions(
+    q: str = Query(min_length=1, max_length=100),
+    limit: int = Query(default=5, ge=1, le=10),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    query = q.strip()
+    if not query:
+        return []
+
+    rows = db.execute(
+        text(
+            """
+            with matches as (
+              select
+                id, target_name, target_subject_name, business_summary, updated_at,
+                'target_name'::text as search_field,
+                'target'::text as match_type,
+                target_name as match_text,
+                1 as priority
+              from seller_target
+              where team_id = :team_id
+                and workspace_id = :workspace_id
+                and deleted_at is null
+                and target_name ilike :q
+              union all
+              select
+                id, target_name, target_subject_name, business_summary, updated_at,
+                'target_subject_name'::text as search_field,
+                'subject'::text as match_type,
+                target_subject_name as match_text,
+                2 as priority
+              from seller_target
+              where team_id = :team_id
+                and workspace_id = :workspace_id
+                and deleted_at is null
+                and target_subject_name ilike :q
+              union all
+              select
+                id, target_name, target_subject_name, business_summary, updated_at,
+                'business_summary'::text as search_field,
+                'summary'::text as match_type,
+                business_summary as match_text,
+                3 as priority
+              from seller_target
+              where team_id = :team_id
+                and workspace_id = :workspace_id
+                and deleted_at is null
+                and business_summary ilike :q
+            )
+            select distinct on (id)
+              id, target_name, target_subject_name, business_summary,
+              search_field, match_type, match_text
+            from matches
+            order by id, priority, updated_at desc
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "q": f"%{query}%",
+        },
+    ).mappings().all()
+    sorted_rows = sorted(rows, key=lambda row: ({"target": 1, "subject": 2, "summary": 3}[row["match_type"]], row["target_name"]))
+    return [
+        {
+            "id": row["id"],
+            "search_field": row["search_field"],
+            "match_type": row["match_type"],
+            "match_label": {"target": "标的", "subject": "主体", "summary": "摘要"}[row["match_type"]],
+            "match_text": row["match_text"],
+            "target_name": row["target_name"],
+            "target_subject_name": row["target_subject_name"],
+            "snippet": _truncate_text(row["business_summary"], 80),
+        }
+        for row in sorted_rows[:limit]
+    ]
+
+
+@router.post("/bulk-delete", response_model=SellerTargetBulkDeleteOut)
+def bulk_delete_seller_targets(
+    payload: SellerTargetBulkDeleteRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    target_ids = list(dict.fromkeys(payload.ids))
+    deleted_ids = _soft_delete_seller_targets(db, target_ids)
+    deleted_id_set = set(deleted_ids)
+    skipped_ids = [target_id for target_id in target_ids if target_id not in deleted_id_set]
+    db.commit()
+    return {
+        "status": "ok",
+        "deleted_count": len(deleted_ids),
+        "deleted_ids": deleted_ids,
+        "skipped_ids": skipped_ids,
+    }
 
 
 @router.get("/{seller_target_id}", response_model=SellerTargetOut)
@@ -432,7 +663,31 @@ def update_seller_target(
 @router.delete("/{seller_target_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_seller_target(seller_target_id: UUID, db: Session = Depends(get_db)) -> None:
     _get_seller_target_or_404(db, seller_target_id)
-    db.execute(
+    _soft_delete_seller_targets(db, [seller_target_id])
+    db.commit()
+    return None
+
+
+def _filter_options(
+    db: Session,
+    query: str,
+    params: dict[str, Any],
+    labels: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    rows = db.execute(text(query), params).mappings().all()
+    label_map = labels or {}
+    return [
+        {"value": row["value"], "label": label_map.get(row["value"], row["value"]), "count": int(row["count"])}
+        for row in rows
+        if row["value"]
+    ]
+
+
+def _soft_delete_seller_targets(db: Session, seller_target_ids: list[UUID]) -> list[UUID]:
+    if not seller_target_ids:
+        return []
+
+    rows = db.execute(
         text(
             """
             update seller_target
@@ -440,30 +695,32 @@ def delete_seller_target(seller_target_id: UUID, db: Session = Depends(get_db)) 
                 deleted_by = :deleted_by,
                 updated_at = now(),
                 updated_by = :updated_by
-            where id = :seller_target_id
+            where id in :seller_target_ids
               and team_id = :team_id
               and workspace_id = :workspace_id
               and deleted_at is null
+            returning id
             """
-        ),
+        ).bindparams(bindparam("seller_target_ids", expanding=True)),
         {
             "deleted_by": DEFAULT_ADMIN_USER_ID,
             "updated_by": DEFAULT_ADMIN_USER_ID,
-            "seller_target_id": seller_target_id,
+            "seller_target_ids": seller_target_ids,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
         },
-    )
-    write_action_log(
-        db,
-        entity_type="seller_target",
-        entity_id=seller_target_id,
-        field_path="deleted_at",
-        old_value=None,
-        new_value="now()",
-    )
-    db.commit()
-    return None
+    ).mappings().all()
+    deleted_ids = [row["id"] for row in rows]
+    for deleted_id in deleted_ids:
+        write_action_log(
+            db,
+            entity_type="seller_target",
+            entity_id=deleted_id,
+            field_path="deleted_at",
+            old_value=None,
+            new_value="now()",
+        )
+    return deleted_ids
 
 
 def _get_seller_target_or_404(db: Session, seller_target_id: UUID) -> dict[str, Any]:

@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, FormEvent, ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
   AlertCircle,
   Building2,
+  ChevronDown,
   FileText,
   Image,
   Loader2,
@@ -12,36 +13,145 @@ import {
   Plus,
   Search,
   Sparkles,
+  Tag,
   Trash2,
   Upload,
   X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { attachments, businessUpdates, sellerTargets } from '../lib/api';
-import type { AttachmentUploadPolicy, SellerTarget, SellerTargetCreate } from '../types/api';
+import type {
+  AttachmentUploadPolicy,
+  SellerTarget,
+  SellerTargetCreate,
+  SellerTargetFilterOption,
+  SellerTargetFilterOptions,
+  SellerTargetSearchField,
+  SellerTargetSuggestion,
+} from '../types/api';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
 import { sellerTargetStatusClass, sellerTargetStatusLabel } from '../lib/sellerTargetStatus';
 
+const PAGE_SIZE = 20;
+
+const SEARCH_FIELD_LABELS: Record<SellerTargetSearchField | 'all', string> = {
+  all: '全部字段',
+  target_name: '标的',
+  target_subject_name: '主体',
+  business_summary: '摘要',
+};
+
+type TargetFilters = {
+  q: string;
+  searchField?: SellerTargetSearchField;
+  industry: string;
+  region: string;
+  status: string;
+  page: number;
+};
+
 export default function Targets() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const filters = useMemo(() => readTargetFilters(searchParams), [searchParams]);
   const [items, setItems] = useState<SellerTarget[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchQuery, setSearchQuery] = useState(filters.q);
+  const [filterOptions, setFilterOptions] = useState<SellerTargetFilterOptions>({ industries: [], regions: [], statuses: [] });
+  const [suggestions, setSuggestions] = useState<SellerTargetSuggestion[]>([]);
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+  const [showSuggestions, setShowSuggestions] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [updateDrawer, setUpdateDrawer] = useState<{ open: boolean; targetId?: string; targetName?: string }>({ open: false });
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
 
-  const fetchTargets = useCallback((q?: string) => {
+  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const visibleIds = useMemo(() => items.map((item) => item.id), [items]);
+  const selectedCount = selectedIds.size;
+  const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
+  const activeFilterCount = [filters.q, filters.industry, filters.region, filters.status].filter(Boolean).length;
+
+  const updateFilters = useCallback((patch: Partial<TargetFilters>, options?: { replace?: boolean }) => {
+    const next = new URLSearchParams(searchParams);
+    if ('q' in patch) setOrDelete(next, 'q', patch.q);
+    if ('searchField' in patch) setOrDelete(next, 'searchField', patch.searchField);
+    if ('industry' in patch) setOrDelete(next, 'industry', patch.industry);
+    if ('region' in patch) setOrDelete(next, 'region', patch.region);
+    if ('status' in patch) setOrDelete(next, 'status', patch.status);
+    if (patch.page !== undefined) {
+      if (patch.page <= 1) next.delete('page');
+      else next.set('page', String(patch.page));
+    }
+    setSearchParams(next, { replace: options?.replace });
+  }, [searchParams, setSearchParams]);
+
+  const fetchTargets = useCallback(() => {
     setLoading(true);
-    sellerTargets.list({ q: q || undefined, limit: 50 })
-      .then(setItems)
+    sellerTargets
+      .list({
+        q: filters.q || undefined,
+        search_field: filters.searchField,
+        industry: filters.industry || undefined,
+        region: filters.region || undefined,
+        status: filters.status || undefined,
+        limit: PAGE_SIZE,
+        offset: (filters.page - 1) * PAGE_SIZE,
+      })
+      .then((response) => {
+        setItems(response.items);
+        setTotal(response.total);
+        setSelectedIds(new Set());
+        if (response.items.length === 0 && response.total > 0 && filters.page > 1) {
+          updateFilters({ page: filters.page - 1 }, { replace: true });
+        }
+      })
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, []);
+  }, [filters, updateFilters]);
 
   useEffect(() => {
     fetchTargets();
   }, [fetchTargets]);
+
+  useEffect(() => {
+    sellerTargets.filterOptions().then(setFilterOptions).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    setSearchQuery(filters.q);
+  }, [filters.q]);
+
+  useEffect(() => {
+    const query = searchQuery.trim();
+    if (!showSuggestions || !query) {
+      setSuggestions([]);
+      setSuggestionsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setSuggestionsLoading(true);
+    const timer = window.setTimeout(() => {
+      sellerTargets
+        .suggestions({ q: query, limit: 5 })
+        .then((nextSuggestions) => {
+          if (!cancelled) setSuggestions(nextSuggestions);
+        })
+        .catch(() => {
+          if (!cancelled) setSuggestions([]);
+        })
+        .finally(() => {
+          if (!cancelled) setSuggestionsLoading(false);
+        });
+    }, 220);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [searchQuery, showSuggestions]);
 
   useEffect(() => {
     if (searchParams.get('action') === 'new') {
@@ -53,7 +163,16 @@ export default function Targets() {
   }, [searchParams, setSearchParams]);
 
   const handleSearch = () => {
-    fetchTargets(searchQuery);
+    const nextQuery = searchQuery.trim();
+    updateFilters({ q: nextQuery, searchField: nextQuery === filters.q ? filters.searchField : undefined, page: 1 });
+    setShowSuggestions(false);
+  };
+
+  const handleSuggestionSelect = (suggestion: SellerTargetSuggestion) => {
+    const nextQuery = suggestion.match_type === 'summary' ? searchQuery.trim() : suggestion.match_text;
+    setSearchQuery(nextQuery);
+    setShowSuggestions(false);
+    updateFilters({ q: nextQuery, searchField: suggestion.search_field, page: 1 });
   };
 
   const handleDelete = async (item: SellerTarget) => {
@@ -61,7 +180,8 @@ export default function Targets() {
     setDeletingId(item.id);
     try {
       await sellerTargets.delete(item.id);
-      fetchTargets(searchQuery);
+      await sellerTargets.filterOptions().then(setFilterOptions).catch(() => {});
+      fetchTargets();
     } catch (err) {
       alert(err instanceof Error ? err.message : '删除失败');
     } finally {
@@ -69,10 +189,47 @@ export default function Targets() {
     }
   };
 
+  const handleBulkDelete = async () => {
+    const ids = Array.from(selectedIds);
+    if (!ids.length) return;
+    if (!window.confirm(`确认删除已选择的 ${ids.length} 个标的？删除后不会出现在列表和推荐候选里。`)) return;
+    setBulkDeleting(true);
+    try {
+      await sellerTargets.bulkDelete(ids);
+      await sellerTargets.filterOptions().then(setFilterOptions).catch(() => {});
+      fetchTargets();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '批量删除失败');
+    } finally {
+      setBulkDeleting(false);
+    }
+  };
+
+  const toggleSelectAllVisible = () => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allVisibleSelected) visibleIds.forEach((id) => next.delete(id));
+      else visibleIds.forEach((id) => next.add(id));
+      return next;
+    });
+  };
+
+  const toggleSelected = (id: string, checked: boolean) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-gray-900">标的管理</h1>
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold text-gray-900">标的管理</h1>
+          <p className="text-xs text-gray-400 mt-1">共 {total} 个标的{activeFilterCount > 0 ? `，已应用 ${activeFilterCount} 个条件` : ''}</p>
+        </div>
         <div className="flex items-center gap-2">
           <button
             onClick={() => setShowCreateModal(true)}
@@ -88,40 +245,105 @@ export default function Targets() {
       </div>
 
       <div className="flex items-center gap-2 flex-wrap">
-        <div className="relative flex-1 max-w-sm">
+        <div className="relative flex-1 min-w-[280px] max-w-md">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
           <input
             type="text"
             value={searchQuery}
-            onChange={(event) => setSearchQuery(event.target.value)}
+            onChange={(event) => {
+              setSearchQuery(event.target.value);
+              setShowSuggestions(true);
+            }}
+            onFocus={() => setShowSuggestions(true)}
+            onBlur={() => window.setTimeout(() => setShowSuggestions(false), 120)}
             onKeyDown={(event) => event.key === 'Enter' && handleSearch()}
             placeholder="搜索标的名称、主体或摘要..."
             className="w-full pl-9 pr-4 py-2 border border-gray-200 text-sm outline-none focus:border-brand-600 transition-colors bg-white"
           />
+          <SearchSuggestionList
+            open={showSuggestions && searchQuery.trim().length > 0}
+            loading={suggestionsLoading}
+            suggestions={suggestions}
+            onSelect={handleSuggestionSelect}
+          />
         </div>
-        <select className="px-3 py-2 border border-gray-200 text-sm text-gray-600 bg-white">
-          <option>行业 全部</option>
-        </select>
-        <select className="px-3 py-2 border border-gray-200 text-sm text-gray-600 bg-white">
-          <option>地区 全部</option>
-        </select>
-        <select className="px-3 py-2 border border-gray-200 text-sm text-gray-600 bg-white">
-          <option>状态 全部</option>
-        </select>
-        <select className="px-3 py-2 border border-gray-200 text-sm text-gray-600 bg-white">
-          <option>信息 全部</option>
-        </select>
+        <FilterSelect
+          label="行业"
+          value={filters.industry}
+          options={filterOptions.industries}
+          onChange={(value) => updateFilters({ industry: value, page: 1 })}
+        />
+        <FilterSelect
+          label="地区"
+          value={filters.region}
+          options={filterOptions.regions}
+          onChange={(value) => updateFilters({ region: value, page: 1 })}
+        />
+        <FilterSelect
+          label="状态"
+          value={filters.status}
+          options={filterOptions.statuses}
+          onChange={(value) => updateFilters({ status: value, page: 1 })}
+        />
         <button onClick={handleSearch} className="px-3 py-2 border border-gray-200 text-sm font-medium text-gray-700 hover:border-brand-600 hover:text-brand-600 transition-colors bg-white">
           搜索
         </button>
+        {activeFilterCount > 0 && (
+          <button
+            onClick={() => {
+              setSearchQuery('');
+              updateFilters({ q: '', searchField: undefined, industry: '', region: '', status: '', page: 1 });
+            }}
+            className="px-3 py-2 text-sm text-gray-500 hover:text-gray-700"
+          >
+            清空条件
+          </button>
+        )}
       </div>
+
+      {filters.q && filters.searchField && (
+        <div className="flex items-center gap-2 text-xs text-gray-500">
+          <span className="inline-flex items-center gap-1 bg-brand-50 text-brand-700 px-2 py-1">
+            <Tag className="w-3 h-3" />
+            按{SEARCH_FIELD_LABELS[filters.searchField]}检索：{filters.q}
+          </span>
+        </div>
+      )}
+
+      {selectedCount > 0 && (
+        <div className="flex items-center justify-between gap-3 border border-amber-200 bg-amber-50 px-3 py-2 text-sm">
+          <span className="text-amber-800">已选择 {selectedCount} 个标的</span>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setSelectedIds(new Set())} className="px-3 py-1.5 text-xs text-amber-700 hover:text-amber-900">
+              取消选择
+            </button>
+            <button
+              onClick={handleBulkDelete}
+              disabled={bulkDeleting}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
+            >
+              {bulkDeleting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+              批量删除
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="bg-white border border-gray-200">
         <div className="overflow-x-auto">
           <table className="w-max min-w-full text-sm">
             <thead>
               <tr className="border-b border-gray-100 bg-gray-50">
-                <th className="sticky left-0 z-20 w-[220px] bg-gray-50 text-left px-4 py-3 font-medium text-gray-600">标的名称</th>
+                <th className="sticky left-0 z-30 w-12 bg-gray-50 px-4 py-3 text-left">
+                  <input
+                    type="checkbox"
+                    checked={allVisibleSelected}
+                    onChange={toggleSelectAllVisible}
+                    aria-label="选择当前页标的"
+                    className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600"
+                  />
+                </th>
+                <th className="sticky left-12 z-20 w-[220px] bg-gray-50 text-left px-4 py-3 font-medium text-gray-600">标的名称</th>
                 <th className="w-20 max-w-20 text-left px-3 py-3 font-medium text-gray-600">标的主体</th>
                 <th className="w-[110px] text-center px-4 py-3 font-medium text-gray-600">推荐状态</th>
                 <th className="w-[92px] text-left px-4 py-3 font-medium text-gray-600">类型</th>
@@ -143,19 +365,21 @@ export default function Targets() {
             <tbody className="divide-y divide-gray-100">
               {loading ? (
                 <tr>
-                  <td colSpan={17} className="px-4 py-8 text-center">
+                  <td colSpan={18} className="px-4 py-8 text-center">
                     <div className="w-5 h-5 border-2 border-brand-600 border-t-transparent rounded-full animate-spin mx-auto" />
                   </td>
                 </tr>
               ) : items.length === 0 ? (
                 <tr>
-                  <td colSpan={17} className="px-4 py-8 text-center text-gray-400">暂无标的数据</td>
+                  <td colSpan={18} className="px-4 py-8 text-center text-gray-400">暂无匹配的标的数据</td>
                 </tr>
               ) : (
                 items.map((item) => (
                   <TargetRow
                     key={item.id}
                     item={item}
+                    selected={selectedIds.has(item.id)}
+                    onSelectedChange={(checked) => toggleSelected(item.id, checked)}
                     onOpenUpdateDrawer={() => setUpdateDrawer({ open: true, targetId: item.id, targetName: item.target_name })}
                     onDelete={() => handleDelete(item)}
                     deleting={deletingId === item.id}
@@ -165,12 +389,33 @@ export default function Targets() {
             </tbody>
           </table>
         </div>
+        <div className="flex items-center justify-between gap-3 border-t border-gray-100 px-4 py-3 text-sm text-gray-500">
+          <span>
+            第 {filters.page} / {pageCount} 页 · 每页 {PAGE_SIZE} 条
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => updateFilters({ page: Math.max(1, filters.page - 1) })}
+              disabled={filters.page <= 1 || loading}
+              className="px-3 py-1.5 border border-gray-200 bg-white text-gray-700 hover:border-brand-500 hover:text-brand-600 disabled:opacity-40 disabled:hover:border-gray-200 disabled:hover:text-gray-700"
+            >
+              上一页
+            </button>
+            <button
+              onClick={() => updateFilters({ page: Math.min(pageCount, filters.page + 1) })}
+              disabled={filters.page >= pageCount || loading}
+              className="px-3 py-1.5 border border-gray-200 bg-white text-gray-700 hover:border-brand-500 hover:text-brand-600 disabled:opacity-40 disabled:hover:border-gray-200 disabled:hover:text-gray-700"
+            >
+              下一页
+            </button>
+          </div>
+        </div>
       </div>
 
       {showCreateModal && (
         <CreateTargetModal
           onClose={() => setShowCreateModal(false)}
-          onCreated={() => { setShowCreateModal(false); fetchTargets(searchQuery); }}
+          onCreated={() => { setShowCreateModal(false); fetchTargets(); }}
         />
       )}
 
@@ -179,7 +424,7 @@ export default function Targets() {
         onClose={() => setUpdateDrawer({ open: false })}
         defaultTargetId={updateDrawer.targetId}
         defaultTargetName={updateDrawer.targetName}
-        onSuccess={() => fetchTargets(searchQuery)}
+        onSuccess={fetchTargets}
       />
     </div>
   );
@@ -187,11 +432,15 @@ export default function Targets() {
 
 function TargetRow({
   item,
+  selected,
+  onSelectedChange,
   onOpenUpdateDrawer,
   onDelete,
   deleting,
 }: {
   item: SellerTarget;
+  selected: boolean;
+  onSelectedChange: (checked: boolean) => void;
   onOpenUpdateDrawer: () => void;
   onDelete: () => void;
   deleting: boolean;
@@ -208,7 +457,16 @@ function TargetRow({
 
   return (
     <tr className="group hover:bg-brand-50/30 transition-colors">
-      <td className="sticky left-0 z-10 bg-white px-4 py-3 group-hover:bg-brand-50">
+      <td className="sticky left-0 z-20 bg-white px-4 py-3 group-hover:bg-brand-50">
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={(event) => onSelectedChange(event.target.checked)}
+          aria-label={`选择${item.target_name}`}
+          className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600"
+        />
+      </td>
+      <td className="sticky left-12 z-10 bg-white px-4 py-3 group-hover:bg-brand-50">
         <ClampedLink to={`/targets/${item.id}`} value={item.target_name} className="font-medium text-gray-900 hover:text-brand-600 transition-colors" />
         {item.business_summary && <ClampedText value={item.business_summary} className="mt-1 text-xs text-gray-400" />}
       </td>
@@ -258,6 +516,143 @@ function TargetRow({
       </td>
     </tr>
   );
+}
+
+function SearchSuggestionList({
+  open,
+  loading,
+  suggestions,
+  onSelect,
+}: {
+  open: boolean;
+  loading: boolean;
+  suggestions: SellerTargetSuggestion[];
+  onSelect: (suggestion: SellerTargetSuggestion) => void;
+}) {
+  if (!open) return null;
+
+  return (
+    <div className="absolute left-0 right-0 top-[calc(100%+4px)] z-40 border border-gray-200 bg-white shadow-lg">
+      {loading ? (
+        <div className="flex items-center gap-2 px-3 py-3 text-xs text-gray-400">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          正在查找匹配项...
+        </div>
+      ) : suggestions.length === 0 ? (
+        <div className="px-3 py-3 text-xs text-gray-400">暂无匹配建议，回车可全文搜索</div>
+      ) : (
+        <div className="py-1">
+          {suggestions.map((suggestion) => (
+            <button
+              key={`${suggestion.id}-${suggestion.search_field}`}
+              type="button"
+              onMouseDown={(event) => {
+                event.preventDefault();
+                onSelect(suggestion);
+              }}
+              className="w-full px-3 py-2 text-left hover:bg-brand-50 transition-colors"
+            >
+              <div className="flex items-center gap-2">
+                <span className="max-w-[260px] truncate text-sm text-gray-900">{suggestion.match_text}</span>
+                <span className="inline-flex shrink-0 items-center gap-1 rounded-sm bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-600">
+                  <Tag className="h-2.5 w-2.5" />
+                  {suggestion.match_label}
+                </span>
+              </div>
+              <p className="mt-0.5 truncate text-[11px] text-gray-400">
+                {suggestion.match_type === 'summary' ? suggestion.target_name : suggestion.snippet || suggestion.target_subject_name || '点击按该字段检索'}
+              </p>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FilterSelect({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: SellerTargetFilterOption[];
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const selectedOption = options.find((option) => option.value === value);
+  const displayText = selectedOption ? selectedOption.label : '全部';
+
+  return (
+    <div className="relative w-[180px]">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        onBlur={() => window.setTimeout(() => setOpen(false), 120)}
+        className="flex w-full items-center justify-between gap-2 border border-gray-200 bg-white px-3 py-2 text-left text-sm text-gray-600 outline-none transition-colors hover:border-brand-300 focus:border-brand-600"
+        title={`${label} ${displayText}`}
+      >
+        <span className="truncate">{label} {displayText}</span>
+        <ChevronDown className="h-3.5 w-3.5 shrink-0 text-gray-400" />
+      </button>
+      {open && (
+        <div className="absolute left-0 top-[calc(100%+4px)] z-40 max-h-64 w-[220px] overflow-y-auto border border-gray-200 bg-white py-1 shadow-lg">
+          <button
+            type="button"
+            onMouseDown={(event) => {
+              event.preventDefault();
+              onChange('');
+              setOpen(false);
+            }}
+            className={`flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-brand-50 ${!value ? 'text-brand-700' : 'text-gray-700'}`}
+          >
+            <span className="truncate">{label} 全部</span>
+          </button>
+          {options.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onMouseDown={(event) => {
+                event.preventDefault();
+                onChange(option.value);
+                setOpen(false);
+              }}
+              className={`flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-brand-50 ${value === option.value ? 'text-brand-700' : 'text-gray-700'}`}
+              title={option.label}
+            >
+              <span className="truncate">{option.label}</span>
+              <span className="shrink-0 text-xs text-gray-400">{option.count}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function readTargetFilters(searchParams: URLSearchParams): TargetFilters {
+  const searchFieldParam = searchParams.get('searchField');
+  const searchField = isSellerTargetSearchField(searchFieldParam) ? searchFieldParam : undefined;
+  const page = Math.max(1, Number(searchParams.get('page') || '1') || 1);
+  return {
+    q: searchParams.get('q') || '',
+    searchField,
+    industry: searchParams.get('industry') || '',
+    region: searchParams.get('region') || '',
+    status: searchParams.get('status') || '',
+    page,
+  };
+}
+
+function isSellerTargetSearchField(value: string | null): value is SellerTargetSearchField {
+  return value === 'target_name' || value === 'target_subject_name' || value === 'business_summary';
+}
+
+function setOrDelete(params: URLSearchParams, key: string, value: string | undefined) {
+  if (value) params.set(key, value);
+  else params.delete(key);
 }
 
 function StatusBadge({ status, type }: { status: string; type: 'recommendation' | 'information' }) {
@@ -425,7 +820,7 @@ function CreateTargetModal({ onClose, onCreated }: { onClose: () => void; onCrea
       setNameWarning('');
       sellerTargets
         .list({ q: name, limit: 5 })
-        .then((results) => setDuplicates(results.filter((item) => item.target_name !== name)))
+        .then((response) => setDuplicates(response.items.filter((item) => item.target_name !== name)))
         .catch(() => {});
     }, 300);
 

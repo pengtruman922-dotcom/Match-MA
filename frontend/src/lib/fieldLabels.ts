@@ -1,0 +1,243 @@
+export type EntityType = 'seller_target' | 'buyer_intent' | 'buyer_party' | 'buyer_seller_relation' | string;
+
+const SELLER_TARGET_FIELD_LABELS: Record<string, string> = {
+  target_name: '标的名称',
+  target_type: '标的类型',
+  target_subject_name: '标的主体',
+  recommendation_status: '推荐状态',
+  information_status: '信息状态',
+  industry_primary: '一级行业',
+  industry_secondary: '二级行业',
+  registered_province: '注册省份',
+  registered_city: '注册城市',
+  headquarter_province: '总部省份',
+  headquarter_city: '总部城市',
+  raw_region_text: '地区原文',
+  region_granularity: '地区粒度',
+  listed_status: '上市状态',
+  market_cap_yuan: '市值',
+  current_revenue_yuan: '当前营收',
+  current_net_profit_yuan: '当前净利润',
+  current_total_profit_yuan: '当前利润总额',
+  current_assets_yuan: '当前总资产',
+  current_debt_ratio: '当前负债率',
+  current_operating_cash_flow_yuan: '经营现金流',
+  financial_period_label: '财务期间',
+  profitability_status: '盈利状态',
+  cash_flow_status: '现金流状态',
+  operation_stability_status: '经营稳定性',
+  valuation_yuan: '估值',
+  valuation_date: '估值时间',
+  asking_price_yuan: '报价',
+  asking_price_date: '报价时间',
+  pe_ratio: '市盈率',
+  pe_source_type: 'PE 来源',
+  premium_rate: '溢价率',
+  is_for_sale: '是否出售',
+  can_control: '可控股',
+  can_consolidate: '可并表',
+  accepts_minority_investment: '接受少数股权',
+  transfer_ratio_min: '出售比例下限',
+  transfer_ratio_max: '出售比例上限',
+  transfer_ratio_text: '出售比例说明',
+  transfer_flexibility_type: '交易灵活性',
+  consolidation_path_summary: '并表路径说明',
+  accepts_relocation: '接受迁址',
+  accepts_return_investment: '接受返投',
+  management_team_summary: '管理团队',
+  management_retention_possible: '管理层可留任',
+  earnout_dependency_status: '业绩对赌依赖',
+  business_summary: '业务摘要',
+  transaction_summary: '交易摘要',
+  risk_summary: '风险摘要',
+  gap_summary: '信息缺口',
+  deleted_at: '删除时间',
+};
+
+const BUYER_PARTY_FIELD_LABELS: Record<string, string> = {
+  buyer_name: '买家名称',
+  legal_name: '法律主体',
+  aliases_json: '别名',
+  buyer_type: '买家类型',
+  group_name: '集团名称',
+  listed_status: '上市状态',
+  region_province: '所在省份',
+  region_city: '所在城市',
+  main_business: '主营业务',
+  capital_strength_summary: '资金实力',
+  profile_summary: '买家画像',
+  status: '状态',
+  deleted_at: '删除时间',
+};
+
+const BUYER_INTENT_FIELD_LABELS: Record<string, string> = {
+  intent_name: '意向名称',
+  status: '状态',
+  pause_reason: '暂停原因',
+  contact_name: '联系人',
+  contact_info_json: '联系方式',
+  raw_requirement_text: '原始需求',
+  intent_summary: '意向摘要',
+  parsed_requirement_json: '结构化需求',
+  industry_primary: '一级行业',
+  industry_secondary: '二级行业',
+  region_scope_summary: '区域范围',
+  region_constraints_json: '区域约束',
+  min_revenue_yuan: '最低营收',
+  min_net_profit_yuan: '最低净利润',
+  min_total_profit_yuan: '最低利润总额',
+  max_pe: '最高 PE',
+  max_valuation_yuan: '最高估值',
+  min_market_cap_yuan: '最低市值',
+  max_market_cap_yuan: '最高市值',
+  market_cap_range_summary: '市值范围',
+  requires_control: '要求控股',
+  requires_consolidation: '要求并表',
+  accepts_minority_investment: '接受少数股权',
+  desired_equity_ratio_min: '期望持股下限',
+  desired_equity_ratio_max: '期望持股上限',
+  equity_ratio_summary: '股权比例要求',
+  equity_requirement_type: '股权要求类型',
+  acceptable_control_paths_json: '可接受控制路径',
+  preferred_listed_status: '偏好上市状态',
+  listing_board_requirement_summary: '板块要求',
+  financing_stage_requirement_summary: '融资阶段要求',
+  transaction_type: '交易类型',
+  transaction_types_json: '交易类型',
+  premium_tolerance_summary: '溢价容忍度',
+  max_premium_rate: '最高溢价率',
+  max_debt_ratio: '最高负债率',
+  debt_ratio_requirement_summary: '负债率要求',
+  major_risk_tolerance_summary: '风险容忍度',
+  buyer_industry_advantage_summary: '买方产业优势',
+  negative_summary: '排除项',
+  priority_summary: '优先级',
+  preference_summary: '偏好说明',
+  unknown_summary: '待确认事项',
+  deleted_at: '删除时间',
+};
+
+const RELATION_FIELD_LABELS: Record<string, string> = {
+  status: '关系状态',
+  status_reason: '状态原因',
+  first_recommended_at: '首次推荐时间',
+  last_contact_at: '最近接触时间',
+  last_event_at: '最近进展时间',
+  last_event_summary: '最近进展摘要',
+};
+
+const FIELD_LABELS_BY_ENTITY: Record<string, Record<string, string>> = {
+  seller_target: SELLER_TARGET_FIELD_LABELS,
+  buyer_party: BUYER_PARTY_FIELD_LABELS,
+  buyer_intent: BUYER_INTENT_FIELD_LABELS,
+  buyer_seller_relation: RELATION_FIELD_LABELS,
+};
+
+export function fieldLabel(entityType: EntityType, fieldPath: string): string {
+  return FIELD_LABELS_BY_ENTITY[entityType]?.[fieldPath] || fieldPath;
+}
+
+const VALUE_LABELS: Record<string, Record<string, string>> = {
+  target_type: {
+    company: '公司',
+    equity_package: '股权包',
+    business_unit: '业务单元',
+    asset_package: '资产包',
+    project: '项目',
+    other: '其他',
+  },
+  listed_status: {
+    listed: '已上市',
+    unlisted: '未上市',
+    pre_ipo: '拟上市',
+    unknown: '未知',
+  },
+  recommendation_status: {
+    recommendable: '可推荐',
+    not_recommendable: '暂不可推荐',
+  },
+  information_status: {
+    normal: '已更新',
+    insufficient: '待补充',
+    pending_review: '待复核',
+    parsing: '解析中',
+    researching: '调研中',
+    parse_failed: '解析失败',
+  },
+  yes_no_like: {
+    yes: '是',
+    likely: '可能',
+    no: '否',
+    unknown: '未知',
+  },
+  transfer_flexibility_type: {
+    control_available: '可控股',
+    consolidation_available: '可并表',
+    minority_available: '可少数股权',
+    full_sale_available: '可整体出售',
+    flexible: '灵活可谈',
+    specific_range: '指定比例',
+    unknown: '未知',
+  },
+  profitability_status: {
+    profitable: '盈利',
+    loss_making: '亏损',
+    break_even: '盈亏平衡',
+    unknown: '未知',
+  },
+  cash_flow_status: {
+    stable_positive: '稳定为正',
+    positive: '为正',
+    negative: '为负',
+    unstable: '不稳定',
+    unknown: '未知',
+  },
+  operation_stability_status: {
+    stable: '稳定',
+    unstable: '不稳定',
+    unknown: '未知',
+    needs_review: '需复核',
+  },
+  earnout_dependency_status: {
+    none: '无',
+    low: '低',
+    medium: '中',
+    high: '高',
+    unknown: '未知',
+  },
+};
+
+const YES_NO_LIKE_FIELDS = new Set([
+  'is_for_sale',
+  'can_control',
+  'can_consolidate',
+  'accepts_minority_investment',
+  'accepts_relocation',
+  'accepts_return_investment',
+  'management_retention_possible',
+  'requires_control',
+  'requires_consolidation',
+]);
+
+export function valueLabel(fieldPath: string, value: unknown): string {
+  if (value === null || value === undefined || value === '') return '-';
+  if (Array.isArray(value)) return value.length ? value.map((item) => valueLabel(fieldPath, item)).join('、') : '-';
+  if (typeof value === 'object') return JSON.stringify(value);
+
+  const text = String(value);
+  const mapKey = YES_NO_LIKE_FIELDS.has(fieldPath) ? 'yes_no_like' : fieldPath;
+  return VALUE_LABELS[mapKey]?.[text] || text;
+}
+
+const SOURCE_TYPE_LABELS: Record<string, string> = {
+  direct_api: '手动编辑',
+  seller_target_parse: '标的解析',
+  business_update_extractor: '业务更新解析',
+  update_log_rollback: '更新回滚',
+  rollback: '回滚',
+};
+
+export function sourceTypeLabel(sourceType: string | null | undefined): string {
+  if (!sourceType) return '-';
+  return SOURCE_TYPE_LABELS[sourceType] || sourceType;
+}

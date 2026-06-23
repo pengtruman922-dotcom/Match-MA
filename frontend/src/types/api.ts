@@ -54,6 +54,45 @@ export interface SellerTarget {
   updated_at: string;
 }
 
+export interface SellerTargetListResponse {
+  items: SellerTarget[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export type SellerTargetSearchField = 'target_name' | 'target_subject_name' | 'business_summary';
+
+export interface SellerTargetFilterOption {
+  value: string;
+  label: string;
+  count: number;
+}
+
+export interface SellerTargetFilterOptions {
+  industries: SellerTargetFilterOption[];
+  regions: SellerTargetFilterOption[];
+  statuses: SellerTargetFilterOption[];
+}
+
+export interface SellerTargetSuggestion {
+  id: string;
+  search_field: SellerTargetSearchField;
+  match_type: 'target' | 'subject' | 'summary';
+  match_label: string;
+  match_text: string;
+  target_name: string;
+  target_subject_name: string | null;
+  snippet: string | null;
+}
+
+export interface SellerTargetBulkDeleteResponse {
+  status: string;
+  deleted_count: number;
+  deleted_ids: string[];
+  skipped_ids: string[];
+}
+
 export interface SellerTargetCreate {
   target_name: string;
   target_type?: string;

@@ -1,6 +1,11 @@
 import type {
   SellerTarget,
+  SellerTargetBulkDeleteResponse,
   SellerTargetCreate,
+  SellerTargetFilterOptions,
+  SellerTargetListResponse,
+  SellerTargetSearchField,
+  SellerTargetSuggestion,
   SellerTargetUpdate,
   AttachmentUploadPolicy,
   BackgroundJob,
@@ -51,8 +56,18 @@ export const auth = {
 };
 
 export const sellerTargets = {
-  list: (params?: { q?: string; limit?: number; offset?: number }) =>
-    apiRequest<SellerTarget[]>(`/seller-targets${buildQuery(params || {})}`),
+  list: (params?: {
+    q?: string;
+    search_field?: SellerTargetSearchField;
+    industry?: string;
+    region?: string;
+    status?: string;
+    limit?: number;
+    offset?: number;
+  }) => apiRequest<SellerTargetListResponse>(`/seller-targets${buildQuery(params || {})}`),
+  filterOptions: () => apiRequest<SellerTargetFilterOptions>('/seller-targets/filter-options'),
+  suggestions: (params: { q: string; limit?: number }) =>
+    apiRequest<SellerTargetSuggestion[]>(`/seller-targets/suggestions${buildQuery(params)}`),
   get: (id: string) => apiRequest<SellerTarget>(`/seller-targets/${id}`),
   create: (data: SellerTargetCreate) =>
     apiRequest<SellerTarget>('/seller-targets', {
@@ -65,6 +80,11 @@ export const sellerTargets = {
       body: JSON.stringify(data),
     }),
   delete: (id: string) => apiRequest<{ status: string }>(`/seller-targets/${id}`, { method: 'DELETE' }),
+  bulkDelete: (ids: string[]) =>
+    apiRequest<SellerTargetBulkDeleteResponse>('/seller-targets/bulk-delete', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    }),
 };
 
 export const buyerParties = {

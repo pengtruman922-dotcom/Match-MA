@@ -14,6 +14,7 @@ import { relations, sellerTargets, updateLogs } from '../lib/api';
 import type { BuyerSellerRelation, RelationEvent, SellerTarget, UpdateLog } from '../types/api';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
 import { sellerTargetStatusClass, sellerTargetStatusLabel } from '../lib/sellerTargetStatus';
+import { fieldLabel, sourceTypeLabel, valueLabel } from '../lib/fieldLabels';
 
 type Tab = 'info' | 'attachments' | 'relations' | 'history';
 
@@ -182,7 +183,7 @@ function InfoTab({ target }: { target: SellerTarget }) {
       fields: [
         { label: '标的名称', value: target.target_name },
         { label: '标的主体', value: getSubjectDisplay(target) },
-        { label: '类型', value: target.target_type || '公司整体' },
+        { label: '类型', value: valueLabel('target_type', target.target_type) },
         { label: '上市状态', value: formatListedStatus(target.listed_status) },
       ],
     },
@@ -210,9 +211,9 @@ function InfoTab({ target }: { target: SellerTarget }) {
         { label: '报价时间', value: target.asking_price_date },
         { label: 'PE', value: target.pe_ratio ? Number(target.pe_ratio).toFixed(1) : null },
         { label: '出售比例', value: target.transfer_ratio_text || formatTransferRatio(target) },
-        { label: '是否还卖', value: target.is_for_sale },
-        { label: '可控股', value: target.can_control },
-        { label: '可并表', value: target.can_consolidate },
+        { label: '是否还卖', value: valueLabel('is_for_sale', target.is_for_sale) },
+        { label: '可控股', value: valueLabel('can_control', target.can_control) },
+        { label: '可并表', value: valueLabel('can_consolidate', target.can_consolidate) },
       ],
     },
     {
@@ -375,9 +376,9 @@ function HistoryTab({ logs }: { logs: UpdateLog[] }) {
           </span>
           <div className="min-w-0">
             <span className="text-sm text-gray-700">
-              {log.field_path}: {log.old_value_json || '-'} → {log.new_value_json || '-'}
+              {fieldLabel(log.entity_type, log.field_path)}: {valueLabel(log.field_path, log.old_value_json)} → {valueLabel(log.field_path, log.new_value_json)}
             </span>
-            <span className="text-xs text-gray-400 ml-2">来源: {log.source_type}</span>
+            <span className="text-xs text-gray-400 ml-2">来源: {sourceTypeLabel(log.source_type)}</span>
           </div>
         </div>
       ))}

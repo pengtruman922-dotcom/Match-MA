@@ -17,6 +17,7 @@ import {
 import { buyerParties, relations, updateLogs } from '../lib/api';
 import type { BuyerParty, BuyerIntent, BuyerSellerRelation, RelationEvent, UpdateLog } from '../types/api';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
+import { fieldLabel, valueLabel } from '../lib/fieldLabels';
 
 type Tab = 'info' | 'intents' | 'relations' | 'history';
 
@@ -503,7 +504,7 @@ function HistoryTab({ logs }: { logs: UpdateLog[] }) {
             {new Date(log.applied_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
           </span>
           <span className="text-sm text-gray-700">
-            {log.field_path}: {log.old_value_json || '-'} → {log.new_value_json || '-'}
+            {fieldLabel(log.entity_type, log.field_path)}: {valueLabel(log.field_path, log.old_value_json)} → {valueLabel(log.field_path, log.new_value_json)}
           </span>
         </div>
       ))}
