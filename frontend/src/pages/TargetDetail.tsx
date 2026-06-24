@@ -411,7 +411,6 @@ function formatListedStatus(status: string | null): string {
 
 function getSubjectDisplay(target: SellerTarget): string {
   const subject = target.target_subject_name?.trim();
-  if (target.target_type === 'company' && (!subject || subject === target.target_name)) return '同标的';
   return subject || '-';
 }
 

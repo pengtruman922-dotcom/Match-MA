@@ -753,8 +753,6 @@ def _seller_target_params(payload: SellerTargetCreate) -> dict[str, Any]:
     target_name = payload.target_name.strip()
     target_type = payload.target_type or "company"
     target_subject_name = _normalize_optional_text(payload.target_subject_name)
-    if target_type == "company" and not target_subject_name:
-        target_subject_name = target_name
     return {
         "team_id": DEFAULT_TEAM_ID,
         "workspace_id": DEFAULT_WORKSPACE_ID,

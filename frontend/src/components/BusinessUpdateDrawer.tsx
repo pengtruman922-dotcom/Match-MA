@@ -1,4 +1,4 @@
-import { ChangeEvent, useEffect, useRef, useState } from 'react';
+import { ChangeEvent, DragEvent, useEffect, useRef, useState } from 'react';
 import { AlertCircle, FileText, Image, Loader2, Paperclip, Upload, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { attachments, businessUpdates } from '../lib/api';
@@ -74,9 +74,7 @@ export default function BusinessUpdateDrawer({
 
   if (!open) return null;
 
-  function handleFileSelect(event: ChangeEvent<HTMLInputElement>) {
-    const incoming = Array.from(event.target.files || []);
-    event.target.value = '';
+  function addFiles(incoming: File[]) {
     if (!incoming.length) return;
 
     const nextFiles = [...selectedFiles];
@@ -101,6 +99,16 @@ export default function BusinessUpdateDrawer({
 
     setSelectedFiles(nextFiles);
     setFileError(errors[0] || null);
+  }
+
+  function handleFileSelect(event: ChangeEvent<HTMLInputElement>) {
+    addFiles(Array.from(event.target.files || []));
+    event.target.value = '';
+  }
+
+  function handleFileDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    addFiles(Array.from(event.dataTransfer.files || []));
   }
 
   function removeFile(index: number) {
@@ -210,11 +218,15 @@ export default function BusinessUpdateDrawer({
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">附件/截图</label>
-            <div className="border border-dashed border-gray-300 bg-gray-50 px-4 py-4 text-sm text-gray-600">
+            <div
+              className="border border-dashed border-gray-300 bg-gray-50 px-4 py-4 text-sm text-gray-600 transition-colors hover:border-brand-300 hover:bg-brand-50/40"
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={handleFileDrop}
+            >
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-center gap-2 text-gray-800 font-medium">
                   <Upload className="w-4 h-4 text-brand-600" />
-                  上传聊天截图、PDF、Office 或文本附件
+                  拖拽文件到这里，或上传聊天截图、PDF、Office、文本附件
                 </div>
                 <button
                   type="button"

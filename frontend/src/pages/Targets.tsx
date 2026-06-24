@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ChangeEvent, FormEvent, ReactNode } from 'react';
+import type { ChangeEvent, DragEvent, FormEvent, ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
   AlertCircle,
@@ -730,7 +730,6 @@ function formatListedStatus(status: string | null): string {
 
 function getSubjectDisplay(item: SellerTarget): string {
   const subject = item.target_subject_name?.trim();
-  if (item.target_type === 'company' && (!subject || subject === item.target_name)) return '同标的';
   return subject || '-';
 }
 
@@ -831,9 +830,7 @@ function CreateTargetModal({ onClose, onCreated }: { onClose: () => void; onCrea
     setForm((prev) => ({ ...prev, [key]: value }));
   }
 
-  function handleFileSelect(event: ChangeEvent<HTMLInputElement>) {
-    const incoming = Array.from(event.target.files || []);
-    event.target.value = '';
+  function addFiles(incoming: File[]) {
     if (!incoming.length) return;
 
     const nextFiles = [...selectedFiles];
@@ -858,6 +855,16 @@ function CreateTargetModal({ onClose, onCreated }: { onClose: () => void; onCrea
 
     setSelectedFiles(nextFiles);
     setFileError(errors[0] || null);
+  }
+
+  function handleFileSelect(event: ChangeEvent<HTMLInputElement>) {
+    addFiles(Array.from(event.target.files || []));
+    event.target.value = '';
+  }
+
+  function handleFileDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    addFiles(Array.from(event.dataTransfer.files || []));
   }
 
   function removeFile(index: number) {
@@ -975,7 +982,7 @@ function CreateTargetModal({ onClose, onCreated }: { onClose: () => void; onCrea
               value={form.targetSubjectName}
               onChange={(event) => updateForm('targetSubjectName', event.target.value)}
               className="input"
-              placeholder="公司整体可留空，系统显示为同标的"
+              placeholder="可留空；解析后如与标的相同会直接显示同名主体"
             />
           </Field>
           <Field label="行业">
@@ -1027,11 +1034,15 @@ function CreateTargetModal({ onClose, onCreated }: { onClose: () => void; onCrea
 
         <div>
           <label className="block text-xs font-medium text-gray-600 mb-1">附件/截图</label>
-          <div className="border border-dashed border-gray-300 bg-gray-50 px-4 py-4 text-sm text-gray-600">
+          <div
+            className="border border-dashed border-gray-300 bg-gray-50 px-4 py-4 text-sm text-gray-600 transition-colors hover:border-brand-300 hover:bg-brand-50/40"
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={handleFileDrop}
+          >
             <div className="flex items-start justify-between gap-3">
               <div className="flex items-center gap-2 text-gray-800 font-medium">
                 <Upload className="w-4 h-4 text-brand-600" />
-                上传图片、PDF、Office 或文本附件
+                拖拽文件到这里，或上传图片、PDF、Office、文本附件
               </div>
               <button
                 type="button"
