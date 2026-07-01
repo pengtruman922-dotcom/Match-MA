@@ -19,7 +19,7 @@ insert into prompt_template (
   is_active, is_default, created_by, metadata_json
 )
 values (
-  '00000000-0000-0000-0000-000000004216',
+  '00000000-0000-0000-0000-000000004223',
   '00000000-0000-0000-0000-000000000001',
   '00000000-0000-0000-0000-000000000101',
   'buyer_intent_parser',
