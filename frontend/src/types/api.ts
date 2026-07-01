@@ -321,6 +321,14 @@ export interface BuyerIntentCreate {
   preference_summary?: string;
 }
 
+export interface BuyerIntentParseJob {
+  job_id: string;
+  job_type: string;
+  status: string;
+  queue_name: string;
+  buyer_intent_id: string;
+}
+
 export interface BuyerIntentUpdate {
   intent_name?: string;
   status?: string;

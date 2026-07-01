@@ -1,19 +1,28 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ChangeEvent, DragEvent } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
+  AlertCircle,
+  Building2,
   ChevronDown,
   ChevronUp,
+  FileText,
+  Image,
   Loader2,
   MessageSquarePlus,
+  Paperclip,
   Plus,
   Search,
   Sparkles,
   Tag,
   Trash2,
+  Upload,
   X,
 } from 'lucide-react';
-import { buyerParties, buyerIntents } from '../lib/api';
+import type { LucideIcon } from 'lucide-react';
+import { attachments, businessUpdates, buyerParties, buyerIntents } from '../lib/api';
 import type {
+  AttachmentUploadPolicy,
   BuyerFilterOption,
   BuyerIntent,
   BuyerIntentCreate,
@@ -832,6 +841,36 @@ function suggestionSubtitle(suggestion: BuyerSuggestion): string {
 type IntentStep = 'buyer_link' | 'buyer_search' | 'buyer_new' | 'intent_details';
 type BuyerLinkChoice = 'link_existing' | 'create_new' | 'no_link';
 
+type IntentForm = {
+  intent_name: string;
+  industry_primary: string;
+  region_scope_summary: string;
+  min_net_profit_yuan: string;
+  max_pe: string;
+  market_cap_range: string;
+  preferred_listed_status: string;
+  requires_consolidation: string;
+  max_premium_rate: string;
+  max_debt_ratio: string;
+  raw_requirement_text: string;
+  negative_summary: string;
+};
+
+const DEFAULT_INTENT_FORM: IntentForm = {
+  intent_name: '',
+  industry_primary: '',
+  region_scope_summary: '',
+  min_net_profit_yuan: '',
+  max_pe: '',
+  market_cap_range: '',
+  preferred_listed_status: '',
+  requires_consolidation: '',
+  max_premium_rate: '',
+  max_debt_ratio: '',
+  raw_requirement_text: '',
+  negative_summary: '',
+};
+
 function CreateIntentModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
   const [step, setStep] = useState<IntentStep>('buyer_link');
   const [linkChoice, setLinkChoice] = useState<BuyerLinkChoice | null>(null);
@@ -842,8 +881,78 @@ function CreateIntentModal({ onClose, onCreated }: { onClose: () => void; onCrea
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<BuyerParty[]>([]);
   const [searching, setSearching] = useState(false);
-  const [form, setForm] = useState<BuyerIntentCreate>({ intent_name: '' });
+  const [form, setForm] = useState<IntentForm>(DEFAULT_INTENT_FORM);
   const [saving, setSaving] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [uploadPolicy, setUploadPolicy] = useState<AttachmentUploadPolicy | null>(null);
+  const [policyLoading, setPolicyLoading] = useState(false);
+  const [policyError, setPolicyError] = useState<string | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (step !== 'intent_details' || uploadPolicy || policyLoading) return;
+    let cancelled = false;
+    setPolicyLoading(true);
+    attachments
+      .uploadPolicy()
+      .then((policy) => {
+        if (!cancelled) setUploadPolicy(policy);
+      })
+      .catch((err) => {
+        if (!cancelled) setPolicyError(err instanceof Error ? err.message : '读取上传规则失败');
+      })
+      .finally(() => {
+        if (!cancelled) setPolicyLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [step, uploadPolicy, policyLoading]);
+
+  function updateForm<K extends keyof IntentForm>(key: K, value: IntentForm[K]) {
+    setForm((prev) => ({ ...prev, [key]: value }));
+  }
+
+  function addFiles(incoming: File[]) {
+    if (!incoming.length) return;
+    const nextFiles = [...selectedFiles];
+    const errors: string[] = [];
+    const maxFiles = uploadPolicy?.max_files_per_business_update || 10;
+    const maxBytes = uploadPolicy?.max_upload_bytes || 25 * 1024 * 1024;
+    for (const file of incoming) {
+      if (nextFiles.length >= maxFiles) {
+        errors.push(`单次最多上传 ${maxFiles} 个附件。`);
+        break;
+      }
+      if (file.size > maxBytes) {
+        errors.push(`${file.name} 超过 ${formatBytes(maxBytes)}。`);
+        continue;
+      }
+      if (nextFiles.some((item) => item.name === file.name && item.size === file.size && item.lastModified === file.lastModified)) {
+        continue;
+      }
+      nextFiles.push(file);
+    }
+    setSelectedFiles(nextFiles);
+    setFileError(errors[0] || null);
+  }
+
+  function handleFileSelect(event: ChangeEvent<HTMLInputElement>) {
+    addFiles(Array.from(event.target.files || []));
+    event.target.value = '';
+  }
+
+  function handleFileDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    addFiles(Array.from(event.dataTransfer.files || []));
+  }
+
+  function removeFile(index: number) {
+    setSelectedFiles((files) => files.filter((_, itemIndex) => itemIndex !== index));
+    setFileError(null);
+  }
 
   const handleBuyerLinkChoice = (choice: BuyerLinkChoice) => {
     setLinkChoice(choice);
@@ -901,16 +1010,72 @@ function CreateIntentModal({ onClose, onCreated }: { onClose: () => void; onCrea
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.intent_name.trim()) return;
+    const intentName = form.intent_name.trim();
+    if (!intentName) return;
+
+    const marketCap = parseMarketCapRange(form.market_cap_range);
+    if (form.market_cap_range.trim() && marketCap.min === undefined && marketCap.max === undefined) {
+      setSubmitError('市值范围暂无法识别，请使用如 5亿-30亿、5亿以上、30亿以内。');
+      return;
+    }
+
     setSaving(true);
+    setSubmitError(null);
     try {
-      await buyerIntents.create({
-        ...form,
+      const supplement = form.raw_requirement_text.trim();
+      const shouldParse = selectedFiles.length > 0 || supplement.length > 0;
+      const payload: BuyerIntentCreate = {
+        intent_name: intentName,
         buyer_party_id: selectedParty?.id,
-      });
+        raw_requirement_text: normalizeOptional(form.raw_requirement_text),
+        industry_primary: normalizeOptional(form.industry_primary),
+        region_scope_summary: normalizeOptional(form.region_scope_summary),
+        min_net_profit_yuan: parseMoneyToYuan(form.min_net_profit_yuan),
+        max_pe: parseNumberInput(form.max_pe),
+        min_market_cap_yuan: marketCap.min,
+        max_market_cap_yuan: marketCap.max,
+        market_cap_range_summary: normalizeOptional(form.market_cap_range),
+        preferred_listed_status: normalizeOptional(form.preferred_listed_status),
+        requires_consolidation: normalizeOptional(form.requires_consolidation),
+        max_premium_rate: parseNumberInput(form.max_premium_rate),
+        max_debt_ratio: parseNumberInput(form.max_debt_ratio),
+        negative_summary: normalizeOptional(form.negative_summary),
+      };
+
+      const created = await buyerIntents.create(payload);
+      if (shouldParse) {
+        const rawText = buildIntentRawText(form, payload, selectedParty);
+        if (selectedFiles.length > 0) {
+          // Attachments (incl. images) go through the business_update pipeline so OCR
+          // + multimodal extraction fill the intent, mirroring the target create flow.
+          const formData = new FormData();
+          formData.set('raw_text', rawText);
+          formData.set('input_type', 'mixed');
+          formData.set('auto_process', 'true');
+          formData.set('process_after_ocr', 'true');
+          formData.set('include_attachment_text', 'true');
+          formData.set('bound_buyer_intent_ids', JSON.stringify([created.id]));
+          if (selectedParty) {
+            formData.set('bound_buyer_party_ids', JSON.stringify([selectedParty.id]));
+          }
+          formData.set(
+            'metadata_json',
+            JSON.stringify({
+              source: 'frontend_intent_create_modal',
+              create_payload: payload,
+              bound_buyer_intent_ids: [created.id],
+            })
+          );
+          selectedFiles.forEach((file) => formData.append('files', file));
+          await businessUpdates.upload(formData);
+        } else {
+          // Text-only requirements use the dedicated buyer intent parser.
+          await buyerIntents.parse(created.id, { raw_requirement_text: supplement });
+        }
+      }
       onCreated();
-    } catch {
-      alert('创建失败');
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : '创建失败');
     } finally {
       setSaving(false);
     }
@@ -1064,111 +1229,313 @@ function CreateIntentModal({ onClose, onCreated }: { onClose: () => void; onCrea
 
       {/* Step 2: Intent details */}
       {step === 'intent_details' && (
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={handleSubmit} className="space-y-5">
+          <div className="border border-brand-100 bg-brand-50 px-3 py-2.5 text-xs text-brand-800 flex gap-2">
+            <Building2 className="w-4 h-4 mt-0.5 shrink-0" />
+            <p className="leading-relaxed">
+              可以先填关键条件，再粘贴买家需求原文或上传附件。若材料里识别到更完整的行业、地区、利润/市值/溢价等要求，解析结果会自动补全字段。
+            </p>
+          </div>
+
           {selectedParty && (
             <div className="flex items-center gap-2 px-3 py-2 bg-gray-50 border border-gray-200 text-sm">
               <span className="text-gray-500">关联买家：</span>
               <span className="font-medium text-gray-900">{selectedParty.buyer_name}</span>
             </div>
           )}
+
           <Field label="意向名称 *">
             <input
               type="text"
               value={form.intent_name}
-              onChange={(e) => setForm({ ...form, intent_name: e.target.value })}
+              onChange={(e) => updateForm('intent_name', e.target.value)}
               className="input"
               placeholder="例如：浙江国资医药健康并表需求"
               autoFocus
             />
           </Field>
-          <Field label="原始需求描述">
-            <textarea
-              value={form.raw_requirement_text || ''}
-              onChange={(e) => setForm({ ...form, raw_requirement_text: e.target.value })}
-              className="input min-h-[80px] resize-y"
-              placeholder="自然语言描述买家收购需求"
-            />
-          </Field>
-          <div className="grid grid-cols-2 gap-4">
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <Field label="行业">
-              <input type="text" value={form.industry_primary || ''} onChange={(e) => setForm({ ...form, industry_primary: e.target.value })} className="input" placeholder="healthcare" />
+              <input type="text" value={form.industry_primary} onChange={(e) => updateForm('industry_primary', e.target.value)} className="input" placeholder="可选，如医药健康；留空由系统解析" />
             </Field>
             <Field label="地区范围">
-              <input type="text" value={form.region_scope_summary || ''} onChange={(e) => setForm({ ...form, region_scope_summary: e.target.value })} className="input" placeholder="浙江优先，长三角可接受" />
+              <input type="text" value={form.region_scope_summary} onChange={(e) => updateForm('region_scope_summary', e.target.value)} className="input" placeholder="如：浙江优先，长三角可接受" />
             </Field>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <Field label="最低利润 (元)">
-              <input type="number" value={form.min_net_profit_yuan || ''} onChange={(e) => setForm({ ...form, min_net_profit_yuan: Number(e.target.value) || undefined })} className="input" placeholder="20000000" />
+            <Field label="最低净利润">
+              <input type="text" value={form.min_net_profit_yuan} onChange={(e) => updateForm('min_net_profit_yuan', e.target.value)} className="input" placeholder="例如：2000万、1亿" />
             </Field>
-            <Field label="PE上限">
-              <input type="number" value={form.max_pe || ''} onChange={(e) => setForm({ ...form, max_pe: Number(e.target.value) || undefined })} className="input" placeholder="13" />
+            <Field label="PE 上限">
+              <input type="text" value={form.max_pe} onChange={(e) => updateForm('max_pe', e.target.value)} className="input" placeholder="例如：13" />
             </Field>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <Field label="最低市值 (元)">
-              <input type="number" value={form.min_market_cap_yuan || ''} onChange={(e) => setForm({ ...form, min_market_cap_yuan: Number(e.target.value) || undefined })} className="input" placeholder="500000000" />
+            <Field label="市值范围">
+              <input type="text" value={form.market_cap_range} onChange={(e) => updateForm('market_cap_range', e.target.value)} className="input" placeholder="例如：5亿-30亿、5亿以上、30亿以内" />
             </Field>
-            <Field label="最高市值 (元)">
-              <input type="number" value={form.max_market_cap_yuan || ''} onChange={(e) => setForm({ ...form, max_market_cap_yuan: Number(e.target.value) || undefined })} className="input" placeholder="3000000000" />
-            </Field>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <Field label="上市状态">
-              <select value={form.preferred_listed_status || ''} onChange={(e) => setForm({ ...form, preferred_listed_status: e.target.value || undefined })} className="input">
+            <Field label="上市状态偏好">
+              <select value={form.preferred_listed_status} onChange={(e) => updateForm('preferred_listed_status', e.target.value)} className="input">
                 <option value="">未明确</option>
                 <option value="listed">已上市</option>
                 <option value="preparing_listing">准备上市</option>
                 <option value="unlisted">未上市</option>
                 <option value="any">均可</option>
-                <option value="unknown">未知</option>
               </select>
             </Field>
             <Field label="并表要求">
-              <select value={form.requires_consolidation || ''} onChange={(e) => setForm({ ...form, requires_consolidation: e.target.value || undefined })} className="input">
+              <select value={form.requires_consolidation} onChange={(e) => updateForm('requires_consolidation', e.target.value)} className="input">
                 <option value="">未明确</option>
                 <option value="yes">需要并表</option>
                 <option value="no">不需要并表</option>
-                <option value="unknown">未知</option>
               </select>
             </Field>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <Field label="上市板块">
-              <input type="text" value={form.listing_board_requirement_summary || ''} onChange={(e) => setForm({ ...form, listing_board_requirement_summary: e.target.value })} className="input" placeholder="主板 / 创业板 / 科创板 / 北交所" />
-            </Field>
-            <Field label="阶段明细">
-              <input type="text" value={form.financing_stage_requirement_summary || ''} onChange={(e) => setForm({ ...form, financing_stage_requirement_summary: e.target.value })} className="input" placeholder="pre-IPO / A轮 / 辅导备案" />
-            </Field>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
             <Field label="溢价上限 (%)">
-              <input type="number" value={form.max_premium_rate || ''} onChange={(e) => setForm({ ...form, max_premium_rate: Number(e.target.value) || undefined })} className="input" placeholder="20" />
+              <input type="text" value={form.max_premium_rate} onChange={(e) => updateForm('max_premium_rate', e.target.value)} className="input" placeholder="例如：20" />
             </Field>
             <Field label="负债率上限 (%)">
-              <input type="number" value={form.max_debt_ratio || ''} onChange={(e) => setForm({ ...form, max_debt_ratio: Number(e.target.value) || undefined })} className="input" placeholder="65" />
+              <input type="text" value={form.max_debt_ratio} onChange={(e) => updateForm('max_debt_ratio', e.target.value)} className="input" placeholder="例如：65" />
             </Field>
           </div>
+
+          <Field label="买家需求原文 / 补充材料">
+            <textarea
+              value={form.raw_requirement_text}
+              onChange={(e) => updateForm('raw_requirement_text', e.target.value)}
+              className="input min-h-[130px] resize-y leading-relaxed"
+              placeholder="可粘贴买家的聊天记录、需求邮件、投资偏好说明等大段文本，系统会解析补全上面的结构化字段。"
+            />
+          </Field>
+
           <Field label="其他要求 / 排除项">
             <textarea
-              value={form.negative_summary || ''}
-              onChange={(e) => setForm({ ...form, negative_summary: e.target.value })}
+              value={form.negative_summary}
+              onChange={(e) => updateForm('negative_summary', e.target.value)}
               className="input min-h-[60px] resize-y"
               placeholder="例如：不接受重大诉讼、冻结、执行或违规违法风险"
             />
           </Field>
-          <div className="flex justify-between pt-2">
-            <button type="button" onClick={() => setStep('buyer_link')} className="px-3 py-2 text-sm border border-gray-200 text-gray-700">返回</button>
-            <div className="flex gap-2">
+
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">附件/截图</label>
+            <div
+              className="border border-dashed border-gray-300 bg-gray-50 px-4 py-4 text-sm text-gray-600 transition-colors hover:border-brand-300 hover:bg-brand-50/40"
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={handleFileDrop}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-2 text-gray-800 font-medium">
+                  <Upload className="w-4 h-4 text-brand-600" />
+                  拖拽文件到这里，或上传图片、PDF、Office、文本附件
+                </div>
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="shrink-0 bg-white border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:border-brand-300 hover:text-brand-700"
+                >
+                  选择文件
+                </button>
+              </div>
+              <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
+              <UploadPolicyCard policy={uploadPolicy} loading={policyLoading} error={policyError} />
+              <SelectedFiles files={selectedFiles} onRemove={removeFile} />
+              {fileError && <InlineWarning message={fileError} />}
+            </div>
+          </div>
+
+          {submitError && <div className="border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{submitError}</div>}
+
+          <div className="flex items-center justify-between gap-3 pt-2">
+            <p className="text-xs text-gray-400">
+              {selectedFiles.length > 0 || form.raw_requirement_text.trim()
+                ? '创建后会自动进入解析队列，解析结果可在意向详情查看。'
+                : '仅创建基础意向，不触发解析。'}
+            </p>
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => setStep('buyer_link')} className="px-3 py-2 text-sm border border-gray-200 text-gray-700">返回</button>
               <button type="button" onClick={onClose} className="px-4 py-2 text-sm border border-gray-200 text-gray-700">取消</button>
-              <button type="submit" disabled={saving || !form.intent_name.trim()} className="px-4 py-2 text-sm bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50">
-                {saving ? '创建中...' : '创建意向'}
+              <button type="submit" disabled={saving || !form.intent_name.trim()} className="px-4 py-2 text-sm bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50 inline-flex items-center gap-2">
+                {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                {saving ? '创建中...' : selectedFiles.length > 0 || form.raw_requirement_text.trim() ? '创建并解析' : '创建意向'}
               </button>
             </div>
           </div>
         </form>
       )}
     </Modal>
+  );
+}
+
+function parseMoneyToYuan(value: string): number | undefined {
+  const text = value.trim();
+  if (!text) return undefined;
+  const normalized = text.replace(/[,，\s]/g, '').replace(/人民币|CNY|RMB/gi, '');
+  const match = normalized.match(/^(\d+(?:\.\d+)?)(亿元|亿|万元|万|元)?$/);
+  if (!match) return undefined;
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount)) return undefined;
+  const unit = match[2] || '元';
+  if (unit === '亿元' || unit === '亿') return amount * 100000000;
+  if (unit === '万元' || unit === '万') return amount * 10000;
+  return amount;
+}
+
+function parseNumberInput(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const num = Number(trimmed.replace(/[,，%\s]/g, ''));
+  return Number.isFinite(num) ? num : undefined;
+}
+
+function parseMarketCapRange(value: string): { min?: number; max?: number } {
+  const raw = value.trim();
+  if (!raw) return {};
+  const normalized = raw.replace(/\s/g, '');
+  const rangeMatch = normalized.match(/^(.+?)(?:[-~—]|至|到)(.+)$/);
+  if (rangeMatch) {
+    return { min: parseMoneyToYuan(rangeMatch[1]), max: parseMoneyToYuan(rangeMatch[2]) };
+  }
+  if (/(以上|起|\+)$/.test(normalized) || /^(>=?|大于|超过)/.test(normalized)) {
+    return { min: parseMoneyToYuan(normalized.replace(/以上|起|\+|>=?|大于|超过/g, '')) };
+  }
+  if (/(以内|以下)$/.test(normalized) || /^(<=?|不超过|小于)/.test(normalized)) {
+    return { max: parseMoneyToYuan(normalized.replace(/以内|以下|<=?|不超过|小于/g, '')) };
+  }
+  const single = parseMoneyToYuan(normalized);
+  return single !== undefined ? { min: single } : {};
+}
+
+function normalizeOptional(value: string | undefined): string | undefined {
+  const trimmed = (value || '').trim();
+  return trimmed || undefined;
+}
+
+function buildIntentRawText(form: IntentForm, payload: BuyerIntentCreate, party: BuyerParty | null): string {
+  const lines = [
+    '【新建买家意向初始输入】',
+    `意向名称：${payload.intent_name}`,
+    party ? `关联买家：${party.buyer_name}` : null,
+    form.industry_primary.trim() ? `行业：${form.industry_primary.trim()}` : null,
+    form.region_scope_summary.trim() ? `地区范围：${form.region_scope_summary.trim()}` : null,
+    form.min_net_profit_yuan.trim() ? `最低净利润：${form.min_net_profit_yuan.trim()}` : null,
+    form.max_pe.trim() ? `PE上限：${form.max_pe.trim()}` : null,
+    form.market_cap_range.trim() ? `市值范围：${form.market_cap_range.trim()}` : null,
+    form.preferred_listed_status ? `上市状态偏好：${form.preferred_listed_status}` : null,
+    form.requires_consolidation ? `并表要求：${form.requires_consolidation}` : null,
+    form.max_premium_rate.trim() ? `溢价上限：${form.max_premium_rate.trim()}%` : null,
+    form.max_debt_ratio.trim() ? `负债率上限：${form.max_debt_ratio.trim()}%` : null,
+    form.negative_summary.trim() ? `其他要求/排除项：${form.negative_summary.trim()}` : null,
+    '',
+    '解析要求：请从下方需求原文和附件中提取买家的行业、地区、利润/市值/PE/溢价/负债率要求、上市偏好、并表控股要求、交易方式、风险容忍度等；如与上述初始输入冲突，以材料为准。行业和地区请输出中文，不要臆造材料中没有的信息。',
+  ].filter((line): line is string => line !== null);
+
+  if (form.raw_requirement_text.trim()) {
+    lines.push('', '【需求原文/补充材料】', form.raw_requirement_text.trim());
+  }
+
+  return lines.join('\n');
+}
+
+function formatBytes(value: number) {
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${value} B`;
+}
+
+function UploadPolicyCard({
+  policy,
+  loading,
+  error,
+}: {
+  policy: AttachmentUploadPolicy | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  if (loading) {
+    return (
+      <div className="mt-3 flex items-center gap-2 text-xs text-gray-500">
+        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+        正在读取上传规则...
+      </div>
+    );
+  }
+
+  if (error) return <InlineWarning message={error} />;
+  if (!policy) return <p className="mt-3 text-xs text-gray-400">上传规则暂不可用。</p>;
+
+  const image = policy.image_policy.constraints;
+  const pdf = policy.pdf_policy.text_detection;
+  const doc2xStatus = policy.pdf_policy.scanned_pdf.doc2x_configured ? '已配置' : '未配置';
+
+  return (
+    <div className="mt-3 space-y-3">
+      <div className="grid grid-cols-3 gap-2">
+        <PolicyStat label="单文件上限" value={`${policy.max_upload_mb} MB`} />
+        <PolicyStat label="附件数量" value={`${policy.max_files_per_business_update} 个/次`} />
+        <PolicyStat label="图片数量" value={`${image.max_count_per_business_update} 张/次`} />
+      </div>
+      <div className="grid grid-cols-1 gap-2 text-xs">
+        <PolicyLine
+          icon={Image}
+          title="截图 / 图片"
+          body={`支持 ${image.supported_types.join('、')}；不走 OCR，直接交给多模态模型；会压缩到最长边 ${image.model_preprocess_max_side_px}px。`}
+        />
+        <PolicyLine
+          icon={FileText}
+          title="PDF"
+          body={`前 ${pdf.sample_page_limit} 页累计文本不少于 ${pdf.min_total_chars_for_text_pdf} 字按文本 PDF 本地解析；扫描件走 Doc2X 异步 OCR（${doc2xStatus}）。`}
+        />
+      </div>
+    </div>
+  );
+}
+
+function SelectedFiles({ files, onRemove }: { files: File[]; onRemove: (index: number) => void }) {
+  if (!files.length) return null;
+  return (
+    <div className="mt-3 space-y-2">
+      {files.map((file, index) => (
+        <div key={`${file.name}-${file.size}-${file.lastModified}`} className="flex items-center justify-between gap-3 bg-white border border-gray-200 px-3 py-2">
+          <div className="min-w-0 flex items-center gap-2">
+            <Paperclip className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+            <div className="min-w-0">
+              <p className="truncate text-xs font-medium text-gray-800">{file.name}</p>
+              <p className="text-[11px] text-gray-400">{formatBytes(file.size)}</p>
+            </div>
+          </div>
+          <button type="button" onClick={() => onRemove(index)} className="shrink-0 text-xs text-gray-400 hover:text-red-600">
+            移除
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function InlineWarning({ message }: { message: string }) {
+  return (
+    <div className="mt-3 flex items-start gap-2 border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+      <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+      <span>{message}</span>
+    </div>
+  );
+}
+
+function PolicyStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="bg-white border border-gray-200 px-3 py-2">
+      <p className="text-[11px] text-gray-400">{label}</p>
+      <p className="mt-0.5 text-sm font-semibold text-gray-900">{value}</p>
+    </div>
+  );
+}
+
+function PolicyLine({ icon: Icon, title, body }: { icon: LucideIcon; title: string; body: string }) {
+  return (
+    <div className="flex gap-2 bg-white border border-gray-200 px-3 py-2">
+      <Icon className="w-3.5 h-3.5 text-brand-600 mt-0.5 shrink-0" />
+      <div>
+        <p className="font-medium text-gray-800">{title}</p>
+        <p className="mt-0.5 text-gray-500 leading-relaxed">{body}</p>
+      </div>
+    </div>
   );
 }
 
@@ -1228,7 +1595,7 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center">
       <div className="fixed inset-0 bg-black/30" onClick={onClose} />
-      <div className="relative bg-white border border-gray-200 shadow-lg w-full max-w-lg mx-4 max-h-[85vh] overflow-y-auto">
+      <div className="relative bg-white border border-gray-200 shadow-lg w-full max-w-2xl mx-4 max-h-[88vh] overflow-y-auto">
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
           <h3 className="text-base font-semibold text-gray-900">{title}</h3>
           <button onClick={onClose} className="p-1 text-gray-400 hover:text-gray-600"><X className="w-4 h-4" /></button>
