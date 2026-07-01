@@ -616,6 +616,12 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
     if not schema_validation_json["valid"]:
         raise ValueError(schema_validation_json.get("error") or "Buyer intent parser output is invalid.")
 
+    source_context = _parse_source_context(
+        job,
+        default_source_type="buyer_intent_parse",
+        default_source_label="Buyer intent parser",
+    )
+
     applied_fields: list[str] = []
     if changes:
         applied_fields = _apply_buyer_intent_parse_changes(
@@ -624,12 +630,22 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
             changes,
             job.id,
             normalization_notes,
-            _parse_source_context(
-                job,
-                default_source_type="buyer_intent_parse",
-                default_source_label="Buyer intent parser",
-            ),
+            source_context,
         )
+
+    # Enrich the linked buyer party (acquirer) from the same requirement material.
+    applied_buyer_party_fields: list[str] = []
+    party_changes = _normalize_buyer_party_parse_changes(parsed_output_json)
+    if party_changes and buyer_intent.get("buyer_party_id"):
+        buyer_party = _get_buyer_party(db, UUID(str(buyer_intent["buyer_party_id"])))
+        if buyer_party:
+            applied_buyer_party_fields = _apply_buyer_party_parse_changes(
+                db,
+                buyer_party,
+                party_changes,
+                job.id,
+                source_context,
+            )
 
     return {
         "handled": True,
@@ -637,6 +653,8 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
         "buyer_intent_id": str(buyer_intent_id),
         "applied_fields": applied_fields,
         "field_count": len(applied_fields),
+        "applied_buyer_party_fields": applied_buyer_party_fields,
+        "buyer_party_field_count": len(applied_buyer_party_fields),
         "trace_created": True,
         "model_name": node_config["model_name"],
         "prompt_version": node_config["prompt_version"],
@@ -3850,6 +3868,31 @@ BUYER_INTENT_TEXT_LIMITS = {
 }
 
 
+# Buyer party (acquirer) fields the buyer intent parser may enrich from the same
+# requirement material. Enrichment only fills empty party fields; it never
+# overwrites existing buyer_party data because a party is shared across intents.
+BUYER_PARTY_PARSE_FIELDS = {
+    "buyer_type",
+    "group_name",
+    "listed_status",
+    "region_province",
+    "region_city",
+    "main_business",
+    "capital_strength_summary",
+    "profile_summary",
+}
+
+BUYER_PARTY_PARSE_TEXT_LIMITS = {
+    "buyer_type": 80,
+    "group_name": 200,
+    "region_province": 80,
+    "region_city": 80,
+    "main_business": 2000,
+    "capital_strength_summary": 2000,
+    "profile_summary": 2000,
+}
+
+
 def _validate_seller_target_parse_output(parsed_output_json: dict[str, Any] | None) -> dict[str, Any]:
     if parsed_output_json is None:
         return {"valid": False, "error": "LLM output is not a JSON object."}
@@ -4034,6 +4077,9 @@ def _validate_buyer_intent_parse_output(parsed_output_json: dict[str, Any] | Non
     if not isinstance(candidate, dict):
         return {"valid": False, "error": "Buyer intent parser output must be an object."}
     allowed_count = len([key for key in candidate if key in BUYER_INTENT_PARSE_FIELDS])
+    party = parsed_output_json.get("buyer_party")
+    if isinstance(party, dict):
+        allowed_count += len([key for key in party if key in BUYER_PARTY_PARSE_FIELDS])
     return {
         "valid": allowed_count > 0,
         "field_count": allowed_count,
@@ -4185,6 +4231,132 @@ def _write_buyer_intent_parse_logs(
                 "metadata_json": {
                     "source": "buyer_intent_parser",
                     "normalization_notes": normalization_notes,
+                    "proposed_value": _json_safe_value(changes.get(field_path)),
+                    "field_value_source": _json_safe_value(source_context),
+                },
+            },
+        )
+
+
+def _normalize_buyer_party_parse_changes(parsed_output_json: dict[str, Any] | None) -> dict[str, Any]:
+    if not parsed_output_json:
+        return {}
+    candidate = parsed_output_json.get("buyer_party")
+    if not isinstance(candidate, dict):
+        return {}
+
+    changes: dict[str, Any] = {}
+    for key, value in candidate.items():
+        if key not in BUYER_PARTY_PARSE_FIELDS:
+            continue
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        if key == "listed_status":
+            listed_status = _normalize_listed_status(value)
+            changes[key] = "unknown" if listed_status == "any" else listed_status
+            continue
+        text_value = str(value).strip()
+        limit = BUYER_PARTY_PARSE_TEXT_LIMITS.get(key)
+        if limit:
+            text_value = text_value[:limit]
+        changes[key] = text_value
+    return {key: value for key, value in changes.items() if value is not None}
+
+
+def _apply_buyer_party_parse_changes(
+    db: Session,
+    buyer_party: dict[str, Any],
+    changes: dict[str, Any],
+    job_id: UUID,
+    source_context: dict[str, Any],
+) -> list[str]:
+    # Enrich-only: fill empty buyer_party fields, never overwrite existing data.
+    diff: dict[str, tuple[Any, Any]] = {}
+    for field, new_value in changes.items():
+        current = buyer_party.get(field)
+        if current is not None and not (isinstance(current, str) and not current.strip()):
+            continue
+        if _json_safe_value(current) == _json_safe_value(new_value):
+            continue
+        diff[field] = (current, new_value)
+    if not diff:
+        return []
+
+    set_clauses = [f"{field} = :{field}" for field in diff]
+    set_clauses.extend(["updated_at = now()", "updated_by = :updated_by"])
+    db.execute(
+        text(
+            f"""
+            update buyer_party
+            set {', '.join(set_clauses)}
+            where id = :buyer_party_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ),
+        {
+            **{field: changes[field] for field in diff},
+            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "buyer_party_id": buyer_party["id"],
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )
+    _write_buyer_party_parse_logs(db, buyer_party, changes, diff, job_id, source_context)
+    _write_field_value_sources(
+        db,
+        entity_type="buyer_party",
+        entity_id=UUID(str(buyer_party["id"])),
+        changes=changes,
+        diff=diff,
+        source_context=source_context,
+        review_status="auto_accepted",
+    )
+    return list(diff.keys())
+
+
+def _write_buyer_party_parse_logs(
+    db: Session,
+    buyer_party: dict[str, Any],
+    changes: dict[str, Any],
+    diff: dict[str, tuple[Any, Any]],
+    job_id: UUID,
+    source_context: dict[str, Any],
+) -> None:
+    for field_path, (old_value, new_value) in diff.items():
+        db.execute(
+            text(
+                """
+                insert into action_application_log (
+                  team_id, workspace_id, entity_type, entity_id, field_path,
+                  old_value_json, new_value_json, source_type, source_id,
+                  evidence_id, applied_by, edited_before_apply, metadata_json
+                )
+                values (
+                  :team_id, :workspace_id, 'buyer_party', :buyer_party_id, :field_path,
+                  :old_value_json, :new_value_json, 'buyer_intent_parse', :job_id,
+                  :evidence_id, :applied_by, false, :metadata_json
+                )
+                """
+            ).bindparams(
+                bindparam("old_value_json", type_=JSONB),
+                bindparam("new_value_json", type_=JSONB),
+                bindparam("metadata_json", type_=JSONB),
+            ),
+            {
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+                "buyer_party_id": buyer_party["id"],
+                "field_path": field_path,
+                "old_value_json": _json_safe_value(old_value),
+                "new_value_json": _json_safe_value(new_value),
+                "job_id": job_id,
+                "evidence_id": source_context.get("evidence_id"),
+                "applied_by": DEFAULT_ADMIN_USER_ID,
+                "metadata_json": {
+                    "source": "buyer_intent_parser",
+                    "enrichment": "buyer_party",
                     "proposed_value": _json_safe_value(changes.get(field_path)),
                     "field_value_source": _json_safe_value(source_context),
                 },

@@ -88,6 +88,17 @@ def test_business_update_prompt_seed_requires_chinese_industry_and_region_values
     assert "do not output English translated labels" in sql
 
 
+def test_buyer_intent_prompt_seed_enriches_buyer_party() -> None:
+    sql = Path("database/migrations/023_buyer_intent_parser_prompt_v04.sql").read_text(encoding="utf-8")
+
+    assert "buyer_intent_parser" in sql
+    assert "v0.4.0" in sql
+    assert "buyer_party" in sql
+    assert "capital_strength_summary" in sql
+    assert "main_business" in sql
+    assert "Never place target/seller attributes in buyer_party" in sql
+
+
 def test_meta_ai_infra_status_checks_qwen36_plus() -> None:
     source = Path("backend/app/api/routes/meta.py").read_text(encoding="utf-8")
 
