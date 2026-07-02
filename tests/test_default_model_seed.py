@@ -25,6 +25,14 @@ def test_buyer_intent_parser_timeout_seed_allows_long_requirement_jobs() -> None
     assert "qwen3.6-plus buyer intent parsing can exceed 90 seconds" in sql
 
 
+def test_buyer_intent_prompt_seed_uses_database_buyer_party_type_values() -> None:
+    sql = Path("database/migrations/025_buyer_intent_buyer_party_type_prompt.sql").read_text(encoding="utf-8")
+
+    assert "buyer_party.buyer_type" in sql
+    assert "industrial_buyer, listed_company, state_owned_platform" in sql
+    assert "Map strategic/private/corporate buyers to industrial_buyer" in sql
+
+
 def test_buyer_intent_prompt_seed_includes_expanded_requirement_fields() -> None:
     sql = Path("database/migrations/015_buyer_intent_prompt_v03.sql").read_text(encoding="utf-8")
 

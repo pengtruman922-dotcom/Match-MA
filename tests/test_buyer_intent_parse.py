@@ -3,6 +3,7 @@ from uuid import UUID
 from backend.app.api.routes.buyer_intents import _compact_parse_trace
 from backend.app.jobs.handlers import (
     _build_buyer_profile_context,
+    _normalize_buyer_party_parse_changes,
     _normalize_buyer_intent_parse_changes,
     _normalize_equity_requirement_type,
     _normalize_listed_status,
@@ -95,6 +96,23 @@ def test_buyer_intent_parser_enum_helpers_are_tolerant() -> None:
     assert _normalize_listed_status("准备上市") == "preparing_listing"
     assert _normalize_listed_status("pre IPO") == "pre_ipo"
     assert _normalize_equity_requirement_type("参股也可以") == "minority_acceptable"
+
+
+def test_buyer_party_parse_changes_normalize_model_buyer_type_aliases() -> None:
+    changes = _normalize_buyer_party_parse_changes(
+        {
+            "buyer_party": {
+                "buyer_type": "strategic",
+                "listed_status": "不限",
+                "group_name": "华源",
+                "main_business": "冶炼及关键金属供应链",
+            }
+        }
+    )
+
+    assert changes["buyer_type"] == "industrial_buyer"
+    assert changes["listed_status"] == "unknown"
+    assert changes["group_name"] == "华源"
 
 
 def test_buyer_profile_context_loads_linked_buyer_party() -> None:

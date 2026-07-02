@@ -3916,6 +3916,46 @@ BUYER_PARTY_PARSE_TEXT_LIMITS = {
     "profile_summary": 2000,
 }
 
+BUYER_PARTY_TYPE_VALUES = {
+    "industrial_buyer",
+    "listed_company",
+    "state_owned_platform",
+    "pe_fund",
+    "financial_investor",
+    "government_platform",
+    "other",
+}
+
+BUYER_PARTY_TYPE_ALIASES = {
+    "strategic": "industrial_buyer",
+    "strategic_buyer": "industrial_buyer",
+    "strategic_investor": "industrial_buyer",
+    "industrial": "industrial_buyer",
+    "industry": "industrial_buyer",
+    "corporate": "industrial_buyer",
+    "corporate_buyer": "industrial_buyer",
+    "private": "industrial_buyer",
+    "private_company": "industrial_buyer",
+    "listed": "listed_company",
+    "public_company": "listed_company",
+    "上市公司": "listed_company",
+    "state_owned": "state_owned_platform",
+    "state_owned_enterprise": "state_owned_platform",
+    "soe": "state_owned_platform",
+    "国资": "state_owned_platform",
+    "国资平台": "state_owned_platform",
+    "pe": "pe_fund",
+    "private_equity": "pe_fund",
+    "pe基金": "pe_fund",
+    "fund": "financial_investor",
+    "financial": "financial_investor",
+    "financial_investor": "financial_investor",
+    "government": "government_platform",
+    "government_platform": "government_platform",
+    "政府平台": "government_platform",
+    "other": "other",
+}
+
 
 def _validate_seller_target_parse_output(parsed_output_json: dict[str, Any] | None) -> dict[str, Any]:
     if parsed_output_json is None:
@@ -4279,12 +4319,31 @@ def _normalize_buyer_party_parse_changes(parsed_output_json: dict[str, Any] | No
             listed_status = _normalize_listed_status(value)
             changes[key] = "unknown" if listed_status == "any" else listed_status
             continue
+        if key == "buyer_type":
+            changes[key] = _normalize_buyer_party_type(value)
+            continue
         text_value = str(value).strip()
         limit = BUYER_PARTY_PARSE_TEXT_LIMITS.get(key)
         if limit:
             text_value = text_value[:limit]
         changes[key] = text_value
     return {key: value for key, value in changes.items() if value is not None}
+
+
+def _normalize_buyer_party_type(value: Any) -> str | None:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    normalized = raw.lower().replace("-", "_").replace(" ", "_")
+    if normalized in BUYER_PARTY_TYPE_VALUES:
+        return normalized
+    if normalized in BUYER_PARTY_TYPE_ALIASES:
+        return BUYER_PARTY_TYPE_ALIASES[normalized]
+    if raw in BUYER_PARTY_TYPE_ALIASES:
+        return BUYER_PARTY_TYPE_ALIASES[raw]
+    return "other"
 
 
 def _apply_buyer_party_parse_changes(
