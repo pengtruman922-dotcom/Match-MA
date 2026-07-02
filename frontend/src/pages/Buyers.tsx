@@ -42,8 +42,8 @@ type Tab = 'intents' | 'parties';
 type BuyerSuggestion = BuyerIntentSuggestion | BuyerPartySuggestion;
 
 const PAGE_SIZE = 20;
-const INTENT_PARSE_POLL_INTERVAL_MS = 2000;
-const INTENT_PARSE_POLL_TIMEOUT_MS = 90000;
+const INTENT_PARSE_STATUS_POLL_INTERVAL_MS = 5000;
+const UPLOAD_POLICY_TIMEOUT_MS = 12000;
 const INTENT_FILTERS: Array<keyof BuyerIntentFilters> = ['q', 'industry', 'region', 'status', 'listedStatus', 'requiresConsolidation'];
 const PARTY_FILTERS: Array<keyof BuyerPartyFilters> = ['q', 'buyerType', 'region', 'listedStatus', 'status'];
 
@@ -212,6 +212,7 @@ function IntentsList({
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [parseStatuses, setParseStatuses] = useState<Record<string, BuyerIntentParseStatus>>({});
 
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const visibleIds = useMemo(() => items.map((item) => item.id), [items]);
@@ -265,6 +266,66 @@ function IntentsList({
   useEffect(() => { fetchData(); }, [fetchData, refreshKey]);
   useEffect(() => { buyerIntents.filterOptions().then(setFilterOptions).catch(() => {}); }, []);
   useEffect(() => { setSearchQuery(filters.q); }, [filters.q]);
+
+  useEffect(() => {
+    if (items.length === 0) {
+      setParseStatuses({});
+      return;
+    }
+    let cancelled = false;
+    Promise.all(
+      items.map((item) =>
+        buyerIntents
+          .parseStatus(item.id)
+          .then((status) => [item.id, status] as const)
+          .catch(() => null)
+      )
+    ).then((pairs) => {
+      if (cancelled) return;
+      const next: Record<string, BuyerIntentParseStatus> = {};
+      for (const pair of pairs) {
+        if (pair) next[pair[0]] = pair[1];
+      }
+      setParseStatuses(next);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [items]);
+
+  useEffect(() => {
+    const activeIds = Object.entries(parseStatuses)
+      .filter(([, status]) => isActiveParseStatus(status))
+      .map(([id]) => id);
+    if (activeIds.length === 0) return;
+    const timer = window.setInterval(() => {
+      Promise.all(
+        activeIds.map((id) =>
+          buyerIntents
+            .parseStatus(id)
+            .then((status) => [id, status] as const)
+            .catch(() => null)
+        )
+      ).then((pairs) => {
+        const shouldRefreshRows = pairs.some((pair) => {
+          if (!pair) return false;
+          const [id, status] = pair;
+          return parseStatuses[id]?.latest_job?.status !== 'succeeded' && status.latest_job?.status === 'succeeded';
+        });
+        setParseStatuses((prev) => {
+          const next = { ...prev };
+          for (const pair of pairs) {
+            if (!pair) continue;
+            const [id, status] = pair;
+            next[id] = status;
+          }
+          return next;
+        });
+        if (shouldRefreshRows) fetchData();
+      });
+    }, INTENT_PARSE_STATUS_POLL_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [fetchData, parseStatuses]);
 
   useEffect(() => {
     const query = searchQuery.trim();
@@ -381,19 +442,21 @@ function IntentsList({
               <th className="text-left px-4 py-3 font-medium text-gray-600">上市要求</th>
               <th className="text-right px-4 py-3 font-medium text-gray-600">利润要求</th>
               <th className="text-right px-4 py-3 font-medium text-gray-600">市值范围</th>
+              <th className="text-center px-4 py-3 font-medium text-gray-600">解析状态</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">状态</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">操作</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {loading ? (
-              <tr><td colSpan={10} className="px-4 py-8 text-center"><div className="w-5 h-5 border-2 border-brand-600 border-t-transparent rounded-full animate-spin mx-auto" /></td></tr>
+              <tr><td colSpan={11} className="px-4 py-8 text-center"><div className="w-5 h-5 border-2 border-brand-600 border-t-transparent rounded-full animate-spin mx-auto" /></td></tr>
             ) : items.length === 0 ? (
-              <tr><td colSpan={10} className="px-4 py-8 text-center text-gray-400">暂无匹配的买家意向</td></tr>
+              <tr><td colSpan={11} className="px-4 py-8 text-center text-gray-400">暂无匹配的买家意向</td></tr>
             ) : items.map((item) => (
               <IntentRow
                 key={item.id}
                 item={item}
+                parseStatus={parseStatuses[item.id]}
                 expanded={expandedId === item.id}
                 selected={selectedIds.has(item.id)}
                 onSelectedChange={(checked) => toggleSelected(item.id, checked)}
@@ -411,7 +474,21 @@ function IntentsList({
   );
 }
 
-function IntentRow({ item, expanded, selected, onSelectedChange, onToggle }: { item: BuyerIntent; expanded: boolean; selected: boolean; onSelectedChange: (checked: boolean) => void; onToggle: () => void }) {
+function IntentRow({
+  item,
+  parseStatus,
+  expanded,
+  selected,
+  onSelectedChange,
+  onToggle,
+}: {
+  item: BuyerIntent;
+  parseStatus?: BuyerIntentParseStatus;
+  expanded: boolean;
+  selected: boolean;
+  onSelectedChange: (checked: boolean) => void;
+  onToggle: () => void;
+}) {
   return (
     <>
       <tr className="hover:bg-brand-50/30 transition-colors">
@@ -421,13 +498,14 @@ function IntentRow({ item, expanded, selected, onSelectedChange, onToggle }: { i
         <td className="px-4 py-3 text-gray-600">{item.industry_primary || '-'}</td>
         <td className="px-4 py-3 text-gray-600 max-w-[180px] truncate" title={item.region_scope_summary || undefined}>{item.region_scope_summary || '-'}</td>
         <td className="px-4 py-3 text-gray-600">{listingRequirementLabel(item)}</td>
-        <td className="px-4 py-3 text-right text-gray-600 font-mono">{item.min_net_profit_yuan ? `${(Number(item.min_net_profit_yuan) / 10000).toFixed(0)}?` : '-'}</td>
+        <td className="px-4 py-3 text-right text-gray-600 font-mono">{item.min_net_profit_yuan ? `${(Number(item.min_net_profit_yuan) / 10000).toFixed(0)}万` : '-'}</td>
         <td className="px-4 py-3 text-right text-gray-600 font-mono">{marketCapRangeLabel(item)}</td>
+        <td className="px-4 py-3 text-center"><ParseStatusBadge item={item} parseStatus={parseStatus} /></td>
         <td className="px-4 py-3 text-center"><IntentStatusBadge status={item.status} /></td>
         <td className="px-4 py-3"><div className="flex items-center justify-center gap-1"><Link to={`/recommendations?mode=buyer-to-target&intentId=${item.id}`} className="inline-flex items-center gap-1 px-2 py-1 text-xs text-brand-600 hover:bg-brand-50 transition-colors"><Sparkles className="w-3 h-3" />推荐标的</Link><span className="text-gray-200">|</span><button className="inline-flex items-center gap-1 px-2 py-1 text-xs text-brand-600 hover:bg-brand-50 transition-colors" type="button"><MessageSquarePlus className="w-3 h-3" />录入更新</button></div></td>
       </tr>
       {expanded && (
-        <tr className="bg-gray-50/50"><td colSpan={10} className="px-8 py-2.5"><div className="space-y-1"><p className="text-xs text-gray-600 line-clamp-2">{item.raw_requirement_text || item.intent_summary || '暂无摘要'}{item.requires_consolidation === 'yes' && <span className="text-gray-500 ml-2">· 需并表</span>}{item.buyer_party_id ? '' : <span className="text-amber-600 ml-2">· 未关联买家主体</span>}</p><p className="text-xs text-gray-500 line-clamp-1">{compactRequirementNotes(item)}</p></div></td></tr>
+        <tr className="bg-gray-50/50"><td colSpan={11} className="px-8 py-2.5"><div className="space-y-1"><p className="text-xs text-gray-600 line-clamp-2">{item.raw_requirement_text || item.intent_summary || '暂无摘要'}{item.requires_consolidation === 'yes' && <span className="text-gray-500 ml-2">· 需并表</span>}{item.buyer_party_id ? '' : <span className="text-amber-600 ml-2">· 未关联买家主体</span>}</p><p className="text-xs text-gray-500 line-clamp-1">{compactRequirementNotes(item)}</p></div></td></tr>
       )}
     </>
   );
@@ -804,6 +882,68 @@ function compactRequirementNotes(item: BuyerIntent): string {
   return parts.length ? parts.join(' · ') : '暂无补充约束';
 }
 
+function ParseStatusBadge({ item, parseStatus }: { item: BuyerIntent; parseStatus?: BuyerIntentParseStatus }) {
+  const job = parseStatus?.latest_job;
+  const status = job?.status;
+  const isActive = status === 'queued' || status === 'running' || status === 'retry_waiting';
+  let label = hasStructuredIntentFields(item) ? '已解析' : '待解析';
+  let color = hasStructuredIntentFields(item) ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-500';
+
+  if (status === 'queued') {
+    label = '排队中';
+    color = 'bg-blue-50 text-blue-700';
+  } else if (status === 'running') {
+    label = '解析中';
+    color = 'bg-blue-50 text-blue-700';
+  } else if (status === 'retry_waiting') {
+    label = '重试中';
+    color = 'bg-amber-50 text-amber-700';
+  } else if (status === 'succeeded') {
+    label = '已解析';
+    color = 'bg-emerald-50 text-emerald-700';
+  } else if (status === 'failed') {
+    label = '解析失败';
+    color = 'bg-red-50 text-red-700';
+  } else if (status === 'cancelled') {
+    label = '已取消';
+    color = 'bg-gray-100 text-gray-600';
+  }
+
+  const title = job?.error_message
+    || (job ? `任务 ${job.status}，尝试 ${job.attempt_count}/${job.max_attempts}` : undefined);
+
+  return (
+    <span title={title} className={`inline-flex items-center justify-center gap-1 whitespace-nowrap px-2 py-0.5 text-xs font-medium ${color}`}>
+      {isActive && <Loader2 className="h-3 w-3 animate-spin" />}
+      {label}
+    </span>
+  );
+}
+
+function isActiveParseStatus(status: BuyerIntentParseStatus): boolean {
+  const jobStatus = status.latest_job?.status;
+  return jobStatus === 'queued' || jobStatus === 'running' || jobStatus === 'retry_waiting';
+}
+
+function hasStructuredIntentFields(item: BuyerIntent): boolean {
+  return Boolean(
+    item.intent_summary
+    || item.industry_primary
+    || item.industry_secondary
+    || item.region_scope_summary
+    || item.min_revenue_yuan
+    || item.min_net_profit_yuan
+    || item.max_valuation_yuan
+    || item.market_cap_range_summary
+    || (item.preferred_listed_status && item.preferred_listed_status !== 'unknown')
+    || (item.requires_consolidation && item.requires_consolidation !== 'unknown')
+    || (item.requires_control && item.requires_control !== 'unknown')
+    || item.transaction_type
+    || item.major_risk_tolerance_summary
+    || item.preference_summary
+  );
+}
+
 function IntentStatusBadge({ status }: { status: string }) {
   const isActive = status === 'active';
   return <span className={`text-xs px-2 py-0.5 font-medium ${isActive ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-600'}`}>{valueLabel('buyer_intent_status', status)}</span>;
@@ -897,9 +1037,13 @@ function CreateIntentModal({ onClose, onCreated }: { onClose: () => void; onCrea
   useEffect(() => {
     if (step !== 'intent_details' || uploadPolicy) return;
     let cancelled = false;
+    setPolicyError(null);
     setPolicyLoading(true);
-    attachments
-      .uploadPolicy()
+    withTimeout(
+      attachments.uploadPolicy(),
+      UPLOAD_POLICY_TIMEOUT_MS,
+      '读取上传规则超时，可先按默认规则继续选择附件'
+    )
       .then((policy) => {
         if (!cancelled) setUploadPolicy(policy);
       })
@@ -1074,7 +1218,6 @@ function CreateIntentModal({ onClose, onCreated }: { onClose: () => void; onCrea
         } else {
           // Text-only requirements use the dedicated buyer intent parser.
           await buyerIntents.parse(created.id, { raw_requirement_text: supplement });
-          await waitForBuyerIntentParse(created.id);
         }
       }
       onCreated();
@@ -1437,26 +1580,14 @@ function buildIntentRawText(form: IntentForm, payload: BuyerIntentCreate, party:
   return lines.join('\n');
 }
 
-async function waitForBuyerIntentParse(buyerIntentId: string): Promise<void> {
-  const deadline = Date.now() + INTENT_PARSE_POLL_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const status = await buyerIntents.parseStatus(buyerIntentId);
-    const job = status.latest_job;
-    if (job?.status === 'succeeded') return;
-    if (job && isTerminalFailedParseStatus(status)) {
-      throw new Error(status.latest_trace?.error_message || job.error_message || '买家意向解析失败');
-    }
-    await delay(INTENT_PARSE_POLL_INTERVAL_MS);
-  }
-}
-
-function isTerminalFailedParseStatus(status: BuyerIntentParseStatus): boolean {
-  const job = status.latest_job;
-  return job?.status === 'failed' || job?.status === 'cancelled';
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: number | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer !== undefined) window.clearTimeout(timer);
+  });
 }
 
 function formatBytes(value: number) {

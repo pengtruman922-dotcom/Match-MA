@@ -17,6 +17,14 @@ def test_business_update_extractor_timeout_seed_allows_long_attachment_jobs() ->
     assert "qwen3.6-plus attachment-backed business updates" in sql
 
 
+def test_buyer_intent_parser_timeout_seed_allows_long_requirement_jobs() -> None:
+    sql = Path("database/migrations/024_buyer_intent_parser_timeout.sql").read_text(encoding="utf-8")
+
+    assert "buyer_intent_parser" in sql
+    assert "greatest(coalesce(timeout_seconds, 90), 300)" in sql
+    assert "qwen3.6-plus buyer intent parsing can exceed 90 seconds" in sql
+
+
 def test_buyer_intent_prompt_seed_includes_expanded_requirement_fields() -> None:
     sql = Path("database/migrations/015_buyer_intent_prompt_v03.sql").read_text(encoding="utf-8")
 
