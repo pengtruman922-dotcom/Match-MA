@@ -2104,6 +2104,30 @@ def _get_buyer_intent_for_parse(db: Session, buyer_intent_id: UUID) -> dict[str,
     return _json_safe_dict(row)
 
 
+def _get_buyer_party(db: Session, buyer_party_id: UUID) -> dict[str, Any] | None:
+    row = db.execute(
+        text(
+            """
+            select
+              id, buyer_name, legal_name, aliases_json, buyer_type, group_name,
+              listed_status, region_province, region_city, main_business,
+              capital_strength_summary, profile_summary, status
+            from buyer_party
+            where id = :buyer_party_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ),
+        {
+            "buyer_party_id": buyer_party_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    return _json_safe_dict(row) if row else None
+
+
 def _get_attachment_for_ocr(db: Session, attachment_id: UUID) -> dict[str, Any]:
     row = db.execute(
         text(

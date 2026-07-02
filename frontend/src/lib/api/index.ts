@@ -24,6 +24,7 @@ import type {
   BuyerIntentTargetExclusion,
   BuyerIntentUpdate,
   BuyerIntentParseJob,
+  BuyerIntentParseStatus,
   BuyerParty,
   BuyerPartyCreate,
   BuyerPartyFilterOptions,
@@ -149,6 +150,7 @@ export const buyerIntents = {
       method: 'POST',
       body: JSON.stringify(data || {}),
     }),
+  parseStatus: (id: string) => apiRequest<BuyerIntentParseStatus>(`/buyer-intents/${id}/parse-status`),
   update: (id: string, data: BuyerIntentUpdate) =>
     apiRequest<BuyerIntent>(`/buyer-intents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   delete: (id: string) => apiRequest<{ status: string }>(`/buyer-intents/${id}`, { method: 'DELETE' }),

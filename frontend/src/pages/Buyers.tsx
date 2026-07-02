@@ -27,6 +27,7 @@ import type {
   BuyerIntent,
   BuyerIntentCreate,
   BuyerIntentFilterOptions,
+  BuyerIntentParseStatus,
   BuyerIntentSearchField,
   BuyerIntentSuggestion,
   BuyerParty,
@@ -41,6 +42,8 @@ type Tab = 'intents' | 'parties';
 type BuyerSuggestion = BuyerIntentSuggestion | BuyerPartySuggestion;
 
 const PAGE_SIZE = 20;
+const INTENT_PARSE_POLL_INTERVAL_MS = 2000;
+const INTENT_PARSE_POLL_TIMEOUT_MS = 90000;
 const INTENT_FILTERS: Array<keyof BuyerIntentFilters> = ['q', 'industry', 'region', 'status', 'listedStatus', 'requiresConsolidation'];
 const PARTY_FILTERS: Array<keyof BuyerPartyFilters> = ['q', 'buyerType', 'region', 'listedStatus', 'status'];
 
@@ -892,7 +895,7 @@ function CreateIntentModal({ onClose, onCreated }: { onClose: () => void; onCrea
   const [fileError, setFileError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (step !== 'intent_details' || uploadPolicy || policyLoading) return;
+    if (step !== 'intent_details' || uploadPolicy) return;
     let cancelled = false;
     setPolicyLoading(true);
     attachments
@@ -909,7 +912,7 @@ function CreateIntentModal({ onClose, onCreated }: { onClose: () => void; onCrea
     return () => {
       cancelled = true;
     };
-  }, [step, uploadPolicy, policyLoading]);
+  }, [step, uploadPolicy]);
 
   function updateForm<K extends keyof IntentForm>(key: K, value: IntentForm[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -1071,6 +1074,7 @@ function CreateIntentModal({ onClose, onCreated }: { onClose: () => void; onCrea
         } else {
           // Text-only requirements use the dedicated buyer intent parser.
           await buyerIntents.parse(created.id, { raw_requirement_text: supplement });
+          await waitForBuyerIntentParse(created.id);
         }
       }
       onCreated();
@@ -1431,6 +1435,28 @@ function buildIntentRawText(form: IntentForm, payload: BuyerIntentCreate, party:
   }
 
   return lines.join('\n');
+}
+
+async function waitForBuyerIntentParse(buyerIntentId: string): Promise<void> {
+  const deadline = Date.now() + INTENT_PARSE_POLL_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const status = await buyerIntents.parseStatus(buyerIntentId);
+    const job = status.latest_job;
+    if (job?.status === 'succeeded') return;
+    if (job && isTerminalFailedParseStatus(status)) {
+      throw new Error(status.latest_trace?.error_message || job.error_message || '买家意向解析失败');
+    }
+    await delay(INTENT_PARSE_POLL_INTERVAL_MS);
+  }
+}
+
+function isTerminalFailedParseStatus(status: BuyerIntentParseStatus): boolean {
+  const job = status.latest_job;
+  return job?.status === 'failed' || job?.status === 'cancelled';
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function formatBytes(value: number) {

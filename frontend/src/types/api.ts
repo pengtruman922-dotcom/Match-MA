@@ -329,6 +329,33 @@ export interface BuyerIntentParseJob {
   buyer_intent_id: string;
 }
 
+export interface BuyerIntentParseStatus {
+  buyer_intent: BuyerIntent;
+  latest_job: {
+    id: string;
+    job_type: string;
+    status: string;
+    queue_name: string;
+    error_code: string | null;
+    error_message: string | null;
+    attempt_count: number;
+    max_attempts: number;
+    started_at: string | null;
+    finished_at: string | null;
+    created_at: string;
+    updated_at: string;
+    result_json: Record<string, unknown>;
+    debug_ref?: DebugRef;
+  } | null;
+  latest_trace: {
+    status: string;
+    error_code?: string | null;
+    error_message?: string | null;
+  } | null;
+  recent_update_logs: Array<Record<string, unknown>>;
+  debug_ref: DebugRef;
+}
+
 export interface BuyerIntentUpdate {
   intent_name?: string;
   status?: string;

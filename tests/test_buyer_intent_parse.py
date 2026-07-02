@@ -2,6 +2,7 @@ from uuid import UUID
 
 from backend.app.api.routes.buyer_intents import _compact_parse_trace
 from backend.app.jobs.handlers import (
+    _build_buyer_profile_context,
     _normalize_buyer_intent_parse_changes,
     _normalize_equity_requirement_type,
     _normalize_listed_status,
@@ -11,6 +12,29 @@ from backend.app.jobs.handlers import (
 
 
 JOB_ID = UUID("00000000-0000-0000-0000-000000000001")
+
+
+class _FakeMappingResult:
+    def __init__(self, row):
+        self.row = row
+
+    def mappings(self):
+        return self
+
+    def one_or_none(self):
+        return self.row
+
+
+class _FakeDb:
+    def __init__(self, row):
+        self.row = row
+        self.statement = None
+        self.params = None
+
+    def execute(self, statement, params):
+        self.statement = str(statement)
+        self.params = params
+        return _FakeMappingResult(self.row)
 
 
 def test_buyer_intent_parse_output_validation_requires_supported_fields() -> None:
@@ -71,6 +95,41 @@ def test_buyer_intent_parser_enum_helpers_are_tolerant() -> None:
     assert _normalize_listed_status("准备上市") == "preparing_listing"
     assert _normalize_listed_status("pre IPO") == "pre_ipo"
     assert _normalize_equity_requirement_type("参股也可以") == "minority_acceptable"
+
+
+def test_buyer_profile_context_loads_linked_buyer_party() -> None:
+    buyer_party_id = UUID("00000000-0000-0000-0000-000000000123")
+    db = _FakeDb(
+        {
+            "id": buyer_party_id,
+            "buyer_name": "中大咨询",
+            "legal_name": "中大咨询有限公司",
+            "aliases_json": [],
+            "buyer_type": "industrial_buyer",
+            "group_name": None,
+            "listed_status": "unlisted",
+            "region_province": "广东省",
+            "region_city": "广州市",
+            "main_business": "咨询服务",
+            "capital_strength_summary": None,
+            "profile_summary": None,
+            "status": "active",
+        }
+    )
+
+    context = _build_buyer_profile_context(
+        db,
+        {
+            "id": "00000000-0000-0000-0000-000000000456",
+            "buyer_party_id": str(buyer_party_id),
+            "intent_name": "交通行业收购",
+        },
+    )
+
+    assert context["buyer_party"]["id"] == str(buyer_party_id)
+    assert context["buyer_party"]["buyer_name"] == "中大咨询"
+    assert db.params["buyer_party_id"] == buyer_party_id
+    assert "from buyer_party" in db.statement
 
 
 def test_compact_parse_trace_hides_long_raw_output() -> None:
