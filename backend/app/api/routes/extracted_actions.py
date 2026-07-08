@@ -923,7 +923,13 @@ def _allowed_seller_target_changes(changes: dict[str, Any]) -> dict[str, Any]:
         "risk_summary",
         "gap_summary",
     }
-    return {key: value for key, value in changes.items() if key in allowed_fields}
+    allowed = {key: value for key, value in changes.items() if key in allowed_fields}
+    # business_summary is a short profile shown in list rows; cap it so extracted
+    # actions that echo raw source material cannot flood the UI.
+    summary = allowed.get("business_summary")
+    if isinstance(summary, str):
+        allowed["business_summary"] = summary.strip()[:300]
+    return allowed
 
 
 def _seller_target_changes_with_post_parse_status(

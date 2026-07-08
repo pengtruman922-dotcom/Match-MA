@@ -2128,6 +2128,7 @@ def _candidate_targets_for_intent(
               and st.workspace_id = :workspace_id
               and st.deleted_at is null
               and st.recommendation_status = 'recommendable'
+              and st.lifecycle_status = 'active'
             order by
               case when st.industry_primary = :industry_primary then 0 else 1 end,
               st.current_net_profit_yuan desc nulls last,

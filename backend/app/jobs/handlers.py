@@ -3858,6 +3858,9 @@ SELLER_TARGET_TEXT_LIMITS = {
     "target_subject_name": 300,
     "valuation_date": 80,
     "asking_price_date": 80,
+    # business_summary is a short AI-written profile shown in list rows; cap it
+    # so a model that echoes raw source material cannot flood the UI.
+    "business_summary": 300,
 }
 
 BUYER_INTENT_PARSE_JSON_FIELDS = {

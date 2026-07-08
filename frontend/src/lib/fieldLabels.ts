@@ -4,6 +4,7 @@ const SELLER_TARGET_FIELD_LABELS: Record<string, string> = {
   target_name: '标的名称',
   target_type: '标的类型',
   target_subject_name: '标的主体',
+  lifecycle_status: '交易状态',
   recommendation_status: '推荐状态',
   information_status: '信息状态',
   industry_primary: '一级行业',
@@ -218,6 +219,11 @@ const VALUE_LABELS: Record<string, Record<string, string>> = {
     pre_ipo: '拟上市',
     unknown: '未知',
   },
+  lifecycle_status: {
+    active: '在售中',
+    sold: '已售出',
+    off_market: '已停售',
+  },
   recommendation_status: {
     recommendable: '可推荐',
     not_recommendable: '暂不可推荐',
@@ -288,11 +294,11 @@ const YES_NO_LIKE_FIELDS = new Set([
 
 Object.assign(VALUE_LABELS, {
   status: {
-    active: '??',
-    paused: '??',
-    archived: '???',
-    merged: '???',
-    completed: '???',
+    active: '活跃',
+    paused: '暂停',
+    archived: '已归档',
+    merged: '已合并',
+    completed: '已完成',
   },
   buyer_type: {
     industrial_buyer: '产业买家',

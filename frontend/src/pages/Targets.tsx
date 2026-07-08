@@ -30,9 +30,19 @@ import type {
   SellerTargetSuggestion,
 } from '../types/api';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
-import { sellerTargetStatusClass, sellerTargetStatusLabel } from '../lib/sellerTargetStatus';
+import {
+  sellerTargetDisplayStatus,
+  sellerTargetDisplayStatusClass,
+  sellerTargetDisplayStatusLabel,
+  sellerTargetStatusLabel,
+} from '../lib/sellerTargetStatus';
 
 const PAGE_SIZE = 20;
+const PARSE_POLL_INTERVAL_MS = 4000;
+
+function isParsingTarget(item: SellerTarget): boolean {
+  return item.information_status === 'parsing' || item.information_status === 'researching';
+}
 
 const SEARCH_FIELD_LABELS: Record<SellerTargetSearchField | 'all', string> = {
   all: '全部字段',
@@ -114,6 +124,36 @@ export default function Targets() {
   useEffect(() => {
     fetchTargets();
   }, [fetchTargets]);
+
+  // Poll rows still parsing so recommendation/summary flips show up without a
+  // manual refresh. Completion signal is information_status leaving parsing.
+  useEffect(() => {
+    const activeIds = items.filter(isParsingTarget).map((item) => item.id);
+    if (activeIds.length === 0) return;
+    const timer = window.setInterval(() => {
+      Promise.all(activeIds.map((id) => sellerTargets.get(id).catch(() => null))).then((rows) => {
+        const updates = rows.filter((row): row is SellerTarget => row !== null);
+        if (!updates.length) return;
+        setItems((prev) => {
+          let changed = false;
+          const next = prev.map((item) => {
+            const fresh = updates.find((row) => row.id === item.id);
+            if (!fresh) return item;
+            if (fresh.updated_at === item.updated_at && fresh.information_status === item.information_status) return item;
+            changed = true;
+            // The detail endpoint does not aggregate follow-ups; keep the list values.
+            return {
+              ...fresh,
+              latest_follow_up_on: item.latest_follow_up_on,
+              latest_follow_up_content: item.latest_follow_up_content,
+            };
+          });
+          return changed ? next : prev;
+        });
+      });
+    }, PARSE_POLL_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [items]);
 
   useEffect(() => {
     sellerTargets.filterOptions().then(setFilterOptions).catch(() => {});
@@ -345,7 +385,7 @@ export default function Targets() {
                 </th>
                 <th className="sticky left-12 z-20 w-[220px] bg-gray-50 text-left px-4 py-3 font-medium text-gray-600">标的名称</th>
                 <th className="w-20 max-w-20 text-left px-3 py-3 font-medium text-gray-600">标的主体</th>
-                <th className="w-[110px] text-center px-4 py-3 font-medium text-gray-600">推荐状态</th>
+                <th className="w-[110px] text-center px-4 py-3 font-medium text-gray-600">状态</th>
                 <th className="w-[92px] text-left px-4 py-3 font-medium text-gray-600">类型</th>
                 <th className="w-[96px] text-left px-4 py-3 font-medium text-gray-600">上市状态</th>
                 <th className="w-[150px] text-left px-4 py-3 font-medium text-gray-600">行业</th>
@@ -358,7 +398,7 @@ export default function Targets() {
                 <th className="w-[120px] text-left px-4 py-3 font-medium text-gray-600">出售比例</th>
                 <th className="w-[76px] text-center px-4 py-3 font-medium text-gray-600">控股</th>
                 <th className="w-[76px] text-center px-4 py-3 font-medium text-gray-600">并表</th>
-                <th className="w-[110px] text-center px-4 py-3 font-medium text-gray-600">信息状态</th>
+                <th className="w-[200px] text-left px-4 py-3 font-medium text-gray-600">最近跟进</th>
                 <th className="sticky right-0 z-20 w-[210px] bg-gray-50 text-left px-4 py-3 font-medium text-gray-600">操作</th>
               </tr>
             </thead>
@@ -468,10 +508,14 @@ function TargetRow({
       </td>
       <td className="sticky left-12 z-10 bg-white px-4 py-3 group-hover:bg-brand-50">
         <ClampedLink to={`/targets/${item.id}`} value={item.target_name} className="font-medium text-gray-900 hover:text-brand-600 transition-colors" />
-        {item.business_summary && <ClampedText value={item.business_summary} className="mt-1 text-xs text-gray-400" />}
+        {isParsingTarget(item) ? (
+          <p className="mt-1 text-xs italic text-sky-500">摘要生成中...</p>
+        ) : (
+          item.business_summary && <ClampedText value={item.business_summary} className="mt-1 text-xs text-gray-400" />
+        )}
       </td>
       <td className="w-20 max-w-20 px-3 py-3 text-gray-600"><ClampedText value={subject} /></td>
-      <td className="px-4 py-3 text-center"><StatusBadge status={item.recommendation_status} type="recommendation" /></td>
+      <td className="px-4 py-3 text-center"><DisplayStatusBadge item={item} /></td>
       <td className="px-4 py-3 text-gray-600"><ClampedText value={formatTargetType(item.target_type)} /></td>
       <td className="px-4 py-3 text-gray-600"><ClampedText value={formatListedStatus(item.listed_status)} /></td>
       <td className="px-4 py-3 text-gray-600"><ClampedText value={industry} /></td>
@@ -486,7 +530,16 @@ function TargetRow({
       <td className="px-4 py-3 text-gray-600"><ClampedText value={ratioText} /></td>
       <td className="px-4 py-3 text-center"><YesNoBadge value={item.can_control} /></td>
       <td className="px-4 py-3 text-center"><YesNoBadge value={item.can_consolidate} /></td>
-      <td className="px-4 py-3 text-center"><StatusBadge status={item.information_status} type="information" /></td>
+      <td className="px-4 py-3 text-gray-600">
+        {item.latest_follow_up_on ? (
+          <div>
+            <p className="text-[11px] font-mono text-gray-400">{item.latest_follow_up_on}</p>
+            <ClampedText value={item.latest_follow_up_content || ''} className="mt-0.5 text-xs" />
+          </div>
+        ) : (
+          '-'
+        )}
+      </td>
       <td className="sticky right-0 z-10 bg-white px-4 py-3 group-hover:bg-brand-50">
         <div className="flex items-center gap-1 whitespace-nowrap">
           <button
@@ -655,11 +708,17 @@ function setOrDelete(params: URLSearchParams, key: string, value: string | undef
   else params.delete(key);
 }
 
-function StatusBadge({ status, type }: { status: string; type: 'recommendation' | 'information' }) {
-  const colors = sellerTargetStatusClass(status, type);
-  const label = sellerTargetStatusLabel(status, type);
-
-  return <span className={`text-xs px-2 py-0.5 font-medium ${colors}`}>{label}</span>;
+function DisplayStatusBadge({ item }: { item: SellerTarget }) {
+  const displayStatus = sellerTargetDisplayStatus(item);
+  return (
+    <span
+      className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 font-medium ${sellerTargetDisplayStatusClass(displayStatus)}`}
+      title={`信息状态：${sellerTargetStatusLabel(item.information_status, 'information')}`}
+    >
+      {displayStatus === 'parsing' && <Loader2 className="w-3 h-3 animate-spin" />}
+      {sellerTargetDisplayStatusLabel(displayStatus)}
+    </span>
+  );
 }
 
 function YesNoBadge({ value }: { value: string | null }) {
@@ -899,7 +958,6 @@ function CreateTargetModal({ onClose, onCreated }: { onClose: () => void; onCrea
         headquarter_city: region.city,
         asking_price_yuan: askingPriceYuan,
         asking_price_date: normalizeOptional(form.askingPriceDate),
-        business_summary: normalizeOptional(form.supplement),
       };
 
       const created = await sellerTargets.create(payload);
@@ -1264,7 +1322,7 @@ function buildCreateTargetRawText(form: CreateTargetForm, payload: SellerTargetC
     form.askingPrice.trim() ? `报价：${form.askingPrice.trim()}` : null,
     form.askingPriceDate.trim() ? `报价时间：${form.askingPriceDate.trim()}` : null,
     '',
-    '解析要求：如果附件或正式文件识别到更完整的标的名称、主体名称、一级/二级行业、行业标签或地区，请以正式材料为准，可以覆盖上述初始输入；行业和地区字段请输出中文。不要臆造材料中没有的信息。',
+    '解析要求：如果附件或正式文件识别到更完整的标的名称、主体名称、一级/二级行业、行业标签或地区，请以正式材料为准，可以覆盖上述初始输入；行业和地区字段请输出中文。不要臆造材料中没有的信息。业务摘要（business_summary）请用一两句话概括标的主营业务与核心亮点，不要照抄或粘贴原文。',
   ].filter((line): line is string => line !== null);
 
   if (form.supplement.trim()) {

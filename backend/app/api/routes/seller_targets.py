@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID, uuid4
@@ -21,6 +22,7 @@ class SellerTargetCreate(BaseModel):
     target_type: str = "company"
     target_subject_name: str | None = Field(default=None, max_length=300)
     owner_user_id: UUID | None = None
+    lifecycle_status: Literal["active", "sold", "off_market"] = "active"
     recommendation_status: Literal["recommendable", "not_recommendable"] = "not_recommendable"
     information_status: Literal[
         "normal",
@@ -55,6 +57,7 @@ class SellerTargetOut(BaseModel):
     target_name: str
     target_type: str
     target_subject_name: str | None
+    lifecycle_status: str
     recommendation_status: str
     information_status: str
     industry_primary: str | None
@@ -104,6 +107,8 @@ class SellerTargetOut(BaseModel):
     gap_summary: str | None
     created_at: str
     updated_at: str
+    latest_follow_up_on: str | None = None
+    latest_follow_up_content: str | None = None
 
 
 class SellerTargetListOut(BaseModel):
@@ -158,6 +163,7 @@ class SellerTargetUpdate(BaseModel):
     management_team_summary: str | None = None
     management_retention_possible: str | None = None
     earnout_dependency_status: str | None = None
+    lifecycle_status: Literal["active", "sold", "off_market"] | None = None
     recommendation_status: str | None = None
     information_status: str | None = None
     business_summary: str | None = None
@@ -221,8 +227,28 @@ class SellerTargetBulkDeleteOut(BaseModel):
     skipped_ids: list[UUID]
 
 
+class TargetFollowUpCreate(BaseModel):
+    content: str = Field(min_length=1, max_length=4000)
+    occurred_on: date | None = None
+    related_buyer_party_ids: list[UUID] = Field(default_factory=list, max_length=20)
+
+
+class TargetFollowUpBuyerRef(BaseModel):
+    id: UUID
+    buyer_name: str
+
+
+class TargetFollowUpOut(BaseModel):
+    id: UUID
+    seller_target_id: UUID
+    occurred_on: str
+    content: str
+    related_buyer_parties: list[TargetFollowUpBuyerRef]
+    created_at: str
+
+
 SELLER_TARGET_OUT_COLUMNS = """
-              id, target_name, target_type, target_subject_name, recommendation_status, information_status,
+              id, target_name, target_type, target_subject_name, lifecycle_status, recommendation_status, information_status,
               industry_primary, industry_secondary, registered_province, registered_city,
               headquarter_province, headquarter_city, raw_region_text, region_granularity,
               listed_status, market_cap_yuan, current_revenue_yuan, current_net_profit_yuan,
@@ -238,6 +264,29 @@ SELLER_TARGET_OUT_COLUMNS = """
               created_at::text as created_at, updated_at::text as updated_at
 """
 
+# Single user-facing "status" derived from three orthogonal stored statuses:
+# parse lifecycle beats deal lifecycle beats recommendability, so the UI can
+# render one column while the database stays conflict-free.
+SELLER_TARGET_DISPLAY_STATUS_SQL = """
+              case
+                when information_status in ('parsing', 'researching') then 'parsing'
+                when information_status = 'parse_failed' then 'parse_failed'
+                when lifecycle_status = 'sold' then 'sold'
+                when lifecycle_status = 'off_market' then 'off_market'
+                when recommendation_status = 'recommendable' then 'recommendable'
+                else 'not_recommendable'
+              end
+"""
+
+SELLER_TARGET_DISPLAY_STATUS_LABELS = {
+    "parsing": "解析中",
+    "parse_failed": "解析失败",
+    "sold": "已售出",
+    "off_market": "已停售",
+    "recommendable": "可推荐",
+    "not_recommendable": "暂不可推荐",
+}
+
 
 @router.post("", response_model=SellerTargetOut, status_code=status.HTTP_201_CREATED)
 def create_seller_target(payload: SellerTargetCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
@@ -246,7 +295,7 @@ def create_seller_target(payload: SellerTargetCreate, db: Session = Depends(get_
             f"""
             insert into seller_target (
               team_id, workspace_id, target_name, target_type, target_subject_name, owner_user_id,
-              recommendation_status, information_status,
+              lifecycle_status, recommendation_status, information_status,
               industry_primary, industry_secondary, headquarter_province, headquarter_city,
               listed_status, current_revenue_yuan, current_net_profit_yuan,
               valuation_yuan, valuation_date, asking_price_yuan, asking_price_date, pe_ratio,
@@ -256,7 +305,7 @@ def create_seller_target(payload: SellerTargetCreate, db: Session = Depends(get_
             )
             values (
               :team_id, :workspace_id, :target_name, :target_type, :target_subject_name, :owner_user_id,
-              :recommendation_status, :information_status,
+              :lifecycle_status, :recommendation_status, :information_status,
               :industry_primary, :industry_secondary, :headquarter_province, :headquarter_city,
               :listed_status, :current_revenue_yuan, :current_net_profit_yuan,
               :valuation_yuan, :valuation_date, :asking_price_yuan, :asking_price_date, :pe_ratio,
@@ -296,7 +345,14 @@ def list_seller_targets(
     search_field: Literal["target_name", "target_subject_name", "business_summary"] | None = Query(default=None),
     industry: str | None = Query(default=None, max_length=200),
     region: str | None = Query(default=None, max_length=200),
-    status: Literal["recommendable", "not_recommendable"] | None = Query(default=None),
+    status: Literal[
+        "recommendable",
+        "not_recommendable",
+        "parsing",
+        "parse_failed",
+        "sold",
+        "off_market",
+    ] | None = Query(default=None),
 ) -> dict[str, Any]:
     where = ["team_id = :team_id", "workspace_id = :workspace_id", "deleted_at is null"]
     params: dict[str, Any] = {
@@ -323,7 +379,7 @@ def list_seller_targets(
         )
         params["region"] = region
     if status:
-        where.append("recommendation_status = :status")
+        where.append(f"({SELLER_TARGET_DISPLAY_STATUS_SQL}) = :status")
         params["status"] = status
 
     where_sql = " and ".join(where)
@@ -342,8 +398,18 @@ def list_seller_targets(
         text(
             f"""
             select
-{SELLER_TARGET_OUT_COLUMNS}
+{SELLER_TARGET_OUT_COLUMNS},
+              lf.occurred_on::text as latest_follow_up_on,
+              lf.content as latest_follow_up_content
             from seller_target
+            left join lateral (
+              select f.occurred_on, f.content
+              from target_follow_up f
+              where f.seller_target_id = seller_target.id
+                and f.deleted_at is null
+              order by f.occurred_on desc, f.created_at desc
+              limit 1
+            ) lf on true
             where {where_sql}
             order by updated_at desc
             limit :limit offset :offset
@@ -393,17 +459,17 @@ def seller_target_filter_options(db: Session = Depends(get_db)) -> dict[str, Any
     )
     statuses = _filter_options(
         db,
-        """
-        select recommendation_status as value, count(*) as count
+        f"""
+        select ({SELLER_TARGET_DISPLAY_STATUS_SQL}) as value, count(*) as count
         from seller_target
         where team_id = :team_id
           and workspace_id = :workspace_id
           and deleted_at is null
-        group by recommendation_status
-        order by count desc, recommendation_status asc
+        group by value
+        order by count desc, value asc
         """,
         params,
-        labels={"recommendable": "可推荐", "not_recommendable": "暂不可推荐"},
+        labels=SELLER_TARGET_DISPLAY_STATUS_LABELS,
     )
     return {"industries": industries, "regions": regions, "statuses": statuses}
 
@@ -596,6 +662,164 @@ def get_seller_target_parse_status(
     }
 
 
+@router.get("/{seller_target_id}/follow-ups", response_model=list[TargetFollowUpOut])
+def list_target_follow_ups(
+    seller_target_id: UUID,
+    db: Session = Depends(get_db),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[dict[str, Any]]:
+    _get_seller_target_or_404(db, seller_target_id)
+    rows = db.execute(
+        text(
+            """
+            select
+              id, seller_target_id, occurred_on::text as occurred_on, content,
+              related_buyer_party_ids_json, created_at::text as created_at
+            from target_follow_up
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and seller_target_id = :seller_target_id
+              and deleted_at is null
+            order by occurred_on desc, created_at desc
+            limit :limit
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "seller_target_id": seller_target_id,
+            "limit": limit,
+        },
+    ).mappings().all()
+    return _follow_ups_with_buyer_refs(db, [dict(row) for row in rows])
+
+
+@router.post(
+    "/{seller_target_id}/follow-ups",
+    response_model=TargetFollowUpOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_target_follow_up(
+    seller_target_id: UUID,
+    payload: TargetFollowUpCreate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    _get_seller_target_or_404(db, seller_target_id)
+    content = payload.content.strip()
+    if not content:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="content is required.")
+    related_ids = [str(party_id) for party_id in dict.fromkeys(payload.related_buyer_party_ids)]
+    row = db.execute(
+        text(
+            """
+            insert into target_follow_up (
+              team_id, workspace_id, seller_target_id, occurred_on, content,
+              related_buyer_party_ids_json, created_by
+            )
+            values (
+              :team_id, :workspace_id, :seller_target_id,
+              coalesce(:occurred_on, current_date), :content,
+              :related_buyer_party_ids_json, :created_by
+            )
+            returning
+              id, seller_target_id, occurred_on::text as occurred_on, content,
+              related_buyer_party_ids_json, created_at::text as created_at
+            """
+        ).bindparams(bindparam("related_buyer_party_ids_json", type_=JSONB)),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "seller_target_id": seller_target_id,
+            "occurred_on": payload.occurred_on,
+            "content": content,
+            "related_buyer_party_ids_json": related_ids,
+            "created_by": DEFAULT_ADMIN_USER_ID,
+        },
+    ).mappings().one()
+    db.commit()
+    return _follow_ups_with_buyer_refs(db, [dict(row)])[0]
+
+
+@router.delete("/{seller_target_id}/follow-ups/{follow_up_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_target_follow_up(
+    seller_target_id: UUID,
+    follow_up_id: UUID,
+    db: Session = Depends(get_db),
+) -> None:
+    result = db.execute(
+        text(
+            """
+            update target_follow_up
+            set deleted_at = now(), deleted_by = :deleted_by
+            where id = :follow_up_id
+              and seller_target_id = :seller_target_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ),
+        {
+            "follow_up_id": follow_up_id,
+            "seller_target_id": seller_target_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "deleted_by": DEFAULT_ADMIN_USER_ID,
+        },
+    )
+    if not result.rowcount:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Follow-up not found.")
+    db.commit()
+    return None
+
+
+def _follow_ups_with_buyer_refs(db: Session, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    party_ids: list[UUID] = []
+    for row in rows:
+        for raw_id in row.get("related_buyer_party_ids_json") or []:
+            try:
+                party_ids.append(UUID(str(raw_id)))
+            except (TypeError, ValueError):
+                continue
+    name_map: dict[str, str] = {}
+    if party_ids:
+        buyer_rows = db.execute(
+            text(
+                """
+                select id, buyer_name
+                from buyer_party
+                where team_id = :team_id
+                  and workspace_id = :workspace_id
+                  and id = any(:party_ids)
+                """
+            ),
+            {
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+                "party_ids": list(dict.fromkeys(party_ids)),
+            },
+        ).mappings().all()
+        name_map = {str(buyer["id"]): buyer["buyer_name"] for buyer in buyer_rows}
+
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        related = [
+            {"id": raw_id, "buyer_name": name_map[str(raw_id)]}
+            for raw_id in (row.get("related_buyer_party_ids_json") or [])
+            if str(raw_id) in name_map
+        ]
+        results.append(
+            {
+                "id": row["id"],
+                "seller_target_id": row["seller_target_id"],
+                "occurred_on": row["occurred_on"],
+                "content": row["content"],
+                "related_buyer_parties": related,
+                "created_at": row["created_at"],
+            }
+        )
+    return results
+
+
 @router.patch("/{seller_target_id}", response_model=SellerTargetOut)
 def update_seller_target(
     seller_target_id: UUID,
@@ -760,6 +984,7 @@ def _seller_target_params(payload: SellerTargetCreate) -> dict[str, Any]:
         "target_type": target_type,
         "target_subject_name": target_subject_name,
         "owner_user_id": payload.owner_user_id or DEFAULT_ADMIN_USER_ID,
+        "lifecycle_status": payload.lifecycle_status,
         "recommendation_status": payload.recommendation_status,
         "information_status": payload.information_status,
         "industry_primary": _normalize_optional_text(payload.industry_primary),

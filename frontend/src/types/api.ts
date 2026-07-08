@@ -3,6 +3,7 @@ export interface SellerTarget {
   target_name: string;
   target_type: string | null;
   target_subject_name: string | null;
+  lifecycle_status: string;
   recommendation_status: string;
   information_status: string;
   industry_primary: string | null;
@@ -52,6 +53,8 @@ export interface SellerTarget {
   gap_summary: string | null;
   created_at: string;
   updated_at: string;
+  latest_follow_up_on?: string | null;
+  latest_follow_up_content?: string | null;
 }
 
 export interface SellerTargetListResponse {
@@ -93,10 +96,31 @@ export interface SellerTargetBulkDeleteResponse {
   skipped_ids: string[];
 }
 
+export interface TargetFollowUpBuyerRef {
+  id: string;
+  buyer_name: string;
+}
+
+export interface TargetFollowUp {
+  id: string;
+  seller_target_id: string;
+  occurred_on: string;
+  content: string;
+  related_buyer_parties: TargetFollowUpBuyerRef[];
+  created_at: string;
+}
+
+export interface TargetFollowUpCreate {
+  content: string;
+  occurred_on?: string;
+  related_buyer_party_ids?: string[];
+}
+
 export interface SellerTargetCreate {
   target_name: string;
   target_type?: string;
   target_subject_name?: string;
+  lifecycle_status?: string;
   recommendation_status?: string;
   information_status?: string;
   industry_primary?: string;
@@ -121,6 +145,7 @@ export interface SellerTargetUpdate {
   target_name?: string;
   target_type?: string;
   target_subject_name?: string;
+  lifecycle_status?: string;
   recommendation_status?: string;
   information_status?: string;
   industry_primary?: string;

@@ -9,11 +9,19 @@ import {
   AlertCircle,
   FileText,
   Clock,
+  Loader2,
+  Trash2,
 } from 'lucide-react';
 import { relations, sellerTargets, updateLogs } from '../lib/api';
-import type { BuyerSellerRelation, RelationEvent, SellerTarget, UpdateLog } from '../types/api';
+import type { BuyerSellerRelation, RelationEvent, SellerTarget, TargetFollowUp, UpdateLog } from '../types/api';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
-import { sellerTargetStatusClass, sellerTargetStatusLabel } from '../lib/sellerTargetStatus';
+import {
+  sellerTargetDisplayStatus,
+  sellerTargetDisplayStatusClass,
+  sellerTargetDisplayStatusLabel,
+  sellerTargetStatusClass,
+  sellerTargetStatusLabel,
+} from '../lib/sellerTargetStatus';
 import { fieldLabel, sourceTypeLabel, valueLabel } from '../lib/fieldLabels';
 
 type Tab = 'info' | 'attachments' | 'relations' | 'history';
@@ -27,7 +35,9 @@ export default function TargetDetail() {
   const [logs, setLogs] = useState<UpdateLog[]>([]);
   const [relationItems, setRelationItems] = useState<BuyerSellerRelation[]>([]);
   const [relationEvents, setRelationEvents] = useState<RelationEvent[]>([]);
+  const [followUps, setFollowUps] = useState<TargetFollowUp[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [lifecycleSaving, setLifecycleSaving] = useState(false);
 
   useEffect(() => {
     if (!id) return;
@@ -40,14 +50,29 @@ export default function TargetDetail() {
       updateLogs.list({ entity_type: 'seller_target', entity_id: id }),
       relations.list({ seller_target_id: id, limit: 50 }),
       relations.listEvents({ seller_target_id: id, limit: 50 }),
+      sellerTargets.followUps(id),
     ])
-      .then(([nextLogs, nextRelations, nextEvents]) => {
+      .then(([nextLogs, nextRelations, nextEvents, nextFollowUps]) => {
         setLogs(nextLogs);
         setRelationItems(nextRelations);
         setRelationEvents(nextEvents);
+        setFollowUps(nextFollowUps);
       })
       .catch(() => {});
   }, [id, navigate]);
+
+  const handleLifecycleChange = async (value: string) => {
+    if (!target || value === target.lifecycle_status) return;
+    setLifecycleSaving(true);
+    try {
+      const updated = await sellerTargets.update(target.id, { lifecycle_status: value });
+      setTarget(updated);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '更新交易状态失败');
+    } finally {
+      setLifecycleSaving(false);
+    }
+  };
 
   if (loading) {
     return (
@@ -62,7 +87,7 @@ export default function TargetDetail() {
   const tabs: { key: Tab; label: string }[] = [
     { key: 'info', label: '基本信息' },
     { key: 'attachments', label: '附件与证据' },
-    { key: 'relations', label: '关系/跟进' },
+    { key: 'relations', label: '跟进记录' },
     { key: 'history', label: '更新记录' },
   ];
 
@@ -81,12 +106,23 @@ export default function TargetDetail() {
               {target.headquarter_province && <span>· {target.headquarter_province}{target.headquarter_city || ''}</span>}
               {target.current_net_profit_yuan && <span>· 利润{formatYuan(target.current_net_profit_yuan)}</span>}
               {target.asking_price_yuan && <span>· 报价{formatYuan(target.asking_price_yuan)}*</span>}
-              <StatusBadge status={target.recommendation_status} type="recommendation" />
+              <DisplayStatusBadge target={target} />
               <StatusBadge status={target.information_status} type="information" />
             </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <select
+            value={target.lifecycle_status}
+            onChange={(event) => handleLifecycleChange(event.target.value)}
+            disabled={lifecycleSaving}
+            title="交易状态：已售出/已停售的标的会自动退出推荐候选池"
+            className="px-2 py-1.5 text-sm border border-gray-200 text-gray-700 bg-white outline-none hover:border-brand-500 focus:border-brand-600 disabled:opacity-50"
+          >
+            <option value="active">在售中</option>
+            <option value="sold">已售出</option>
+            <option value="off_market">已停售</option>
+          </select>
           <button
             onClick={() => setDrawerOpen(true)}
             className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border border-gray-200 text-gray-700 hover:border-brand-500 hover:text-brand-600 transition-colors"
@@ -128,7 +164,13 @@ export default function TargetDetail() {
               {activeTab === 'info' && <InfoTab target={target} />}
               {activeTab === 'attachments' && <AttachmentsTab />}
               {activeTab === 'relations' && (
-                <RelationsTab relationItems={relationItems} relationEvents={relationEvents} />
+                <FollowUpsTab
+                  targetId={target.id}
+                  followUps={followUps}
+                  onChanged={setFollowUps}
+                  relationItems={relationItems}
+                  relationEvents={relationEvents}
+                />
               )}
               {activeTab === 'history' && <HistoryTab logs={logs} />}
             </div>
@@ -248,6 +290,146 @@ function AttachmentsTab() {
     <div className="text-center py-10">
       <FileText className="w-8 h-8 text-gray-300 mx-auto mb-2" />
       <p className="text-sm text-gray-400">附件解析功能后端开发中</p>
+    </div>
+  );
+}
+
+function FollowUpsTab({
+  targetId,
+  followUps,
+  onChanged,
+  relationItems,
+  relationEvents,
+}: {
+  targetId: string;
+  followUps: TargetFollowUp[];
+  onChanged: (next: TargetFollowUp[]) => void;
+  relationItems: BuyerSellerRelation[];
+  relationEvents: RelationEvent[];
+}) {
+  const [content, setContent] = useState('');
+  const [occurredOn, setOccurredOn] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const refresh = () => sellerTargets.followUps(targetId).then(onChanged).catch(() => {});
+
+  const handleSubmit = async () => {
+    const text = content.trim();
+    if (!text) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await sellerTargets.createFollowUp(targetId, {
+        content: text,
+        occurred_on: occurredOn || undefined,
+      });
+      setContent('');
+      setOccurredOn('');
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '保存跟进记录失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async (followUp: TargetFollowUp) => {
+    if (!window.confirm('确认删除这条跟进记录？')) return;
+    setDeletingId(followUp.id);
+    try {
+      await sellerTargets.deleteFollowUp(targetId, followUp.id);
+      await refresh();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '删除失败');
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <section>
+        <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">添加跟进</h4>
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <input
+              type="date"
+              value={occurredOn}
+              onChange={(event) => setOccurredOn(event.target.value)}
+              className="border border-gray-200 px-2 py-1.5 text-sm text-gray-700 outline-none focus:border-brand-600"
+              title="跟进日期，留空默认今天"
+            />
+            <span className="text-xs text-gray-400">留空默认今天，可补录历史日期</span>
+          </div>
+          <textarea
+            value={content}
+            onChange={(event) => setContent(event.target.value)}
+            placeholder="例如：已发给广州工业投资控股集团有限公司，需要再确认交易条件"
+            className="w-full border border-gray-200 px-3 py-2 text-sm outline-none focus:border-brand-600 min-h-[64px] resize-y"
+          />
+          {error && <p className="text-xs text-red-600">{error}</p>}
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={handleSubmit}
+              disabled={saving || !content.trim()}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50"
+            >
+              {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+              保存跟进
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">跟进记录</h4>
+        {followUps.length === 0 ? (
+          <p className="text-sm text-gray-400">暂无人工跟进记录</p>
+        ) : (
+          <div className="space-y-2">
+            {followUps.map((followUp) => (
+              <div key={followUp.id} className="group flex items-start gap-3 border border-gray-100 px-3 py-2.5">
+                <span className="text-xs text-gray-400 font-mono w-24 shrink-0 pt-0.5">{followUp.occurred_on}</span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm text-gray-800 whitespace-pre-wrap">{followUp.content}</p>
+                  {followUp.related_buyer_parties.length > 0 && (
+                    <p className="mt-1 flex flex-wrap gap-1">
+                      {followUp.related_buyer_parties.map((buyer) => (
+                        <Link
+                          key={buyer.id}
+                          to={`/buyers/${buyer.id}`}
+                          className="inline-flex items-center gap-1 bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-600 hover:bg-brand-50 hover:text-brand-700"
+                        >
+                          <UserRound className="w-2.5 h-2.5" />
+                          {buyer.buyer_name}
+                        </Link>
+                      ))}
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleDelete(followUp)}
+                  disabled={deletingId === followUp.id}
+                  className="shrink-0 p-1 text-gray-300 hover:text-red-600 opacity-0 group-hover:opacity-100 transition-opacity disabled:opacity-50"
+                  title="删除跟进记录"
+                >
+                  {deletingId === followUp.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {relationItems.length === 0 && relationEvents.length === 0 ? (
+        <p className="text-xs text-gray-400">推荐、接触、尽调等系统进展会自动沉淀在下方。</p>
+      ) : (
+        <RelationsTab relationItems={relationItems} relationEvents={relationEvents} />
+      )}
     </div>
   );
 }
@@ -391,6 +573,15 @@ function StatusBadge({ status, type }: { status: string; type: 'recommendation' 
   const label = sellerTargetStatusLabel(status, type);
 
   return <span className={`text-xs px-1.5 py-0.5 font-medium ${colors}`}>{label}</span>;
+}
+
+function DisplayStatusBadge({ target }: { target: SellerTarget }) {
+  const displayStatus = sellerTargetDisplayStatus(target);
+  return (
+    <span className={`text-xs px-1.5 py-0.5 font-medium ${sellerTargetDisplayStatusClass(displayStatus)}`}>
+      {sellerTargetDisplayStatusLabel(displayStatus)}
+    </span>
+  );
 }
 
 function formatYuan(val: string): string {
