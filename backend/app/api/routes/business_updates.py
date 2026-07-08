@@ -1237,6 +1237,43 @@ def _mark_business_update_processing(db: Session, business_update_id: UUID) -> N
             "workspace_id": DEFAULT_WORKSPACE_ID,
         },
     )
+    _mark_bound_seller_targets_parsing(db, business_update_id)
+
+
+def _mark_bound_seller_targets_parsing(db: Session, business_update_id: UUID) -> None:
+    """Show bound targets as parsing so the list/detail polling picks the run up.
+
+    The extract-actions handler releases them afterwards: field applies flip to
+    normal, follow-up-only applies release to normal, leftovers become
+    pending_review, failures become parse_failed.
+    """
+    db.execute(
+        text(
+            """
+            update seller_target st
+            set information_status = 'parsing',
+                updated_at = now(),
+                updated_by = :updated_by
+            from business_update bu
+            where bu.id = :business_update_id
+              and bu.team_id = :team_id
+              and bu.workspace_id = :workspace_id
+              and st.team_id = :team_id
+              and st.workspace_id = :workspace_id
+              and st.deleted_at is null
+              and st.information_status <> 'parsing'
+              and st.id::text in (
+                select jsonb_array_elements_text(bu.bound_seller_target_ids_json)
+              )
+            """
+        ),
+        {
+            "business_update_id": business_update_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "updated_by": DEFAULT_ADMIN_USER_ID,
+        },
+    )
 
 
 def _mark_attachment_parsing(db: Session, attachment_id: UUID, job_id: UUID) -> None:
@@ -1851,6 +1888,7 @@ REVIEW_GROUP_LABELS = {
 ACTION_LABELS = {
     "seller_fact_update": "标的字段更新",
     "seller_event": "标的事件",
+    "target_follow_up": "标的跟进记录",
     "buyer_intent_update": "买家意向更新",
     "buyer_seller_relation_update": "关系进展更新",
     "buyer_intent_target_exclusion": "买家排除标的",
@@ -1872,6 +1910,7 @@ APPLY_SUPPORTED_ACTION_TYPES = {
     "buyer_intent_update",
     "buyer_seller_relation_update",
     "buyer_intent_target_exclusion",
+    "target_follow_up",
 }
 
 

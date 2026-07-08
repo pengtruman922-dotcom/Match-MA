@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -27,6 +28,7 @@ from backend.app.api.routes.extracted_actions import (
     apply_buyer_intent_update_action,
     apply_buyer_seller_relation_update_action,
     apply_seller_fact_update_action,
+    apply_target_follow_up_action,
 )
 from backend.app.jobs.queue import JobClaim
 from backend.app.services.search_docs import (
@@ -52,6 +54,7 @@ from backend.app.services.pdf_inspection import inspect_pdf_text_layer
 ALLOWED_ACTION_TYPES = {
     "seller_fact_update",
     "seller_event",
+    "target_follow_up",
     "buyer_seller_relation_update",
     "buyer_intent_target_exclusion",
     "buyer_intent_update",
@@ -1984,7 +1987,7 @@ def _get_business_update(db: Session, business_update_id: UUID) -> dict[str, Any
               id, raw_text, input_type, processing_status,
               bound_seller_target_ids_json, bound_buyer_party_ids_json,
               bound_buyer_intent_ids_json, bound_recommendation_session_id,
-              metadata_json
+              metadata_json, created_at::text as created_at
             from business_update
             where id = :business_update_id
               and team_id = :team_id
@@ -3256,6 +3259,8 @@ def _build_business_update_context(db: Session, business_update: dict[str, Any])
         "bound_seller_targets": _fetch_seller_targets(db, seller_target_ids),
         "bound_buyer_parties": _fetch_buyer_parties(db, buyer_party_ids),
         "bound_buyer_intents": _fetch_buyer_intents(db, buyer_intent_ids),
+        # Reference date for resolving partial follow-up dates such as 0730.
+        "update_date": str(business_update.get("created_at") or "")[:10],
         "instructions": {
             "target_id_policy": (
                 "Use bound object IDs only when they clearly match; otherwise null."
@@ -4672,7 +4677,80 @@ def _normalize_proposed_changes(
             aliases=BUYER_SELLER_RELATION_FIELD_ALIASES,
             enum_fields=BUYER_SELLER_RELATION_ENUM_FIELDS,
         )
+    if action_type == "target_follow_up":
+        return _normalize_target_follow_up_changes(proposed_changes)
     return proposed_changes, []
+
+
+TARGET_FOLLOW_UP_DATE_PATTERNS = (
+    ("%Y-%m-%d", re.compile(r"^\d{4}-\d{1,2}-\d{1,2}$")),
+    ("%Y/%m/%d", re.compile(r"^\d{4}/\d{1,2}/\d{1,2}$")),
+    ("%Y.%m.%d", re.compile(r"^\d{4}\.\d{1,2}\.\d{1,2}$")),
+    ("%Y%m%d", re.compile(r"^\d{8}$")),
+)
+
+
+def _normalize_target_follow_up_changes(
+    proposed_changes: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    notes: list[str] = []
+    content = str(proposed_changes.get("content") or "").strip()
+    if len(content) > 2000:
+        content = content[:2000]
+        notes.append("content_truncated_to_2000")
+
+    occurred_on: str | None = None
+    raw_date = str(proposed_changes.get("occurred_on") or "").strip()
+    if raw_date:
+        parsed = _parse_follow_up_date(raw_date)
+        if parsed is None:
+            notes.append(f"occurred_on_unparseable:{raw_date[:40]}")
+        else:
+            if parsed > date.today():
+                # Year-less dates resolved into the future are almost always
+                # last year's follow-ups.
+                parsed = _minus_one_year(parsed)
+                notes.append("occurred_on_future_shifted_back_one_year")
+            occurred_on = parsed.isoformat()
+
+    buyer_names: list[str] = []
+    raw_names = proposed_changes.get("buyer_names")
+    if isinstance(raw_names, list):
+        for raw_name in raw_names:
+            name = str(raw_name or "").strip()
+            if name and name not in buyer_names:
+                buyer_names.append(name)
+        if len(buyer_names) > 10:
+            buyer_names = buyer_names[:10]
+            notes.append("buyer_names_truncated_to_10")
+
+    for key in proposed_changes:
+        if key not in {"occurred_on", "content", "buyer_names"}:
+            notes.append(f"ignored_unsupported_field:{key}")
+
+    changes: dict[str, Any] = {"content": content, "buyer_names": buyer_names}
+    if occurred_on:
+        changes["occurred_on"] = occurred_on
+    return changes, notes
+
+
+def _parse_follow_up_date(raw: str) -> date | None:
+    from datetime import datetime as _datetime
+
+    for fmt, pattern in TARGET_FOLLOW_UP_DATE_PATTERNS:
+        if pattern.match(raw):
+            try:
+                return _datetime.strptime(raw, fmt).date()
+            except ValueError:
+                return None
+    return None
+
+
+def _minus_one_year(value: date) -> date:
+    try:
+        return value.replace(year=value.year - 1)
+    except ValueError:
+        return value - timedelta(days=366)
 
 
 def _normalize_money_fields_from_action_evidence(
@@ -4971,7 +5049,7 @@ def _normalize_action_target(
     if target_entity_id is not None:
         return target_entity_type, target_entity_id, []
 
-    if action_type == "seller_fact_update":
+    if action_type in {"seller_fact_update", "target_follow_up"}:
         bound_ids = _uuid_list(business_update["bound_seller_target_ids_json"])
         if len(bound_ids) == 1:
             return "seller_target", bound_ids[0], ["target_entity_id<-single_bound_seller_target"]
@@ -5082,12 +5160,27 @@ def _insert_extracted_actions(
     return action_ids
 
 
+AUTO_APPLY_ACTION_TYPE_ORDER = {
+    "seller_fact_update": 0,
+    "buyer_intent_update": 1,
+    "buyer_seller_relation_update": 2,
+    "buyer_intent_target_exclusion": 3,
+    # Follow-ups apply last: fact updates must run the post-parse status flip
+    # while the target is still in 'parsing'.
+    "target_follow_up": 4,
+}
+
+
 def _auto_apply_safe_actions(db: Session, action_ids: list[UUID]) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
+    actions: list[dict[str, Any]] = []
     for action_id in action_ids:
         action = _get_extracted_action_for_auto_apply(db, action_id)
-        if not action or not _is_safe_auto_apply_action(action):
-            continue
+        if action and _is_safe_auto_apply_action(action):
+            actions.append(action)
+    actions.sort(key=lambda action: AUTO_APPLY_ACTION_TYPE_ORDER.get(action["action_type"], 99))
+
+    results: list[dict[str, Any]] = []
+    for action in actions:
         result = _apply_auto_action(db, action)
         if result:
             results.append(result)
@@ -5127,6 +5220,8 @@ def _apply_auto_action(db: Session, action: dict[str, Any]) -> dict[str, Any] | 
         return apply_buyer_seller_relation_update_action(db, action, require_accepted=False)
     if action["action_type"] == "buyer_intent_target_exclusion":
         return apply_buyer_intent_target_exclusion_action(db, action, require_accepted=False)
+    if action["action_type"] == "target_follow_up":
+        return apply_target_follow_up_action(db, action, require_accepted=False)
     return None
 
 
@@ -5151,6 +5246,14 @@ def _is_safe_auto_apply_action(action: dict[str, Any]) -> bool:
     if action["action_type"] == "buyer_intent_target_exclusion":
         changes = action["proposed_changes_json"]
         return bool((changes.get("buyer_intent_id") or action["target_entity_id"]) and changes.get("seller_target_id"))
+
+    if action["action_type"] == "target_follow_up":
+        changes = action["proposed_changes_json"]
+        return (
+            action["target_entity_type"] == "seller_target"
+            and action["target_entity_id"] is not None
+            and bool(str(changes.get("content") or "").strip())
+        )
 
     return False
 
@@ -5268,7 +5371,6 @@ def _mark_bound_seller_targets_pending_review_after_business_update_parse(
             """
             update seller_target
             set information_status = 'pending_review',
-                recommendation_status = 'not_recommendable',
                 updated_at = now(),
                 updated_by = :updated_by,
                 metadata_json = metadata_json || :metadata_patch
@@ -5308,7 +5410,6 @@ def _mark_seller_targets_parse_failed(
             """
             update seller_target
             set information_status = 'parse_failed',
-                recommendation_status = 'not_recommendable',
                 updated_at = now(),
                 updated_by = :updated_by,
                 metadata_json = metadata_json || :metadata_patch

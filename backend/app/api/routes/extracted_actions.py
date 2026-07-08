@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -233,6 +234,8 @@ def apply_extracted_action(extracted_action_id: UUID, db: Session = Depends(get_
         result = apply_buyer_seller_relation_update_action(db, action, require_accepted=True)
     elif action["action_type"] == "buyer_intent_target_exclusion":
         result = apply_buyer_intent_target_exclusion_action(db, action, require_accepted=True)
+    elif action["action_type"] == "target_follow_up":
+        result = apply_target_follow_up_action(db, action, require_accepted=True)
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -353,6 +356,190 @@ def apply_seller_fact_update_action(
         "entity_id": seller_target_id,
         "applied_fields": list(diff.keys()),
     }
+
+
+# Transient statuses a follow-up-only parse should release the target from.
+# Only the parse-lifecycle statuses set by this flow; a follow-up note never
+# changes recommendation_status.
+TARGET_FOLLOW_UP_PARSING_STATUSES = ("parsing", "researching")
+
+
+def apply_target_follow_up_action(
+    db: Session,
+    action: dict[str, Any],
+    *,
+    require_accepted: bool = True,
+) -> dict[str, Any]:
+    if action["action_type"] != "target_follow_up" or action["target_entity_type"] != "seller_target":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only target_follow_up actions targeting seller_target are supported.",
+        )
+    if action["target_entity_id"] is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target_entity_id is required.")
+    if action["applied_at"] is not None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Action has already been applied.")
+    if require_accepted and action["review_status"] not in {"accepted", "auto_accepted"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Action must be accepted before apply.",
+        )
+
+    seller_target_id = action["target_entity_id"]
+    _get_seller_target_snapshot_or_404(db, seller_target_id)
+    changes = action["proposed_changes_json"] or {}
+    content = str(changes.get("content") or "").strip()[:2000]
+    if not content:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target_follow_up requires content.")
+    occurred_on = _parse_follow_up_occurred_on(changes.get("occurred_on"))
+    buyer_names = [str(name).strip() for name in (changes.get("buyer_names") or []) if str(name).strip()]
+    related_buyer_party_ids = _match_buyer_party_ids(db, buyer_names)
+
+    def _finish(result_status: str, applied_fields: list[str]) -> dict[str, Any]:
+        _release_target_from_parsing_after_follow_up(db, seller_target_id)
+        _mark_action_applied(
+            db,
+            action["id"],
+            review_status="auto_accepted" if not require_accepted else None,
+        )
+        _refresh_business_update_status(db, action["business_update_id"])
+        return {
+            "status": result_status,
+            "extracted_action_id": action["id"],
+            "business_update_id": action["business_update_id"],
+            "entity_type": "seller_target",
+            "entity_id": seller_target_id,
+            "applied_fields": applied_fields,
+        }
+
+    # Job retries re-extract the same material; skip identical entries.
+    duplicate_id = db.execute(
+        text(
+            """
+            select id
+            from target_follow_up
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and seller_target_id = :seller_target_id
+              and occurred_on = coalesce(cast(:occurred_on as date), current_date)
+              and content = :content
+              and deleted_at is null
+            limit 1
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "seller_target_id": seller_target_id,
+            "occurred_on": occurred_on,
+            "content": content,
+        },
+    ).scalar_one_or_none()
+    if duplicate_id:
+        return _finish("noop", [])
+
+    db.execute(
+        text(
+            """
+            insert into target_follow_up (
+              team_id, workspace_id, seller_target_id, occurred_on, content,
+              related_buyer_party_ids_json, created_by, metadata_json
+            )
+            values (
+              :team_id, :workspace_id, :seller_target_id,
+              coalesce(cast(:occurred_on as date), current_date), :content,
+              :related_buyer_party_ids_json, :created_by, :metadata_json
+            )
+            """
+        ).bindparams(
+            bindparam("related_buyer_party_ids_json", type_=JSONB),
+            bindparam("metadata_json", type_=JSONB),
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "seller_target_id": seller_target_id,
+            "occurred_on": occurred_on,
+            "content": content,
+            "related_buyer_party_ids_json": [str(party_id) for party_id in related_buyer_party_ids],
+            "created_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_json": {
+                "source": "extracted_action",
+                "extracted_action_id": str(action["id"]),
+                "business_update_id": str(action["business_update_id"]),
+                "buyer_names_raw": buyer_names,
+            },
+        },
+    )
+    return _finish("applied", ["target_follow_up"])
+
+
+def _parse_follow_up_occurred_on(raw: Any) -> str | None:
+    text_value = str(raw or "").strip()
+    if not text_value:
+        return None
+    try:
+        parsed = date.fromisoformat(text_value)
+    except ValueError:
+        return None
+    if parsed > date.today():
+        try:
+            parsed = parsed.replace(year=parsed.year - 1)
+        except ValueError:
+            return None
+    return parsed.isoformat()
+
+
+def _match_buyer_party_ids(db: Session, buyer_names: list[str]) -> list[UUID]:
+    matched: list[UUID] = []
+    for name in buyer_names:
+        rows = db.execute(
+            text(
+                """
+                select id
+                from buyer_party
+                where team_id = :team_id
+                  and workspace_id = :workspace_id
+                  and deleted_at is null
+                  and (buyer_name = :name or legal_name = :name or aliases_json ? :name)
+                limit 2
+                """
+            ),
+            {
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+                "name": name,
+            },
+        ).scalars().all()
+        # Attach only unambiguous matches; otherwise the name stays in content.
+        if len(rows) == 1 and rows[0] not in matched:
+            matched.append(rows[0])
+    return matched
+
+
+def _release_target_from_parsing_after_follow_up(db: Session, seller_target_id: UUID) -> None:
+    db.execute(
+        text(
+            """
+            update seller_target
+            set information_status = 'normal',
+                updated_at = now(),
+                updated_by = :updated_by
+            where id = :seller_target_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+              and information_status = any(:parsing_statuses)
+            """
+        ),
+        {
+            "seller_target_id": seller_target_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "parsing_statuses": list(TARGET_FOLLOW_UP_PARSING_STATUSES),
+        },
+    )
 
 
 def apply_buyer_intent_update_action(

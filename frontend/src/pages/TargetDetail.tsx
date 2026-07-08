@@ -61,6 +61,33 @@ export default function TargetDetail() {
       .catch(() => {});
   }, [id, navigate]);
 
+  // Poll while a business-update parse is running so status/summary/follow-up
+  // changes show up without a manual refresh.
+  const parsing = target?.information_status === 'parsing' || target?.information_status === 'researching';
+  useEffect(() => {
+    if (!id || !parsing) return;
+    const timer = window.setInterval(() => {
+      sellerTargets
+        .get(id)
+        .then((fresh) => {
+          setTarget(fresh);
+          if (fresh.information_status !== 'parsing' && fresh.information_status !== 'researching') {
+            Promise.all([
+              updateLogs.list({ entity_type: 'seller_target', entity_id: id }),
+              sellerTargets.followUps(id),
+            ])
+              .then(([nextLogs, nextFollowUps]) => {
+                setLogs(nextLogs);
+                setFollowUps(nextFollowUps);
+              })
+              .catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [id, parsing]);
+
   const handleLifecycleChange = async (value: string) => {
     if (!target || value === target.lifecycle_status) return;
     setLifecycleSaving(true);
@@ -213,6 +240,9 @@ export default function TargetDetail() {
         onClose={() => setDrawerOpen(false)}
         defaultTargetId={target.id}
         defaultTargetName={target.target_name}
+        onSuccess={() => {
+          if (id) sellerTargets.get(id).then(setTarget).catch(() => {});
+        }}
       />
     </div>
   );
@@ -307,33 +337,9 @@ function FollowUpsTab({
   relationItems: BuyerSellerRelation[];
   relationEvents: RelationEvent[];
 }) {
-  const [content, setContent] = useState('');
-  const [occurredOn, setOccurredOn] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const refresh = () => sellerTargets.followUps(targetId).then(onChanged).catch(() => {});
-
-  const handleSubmit = async () => {
-    const text = content.trim();
-    if (!text) return;
-    setSaving(true);
-    setError(null);
-    try {
-      await sellerTargets.createFollowUp(targetId, {
-        content: text,
-        occurred_on: occurredOn || undefined,
-      });
-      setContent('');
-      setOccurredOn('');
-      await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '保存跟进记录失败');
-    } finally {
-      setSaving(false);
-    }
-  };
 
   const handleDelete = async (followUp: TargetFollowUp) => {
     if (!window.confirm('确认删除这条跟进记录？')) return;
@@ -351,43 +357,12 @@ function FollowUpsTab({
   return (
     <div className="space-y-6">
       <section>
-        <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">添加跟进</h4>
-        <div className="space-y-2">
-          <div className="flex items-center gap-2">
-            <input
-              type="date"
-              value={occurredOn}
-              onChange={(event) => setOccurredOn(event.target.value)}
-              className="border border-gray-200 px-2 py-1.5 text-sm text-gray-700 outline-none focus:border-brand-600"
-              title="跟进日期，留空默认今天"
-            />
-            <span className="text-xs text-gray-400">留空默认今天，可补录历史日期</span>
-          </div>
-          <textarea
-            value={content}
-            onChange={(event) => setContent(event.target.value)}
-            placeholder="例如：已发给广州工业投资控股集团有限公司，需要再确认交易条件"
-            className="w-full border border-gray-200 px-3 py-2 text-sm outline-none focus:border-brand-600 min-h-[64px] resize-y"
-          />
-          {error && <p className="text-xs text-red-600">{error}</p>}
-          <div className="flex justify-end">
-            <button
-              type="button"
-              onClick={handleSubmit}
-              disabled={saving || !content.trim()}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50"
-            >
-              {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-              保存跟进
-            </button>
-          </div>
-        </div>
-      </section>
-
-      <section>
         <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">跟进记录</h4>
+        <p className="mb-3 text-xs text-gray-400">
+          在「录入更新」里输入跟进动态（如：0730 推给广州工业投资控股集团，等待反馈），AI 解析后会自动按日期落到这里。
+        </p>
         {followUps.length === 0 ? (
-          <p className="text-sm text-gray-400">暂无人工跟进记录</p>
+          <p className="text-sm text-gray-400">暂无跟进记录</p>
         ) : (
           <div className="space-y-2">
             {followUps.map((followUp) => (
