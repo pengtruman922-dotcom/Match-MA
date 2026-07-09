@@ -8,8 +8,17 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
+from backend.app.api.authn import AuthContext, CurrentUser, require_admin
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
-from backend.app.api.routes.utils import diff_payload, write_action_log, write_action_logs_for_diff
+from backend.app.api.routes.utils import (
+    assign_owner_bulk,
+    diff_payload,
+    ensure_active_user,
+    owner_filter_condition,
+    owner_filter_options,
+    write_action_log,
+    write_action_logs_for_diff,
+)
 from backend.app.db import get_db
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 
@@ -106,6 +115,8 @@ class BuyerIntentOut(BaseModel):
     priority_summary: str | None
     preference_summary: str | None
     unknown_summary: str | None
+    owner_user_id: UUID | None = None
+    owner_name: str | None = None
     created_at: str
     updated_at: str
 
@@ -160,6 +171,7 @@ class BuyerIntentUpdate(BaseModel):
     priority_summary: str | None = None
     preference_summary: str | None = None
     unknown_summary: str | None = None
+    owner_user_id: UUID | None = None
 
 
 class BuyerIntentParseRequest(BaseModel):
@@ -195,6 +207,7 @@ class BuyerIntentFilterOptionsOut(BaseModel):
     statuses: list[BuyerIntentFilterOptionOut]
     listed_statuses: list[BuyerIntentFilterOptionOut]
     consolidation_requirements: list[BuyerIntentFilterOptionOut]
+    owners: list[BuyerIntentFilterOptionOut] = []
 
 
 class BuyerIntentSuggestionOut(BaseModel):
@@ -236,6 +249,8 @@ BUYER_INTENT_OUT_COLUMNS = """
               bi.max_premium_rate, bi.max_debt_ratio, bi.debt_ratio_requirement_summary,
               bi.major_risk_tolerance_summary, bi.buyer_industry_advantage_summary,
               bi.negative_summary, bi.priority_summary, bi.preference_summary, bi.unknown_summary,
+              bi.owner_user_id,
+              (select au.name from app_user au where au.id = bi.owner_user_id) as owner_name,
               bi.created_at::text as created_at, bi.updated_at::text as updated_at
 """
 
@@ -249,7 +264,11 @@ BUYER_INTENT_SEARCH_COLUMNS = {
 
 
 @router.post("", response_model=BuyerIntentOut, status_code=status.HTTP_201_CREATED)
-def create_buyer_intent(payload: BuyerIntentCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
+def create_buyer_intent(
+    payload: BuyerIntentCreate,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     row = db.execute(
         text(
             """
@@ -297,7 +316,7 @@ def create_buyer_intent(payload: BuyerIntentCreate, db: Session = Depends(get_db
             bindparam("acceptable_control_paths_json", type_=JSONB),
             bindparam("transaction_types_json", type_=JSONB),
         ),
-        _buyer_intent_params(payload),
+        _buyer_intent_params(payload, current_user, db),
     ).mappings().one()
     db.flush()
     created = _get_buyer_intent_or_404(db, row["id"])
@@ -326,6 +345,7 @@ def list_buyer_intents(
     status: Literal["active", "paused"] | None = Query(default=None),
     listed_status: str | None = Query(default=None, max_length=80),
     requires_consolidation: Literal["yes", "no", "likely", "unknown"] | None = Query(default=None),
+    owner: str | None = Query(default=None, max_length=50),
 ) -> dict[str, Any]:
     where = ["bi.team_id = :team_id", "bi.workspace_id = :workspace_id", "bi.deleted_at is null"]
     params: dict[str, Any] = {
@@ -334,6 +354,13 @@ def list_buyer_intents(
         "limit": limit,
         "offset": offset,
     }
+
+    owner_condition = owner_filter_condition(owner, column="bi.owner_user_id")
+    if owner_condition:
+        condition_sql, owner_param = owner_condition
+        where.append(condition_sql)
+        if owner_param is not None:
+            params["owner_user_id"] = owner_param
 
     if q:
         if search_field:
@@ -484,12 +511,14 @@ def buyer_intent_filter_options(db: Session = Depends(get_db)) -> dict[str, Any]
         params,
         labels={"yes": "需要并表", "likely": "可能需要", "no": "不需要并表", "unknown": "未知"},
     )
+    owners = owner_filter_options(db, "buyer_intent", params)
     return {
         "industries": industries,
         "regions": regions,
         "statuses": statuses,
         "listed_statuses": listed_statuses,
         "consolidation_requirements": consolidation_requirements,
+        "owners": owners,
     }
 
 
@@ -601,13 +630,47 @@ def buyer_intent_suggestions(
     ]
 
 
+class BuyerIntentBatchAssignOwnerRequest(BaseModel):
+    ids: list[UUID] = Field(min_length=1, max_length=200)
+    owner_user_id: UUID | None = None
+
+
+class BuyerIntentBatchAssignOwnerOut(BaseModel):
+    status: str
+    updated_count: int
+    updated_ids: list[UUID]
+
+
+@router.post("/batch-assign-owner", response_model=BuyerIntentBatchAssignOwnerOut)
+def batch_assign_buyer_intent_owner(
+    payload: BuyerIntentBatchAssignOwnerRequest,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    require_admin(current_user)
+    if payload.owner_user_id is not None:
+        ensure_active_user(db, payload.owner_user_id)
+    updated_ids = assign_owner_bulk(
+        db,
+        table="buyer_intent",
+        entity_type="buyer_intent",
+        entity_ids=list(dict.fromkeys(payload.ids)),
+        new_owner_user_id=payload.owner_user_id,
+        actor_user_id=current_user.user_id,
+    )
+    db.commit()
+    return {"status": "ok", "updated_count": len(updated_ids), "updated_ids": updated_ids}
+
+
 @router.post("/bulk-delete", response_model=BuyerIntentBulkDeleteOut)
 def bulk_delete_buyer_intents(
     payload: BuyerIntentBulkDeleteRequest,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    require_admin(current_user)
     intent_ids = list(dict.fromkeys(payload.ids))
-    deleted_ids = _soft_delete_buyer_intents(db, intent_ids)
+    deleted_ids = _soft_delete_buyer_intents(db, intent_ids, actor_user_id=current_user.user_id)
     deleted_id_set = set(deleted_ids)
     skipped_ids = [intent_id for intent_id in intent_ids if intent_id not in deleted_id_set]
     db.commit()
@@ -627,6 +690,7 @@ def get_buyer_intent(buyer_intent_id: UUID, db: Session = Depends(get_db)) -> di
 @router.post("/{buyer_intent_id}/parse", response_model=BuyerIntentParseJobOut)
 def parse_buyer_intent(
     buyer_intent_id: UUID,
+    current_user: CurrentUser,
     payload: BuyerIntentParseRequest | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
@@ -655,7 +719,7 @@ def parse_buyer_intent(
             ),
             {
                 "raw_requirement_text": request.raw_requirement_text,
-                "updated_by": DEFAULT_ADMIN_USER_ID,
+                "updated_by": current_user.user_id,
                 "buyer_intent_id": buyer_intent_id,
                 "team_id": DEFAULT_TEAM_ID,
                 "workspace_id": DEFAULT_WORKSPACE_ID,
@@ -702,7 +766,7 @@ def parse_buyer_intent(
                 "buyer_intent_id": str(buyer_intent_id),
                 "raw_requirement_text": raw_requirement_text,
             },
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": current_user.user_id,
             "metadata_json": {"source": "buyer_intent_parse_api"},
         },
     ).mappings().one()
@@ -737,10 +801,16 @@ def get_buyer_intent_parse_status(
 def update_buyer_intent(
     buyer_intent_id: UUID,
     payload: BuyerIntentUpdate,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     original = _get_buyer_intent_or_404(db, buyer_intent_id)
     changes = payload.model_dump(exclude_unset=True)
+
+    if "owner_user_id" in changes:
+        require_admin(current_user)
+        if changes["owner_user_id"] is not None:
+            ensure_active_user(db, changes["owner_user_id"])
 
     if "intent_name" in changes and changes["intent_name"] is not None:
         changes["intent_name"] = changes["intent_name"].strip()
@@ -780,7 +850,7 @@ def update_buyer_intent(
         statement,
         {
             **changes,
-            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "updated_by": current_user.user_id,
             "buyer_intent_id": buyer_intent_id,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
@@ -794,6 +864,7 @@ def update_buyer_intent(
         entity_type="buyer_intent",
         entity_id=buyer_intent_id,
         diff=diff,
+        applied_by=current_user.user_id,
     )
     create_search_doc_rebuild_job(
         db,
@@ -807,9 +878,14 @@ def update_buyer_intent(
 
 
 @router.delete("/{buyer_intent_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_buyer_intent(buyer_intent_id: UUID, db: Session = Depends(get_db)) -> None:
+def delete_buyer_intent(
+    buyer_intent_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> None:
+    require_admin(current_user)
     _get_buyer_intent_or_404(db, buyer_intent_id)
-    _soft_delete_buyer_intents(db, [buyer_intent_id])
+    _soft_delete_buyer_intents(db, [buyer_intent_id], actor_user_id=current_user.user_id)
     db.commit()
     return None
 
@@ -829,9 +905,15 @@ def _filter_options(
     ]
 
 
-def _soft_delete_buyer_intents(db: Session, buyer_intent_ids: list[UUID]) -> list[UUID]:
+def _soft_delete_buyer_intents(
+    db: Session,
+    buyer_intent_ids: list[UUID],
+    *,
+    actor_user_id: UUID | None = None,
+) -> list[UUID]:
     if not buyer_intent_ids:
         return []
+    actor = actor_user_id or DEFAULT_ADMIN_USER_ID
 
     rows = db.execute(
         text(
@@ -849,8 +931,8 @@ def _soft_delete_buyer_intents(db: Session, buyer_intent_ids: list[UUID]) -> lis
             """
         ).bindparams(bindparam("buyer_intent_ids", expanding=True)),
         {
-            "deleted_by": DEFAULT_ADMIN_USER_ID,
-            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "deleted_by": actor,
+            "updated_by": actor,
             "buyer_intent_ids": buyer_intent_ids,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
@@ -865,6 +947,7 @@ def _soft_delete_buyer_intents(db: Session, buyer_intent_ids: list[UUID]) -> lis
             field_path="deleted_at",
             old_value=None,
             new_value="now()",
+            applied_by=actor,
         )
     return deleted_ids
 
@@ -898,12 +981,36 @@ def _get_buyer_intent_or_404(db: Session, buyer_intent_id: UUID) -> dict[str, An
     return dict(row)
 
 
-def _buyer_intent_params(payload: BuyerIntentCreate) -> dict[str, Any]:
+def _resolve_intent_owner(payload: BuyerIntentCreate, current_user: AuthContext, db: Session) -> UUID:
+    """意向负责人：管理员可指定；否则默认继承所属买家的负责人，兜底为创建人。"""
+    if current_user.is_admin and payload.owner_user_id:
+        return payload.owner_user_id
+    if payload.buyer_party_id:
+        buyer_owner = db.execute(
+            text(
+                """
+                select owner_user_id from buyer_party
+                where id = :buyer_party_id and team_id = :team_id
+                  and workspace_id = :workspace_id and deleted_at is null
+                """
+            ),
+            {
+                "buyer_party_id": payload.buyer_party_id,
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+            },
+        ).scalar()
+        if buyer_owner:
+            return buyer_owner
+    return current_user.user_id
+
+
+def _buyer_intent_params(payload: BuyerIntentCreate, current_user: AuthContext, db: Session) -> dict[str, Any]:
     return {
         "team_id": DEFAULT_TEAM_ID,
         "workspace_id": DEFAULT_WORKSPACE_ID,
         "buyer_party_id": payload.buyer_party_id,
-        "owner_user_id": payload.owner_user_id or DEFAULT_ADMIN_USER_ID,
+        "owner_user_id": _resolve_intent_owner(payload, current_user, db),
         "intent_name": payload.intent_name.strip(),
         "contact_name": payload.contact_name,
         "raw_requirement_text": payload.raw_requirement_text,
@@ -944,8 +1051,8 @@ def _buyer_intent_params(payload: BuyerIntentCreate) -> dict[str, Any]:
         "priority_summary": payload.priority_summary,
         "preference_summary": payload.preference_summary,
         "unknown_summary": payload.unknown_summary,
-        "created_by": DEFAULT_ADMIN_USER_ID,
-        "updated_by": DEFAULT_ADMIN_USER_ID,
+        "created_by": current_user.user_id,
+        "updated_by": current_user.user_id,
     }
 
 

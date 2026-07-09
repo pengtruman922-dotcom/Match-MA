@@ -2,9 +2,9 @@ import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { Bug, ChevronDown, LogOut, Search } from 'lucide-react';
 import { useState } from 'react';
 import { useDebugMode } from '../lib/debug';
-import { clearAuthSession, getStoredUser } from '../lib/auth';
+import { clearAuthSession, getStoredUser, isAdmin as isAdminRole } from '../lib/auth';
 
-const navItems = [
+const baseNavItems: Array<{ to: string; label: string; end?: boolean }> = [
   { to: '/', label: '工作台', end: true },
   { to: '/targets', label: '标的管理' },
   { to: '/buyers', label: '买家管理' },
@@ -12,6 +12,8 @@ const navItems = [
   { to: '/dashboard', label: '数据看板' },
   { to: '/settings', label: '设置' },
 ];
+
+const adminNavItems: Array<{ to: string; label: string; end?: boolean }> = [{ to: '/users', label: '账号管理' }];
 
 export default function Layout() {
   const [searchQuery, setSearchQuery] = useState('');
@@ -21,6 +23,7 @@ export default function Layout() {
   const user = getStoredUser();
   const displayName = normalizedDisplayName(user?.display_name || user?.username || '管理员');
   const avatarText = displayName.slice(0, 3);
+  const navItems = isAdminRole() ? [...baseNavItems, ...adminNavItems] : baseNavItems;
 
   function handleSearch(e: React.KeyboardEvent<HTMLInputElement>) {
     if (e.key === 'Enter' && searchQuery.trim()) {

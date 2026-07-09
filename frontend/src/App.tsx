@@ -10,6 +10,7 @@ import Updates from './pages/Updates';
 import Recommend from './pages/Recommend';
 import Dashboard from './pages/Dashboard';
 import Settings from './pages/Settings';
+import Users from './pages/Users';
 import Login from './pages/Login';
 import SearchResults from './pages/SearchResults';
 import DebugCenter from './pages/DebugCenter';
@@ -36,6 +37,7 @@ function App() {
             <Route path="updates/:id" element={<Updates />} />
             <Route path="dashboard" element={<Dashboard />} />
             <Route path="settings" element={<Settings />} />
+            <Route path="users" element={<Users />} />
             <Route path="recommend" element={<Navigate to="/recommendations" replace />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>

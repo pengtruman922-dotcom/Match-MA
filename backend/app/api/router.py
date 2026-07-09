@@ -19,11 +19,13 @@ from backend.app.api.routes import (
     search_docs,
     seller_targets,
     update_logs,
+    users,
     workbench,
 )
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
+api_router.include_router(users.router)
 api_router.include_router(health.router)
 api_router.include_router(meta.router)
 api_router.include_router(model_config.router)

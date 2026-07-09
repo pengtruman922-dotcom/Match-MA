@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     admin_username: str = "admin"
     admin_password: str = "match-ma-admin"
     admin_token: str | None = None
+    auth_jwt_secret: str | None = None
+    auth_token_ttl_seconds: int = 7 * 24 * 3600
+    owner_scope_enforced: bool = False
     railway_git_commit_sha: str | None = None
     railway_git_branch: str | None = None
     railway_service_name: str | None = None
@@ -166,6 +169,18 @@ class Settings(BaseSettings):
         if token:
             return token
         seed = f"{self.admin_username}:{self.admin_password}:{self.app_name}"
+        return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+    @property
+    def effective_auth_jwt_secret(self) -> str:
+        secret = _normalize_secret_text(
+            self.auth_jwt_secret or _first_env("AUTH_JWT_SECRET", "MATCH_MA_AUTH_JWT_SECRET")
+        )
+        if secret:
+            return secret
+        # Fallback keeps login working before AUTH_JWT_SECRET is configured;
+        # production should always set the env var.
+        seed = f"jwt-signing:{self.effective_admin_token}:{self.app_name}"
         return hashlib.sha256(seed.encode("utf-8")).hexdigest()
 
 

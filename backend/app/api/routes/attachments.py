@@ -9,6 +9,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from backend.app.config import get_settings
+from backend.app.api.authn import CurrentUser
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 from backend.app.services.attachment_storage import (
@@ -158,7 +159,11 @@ ATTACHMENT_SELECT_COLUMNS = """
 
 
 @router.post("", response_model=AttachmentOut, status_code=status.HTTP_201_CREATED)
-def create_attachment(payload: AttachmentCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
+def create_attachment(
+    payload: AttachmentCreate,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     _validate_attachment_payload(payload)
     links = _attachment_link_payloads(payload)
     for link in links:
@@ -188,7 +193,7 @@ def create_attachment(payload: AttachmentCreate, db: Session = Depends(get_db)) 
             "mime_type": _clean_optional_text(payload.mime_type),
             "file_size": payload.file_size,
             "storage_path": payload.storage_path.strip(),
-            "uploaded_by": DEFAULT_ADMIN_USER_ID,
+            "uploaded_by": current_user.user_id,
             "metadata_json": _json_safe_value(payload.metadata_json),
         },
     ).mappings().one()
@@ -203,6 +208,7 @@ def create_attachment(payload: AttachmentCreate, db: Session = Depends(get_db)) 
 
 @router.post("/upload", response_model=AttachmentUploadOut, status_code=status.HTTP_201_CREATED)
 def upload_attachment(
+    current_user: CurrentUser,
     file: UploadFile = File(...),
     visibility: str = Form(default="workspace"),
     entity_type: str | None = Form(default=None),
@@ -297,7 +303,7 @@ def upload_attachment(
             "mime_type": file.content_type,
             "file_size": uploaded.file_size,
             "storage_path": uploaded.storage_uri,
-            "uploaded_by": DEFAULT_ADMIN_USER_ID,
+            "uploaded_by": current_user.user_id,
             "metadata_json": _json_safe_value(metadata),
         },
     ).mappings().one()

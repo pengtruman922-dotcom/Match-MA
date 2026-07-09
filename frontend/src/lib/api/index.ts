@@ -53,6 +53,10 @@ import type {
   RecommendationSessionDebugBundle,
   RecommendationSession,
   RecommendationSessionBundle,
+  AppUser,
+  AppUserCreate,
+  AppUserOption,
+  BatchAssignOwnerResponse,
   UpdateLog,
   WorkbenchData,
   WorkbenchTaskBoardData,
@@ -69,6 +73,20 @@ export const auth = {
   me: () => apiRequest<AuthUser>('/auth/me'),
 };
 
+export const users = {
+  list: () => apiRequest<AppUser[]>('/users'),
+  options: () => apiRequest<AppUserOption[]>('/users/options'),
+  create: (data: AppUserCreate) =>
+    apiRequest<AppUser>('/users', { method: 'POST', body: JSON.stringify(data) }),
+  update: (id: string, data: { name?: string; role?: string; status?: string }) =>
+    apiRequest<AppUser>(`/users/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  resetPassword: (id: string, password: string) =>
+    apiRequest<{ status: string }>(`/users/${id}/reset-password`, {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    }),
+};
+
 export const sellerTargets = {
   list: (params?: {
     q?: string;
@@ -76,6 +94,7 @@ export const sellerTargets = {
     industry?: string;
     region?: string;
     status?: string;
+    owner?: string;
     limit?: number;
     offset?: number;
   }) => apiRequest<SellerTargetListResponse>(`/seller-targets${buildQuery(params || {})}`),
@@ -98,6 +117,11 @@ export const sellerTargets = {
     apiRequest<SellerTargetBulkDeleteResponse>('/seller-targets/bulk-delete', {
       method: 'POST',
       body: JSON.stringify({ ids }),
+    }),
+  batchAssignOwner: (ids: string[], ownerUserId: string | null) =>
+    apiRequest<BatchAssignOwnerResponse>('/seller-targets/batch-assign-owner', {
+      method: 'POST',
+      body: JSON.stringify({ ids, owner_user_id: ownerUserId }),
     }),
   followUps: (id: string) => apiRequest<TargetFollowUp[]>(`/seller-targets/${id}/follow-ups`),
   createFollowUp: (id: string, data: TargetFollowUpCreate) =>
@@ -122,6 +146,7 @@ export const buyerParties = {
     region?: string;
     listed_status?: string;
     status?: string;
+    owner?: string;
     limit?: number;
     offset?: number;
   }) => apiRequest<BuyerPartyListResponse>(`/buyer-parties${buildQuery(params || {})}`),
@@ -139,6 +164,11 @@ export const buyerParties = {
       method: 'POST',
       body: JSON.stringify({ ids }),
     }),
+  batchAssignOwner: (ids: string[], ownerUserId: string | null) =>
+    apiRequest<BatchAssignOwnerResponse>('/buyer-parties/batch-assign-owner', {
+      method: 'POST',
+      body: JSON.stringify({ ids, owner_user_id: ownerUserId }),
+    }),
   intents: (id: string) => apiRequest<BuyerIntent[]>(`/buyer-parties/${id}/intents`),
 };
 
@@ -152,6 +182,7 @@ export const buyerIntents = {
     status?: string;
     listed_status?: string;
     requires_consolidation?: string;
+    owner?: string;
     limit?: number;
     offset?: number;
   }) => apiRequest<BuyerIntentListResponse>(`/buyer-intents${buildQuery(params || {})}`),
@@ -174,6 +205,11 @@ export const buyerIntents = {
     apiRequest<BuyerBulkDeleteResponse>('/buyer-intents/bulk-delete', {
       method: 'POST',
       body: JSON.stringify({ ids }),
+    }),
+  batchAssignOwner: (ids: string[], ownerUserId: string | null) =>
+    apiRequest<BatchAssignOwnerResponse>('/buyer-intents/batch-assign-owner', {
+      method: 'POST',
+      body: JSON.stringify({ ids, owner_user_id: ownerUserId }),
     }),
 };
 

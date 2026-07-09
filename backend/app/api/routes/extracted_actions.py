@@ -9,7 +9,8 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
-from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+from backend.app.api.authn import CurrentUser
+from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
 from backend.app.api.routes.utils import (
     diff_payload,
     write_action_logs_for_diff,
@@ -190,6 +191,7 @@ def get_extracted_action(extracted_action_id: UUID, db: Session = Depends(get_db
 def update_extracted_action_review(
     extracted_action_id: UUID,
     payload: ExtractedActionReviewUpdate,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     _get_extracted_action_or_404(db, extracted_action_id)
@@ -214,7 +216,7 @@ def update_extracted_action_review(
         {
             "extracted_action_id": extracted_action_id,
             "review_status": payload.review_status,
-            "reviewed_by": DEFAULT_ADMIN_USER_ID,
+            "reviewed_by": current_user.user_id,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
         },
@@ -301,7 +303,7 @@ def apply_seller_fact_update_action(
         ),
         {
             **{field: changes[field] for field in diff},
-            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "updated_by": SYSTEM_USER_ID,
             "seller_target_id": seller_target_id,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
@@ -462,7 +464,7 @@ def apply_target_follow_up_action(
             "occurred_on": occurred_on,
             "content": content,
             "related_buyer_party_ids_json": [str(party_id) for party_id in related_buyer_party_ids],
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": SYSTEM_USER_ID,
             "metadata_json": {
                 "source": "extracted_action",
                 "extracted_action_id": str(action["id"]),
@@ -536,7 +538,7 @@ def _release_target_from_parsing_after_follow_up(db: Session, seller_target_id: 
             "seller_target_id": seller_target_id,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
-            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "updated_by": SYSTEM_USER_ID,
             "parsing_statuses": list(TARGET_FOLLOW_UP_PARSING_STATUSES),
         },
     )
@@ -610,7 +612,7 @@ def apply_buyer_intent_update_action(
         update_statement,
         {
             **{field: changes[field] for field in diff},
-            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "updated_by": SYSTEM_USER_ID,
             "buyer_intent_id": buyer_intent_id,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
@@ -708,7 +710,7 @@ def apply_buyer_seller_relation_update_action(
             "relation_id": relation["id"],
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
-            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "updated_by": SYSTEM_USER_ID,
         }
         for field in diff:
             if field in {"last_event_at", "first_recommended_at"} and relation_updates[field] == "now()":
@@ -840,7 +842,7 @@ def apply_buyer_intent_target_exclusion_action(
             "reason": reason,
             "source_relation_id": relation_id,
             "source_update_id": action["business_update_id"],
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": SYSTEM_USER_ID,
         },
     ).mappings().one()
 
@@ -1071,7 +1073,7 @@ def _get_or_create_relation(
             "buyer_intent_id": buyer_intent_id,
             "buyer_party_id": buyer_party_id,
             "seller_target_id": seller_target_id,
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": SYSTEM_USER_ID,
         },
     ).mappings().one()
     return dict(row)
@@ -1241,7 +1243,7 @@ def _insert_relation_event(
                 "business_update_id": str(action["business_update_id"]),
                 "raw_evidence_text": action.get("raw_evidence_text"),
             },
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": SYSTEM_USER_ID,
         },
     )
 
@@ -1328,7 +1330,7 @@ def _mark_action_applied(
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
             "review_status": review_status,
-            "reviewed_by": DEFAULT_ADMIN_USER_ID,
+            "reviewed_by": SYSTEM_USER_ID,
         },
     )
 

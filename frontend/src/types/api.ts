@@ -51,6 +51,8 @@ export interface SellerTarget {
   transaction_summary: string | null;
   risk_summary: string | null;
   gap_summary: string | null;
+  owner_user_id?: string | null;
+  owner_name?: string | null;
   created_at: string;
   updated_at: string;
   latest_follow_up_on?: string | null;
@@ -76,6 +78,7 @@ export interface SellerTargetFilterOptions {
   industries: SellerTargetFilterOption[];
   regions: SellerTargetFilterOption[];
   statuses: SellerTargetFilterOption[];
+  owners?: SellerTargetFilterOption[];
 }
 
 export interface SellerTargetSuggestion {
@@ -164,6 +167,7 @@ export interface SellerTargetUpdate {
   can_control?: string;
   can_consolidate?: string;
   business_summary?: string;
+  owner_user_id?: string | null;
 }
 
 export interface BuyerParty {
@@ -180,6 +184,8 @@ export interface BuyerParty {
   capital_strength_summary: string | null;
   profile_summary: string | null;
   status: string;
+  owner_user_id?: string | null;
+  owner_name?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -204,6 +210,7 @@ export interface BuyerPartyFilterOptions {
   regions: BuyerFilterOption[];
   listed_statuses: BuyerFilterOption[];
   statuses: BuyerFilterOption[];
+  owners?: BuyerFilterOption[];
 }
 
 export interface BuyerPartySuggestion {
@@ -233,6 +240,7 @@ export interface BuyerPartyCreate {
   region_city?: string;
   main_business?: string;
   profile_summary?: string;
+  owner_user_id?: string | null;
 }
 
 export interface BuyerIntent {
@@ -276,6 +284,8 @@ export interface BuyerIntent {
   negative_summary: string | null;
   preference_summary: string | null;
   unknown_summary: string | null;
+  owner_user_id?: string | null;
+  owner_name?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -295,6 +305,40 @@ export interface BuyerIntentFilterOptions {
   statuses: BuyerFilterOption[];
   listed_statuses: BuyerFilterOption[];
   consolidation_requirements: BuyerFilterOption[];
+  owners?: BuyerFilterOption[];
+}
+
+export interface AppUser {
+  id: string;
+  username: string | null;
+  name: string;
+  role: string;
+  status: string;
+  created_at: string;
+  owned_seller_targets: number;
+  owned_buyer_parties: number;
+  owned_buyer_intents: number;
+}
+
+export interface AppUserOption {
+  id: string;
+  name: string;
+  username: string | null;
+  role: string;
+  status: string;
+}
+
+export interface AppUserCreate {
+  username: string;
+  name: string;
+  password: string;
+  role: 'admin' | 'consultant';
+}
+
+export interface BatchAssignOwnerResponse {
+  status: string;
+  updated_count: number;
+  updated_ids: string[];
 }
 
 export interface BuyerIntentSuggestion {

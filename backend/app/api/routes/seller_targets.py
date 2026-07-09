@@ -11,8 +11,17 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
+from backend.app.api.authn import AuthContext, CurrentUser, require_admin
 from backend.app.api.routes.attachments import _attachment_parse_readiness
-from backend.app.api.routes.utils import diff_payload, write_action_log, write_action_logs_for_diff
+from backend.app.api.routes.utils import (
+    assign_owner_bulk,
+    diff_payload,
+    ensure_active_user,
+    owner_filter_condition,
+    owner_filter_options,
+    write_action_log,
+    write_action_logs_for_diff,
+)
 from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
@@ -116,6 +125,8 @@ class SellerTargetOut(BaseModel):
     transaction_summary: str | None
     risk_summary: str | None
     gap_summary: str | None
+    owner_user_id: UUID | None = None
+    owner_name: str | None = None
     created_at: str
     updated_at: str
     latest_follow_up_on: str | None = None
@@ -181,6 +192,7 @@ class SellerTargetUpdate(BaseModel):
     transaction_summary: str | None = None
     risk_summary: str | None = None
     gap_summary: str | None = None
+    owner_user_id: UUID | None = None
 
 
 class SellerTargetParseRequest(BaseModel):
@@ -214,6 +226,7 @@ class SellerTargetFilterOptionsOut(BaseModel):
     industries: list[SellerTargetFilterOptionOut]
     regions: list[SellerTargetFilterOptionOut]
     statuses: list[SellerTargetFilterOptionOut]
+    owners: list[SellerTargetFilterOptionOut] = []
 
 
 class SellerTargetSuggestionOut(BaseModel):
@@ -301,6 +314,8 @@ SELLER_TARGET_OUT_COLUMNS = """
               transfer_flexibility_type, consolidation_path_summary, accepts_relocation,
               accepts_return_investment, management_team_summary, management_retention_possible,
               earnout_dependency_status, business_summary, transaction_summary, risk_summary, gap_summary,
+              owner_user_id,
+              (select au.name from app_user au where au.id = seller_target.owner_user_id) as owner_name,
               created_at::text as created_at, updated_at::text as updated_at
 """
 
@@ -329,7 +344,11 @@ SELLER_TARGET_DISPLAY_STATUS_LABELS = {
 
 
 @router.post("", response_model=SellerTargetOut, status_code=status.HTTP_201_CREATED)
-def create_seller_target(payload: SellerTargetCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
+def create_seller_target(
+    payload: SellerTargetCreate,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     row = db.execute(
         text(
             f"""
@@ -357,7 +376,7 @@ def create_seller_target(payload: SellerTargetCreate, db: Session = Depends(get_
 {SELLER_TARGET_OUT_COLUMNS}
             """
         ),
-        _seller_target_params(payload),
+        _seller_target_params(payload, current_user),
     ).mappings().one()
     create_search_doc_rebuild_job(
         db,
@@ -393,6 +412,7 @@ def list_seller_targets(
         "sold",
         "off_market",
     ] | None = Query(default=None),
+    owner: str | None = Query(default=None, max_length=50),
 ) -> dict[str, Any]:
     where = ["team_id = :team_id", "workspace_id = :workspace_id", "deleted_at is null"]
     params: dict[str, Any] = {
@@ -401,6 +421,13 @@ def list_seller_targets(
         "limit": limit,
         "offset": offset,
     }
+
+    owner_condition = owner_filter_condition(owner)
+    if owner_condition:
+        condition_sql, owner_param = owner_condition
+        where.append(condition_sql)
+        if owner_param is not None:
+            params["owner_user_id"] = owner_param
 
     if q:
         if search_field:
@@ -511,7 +538,8 @@ def seller_target_filter_options(db: Session = Depends(get_db)) -> dict[str, Any
         params,
         labels=SELLER_TARGET_DISPLAY_STATUS_LABELS,
     )
-    return {"industries": industries, "regions": regions, "statuses": statuses}
+    owners = owner_filter_options(db, "seller_target", params)
+    return {"industries": industries, "regions": regions, "statuses": statuses, "owners": owners}
 
 
 @router.get("/suggestions", response_model=list[SellerTargetSuggestionOut])
@@ -596,10 +624,12 @@ def seller_target_suggestions(
 @router.post("/bulk-delete", response_model=SellerTargetBulkDeleteOut)
 def bulk_delete_seller_targets(
     payload: SellerTargetBulkDeleteRequest,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    require_admin(current_user)
     target_ids = list(dict.fromkeys(payload.ids))
-    deleted_ids = _soft_delete_seller_targets(db, target_ids)
+    deleted_ids = _soft_delete_seller_targets(db, target_ids, actor_user_id=current_user.user_id)
     deleted_id_set = set(deleted_ids)
     skipped_ids = [target_id for target_id in target_ids if target_id not in deleted_id_set]
     db.commit()
@@ -609,6 +639,38 @@ def bulk_delete_seller_targets(
         "deleted_ids": deleted_ids,
         "skipped_ids": skipped_ids,
     }
+
+
+class SellerTargetBatchAssignOwnerRequest(BaseModel):
+    ids: list[UUID] = Field(min_length=1, max_length=200)
+    owner_user_id: UUID | None = None
+
+
+class BatchAssignOwnerOut(BaseModel):
+    status: str
+    updated_count: int
+    updated_ids: list[UUID]
+
+
+@router.post("/batch-assign-owner", response_model=BatchAssignOwnerOut)
+def batch_assign_seller_target_owner(
+    payload: SellerTargetBatchAssignOwnerRequest,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    require_admin(current_user)
+    if payload.owner_user_id is not None:
+        ensure_active_user(db, payload.owner_user_id)
+    updated_ids = assign_owner_bulk(
+        db,
+        table="seller_target",
+        entity_type="seller_target",
+        entity_ids=list(dict.fromkeys(payload.ids)),
+        new_owner_user_id=payload.owner_user_id,
+        actor_user_id=current_user.user_id,
+    )
+    db.commit()
+    return {"status": "ok", "updated_count": len(updated_ids), "updated_ids": updated_ids}
 
 
 @router.get("/{seller_target_id}/attachments", response_model=SellerTargetAttachmentListOut)
@@ -687,6 +749,7 @@ def download_seller_target_attachment(
 def delete_seller_target_attachment(
     seller_target_id: UUID,
     attachment_id: UUID,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> None:
     _get_seller_target_or_404(db, seller_target_id)
@@ -704,7 +767,7 @@ def delete_seller_target_attachment(
         ),
         {
             "attachment_id": attachment_id,
-            "deleted_by": DEFAULT_ADMIN_USER_ID,
+            "deleted_by": current_user.user_id,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
         },
@@ -720,6 +783,7 @@ def get_seller_target(seller_target_id: UUID, db: Session = Depends(get_db)) -> 
 @router.post("/{seller_target_id}/parse", response_model=SellerTargetParseJobOut)
 def parse_seller_target(
     seller_target_id: UUID,
+    current_user: CurrentUser,
     payload: SellerTargetParseRequest | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
@@ -772,7 +836,7 @@ def parse_seller_target(
                 "seller_target_id": str(seller_target_id),
                 "raw_target_text": raw_target_text,
             },
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": current_user.user_id,
             "metadata_json": {"source": "seller_target_parse_api"},
         },
     ).mappings().one()
@@ -843,6 +907,7 @@ def list_target_follow_ups(
 def create_target_follow_up(
     seller_target_id: UUID,
     payload: TargetFollowUpCreate,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     _get_seller_target_or_404(db, seller_target_id)
@@ -874,7 +939,7 @@ def create_target_follow_up(
             "occurred_on": payload.occurred_on,
             "content": content,
             "related_buyer_party_ids_json": related_ids,
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": current_user.user_id,
         },
     ).mappings().one()
     db.commit()
@@ -885,8 +950,13 @@ def create_target_follow_up(
 def delete_target_follow_up(
     seller_target_id: UUID,
     follow_up_id: UUID,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> None:
+    # 跟进记录允许"管理员或标的负责人"删除（软删除，仅影响这一条记录）。
+    target = _get_seller_target_or_404(db, seller_target_id)
+    if not current_user.is_admin and target.get("owner_user_id") != current_user.user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员或标的负责人可删除跟进记录。")
     result = db.execute(
         text(
             """
@@ -904,7 +974,7 @@ def delete_target_follow_up(
             "seller_target_id": seller_target_id,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
-            "deleted_by": DEFAULT_ADMIN_USER_ID,
+            "deleted_by": current_user.user_id,
         },
     )
     if not result.rowcount:
@@ -965,10 +1035,16 @@ def _follow_ups_with_buyer_refs(db: Session, rows: list[dict[str, Any]]) -> list
 def update_seller_target(
     seller_target_id: UUID,
     payload: SellerTargetUpdate,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     original = _get_seller_target_or_404(db, seller_target_id)
     changes = payload.model_dump(exclude_unset=True)
+
+    if "owner_user_id" in changes:
+        require_admin(current_user)
+        if changes["owner_user_id"] is not None:
+            ensure_active_user(db, changes["owner_user_id"])
 
     if "target_name" in changes and changes["target_name"] is not None:
         changes["target_name"] = changes["target_name"].strip()
@@ -1001,7 +1077,7 @@ def update_seller_target(
         ),
         {
             **changes,
-            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "updated_by": current_user.user_id,
             "seller_target_id": seller_target_id,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
@@ -1013,6 +1089,7 @@ def update_seller_target(
         entity_type="seller_target",
         entity_id=seller_target_id,
         diff=diff,
+        applied_by=current_user.user_id,
     )
     create_search_doc_rebuild_job(
         db,
@@ -1026,9 +1103,14 @@ def update_seller_target(
 
 
 @router.delete("/{seller_target_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_seller_target(seller_target_id: UUID, db: Session = Depends(get_db)) -> None:
+def delete_seller_target(
+    seller_target_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> None:
+    require_admin(current_user)
     _get_seller_target_or_404(db, seller_target_id)
-    _soft_delete_seller_targets(db, [seller_target_id])
+    _soft_delete_seller_targets(db, [seller_target_id], actor_user_id=current_user.user_id)
     db.commit()
     return None
 
@@ -1048,9 +1130,15 @@ def _filter_options(
     ]
 
 
-def _soft_delete_seller_targets(db: Session, seller_target_ids: list[UUID]) -> list[UUID]:
+def _soft_delete_seller_targets(
+    db: Session,
+    seller_target_ids: list[UUID],
+    *,
+    actor_user_id: UUID | None = None,
+) -> list[UUID]:
     if not seller_target_ids:
         return []
+    actor = actor_user_id or DEFAULT_ADMIN_USER_ID
 
     rows = db.execute(
         text(
@@ -1068,8 +1156,8 @@ def _soft_delete_seller_targets(db: Session, seller_target_ids: list[UUID]) -> l
             """
         ).bindparams(bindparam("seller_target_ids", expanding=True)),
         {
-            "deleted_by": DEFAULT_ADMIN_USER_ID,
-            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "deleted_by": actor,
+            "updated_by": actor,
             "seller_target_ids": seller_target_ids,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
@@ -1084,6 +1172,7 @@ def _soft_delete_seller_targets(db: Session, seller_target_ids: list[UUID]) -> l
             field_path="deleted_at",
             old_value=None,
             new_value="now()",
+            applied_by=actor,
         )
     return deleted_ids
 
@@ -1382,17 +1471,19 @@ def _get_seller_target_or_404(db: Session, seller_target_id: UUID) -> dict[str, 
     return dict(row)
 
 
-def _seller_target_params(payload: SellerTargetCreate) -> dict[str, Any]:
+def _seller_target_params(payload: SellerTargetCreate, current_user: AuthContext) -> dict[str, Any]:
     target_name = payload.target_name.strip()
     target_type = payload.target_type or "company"
     target_subject_name = _normalize_optional_text(payload.target_subject_name)
+    # 创建人默认成为负责人；只有管理员可以在创建时指定他人。
+    owner_user_id = payload.owner_user_id if current_user.is_admin and payload.owner_user_id else current_user.user_id
     return {
         "team_id": DEFAULT_TEAM_ID,
         "workspace_id": DEFAULT_WORKSPACE_ID,
         "target_name": target_name,
         "target_type": target_type,
         "target_subject_name": target_subject_name,
-        "owner_user_id": payload.owner_user_id or DEFAULT_ADMIN_USER_ID,
+        "owner_user_id": owner_user_id,
         "lifecycle_status": payload.lifecycle_status,
         "recommendation_status": payload.recommendation_status,
         "information_status": payload.information_status,
@@ -1414,8 +1505,8 @@ def _seller_target_params(payload: SellerTargetCreate) -> dict[str, Any]:
         "business_summary": payload.business_summary,
         "transaction_summary": payload.transaction_summary,
         "risk_summary": payload.risk_summary,
-        "created_by": DEFAULT_ADMIN_USER_ID,
-        "updated_by": DEFAULT_ADMIN_USER_ID,
+        "created_by": current_user.user_id,
+        "updated_by": current_user.user_id,
     }
 
 

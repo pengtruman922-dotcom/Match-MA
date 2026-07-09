@@ -20,8 +20,10 @@ import {
   X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import { attachments, businessUpdates, buyerParties, buyerIntents } from '../lib/api';
+import { attachments, businessUpdates, buyerParties, buyerIntents, users } from '../lib/api';
+import { isAdmin } from '../lib/auth';
 import type {
+  AppUserOption,
   AttachmentUploadPolicy,
   BuyerFilterOption,
   BuyerIntent,
@@ -44,8 +46,8 @@ type BuyerSuggestion = BuyerIntentSuggestion | BuyerPartySuggestion;
 const PAGE_SIZE = 20;
 const INTENT_PARSE_STATUS_POLL_INTERVAL_MS = 5000;
 const UPLOAD_POLICY_TIMEOUT_MS = 12000;
-const INTENT_FILTERS: Array<keyof BuyerIntentFilters> = ['q', 'industry', 'region', 'status', 'listedStatus', 'requiresConsolidation'];
-const PARTY_FILTERS: Array<keyof BuyerPartyFilters> = ['q', 'buyerType', 'region', 'listedStatus', 'status'];
+const INTENT_FILTERS: Array<keyof BuyerIntentFilters> = ['q', 'industry', 'region', 'status', 'listedStatus', 'requiresConsolidation', 'owner'];
+const PARTY_FILTERS: Array<keyof BuyerPartyFilters> = ['q', 'buyerType', 'region', 'listedStatus', 'status', 'owner'];
 
 const EMPTY_INTENT_FILTER_OPTIONS: BuyerIntentFilterOptions = {
   industries: [],
@@ -86,6 +88,7 @@ type BuyerIntentFilters = {
   status: string;
   listedStatus: string;
   requiresConsolidation: string;
+  owner: string;
   page: number;
 };
 
@@ -96,6 +99,7 @@ type BuyerPartyFilters = {
   region: string;
   listedStatus: string;
   status: string;
+  owner: string;
   page: number;
 };
 
@@ -213,6 +217,10 @@ function IntentsList({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [parseStatuses, setParseStatuses] = useState<Record<string, BuyerIntentParseStatus>>({});
+  const admin = isAdmin();
+  const [ownerOptions, setOwnerOptions] = useState<AppUserOption[]>([]);
+  const [assignOwnerId, setAssignOwnerId] = useState('');
+  const [assigning, setAssigning] = useState(false);
 
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const visibleIds = useMemo(() => items.map((item) => item.id), [items]);
@@ -230,6 +238,7 @@ function IntentsList({
     if ('status' in patch) setOrDelete(next, 'status', patch.status);
     if ('listedStatus' in patch) setOrDelete(next, 'listedStatus', patch.listedStatus);
     if ('requiresConsolidation' in patch) setOrDelete(next, 'requiresConsolidation', patch.requiresConsolidation);
+    if ('owner' in patch) setOrDelete(next, 'owner', patch.owner);
     if (patch.page !== undefined) {
       if (patch.page <= 1) next.delete('page');
       else next.set('page', String(patch.page));
@@ -248,6 +257,7 @@ function IntentsList({
         status: filters.status || undefined,
         listed_status: filters.listedStatus || undefined,
         requires_consolidation: filters.requiresConsolidation || undefined,
+        owner: filters.owner || undefined,
         limit: PAGE_SIZE,
         offset: (filters.page - 1) * PAGE_SIZE,
       })
@@ -266,6 +276,10 @@ function IntentsList({
   useEffect(() => { fetchData(); }, [fetchData, refreshKey]);
   useEffect(() => { buyerIntents.filterOptions().then(setFilterOptions).catch(() => {}); }, []);
   useEffect(() => { setSearchQuery(filters.q); }, [filters.q]);
+  useEffect(() => {
+    if (!admin) return;
+    users.options().then(setOwnerOptions).catch(() => {});
+  }, [admin]);
 
   useEffect(() => {
     if (items.length === 0) {
@@ -396,9 +410,26 @@ function IntentsList({
     }
   };
 
+  const handleBatchAssign = async () => {
+    const ids = Array.from(selectedIds);
+    if (!ids.length || !assignOwnerId) return;
+    const ownerName = ownerOptions.find((option) => option.id === assignOwnerId)?.name || '所选账号';
+    if (!window.confirm(`将已选择的 ${ids.length} 个买家意向指派给「${ownerName}」？`)) return;
+    setAssigning(true);
+    try {
+      await buyerIntents.batchAssignOwner(ids, assignOwnerId);
+      await buyerIntents.filterOptions().then(setFilterOptions).catch(() => {});
+      fetchData();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '批量指派失败');
+    } finally {
+      setAssigning(false);
+    }
+  };
+
   const clearFilters = () => {
     setSearchQuery('');
-    updateFilters({ q: '', searchField: undefined, industry: '', region: '', status: '', listedStatus: '', requiresConsolidation: '', page: 1 });
+    updateFilters({ q: '', searchField: undefined, industry: '', region: '', status: '', listedStatus: '', requiresConsolidation: '', owner: '', page: 1 });
   };
 
   return (
@@ -421,6 +452,7 @@ function IntentsList({
           { label: '状态', value: filters.status, options: filterOptions.statuses, onChange: (value) => updateFilters({ status: value, page: 1 }) },
           { label: '上市要求', value: filters.listedStatus, options: filterOptions.listed_statuses, onChange: (value) => updateFilters({ listedStatus: value, page: 1 }) },
           { label: '并表要求', value: filters.requiresConsolidation, options: filterOptions.consolidation_requirements, onChange: (value) => updateFilters({ requiresConsolidation: value, page: 1 }) },
+          ...(admin ? [{ label: '负责人', value: filters.owner, options: filterOptions.owners || [], onChange: (value: string) => updateFilters({ owner: value, page: 1 }) }] : []),
         ]}
         activeFilterCount={activeFilterCount}
         onClear={clearFilters}
@@ -428,7 +460,20 @@ function IntentsList({
         totalLabel="买家意向"
       />
 
-      {selectedCount > 0 && <BulkActionBar count={selectedCount} label="买家意向" deleting={bulkDeleting} onClear={() => setSelectedIds(new Set())} onDelete={handleBulkDelete} />}
+      {selectedCount > 0 && (
+        <BulkActionBar
+          count={selectedCount}
+          label="买家意向"
+          deleting={bulkDeleting}
+          onClear={() => setSelectedIds(new Set())}
+          onDelete={handleBulkDelete}
+          assignOptions={ownerOptions}
+          assignValue={assignOwnerId}
+          onAssignValueChange={setAssignOwnerId}
+          onAssign={handleBatchAssign}
+          assigning={assigning}
+        />
+      )}
 
       <div className="bg-white border border-gray-200 overflow-x-auto">
         <table className="w-full text-sm">
@@ -444,14 +489,15 @@ function IntentsList({
               <th className="text-right px-4 py-3 font-medium text-gray-600">市值范围</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">解析状态</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">状态</th>
+              <th className="text-left px-4 py-3 font-medium text-gray-600">负责人</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">操作</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {loading ? (
-              <tr><td colSpan={11} className="px-4 py-8 text-center"><div className="w-5 h-5 border-2 border-brand-600 border-t-transparent rounded-full animate-spin mx-auto" /></td></tr>
+              <tr><td colSpan={12} className="px-4 py-8 text-center"><div className="w-5 h-5 border-2 border-brand-600 border-t-transparent rounded-full animate-spin mx-auto" /></td></tr>
             ) : items.length === 0 ? (
-              <tr><td colSpan={11} className="px-4 py-8 text-center text-gray-400">暂无匹配的买家意向</td></tr>
+              <tr><td colSpan={12} className="px-4 py-8 text-center text-gray-400">暂无匹配的买家意向</td></tr>
             ) : items.map((item) => (
               <IntentRow
                 key={item.id}
@@ -502,10 +548,11 @@ function IntentRow({
         <td className="px-4 py-3 text-right text-gray-600 font-mono">{marketCapRangeLabel(item)}</td>
         <td className="px-4 py-3 text-center"><ParseStatusBadge item={item} parseStatus={parseStatus} /></td>
         <td className="px-4 py-3 text-center"><IntentStatusBadge status={item.status} /></td>
+        <td className="px-4 py-3 text-gray-600">{item.owner_name || <span className="text-gray-300">未指派</span>}</td>
         <td className="px-4 py-3"><div className="flex items-center justify-center gap-1"><Link to={`/recommendations?mode=buyer-to-target&intentId=${item.id}`} className="inline-flex items-center gap-1 px-2 py-1 text-xs text-brand-600 hover:bg-brand-50 transition-colors"><Sparkles className="w-3 h-3" />推荐标的</Link><span className="text-gray-200">|</span><button className="inline-flex items-center gap-1 px-2 py-1 text-xs text-brand-600 hover:bg-brand-50 transition-colors" type="button"><MessageSquarePlus className="w-3 h-3" />录入更新</button></div></td>
       </tr>
       {expanded && (
-        <tr className="bg-gray-50/50"><td colSpan={11} className="px-8 py-2.5"><div className="space-y-1"><p className="text-xs text-gray-600 line-clamp-2">{item.raw_requirement_text || item.intent_summary || '暂无摘要'}{item.requires_consolidation === 'yes' && <span className="text-gray-500 ml-2">· 需并表</span>}{item.buyer_party_id ? '' : <span className="text-amber-600 ml-2">· 未关联买家主体</span>}</p><p className="text-xs text-gray-500 line-clamp-1">{compactRequirementNotes(item)}</p></div></td></tr>
+        <tr className="bg-gray-50/50"><td colSpan={12} className="px-8 py-2.5"><div className="space-y-1"><p className="text-xs text-gray-600 line-clamp-2">{item.raw_requirement_text || item.intent_summary || '暂无摘要'}{item.requires_consolidation === 'yes' && <span className="text-gray-500 ml-2">· 需并表</span>}{item.buyer_party_id ? '' : <span className="text-amber-600 ml-2">· 未关联买家主体</span>}</p><p className="text-xs text-gray-500 line-clamp-1">{compactRequirementNotes(item)}</p></div></td></tr>
       )}
     </>
   );
@@ -535,6 +582,10 @@ function PartiesList({
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  const admin = isAdmin();
+  const [ownerOptions, setOwnerOptions] = useState<AppUserOption[]>([]);
+  const [assignOwnerId, setAssignOwnerId] = useState('');
+  const [assigning, setAssigning] = useState(false);
 
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const visibleIds = useMemo(() => items.map((item) => item.id), [items]);
@@ -551,6 +602,7 @@ function PartiesList({
     if ('region' in patch) setOrDelete(next, 'partyRegion', patch.region);
     if ('listedStatus' in patch) setOrDelete(next, 'partyListedStatus', patch.listedStatus);
     if ('status' in patch) setOrDelete(next, 'partyStatus', patch.status);
+    if ('owner' in patch) setOrDelete(next, 'partyOwner', patch.owner);
     if (patch.page !== undefined) {
       if (patch.page <= 1) next.delete('partyPage');
       else next.set('partyPage', String(patch.page));
@@ -568,6 +620,7 @@ function PartiesList({
         region: filters.region || undefined,
         listed_status: filters.listedStatus || undefined,
         status: filters.status || undefined,
+        owner: filters.owner || undefined,
         limit: PAGE_SIZE,
         offset: (filters.page - 1) * PAGE_SIZE,
       })
@@ -586,6 +639,10 @@ function PartiesList({
   useEffect(() => { fetchData(); }, [fetchData, refreshKey]);
   useEffect(() => { buyerParties.filterOptions().then(setFilterOptions).catch(() => {}); }, []);
   useEffect(() => { setSearchQuery(filters.q); }, [filters.q]);
+  useEffect(() => {
+    if (!admin) return;
+    users.options().then(setOwnerOptions).catch(() => {});
+  }, [admin]);
 
   useEffect(() => {
     const query = searchQuery.trim();
@@ -656,9 +713,26 @@ function PartiesList({
     }
   };
 
+  const handleBatchAssign = async () => {
+    const ids = Array.from(selectedIds);
+    if (!ids.length || !assignOwnerId) return;
+    const ownerName = ownerOptions.find((option) => option.id === assignOwnerId)?.name || '所选账号';
+    if (!window.confirm(`将已选择的 ${ids.length} 个买家主体指派给「${ownerName}」？`)) return;
+    setAssigning(true);
+    try {
+      await buyerParties.batchAssignOwner(ids, assignOwnerId);
+      await buyerParties.filterOptions().then(setFilterOptions).catch(() => {});
+      fetchData();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '批量指派失败');
+    } finally {
+      setAssigning(false);
+    }
+  };
+
   const clearFilters = () => {
     setSearchQuery('');
-    updateFilters({ q: '', searchField: undefined, buyerType: '', region: '', listedStatus: '', status: '', page: 1 });
+    updateFilters({ q: '', searchField: undefined, buyerType: '', region: '', listedStatus: '', status: '', owner: '', page: 1 });
   };
 
   return (
@@ -680,6 +754,7 @@ function PartiesList({
           { label: '地区', value: filters.region, options: filterOptions.regions, onChange: (value) => updateFilters({ region: value, page: 1 }) },
           { label: '上市状态', value: filters.listedStatus, options: filterOptions.listed_statuses, onChange: (value) => updateFilters({ listedStatus: value, page: 1 }) },
           { label: '状态', value: filters.status, options: filterOptions.statuses, onChange: (value) => updateFilters({ status: value, page: 1 }) },
+          ...(admin ? [{ label: '负责人', value: filters.owner, options: filterOptions.owners || [], onChange: (value: string) => updateFilters({ owner: value, page: 1 }) }] : []),
         ]}
         activeFilterCount={activeFilterCount}
         onClear={clearFilters}
@@ -687,7 +762,20 @@ function PartiesList({
         totalLabel="买家主体"
       />
 
-      {selectedCount > 0 && <BulkActionBar count={selectedCount} label="买家主体" deleting={bulkDeleting} onClear={() => setSelectedIds(new Set())} onDelete={handleBulkDelete} />}
+      {selectedCount > 0 && (
+        <BulkActionBar
+          count={selectedCount}
+          label="买家主体"
+          deleting={bulkDeleting}
+          onClear={() => setSelectedIds(new Set())}
+          onDelete={handleBulkDelete}
+          assignOptions={ownerOptions}
+          assignValue={assignOwnerId}
+          onAssignValueChange={setAssignOwnerId}
+          onAssign={handleBatchAssign}
+          assigning={assigning}
+        />
+      )}
 
       <div className="bg-white border border-gray-200 overflow-x-auto">
         <table className="w-full text-sm">
@@ -700,14 +788,15 @@ function PartiesList({
               <th className="text-left px-4 py-3 font-medium text-gray-600">上市状态</th>
               <th className="text-left px-4 py-3 font-medium text-gray-600">主营业务</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">状态</th>
+              <th className="text-left px-4 py-3 font-medium text-gray-600">负责人</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">操作</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {loading ? (
-              <tr><td colSpan={8} className="px-4 py-8 text-center"><div className="w-5 h-5 border-2 border-brand-600 border-t-transparent rounded-full animate-spin mx-auto" /></td></tr>
+              <tr><td colSpan={9} className="px-4 py-8 text-center"><div className="w-5 h-5 border-2 border-brand-600 border-t-transparent rounded-full animate-spin mx-auto" /></td></tr>
             ) : items.length === 0 ? (
-              <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-400">暂无匹配的买家主体</td></tr>
+              <tr><td colSpan={9} className="px-4 py-8 text-center text-gray-400">暂无匹配的买家主体</td></tr>
             ) : items.map((item) => <PartyRow key={item.id} item={item} selected={selectedIds.has(item.id)} onSelectedChange={(checked) => toggleSelected(item.id, checked)} />)}
           </tbody>
         </table>
@@ -731,6 +820,7 @@ function PartyRow({ item, selected, onSelectedChange }: { item: BuyerParty; sele
       <td className="px-4 py-3 text-gray-600">{valueLabel('listed_status', item.listed_status)}</td>
       <td className="px-4 py-3 text-gray-600 truncate max-w-[240px]" title={item.main_business || undefined}>{item.main_business || '-'}</td>
       <td className="px-4 py-3 text-center"><PartyStatusBadge status={item.status} /></td>
+      <td className="px-4 py-3 text-gray-600">{item.owner_name || <span className="text-gray-300">未指派</span>}</td>
       <td className="px-4 py-3 text-center"><Link to={`/buyers/${item.id}`} className="text-xs text-brand-600 hover:text-brand-700 font-medium">查看</Link></td>
     </tr>
   );
@@ -844,11 +934,66 @@ function FilterSelect({ label, value, options, onChange }: { label: string; valu
   );
 }
 
-function BulkActionBar({ count, label, deleting, onClear, onDelete }: { count: number; label: string; deleting: boolean; onClear: () => void; onDelete: () => void }) {
+function BulkActionBar({
+  count,
+  label,
+  deleting,
+  onClear,
+  onDelete,
+  assignOptions,
+  assignValue,
+  onAssignValueChange,
+  onAssign,
+  assigning,
+}: {
+  count: number;
+  label: string;
+  deleting: boolean;
+  onClear: () => void;
+  onDelete: () => void;
+  assignOptions?: AppUserOption[];
+  assignValue?: string;
+  onAssignValueChange?: (value: string) => void;
+  onAssign?: () => void;
+  assigning?: boolean;
+}) {
+  const admin = isAdmin();
   return (
     <div className="flex items-center justify-between gap-3 border border-amber-200 bg-amber-50 px-3 py-2 text-sm">
       <span className="text-amber-800">已选择 {count} 个{label}</span>
-      <div className="flex items-center gap-2"><button onClick={onClear} className="px-3 py-1.5 text-xs text-amber-700 hover:text-amber-900">取消选择</button><button onClick={onDelete} disabled={deleting} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs bg-red-600 text-white hover:bg-red-700 disabled:opacity-50">{deleting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}批量删除</button></div>
+      <div className="flex items-center gap-2">
+        <button onClick={onClear} className="px-3 py-1.5 text-xs text-amber-700 hover:text-amber-900">取消选择</button>
+        {admin && assignOptions && onAssign && (
+          <>
+            <select
+              value={assignValue || ''}
+              onChange={(event) => onAssignValueChange?.(event.target.value)}
+              className="border border-amber-300 bg-white px-2 py-1.5 text-xs text-gray-700"
+            >
+              <option value="">选择负责人...</option>
+              {assignOptions
+                .filter((option) => option.status === 'active')
+                .map((option) => (
+                  <option key={option.id} value={option.id}>{option.name}</option>
+                ))}
+            </select>
+            <button
+              onClick={onAssign}
+              disabled={assigning || !assignValue}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50"
+            >
+              {assigning && <Loader2 className="w-3 h-3 animate-spin" />}
+              批量指派
+            </button>
+          </>
+        )}
+        {admin && (
+          <button onClick={onDelete} disabled={deleting} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs bg-red-600 text-white hover:bg-red-700 disabled:opacity-50">
+            {deleting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+            批量删除
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -958,12 +1103,12 @@ function readTab(searchParams: URLSearchParams): Tab { return searchParams.get('
 
 function readIntentFilters(searchParams: URLSearchParams): BuyerIntentFilters {
   const searchFieldParam = searchParams.get('searchField');
-  return { q: searchParams.get('q') || '', searchField: isBuyerIntentSearchField(searchFieldParam) ? searchFieldParam : undefined, industry: searchParams.get('industry') || '', region: searchParams.get('region') || '', status: searchParams.get('status') || '', listedStatus: searchParams.get('listedStatus') || '', requiresConsolidation: searchParams.get('requiresConsolidation') || '', page: Math.max(1, Number(searchParams.get('page') || '1') || 1) };
+  return { q: searchParams.get('q') || '', searchField: isBuyerIntentSearchField(searchFieldParam) ? searchFieldParam : undefined, industry: searchParams.get('industry') || '', region: searchParams.get('region') || '', status: searchParams.get('status') || '', listedStatus: searchParams.get('listedStatus') || '', requiresConsolidation: searchParams.get('requiresConsolidation') || '', owner: searchParams.get('owner') || '', page: Math.max(1, Number(searchParams.get('page') || '1') || 1) };
 }
 
 function readPartyFilters(searchParams: URLSearchParams): BuyerPartyFilters {
   const searchFieldParam = searchParams.get('partySearchField');
-  return { q: searchParams.get('partyQ') || '', searchField: isBuyerPartySearchField(searchFieldParam) ? searchFieldParam : undefined, buyerType: searchParams.get('buyerType') || '', region: searchParams.get('partyRegion') || '', listedStatus: searchParams.get('partyListedStatus') || '', status: searchParams.get('partyStatus') || '', page: Math.max(1, Number(searchParams.get('partyPage') || '1') || 1) };
+  return { q: searchParams.get('partyQ') || '', searchField: isBuyerPartySearchField(searchFieldParam) ? searchFieldParam : undefined, buyerType: searchParams.get('buyerType') || '', region: searchParams.get('partyRegion') || '', listedStatus: searchParams.get('partyListedStatus') || '', status: searchParams.get('partyStatus') || '', owner: searchParams.get('partyOwner') || '', page: Math.max(1, Number(searchParams.get('partyPage') || '1') || 1) };
 }
 
 function isBuyerIntentSearchField(value: string | null): value is BuyerIntentSearchField { return value === 'intent_name' || value === 'buyer_name' || value === 'raw_requirement_text' || value === 'intent_summary'; }

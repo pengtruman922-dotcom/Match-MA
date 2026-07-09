@@ -15,8 +15,10 @@ import {
   RefreshCw,
   ExternalLink,
 } from 'lucide-react';
-import { relations, sellerTargets, updateLogs } from '../lib/api';
+import { relations, sellerTargets, updateLogs, users } from '../lib/api';
+import { isAdmin } from '../lib/auth';
 import type {
+  AppUserOption,
   BuyerSellerRelation,
   RelationEvent,
   SellerTarget,
@@ -48,6 +50,14 @@ export default function TargetDetail() {
   const [followUps, setFollowUps] = useState<TargetFollowUp[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [lifecycleSaving, setLifecycleSaving] = useState(false);
+  const admin = isAdmin();
+  const [ownerOptions, setOwnerOptions] = useState<AppUserOption[]>([]);
+  const [ownerSaving, setOwnerSaving] = useState(false);
+
+  useEffect(() => {
+    if (!admin) return;
+    users.options().then(setOwnerOptions).catch(() => {});
+  }, [admin]);
 
   useEffect(() => {
     if (!id) return;
@@ -98,6 +108,19 @@ export default function TargetDetail() {
     return () => window.clearInterval(timer);
   }, [id, parsing]);
 
+  const handleOwnerChange = async (value: string) => {
+    if (!target || value === (target.owner_user_id || '')) return;
+    setOwnerSaving(true);
+    try {
+      const updated = await sellerTargets.update(target.id, { owner_user_id: value || null });
+      setTarget(updated);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '更新负责人失败');
+    } finally {
+      setOwnerSaving(false);
+    }
+  };
+
   const handleLifecycleChange = async (value: string) => {
     if (!target || value === target.lifecycle_status) return;
     setLifecycleSaving(true);
@@ -145,10 +168,32 @@ export default function TargetDetail() {
               {target.asking_price_yuan && <span>· 报价{formatYuan(target.asking_price_yuan)}*</span>}
               <DisplayStatusBadge target={target} />
               <StatusBadge status={target.information_status} type="information" />
+              <span className="inline-flex items-center gap-1 text-gray-500">
+                <UserRound className="w-3 h-3" />
+                负责人：{target.owner_name || '未指派'}
+              </span>
             </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {admin && (
+            <select
+              value={target.owner_user_id || ''}
+              onChange={(event) => handleOwnerChange(event.target.value)}
+              disabled={ownerSaving}
+              title="指派负责人（仅管理员）"
+              className="px-2 py-1.5 text-sm border border-gray-200 text-gray-700 bg-white outline-none hover:border-brand-500 focus:border-brand-600 disabled:opacity-50"
+            >
+              <option value="">未指派</option>
+              {ownerOptions
+                .filter((option) => option.status === 'active' || option.id === target.owner_user_id)
+                .map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.name}
+                  </option>
+                ))}
+            </select>
+          )}
           <select
             value={target.lifecycle_status}
             onChange={(event) => handleLifecycleChange(event.target.value)}

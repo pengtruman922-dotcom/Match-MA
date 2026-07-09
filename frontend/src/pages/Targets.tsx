@@ -19,8 +19,10 @@ import {
   X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import { attachments, businessUpdates, sellerTargets } from '../lib/api';
+import { attachments, businessUpdates, sellerTargets, users } from '../lib/api';
+import { isAdmin } from '../lib/auth';
 import type {
+  AppUserOption,
   AttachmentUploadPolicy,
   SellerTarget,
   SellerTargetCreate,
@@ -57,6 +59,7 @@ type TargetFilters = {
   industry: string;
   region: string;
   status: string;
+  owner: string;
   page: number;
 };
 
@@ -76,12 +79,16 @@ export default function Targets() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const admin = isAdmin();
+  const [ownerOptions, setOwnerOptions] = useState<AppUserOption[]>([]);
+  const [assignOwnerId, setAssignOwnerId] = useState('');
+  const [assigning, setAssigning] = useState(false);
 
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const visibleIds = useMemo(() => items.map((item) => item.id), [items]);
   const selectedCount = selectedIds.size;
   const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
-  const activeFilterCount = [filters.q, filters.industry, filters.region, filters.status].filter(Boolean).length;
+  const activeFilterCount = [filters.q, filters.industry, filters.region, filters.status, filters.owner].filter(Boolean).length;
 
   const updateFilters = useCallback((patch: Partial<TargetFilters>, options?: { replace?: boolean }) => {
     const next = new URLSearchParams(searchParams);
@@ -90,6 +97,7 @@ export default function Targets() {
     if ('industry' in patch) setOrDelete(next, 'industry', patch.industry);
     if ('region' in patch) setOrDelete(next, 'region', patch.region);
     if ('status' in patch) setOrDelete(next, 'status', patch.status);
+    if ('owner' in patch) setOrDelete(next, 'owner', patch.owner);
     if (patch.page !== undefined) {
       if (patch.page <= 1) next.delete('page');
       else next.set('page', String(patch.page));
@@ -106,6 +114,7 @@ export default function Targets() {
         industry: filters.industry || undefined,
         region: filters.region || undefined,
         status: filters.status || undefined,
+        owner: filters.owner || undefined,
         limit: PAGE_SIZE,
         offset: (filters.page - 1) * PAGE_SIZE,
       })
@@ -124,6 +133,11 @@ export default function Targets() {
   useEffect(() => {
     fetchTargets();
   }, [fetchTargets]);
+
+  useEffect(() => {
+    if (!admin) return;
+    users.options().then(setOwnerOptions).catch(() => {});
+  }, [admin]);
 
   // Poll rows still parsing so recommendation/summary flips show up without a
   // manual refresh. Completion signal is information_status leaving parsing.
@@ -263,6 +277,23 @@ export default function Targets() {
     });
   };
 
+  const handleBatchAssign = async () => {
+    const ids = Array.from(selectedIds);
+    if (!ids.length || !assignOwnerId) return;
+    const ownerName = ownerOptions.find((option) => option.id === assignOwnerId)?.name || '所选账号';
+    if (!window.confirm(`将已选择的 ${ids.length} 个标的指派给「${ownerName}」？`)) return;
+    setAssigning(true);
+    try {
+      await sellerTargets.batchAssignOwner(ids, assignOwnerId);
+      await sellerTargets.filterOptions().then(setFilterOptions).catch(() => {});
+      fetchTargets();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '批量指派失败');
+    } finally {
+      setAssigning(false);
+    }
+  };
+
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between gap-3">
@@ -325,6 +356,14 @@ export default function Targets() {
           options={filterOptions.statuses}
           onChange={(value) => updateFilters({ status: value, page: 1 })}
         />
+        {admin && (
+          <FilterSelect
+            label="负责人"
+            value={filters.owner}
+            options={filterOptions.owners || []}
+            onChange={(value) => updateFilters({ owner: value, page: 1 })}
+          />
+        )}
         <button onClick={handleSearch} className="px-3 py-2 border border-gray-200 text-sm font-medium text-gray-700 hover:border-brand-600 hover:text-brand-600 transition-colors bg-white">
           搜索
         </button>
@@ -332,7 +371,7 @@ export default function Targets() {
           <button
             onClick={() => {
               setSearchQuery('');
-              updateFilters({ q: '', searchField: undefined, industry: '', region: '', status: '', page: 1 });
+              updateFilters({ q: '', searchField: undefined, industry: '', region: '', status: '', owner: '', page: 1 });
             }}
             className="px-3 py-2 text-sm text-gray-500 hover:text-gray-700"
           >
@@ -357,14 +396,40 @@ export default function Targets() {
             <button onClick={() => setSelectedIds(new Set())} className="px-3 py-1.5 text-xs text-amber-700 hover:text-amber-900">
               取消选择
             </button>
-            <button
-              onClick={handleBulkDelete}
-              disabled={bulkDeleting}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
-            >
-              {bulkDeleting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
-              批量删除
-            </button>
+            {admin && (
+              <>
+                <select
+                  value={assignOwnerId}
+                  onChange={(event) => setAssignOwnerId(event.target.value)}
+                  className="border border-amber-300 bg-white px-2 py-1.5 text-xs text-gray-700"
+                >
+                  <option value="">选择负责人...</option>
+                  {ownerOptions
+                    .filter((option) => option.status === 'active')
+                    .map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.name}
+                      </option>
+                    ))}
+                </select>
+                <button
+                  onClick={handleBatchAssign}
+                  disabled={assigning || !assignOwnerId}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50"
+                >
+                  {assigning && <Loader2 className="w-3 h-3 animate-spin" />}
+                  批量指派
+                </button>
+                <button
+                  onClick={handleBulkDelete}
+                  disabled={bulkDeleting}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
+                >
+                  {bulkDeleting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+                  批量删除
+                </button>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -399,19 +464,20 @@ export default function Targets() {
                 <th className="w-[76px] text-center px-4 py-3 font-medium text-gray-600">控股</th>
                 <th className="w-[76px] text-center px-4 py-3 font-medium text-gray-600">并表</th>
                 <th className="w-[200px] text-left px-4 py-3 font-medium text-gray-600">最近跟进</th>
+                <th className="w-[100px] text-left px-4 py-3 font-medium text-gray-600">负责人</th>
                 <th className="sticky right-0 z-20 w-[210px] bg-gray-50 text-left px-4 py-3 font-medium text-gray-600">操作</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {loading ? (
                 <tr>
-                  <td colSpan={18} className="px-4 py-8 text-center">
+                  <td colSpan={19} className="px-4 py-8 text-center">
                     <div className="w-5 h-5 border-2 border-brand-600 border-t-transparent rounded-full animate-spin mx-auto" />
                   </td>
                 </tr>
               ) : items.length === 0 ? (
                 <tr>
-                  <td colSpan={18} className="px-4 py-8 text-center text-gray-400">暂无匹配的标的数据</td>
+                  <td colSpan={19} className="px-4 py-8 text-center text-gray-400">暂无匹配的标的数据</td>
                 </tr>
               ) : (
                 items.map((item) => (
@@ -540,6 +606,9 @@ function TargetRow({
           '-'
         )}
       </td>
+      <td className="px-4 py-3 text-gray-600">
+        {item.owner_name ? <ClampedText value={item.owner_name} /> : <span className="text-gray-300">未指派</span>}
+      </td>
       <td className="sticky right-0 z-10 bg-white px-4 py-3 group-hover:bg-brand-50">
         <div className="flex items-center gap-1 whitespace-nowrap">
           <button
@@ -556,15 +625,17 @@ function TargetRow({
             <Sparkles className="w-3 h-3" />
             推荐买家
           </Link>
-          <button
-            type="button"
-            onClick={onDelete}
-            disabled={deleting}
-            className="inline-flex items-center gap-1 px-2 py-1 text-xs text-red-600 hover:bg-red-50 transition-colors disabled:opacity-50"
-          >
-            {deleting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
-            删除
-          </button>
+          {isAdmin() && (
+            <button
+              type="button"
+              onClick={onDelete}
+              disabled={deleting}
+              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-red-600 hover:bg-red-50 transition-colors disabled:opacity-50"
+            >
+              {deleting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+              删除
+            </button>
+          )}
         </div>
       </td>
     </tr>
@@ -695,6 +766,7 @@ function readTargetFilters(searchParams: URLSearchParams): TargetFilters {
     industry: searchParams.get('industry') || '',
     region: searchParams.get('region') || '',
     status: searchParams.get('status') || '',
+    owner: searchParams.get('owner') || '',
     page,
   };
 }

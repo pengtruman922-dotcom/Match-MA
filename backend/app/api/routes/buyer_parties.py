@@ -7,7 +7,16 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
-from backend.app.api.routes.utils import diff_payload, write_action_log, write_action_logs_for_diff
+from backend.app.api.authn import AuthContext, CurrentUser, require_admin
+from backend.app.api.routes.utils import (
+    assign_owner_bulk,
+    diff_payload,
+    ensure_active_user,
+    owner_filter_condition,
+    owner_filter_options,
+    write_action_log,
+    write_action_logs_for_diff,
+)
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 
@@ -40,6 +49,7 @@ class BuyerPartyUpdate(BaseModel):
     main_business: str | None = None
     capital_strength_summary: str | None = None
     profile_summary: str | None = None
+    owner_user_id: UUID | None = None
 
 
 class BuyerPartyOut(BaseModel):
@@ -56,6 +66,8 @@ class BuyerPartyOut(BaseModel):
     capital_strength_summary: str | None
     profile_summary: str | None
     status: str
+    owner_user_id: UUID | None = None
+    owner_name: str | None = None
     created_at: str
     updated_at: str
 
@@ -78,6 +90,7 @@ class BuyerPartyFilterOptionsOut(BaseModel):
     regions: list[BuyerPartyFilterOptionOut]
     listed_statuses: list[BuyerPartyFilterOptionOut]
     statuses: list[BuyerPartyFilterOptionOut]
+    owners: list[BuyerPartyFilterOptionOut] = []
 
 
 class BuyerPartySuggestionOut(BaseModel):
@@ -106,6 +119,8 @@ BUYER_PARTY_OUT_COLUMNS = """
           id, buyer_name, legal_name, aliases_json, buyer_type, group_name,
           listed_status, region_province, region_city, main_business,
           capital_strength_summary, profile_summary, status,
+          owner_user_id,
+          (select au.name from app_user au where au.id = buyer_party.owner_user_id) as owner_name,
           created_at::text as created_at, updated_at::text as updated_at
 """
 
@@ -119,7 +134,11 @@ BUYER_PARTY_SEARCH_COLUMNS = {
 
 
 @router.post("", response_model=BuyerPartyOut, status_code=status.HTTP_201_CREATED)
-def create_buyer_party(payload: BuyerPartyCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
+def create_buyer_party(
+    payload: BuyerPartyCreate,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     statement = text(
         f"""
         insert into buyer_party (
@@ -138,7 +157,7 @@ def create_buyer_party(payload: BuyerPartyCreate, db: Session = Depends(get_db))
 {BUYER_PARTY_OUT_COLUMNS}
         """
     ).bindparams(bindparam("aliases_json", type_=JSONB))
-    row = db.execute(statement, _buyer_party_params(payload)).mappings().one()
+    row = db.execute(statement, _buyer_party_params(payload, current_user)).mappings().one()
     db.commit()
     return dict(row)
 
@@ -154,6 +173,7 @@ def list_buyer_parties(
     region: str | None = Query(default=None, max_length=200),
     listed_status: str | None = Query(default=None, max_length=80),
     status: Literal["active", "archived", "merged"] | None = Query(default=None),
+    owner: str | None = Query(default=None, max_length=50),
 ) -> dict[str, Any]:
     where = ["team_id = :team_id", "workspace_id = :workspace_id", "deleted_at is null"]
     params: dict[str, Any] = {
@@ -162,6 +182,13 @@ def list_buyer_parties(
         "limit": limit,
         "offset": offset,
     }
+
+    owner_condition = owner_filter_condition(owner)
+    if owner_condition:
+        condition_sql, owner_param = owner_condition
+        where.append(condition_sql)
+        if owner_param is not None:
+            params["owner_user_id"] = owner_param
 
     if q:
         if search_field:
@@ -286,11 +313,13 @@ def buyer_party_filter_options(db: Session = Depends(get_db)) -> dict[str, Any]:
         params,
         labels={"active": "活跃", "archived": "已归档", "merged": "已合并"},
     )
+    owners = owner_filter_options(db, "buyer_party", params)
     return {
         "buyer_types": buyer_types,
         "regions": regions,
         "listed_statuses": listed_statuses,
         "statuses": statuses,
+        "owners": owners,
     }
 
 
@@ -390,13 +419,47 @@ def buyer_party_suggestions(
     ]
 
 
+class BuyerPartyBatchAssignOwnerRequest(BaseModel):
+    ids: list[UUID] = Field(min_length=1, max_length=200)
+    owner_user_id: UUID | None = None
+
+
+class BuyerPartyBatchAssignOwnerOut(BaseModel):
+    status: str
+    updated_count: int
+    updated_ids: list[UUID]
+
+
+@router.post("/batch-assign-owner", response_model=BuyerPartyBatchAssignOwnerOut)
+def batch_assign_buyer_party_owner(
+    payload: BuyerPartyBatchAssignOwnerRequest,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    require_admin(current_user)
+    if payload.owner_user_id is not None:
+        ensure_active_user(db, payload.owner_user_id)
+    updated_ids = assign_owner_bulk(
+        db,
+        table="buyer_party",
+        entity_type="buyer_party",
+        entity_ids=list(dict.fromkeys(payload.ids)),
+        new_owner_user_id=payload.owner_user_id,
+        actor_user_id=current_user.user_id,
+    )
+    db.commit()
+    return {"status": "ok", "updated_count": len(updated_ids), "updated_ids": updated_ids}
+
+
 @router.post("/bulk-delete", response_model=BuyerPartyBulkDeleteOut)
 def bulk_delete_buyer_parties(
     payload: BuyerPartyBulkDeleteRequest,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    require_admin(current_user)
     party_ids = list(dict.fromkeys(payload.ids))
-    deleted_ids = _soft_delete_buyer_parties(db, party_ids)
+    deleted_ids = _soft_delete_buyer_parties(db, party_ids, actor_user_id=current_user.user_id)
     deleted_id_set = set(deleted_ids)
     skipped_ids = [party_id for party_id in party_ids if party_id not in deleted_id_set]
     db.commit()
@@ -461,10 +524,16 @@ def list_buyer_party_intents(
 def update_buyer_party(
     buyer_party_id: UUID,
     payload: BuyerPartyUpdate,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     original = _get_buyer_party_or_404(db, buyer_party_id)
     changes = payload.model_dump(exclude_unset=True)
+
+    if "owner_user_id" in changes:
+        require_admin(current_user)
+        if changes["owner_user_id"] is not None:
+            ensure_active_user(db, changes["owner_user_id"])
 
     if "buyer_name" in changes and changes["buyer_name"] is not None:
         changes["buyer_name"] = changes["buyer_name"].strip()
@@ -497,7 +566,7 @@ def update_buyer_party(
         statement,
         {
             **changes,
-            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "updated_by": current_user.user_id,
             "buyer_party_id": buyer_party_id,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
@@ -509,15 +578,21 @@ def update_buyer_party(
         entity_type="buyer_party",
         entity_id=buyer_party_id,
         diff=diff,
+        applied_by=current_user.user_id,
     )
     db.commit()
     return dict(row)
 
 
 @router.delete("/{buyer_party_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_buyer_party(buyer_party_id: UUID, db: Session = Depends(get_db)) -> None:
+def delete_buyer_party(
+    buyer_party_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> None:
+    require_admin(current_user)
     _get_buyer_party_or_404(db, buyer_party_id)
-    _soft_delete_buyer_parties(db, [buyer_party_id])
+    _soft_delete_buyer_parties(db, [buyer_party_id], actor_user_id=current_user.user_id)
     db.commit()
     return None
 
@@ -537,9 +612,15 @@ def _filter_options(
     ]
 
 
-def _soft_delete_buyer_parties(db: Session, buyer_party_ids: list[UUID]) -> list[UUID]:
+def _soft_delete_buyer_parties(
+    db: Session,
+    buyer_party_ids: list[UUID],
+    *,
+    actor_user_id: UUID | None = None,
+) -> list[UUID]:
     if not buyer_party_ids:
         return []
+    actor = actor_user_id or DEFAULT_ADMIN_USER_ID
 
     rows = db.execute(
         text(
@@ -557,8 +638,8 @@ def _soft_delete_buyer_parties(db: Session, buyer_party_ids: list[UUID]) -> list
             """
         ).bindparams(bindparam("buyer_party_ids", expanding=True)),
         {
-            "deleted_by": DEFAULT_ADMIN_USER_ID,
-            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "deleted_by": actor,
+            "updated_by": actor,
             "buyer_party_ids": buyer_party_ids,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
@@ -573,11 +654,14 @@ def _soft_delete_buyer_parties(db: Session, buyer_party_ids: list[UUID]) -> list
             field_path="deleted_at",
             old_value=None,
             new_value="now()",
+            applied_by=actor,
         )
     return deleted_ids
 
 
-def _buyer_party_params(payload: BuyerPartyCreate) -> dict[str, Any]:
+def _buyer_party_params(payload: BuyerPartyCreate, current_user: AuthContext) -> dict[str, Any]:
+    # 创建人默认成为负责人；只有管理员可以在创建时指定他人。
+    owner_user_id = payload.owner_user_id if current_user.is_admin and payload.owner_user_id else current_user.user_id
     return {
         "team_id": DEFAULT_TEAM_ID,
         "workspace_id": DEFAULT_WORKSPACE_ID,
@@ -592,9 +676,9 @@ def _buyer_party_params(payload: BuyerPartyCreate) -> dict[str, Any]:
         "main_business": payload.main_business,
         "capital_strength_summary": payload.capital_strength_summary,
         "profile_summary": payload.profile_summary,
-        "owner_user_id": DEFAULT_ADMIN_USER_ID,
-        "created_by": DEFAULT_ADMIN_USER_ID,
-        "updated_by": DEFAULT_ADMIN_USER_ID,
+        "owner_user_id": owner_user_id,
+        "created_by": current_user.user_id,
+        "updated_by": current_user.user_id,
     }
 
 

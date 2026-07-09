@@ -22,7 +22,7 @@ from backend.app.ai.ocr_client import OcrInput, build_attachment_ocr_input_json,
 from backend.app.ai.prompting import render_template
 from backend.app.ai.rerank_client import RerankCallError, call_dashscope_compatible_rerank
 from backend.app.config import get_settings
-from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
 from backend.app.api.routes.extracted_actions import (
     apply_buyer_intent_target_exclusion_action,
     apply_buyer_intent_update_action,
@@ -4046,7 +4046,7 @@ def _apply_seller_target_parse_changes(
         ),
         {
             **{field: changes[field] for field in diff},
-            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "updated_by": SYSTEM_USER_ID,
             "seller_target_id": seller_target["id"],
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
@@ -4129,7 +4129,7 @@ def _write_seller_target_parse_logs(
                 "new_value_json": _json_safe_value(new_value),
                 "job_id": job_id,
                 "evidence_id": source_context.get("evidence_id"),
-                "applied_by": DEFAULT_ADMIN_USER_ID,
+                "applied_by": SYSTEM_USER_ID,
                 "metadata_json": {
                     "source": "seller_target_parser",
                     "normalization_notes": normalization_notes,
@@ -4236,7 +4236,7 @@ def _apply_buyer_intent_parse_changes(
         statement,
         {
             **{field: changes[field] for field in diff},
-            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "updated_by": SYSTEM_USER_ID,
             "buyer_intent_id": buyer_intent["id"],
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
@@ -4299,7 +4299,7 @@ def _write_buyer_intent_parse_logs(
                 "new_value_json": _json_safe_value(new_value),
                 "job_id": job_id,
                 "evidence_id": source_context.get("evidence_id"),
-                "applied_by": DEFAULT_ADMIN_USER_ID,
+                "applied_by": SYSTEM_USER_ID,
                 "metadata_json": {
                     "source": "buyer_intent_parser",
                     "normalization_notes": normalization_notes,
@@ -4388,7 +4388,7 @@ def _apply_buyer_party_parse_changes(
         ),
         {
             **{field: changes[field] for field in diff},
-            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "updated_by": SYSTEM_USER_ID,
             "buyer_party_id": buyer_party["id"],
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
@@ -4444,7 +4444,7 @@ def _write_buyer_party_parse_logs(
                 "new_value_json": _json_safe_value(new_value),
                 "job_id": job_id,
                 "evidence_id": source_context.get("evidence_id"),
-                "applied_by": DEFAULT_ADMIN_USER_ID,
+                "applied_by": SYSTEM_USER_ID,
                 "metadata_json": {
                     "source": "buyer_intent_parser",
                     "enrichment": "buyer_party",
@@ -4497,7 +4497,7 @@ def _write_field_value_sources(
                 "source_label": source_context.get("source_label"),
                 "confidence": source_context.get("confidence"),
                 "review_status": review_status,
-                "created_by": DEFAULT_ADMIN_USER_ID,
+                "created_by": SYSTEM_USER_ID,
             },
         )
 
@@ -5385,7 +5385,7 @@ def _mark_bound_seller_targets_pending_review_after_business_update_parse(
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
             "seller_target_ids": remaining_ids,
-            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "updated_by": SYSTEM_USER_ID,
             "metadata_patch": {
                 "last_parse_pending_review_job_id": str(job_id),
                 "last_parse_pending_review_reason": "business_update_parsed_without_auto_apply",
@@ -5425,7 +5425,7 @@ def _mark_seller_targets_parse_failed(
             "workspace_id": DEFAULT_WORKSPACE_ID,
             "seller_target_ids": unique_ids,
             "failure_statuses": list(SELLER_TARGET_PARSE_FAILURE_STATUSES),
-            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "updated_by": SYSTEM_USER_ID,
             "metadata_patch": {
                 "last_parse_failed_job_id": str(job_id),
                 "last_parse_error_message": _truncate_text(error_message, 500),
@@ -5605,7 +5605,7 @@ def _insert_llm_trace(
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": SYSTEM_USER_ID,
             "metadata_json": {"source": "business_update_extractor"},
         },
     )
@@ -5689,7 +5689,7 @@ def _insert_buyer_intent_parse_trace(
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": SYSTEM_USER_ID,
             "metadata_json": {"source": "buyer_intent_parser"},
         },
     )
@@ -5773,7 +5773,7 @@ def _insert_seller_target_parse_trace(
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": SYSTEM_USER_ID,
             "metadata_json": {"source": "seller_target_parser"},
         },
     )
@@ -5847,7 +5847,7 @@ def _insert_recommendation_report_message(
                 "message_type": "recommendation_report",
                 "generation_mode": generation_mode,
             },
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": SYSTEM_USER_ID,
         },
     )
     db.execute(
@@ -5942,7 +5942,7 @@ def _insert_recommendation_report_llm_trace(
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": SYSTEM_USER_ID,
             "metadata_json": {"source": "recommendation_report_generate"},
         },
     )
@@ -6008,7 +6008,7 @@ def _insert_rerank_trace(
             "error_message": error_message,
             "latency_ms": latency_ms,
             "total_tokens": total_tokens,
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": SYSTEM_USER_ID,
             "metadata_json": {"source": "recommendation_rerank"},
         },
     )
@@ -6246,7 +6246,7 @@ def _enqueue_doc2x_poll_job(
             "run_after_seconds": max(int(run_after_seconds), 1),
             "parent_job_id": _optional_uuid(parent_job_id),
             "correlation_id": business_update_id or _optional_uuid(source_payload.get("business_update_id")) or attachment_id,
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": SYSTEM_USER_ID,
             "metadata_json": {
                 "source": "doc2x_poll",
                 "attachment_id": str(attachment_id),
@@ -6405,7 +6405,7 @@ def _enqueue_linked_parse_jobs_after_ocr(
                 "payload_json": payload_json,
                 "parent_job_id": job.id,
                 "correlation_id": job.correlation_id or job.id,
-                "created_by": DEFAULT_ADMIN_USER_ID,
+                "created_by": SYSTEM_USER_ID,
                 "metadata_json": {
                     "source": "attachment_ocr_auto_parse",
                     "attachment_id": str(attachment_id),
@@ -6505,7 +6505,7 @@ def _enqueue_business_update_process_after_ocr(
             },
             "parent_job_id": job.id,
             "correlation_id": job.correlation_id or business_update_id,
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": SYSTEM_USER_ID,
             "metadata_json": {
                 "source": "attachment_ocr_auto_business_update_process",
                 "attachment_id": str(attachment_id),
@@ -6635,7 +6635,7 @@ def _insert_recommendation_rerank_message(
                 "message_type": "reranked_candidates",
                 "model_name": model_name,
             },
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": SYSTEM_USER_ID,
         },
     )
     db.execute(
@@ -6734,7 +6734,7 @@ def _insert_model_node_test_trace(
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": SYSTEM_USER_ID,
             "metadata_json": {"source": "model_node_test"},
         },
     )
@@ -6801,7 +6801,7 @@ def _insert_ocr_trace(
             "error_code": error_code,
             "error_message": error_message,
             "latency_ms": latency_ms,
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": SYSTEM_USER_ID,
             "metadata_json": {"source": "attachment_ocr_parse", "execution_mode": "skeleton"},
         },
     )
@@ -6947,7 +6947,7 @@ def _insert_embedding_trace(
             "latency_ms": latency_ms,
             "prompt_tokens": prompt_tokens,
             "total_tokens": total_tokens,
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": SYSTEM_USER_ID,
             "metadata_json": {"source": "embedding_generate"},
         },
     )

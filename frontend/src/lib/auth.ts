@@ -1,4 +1,5 @@
 export interface AuthUser {
+  user_id?: string;
   username: string;
   display_name: string;
   role: string;
@@ -41,4 +42,12 @@ export function clearAuthSession(): void {
 
 export function isLoggedIn(): boolean {
   return Boolean(getAuthToken());
+}
+
+export function isAdmin(): boolean {
+  const user = getStoredUser();
+  // 老会话可能没有 role 字段（升级前存储的），默认按管理员处理，
+  // 后端仍会对每个请求做真实鉴权。
+  if (!user || !user.role) return true;
+  return user.role === 'admin';
 }

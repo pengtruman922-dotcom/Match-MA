@@ -9,6 +9,7 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
+from backend.app.api.authn import CurrentUser
 from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
@@ -138,6 +139,7 @@ class BusinessUpdateSampleRunsOut(BaseModel):
 @router.post("", response_model=BusinessUpdateOut, status_code=status.HTTP_201_CREATED)
 def create_business_update(
     payload: BusinessUpdateCreate,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     _validate_business_update_input_type(payload.input_type)
@@ -176,7 +178,7 @@ def create_business_update(
             "bound_seller_target_ids_json": [str(item) for item in payload.bound_seller_target_ids],
             "bound_buyer_party_ids_json": [str(item) for item in payload.bound_buyer_party_ids],
             "bound_buyer_intent_ids_json": [str(item) for item in payload.bound_buyer_intent_ids],
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": current_user.user_id,
             "metadata_json": payload.metadata_json,
         },
     ).mappings().one()
@@ -211,6 +213,7 @@ def create_business_update(
 
 @router.post("/upload", response_model=BusinessUpdateUploadOut, status_code=status.HTTP_201_CREATED)
 def upload_business_update(
+    current_user: CurrentUser,
     raw_text: str = Form(..., min_length=1),
     input_type: str = Form(default="mixed"),
     files: list[UploadFile] | None = File(default=None),
@@ -246,8 +249,11 @@ def upload_business_update(
             "source": "business_update_multipart_upload",
             "upload_mode": "mixed",
         },
+        actor_user_id=current_user.user_id,
     )
-    uploaded = _save_business_update_upload_files(db, files or [], settings=settings)
+    uploaded = _save_business_update_upload_files(
+        db, files or [], settings=settings, actor_user_id=current_user.user_id
+    )
     for attachment_id in uploaded["uploaded_attachment_ids"]:
         _link_attachment_if_missing(db, attachment_id, "business_update", row["id"], "source_document")
         for entity_type, ids in _bound_attachment_link_targets(
@@ -791,6 +797,7 @@ def _insert_business_update_row(
     bound_buyer_party_ids: list[UUID] | None = None,
     bound_buyer_intent_ids: list[UUID] | None = None,
     metadata_json: dict[str, Any],
+    actor_user_id: UUID | None = None,
 ) -> dict[str, Any]:
     statement = text(
         """
@@ -827,7 +834,7 @@ def _insert_business_update_row(
                 "bound_seller_target_ids_json": [str(item) for item in (bound_seller_target_ids or [])],
                 "bound_buyer_party_ids_json": [str(item) for item in (bound_buyer_party_ids or [])],
                 "bound_buyer_intent_ids_json": [str(item) for item in (bound_buyer_intent_ids or [])],
-                "created_by": DEFAULT_ADMIN_USER_ID,
+                "created_by": actor_user_id or DEFAULT_ADMIN_USER_ID,
                 "metadata_json": metadata_json,
             },
         )
@@ -841,6 +848,7 @@ def _save_business_update_upload_files(
     files: list[UploadFile],
     *,
     settings: Any,
+    actor_user_id: UUID | None = None,
 ) -> dict[str, list[UUID]]:
     if len(files) > settings.business_update_max_upload_files:
         raise HTTPException(
@@ -918,7 +926,7 @@ def _save_business_update_upload_files(
                 "mime_type": file.content_type,
                 "file_size": uploaded.file_size,
                 "storage_path": uploaded.storage_uri,
-                "uploaded_by": DEFAULT_ADMIN_USER_ID,
+                "uploaded_by": actor_user_id or DEFAULT_ADMIN_USER_ID,
                 "metadata_json": metadata,
             },
         ).mappings().one()

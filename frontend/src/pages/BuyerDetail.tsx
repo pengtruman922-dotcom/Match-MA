@@ -14,8 +14,9 @@ import {
   CheckCircle2,
   Ban,
 } from 'lucide-react';
-import { buyerParties, relations, updateLogs } from '../lib/api';
-import type { BuyerParty, BuyerIntent, BuyerSellerRelation, RelationEvent, UpdateLog } from '../types/api';
+import { buyerParties, relations, updateLogs, users } from '../lib/api';
+import { isAdmin } from '../lib/auth';
+import type { AppUserOption, BuyerParty, BuyerIntent, BuyerSellerRelation, RelationEvent, UpdateLog } from '../types/api';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
 import { fieldLabel, valueLabel } from '../lib/fieldLabels';
 
@@ -36,6 +37,27 @@ export default function BuyerDetail() {
     searchParams.get('intentId')
   );
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const admin = isAdmin();
+  const [ownerOptions, setOwnerOptions] = useState<AppUserOption[]>([]);
+  const [ownerSaving, setOwnerSaving] = useState(false);
+
+  useEffect(() => {
+    if (!admin) return;
+    users.options().then(setOwnerOptions).catch(() => {});
+  }, [admin]);
+
+  const handleOwnerChange = async (value: string) => {
+    if (!party || value === (party.owner_user_id || '')) return;
+    setOwnerSaving(true);
+    try {
+      const updated = await buyerParties.update(party.id, { owner_user_id: value || null });
+      setParty(updated);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '更新负责人失败');
+    } finally {
+      setOwnerSaving(false);
+    }
+  };
 
   useEffect(() => {
     if (!id) return;
@@ -91,10 +113,27 @@ export default function BuyerDetail() {
               {party.buyer_type && <span>{valueLabel('buyer_type', party.buyer_type)}</span>}
               {party.region_province && <span>· {party.region_province}{party.region_city || ''}</span>}
               {party.main_business && <span>· {party.main_business}</span>}
+              <span>· 负责人：{party.owner_name || '未指派'}</span>
             </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {admin && (
+            <select
+              value={party.owner_user_id || ''}
+              onChange={(event) => handleOwnerChange(event.target.value)}
+              disabled={ownerSaving}
+              title="指派负责人（仅管理员）"
+              className="px-2 py-1.5 text-sm border border-gray-200 text-gray-700 bg-white outline-none hover:border-brand-500 focus:border-brand-600 disabled:opacity-50"
+            >
+              <option value="">未指派</option>
+              {ownerOptions
+                .filter((option) => option.status === 'active' || option.id === party.owner_user_id)
+                .map((option) => (
+                  <option key={option.id} value={option.id}>{option.name}</option>
+                ))}
+            </select>
+          )}
           <button
             onClick={() => setDrawerOpen(true)}
             className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border border-gray-200 text-gray-700 hover:border-brand-500 hover:text-brand-600 transition-colors"

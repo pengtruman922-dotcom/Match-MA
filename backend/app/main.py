@@ -1,10 +1,13 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, Response
 
+from backend.app.api.authn import ADMIN_CONTEXT, resolve_user_context
 from backend.app.api.router import api_router
 from backend.app.config import get_settings
+from backend.app.security import decode_access_token
 
 
 PUBLIC_API_PATHS = {
@@ -27,13 +30,28 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         settings = get_settings()
         if not settings.auth_enabled or request.method == "OPTIONS" or request.url.path in PUBLIC_API_PATHS:
+            request.state.auth = ADMIN_CONTEXT if not settings.auth_enabled else None
             return await call_next(request)
 
         auth_header = request.headers.get("authorization", "")
         scheme, _, token = auth_header.partition(" ")
-        if scheme.lower() != "bearer" or token != settings.effective_admin_token:
+        if scheme.lower() != "bearer" or not token:
             return JSONResponse({"detail": "Not authenticated."}, status_code=401)
-        return await call_next(request)
+
+        # Legacy static admin token: kept as script compatibility and as the
+        # recovery path if the admin password is lost.
+        if token == settings.effective_admin_token:
+            request.state.auth = ADMIN_CONTEXT
+            return await call_next(request)
+
+        payload = decode_access_token(token, secret=settings.effective_auth_jwt_secret)
+        if payload:
+            context = await run_in_threadpool(resolve_user_context, payload)
+            if context:
+                request.state.auth = context
+                return await call_next(request)
+
+        return JSONResponse({"detail": "Not authenticated."}, status_code=401)
 
 
 def create_app() -> FastAPI:
