@@ -54,6 +54,21 @@ class UserOptionOut(BaseModel):
     status: str
 
 
+class UserActivitySummaryOut(BaseModel):
+    user: UserOptionOut
+    owned_seller_targets: int
+    owned_buyer_parties: int
+    owned_buyer_intents: int
+    seller_target_status_counts: dict[str, int]
+    weekly_new_seller_targets: int
+    weekly_new_buyer_parties: int
+    weekly_new_buyer_intents: int
+    weekly_business_updates: int
+    weekly_follow_ups: int
+    weekly_application_logs: int
+    latest_activity_at: str | None
+
+
 USER_LIST_SQL = """
     select
       u.id,
@@ -105,6 +120,112 @@ def list_user_options(current_user: CurrentUser, db: Session = Depends(get_db)) 
         {"team_id": DEFAULT_TEAM_ID, "system_user_id": SYSTEM_USER_ID},
     ).mappings()
     return [dict(row) for row in rows]
+
+
+@router.get("/activity-summary", response_model=list[UserActivitySummaryOut])
+def list_user_activity_summary(
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    require_admin(current_user)
+    rows = db.execute(
+        text(
+            """
+            with week_boundary as (
+              select (date_trunc('week', now() at time zone 'Asia/Shanghai') at time zone 'Asia/Shanghai') as week_start
+            )
+            select
+              u.id,
+              u.name,
+              u.username,
+              u.role,
+              u.status,
+              (select count(*)::int from seller_target st
+               where st.owner_user_id = u.id and st.deleted_at is null) as owned_seller_targets,
+              (select count(*)::int from buyer_party bp
+               where bp.owner_user_id = u.id and bp.deleted_at is null) as owned_buyer_parties,
+              (select count(*)::int from buyer_intent bi
+               where bi.owner_user_id = u.id and bi.deleted_at is null) as owned_buyer_intents,
+              coalesce((
+                select jsonb_object_agg(status_key, status_count)
+                from (
+                  select coalesce(st.recommendation_status, 'unknown') as status_key, count(*)::int as status_count
+                  from seller_target st
+                  where st.owner_user_id = u.id and st.deleted_at is null
+                  group by coalesce(st.recommendation_status, 'unknown')
+                ) status_rows
+              ), '{}'::jsonb) as seller_target_status_counts,
+              (select count(*)::int from seller_target st, week_boundary wb
+               where st.owner_user_id = u.id and st.deleted_at is null and st.created_at >= wb.week_start)
+                as weekly_new_seller_targets,
+              (select count(*)::int from buyer_party bp, week_boundary wb
+               where bp.owner_user_id = u.id and bp.deleted_at is null and bp.created_at >= wb.week_start)
+                as weekly_new_buyer_parties,
+              (select count(*)::int from buyer_intent bi, week_boundary wb
+               where bi.owner_user_id = u.id and bi.deleted_at is null and bi.created_at >= wb.week_start)
+                as weekly_new_buyer_intents,
+              (select count(*)::int from business_update bu, week_boundary wb
+               where bu.created_by = u.id and bu.created_at >= wb.week_start)
+                as weekly_business_updates,
+              (select count(*)::int from target_follow_up tfu, week_boundary wb
+               where tfu.created_by = u.id and tfu.deleted_at is null and tfu.created_at >= wb.week_start)
+                as weekly_follow_ups,
+              (select count(*)::int from action_application_log log, week_boundary wb
+               where log.applied_by = u.id and log.applied_at >= wb.week_start)
+                as weekly_application_logs,
+              greatest(
+                coalesce((select max(st.updated_at) from seller_target st
+                          where st.owner_user_id = u.id and st.deleted_at is null), '-infinity'::timestamptz),
+                coalesce((select max(bp.updated_at) from buyer_party bp
+                          where bp.owner_user_id = u.id and bp.deleted_at is null), '-infinity'::timestamptz),
+                coalesce((select max(bi.updated_at) from buyer_intent bi
+                          where bi.owner_user_id = u.id and bi.deleted_at is null), '-infinity'::timestamptz),
+                coalesce((select max(bu.created_at) from business_update bu
+                          where bu.created_by = u.id), '-infinity'::timestamptz),
+                coalesce((select max(tfu.created_at) from target_follow_up tfu
+                          where tfu.created_by = u.id and tfu.deleted_at is null), '-infinity'::timestamptz),
+                coalesce((select max(log.applied_at) from action_application_log log
+                          where log.applied_by = u.id), '-infinity'::timestamptz),
+                coalesce((select max(msg.created_at) from recommendation_message msg
+                          where msg.created_by = u.id), '-infinity'::timestamptz)
+              )::text as latest_activity_at
+            from app_user u
+            where u.team_id = :team_id and u.id <> :system_user_id
+            order by u.status asc, latest_activity_at desc nulls last, u.created_at asc
+            """
+        ),
+        {"team_id": DEFAULT_TEAM_ID, "system_user_id": SYSTEM_USER_ID},
+    ).mappings().all()
+
+    summaries: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        latest_activity_at = item.get("latest_activity_at")
+        if latest_activity_at == "-infinity":
+            latest_activity_at = None
+        summaries.append(
+            {
+                "user": {
+                    "id": item["id"],
+                    "name": item["name"],
+                    "username": item.get("username"),
+                    "role": item["role"],
+                    "status": item["status"],
+                },
+                "owned_seller_targets": int(item["owned_seller_targets"] or 0),
+                "owned_buyer_parties": int(item["owned_buyer_parties"] or 0),
+                "owned_buyer_intents": int(item["owned_buyer_intents"] or 0),
+                "seller_target_status_counts": dict(item.get("seller_target_status_counts") or {}),
+                "weekly_new_seller_targets": int(item["weekly_new_seller_targets"] or 0),
+                "weekly_new_buyer_parties": int(item["weekly_new_buyer_parties"] or 0),
+                "weekly_new_buyer_intents": int(item["weekly_new_buyer_intents"] or 0),
+                "weekly_business_updates": int(item["weekly_business_updates"] or 0),
+                "weekly_follow_ups": int(item["weekly_follow_ups"] or 0),
+                "weekly_application_logs": int(item["weekly_application_logs"] or 0),
+                "latest_activity_at": latest_activity_at,
+            }
+        )
+    return summaries
 
 
 @router.post("", response_model=UserOut, status_code=status.HTTP_201_CREATED)

@@ -14,9 +14,13 @@ from sqlalchemy.orm import Session
 from backend.app.api.authn import AuthContext, CurrentUser, require_admin
 from backend.app.api.routes.attachments import _attachment_parse_readiness
 from backend.app.api.routes.utils import (
+    append_owner_scope,
     assign_owner_bulk,
     diff_payload,
+    ensure_entity_visible,
+    ensure_entity_writable,
     ensure_active_user,
+    owner_scope_required,
     owner_filter_condition,
     owner_filter_options,
     write_action_log,
@@ -397,6 +401,7 @@ SELLER_TARGET_SEARCH_COLUMNS = {
 
 @router.get("", response_model=SellerTargetListOut)
 def list_seller_targets(
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
@@ -421,6 +426,8 @@ def list_seller_targets(
         "limit": limit,
         "offset": offset,
     }
+
+    append_owner_scope(where, params, current_user, entity_type="seller_target", alias="seller_target")
 
     owner_condition = owner_filter_condition(owner)
     if owner_condition:
@@ -488,11 +495,15 @@ def list_seller_targets(
 
 
 @router.get("/filter-options", response_model=SellerTargetFilterOptionsOut)
-def seller_target_filter_options(db: Session = Depends(get_db)) -> dict[str, Any]:
+def seller_target_filter_options(current_user: CurrentUser, db: Session = Depends(get_db)) -> dict[str, Any]:
     params = {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID}
+    scope_clause = ""
+    if owner_scope_required(current_user):
+        params["scope_user_id"] = current_user.user_id
+        scope_clause = "and owner_user_id = :scope_user_id"
     industries = _filter_options(
         db,
-        """
+        f"""
         select
           concat_ws(' / ', nullif(industry_primary, ''), nullif(industry_secondary, '')) as value,
           count(*) as count
@@ -500,6 +511,7 @@ def seller_target_filter_options(db: Session = Depends(get_db)) -> dict[str, Any
         where team_id = :team_id
           and workspace_id = :workspace_id
           and deleted_at is null
+          {scope_clause}
           and concat_ws(' / ', nullif(industry_primary, ''), nullif(industry_secondary, '')) <> ''
         group by value
         order by count desc, value asc
@@ -509,7 +521,7 @@ def seller_target_filter_options(db: Session = Depends(get_db)) -> dict[str, Any
     )
     regions = _filter_options(
         db,
-        """
+        f"""
         select
           concat_ws(' ', nullif(headquarter_province, ''), nullif(headquarter_city, '')) as value,
           count(*) as count
@@ -517,6 +529,7 @@ def seller_target_filter_options(db: Session = Depends(get_db)) -> dict[str, Any
         where team_id = :team_id
           and workspace_id = :workspace_id
           and deleted_at is null
+          {scope_clause}
           and concat_ws(' ', nullif(headquarter_province, ''), nullif(headquarter_city, '')) <> ''
         group by value
         order by count desc, value asc
@@ -532,18 +545,20 @@ def seller_target_filter_options(db: Session = Depends(get_db)) -> dict[str, Any
         where team_id = :team_id
           and workspace_id = :workspace_id
           and deleted_at is null
+          {scope_clause}
         group by value
         order by count desc, value asc
         """,
         params,
         labels=SELLER_TARGET_DISPLAY_STATUS_LABELS,
     )
-    owners = owner_filter_options(db, "seller_target", params)
+    owners = [] if owner_scope_required(current_user) else owner_filter_options(db, "seller_target", params)
     return {"industries": industries, "regions": regions, "statuses": statuses, "owners": owners}
 
 
 @router.get("/suggestions", response_model=list[SellerTargetSuggestionOut])
 def seller_target_suggestions(
+    current_user: CurrentUser,
     q: str = Query(min_length=1, max_length=100),
     limit: int = Query(default=5, ge=1, le=10),
     db: Session = Depends(get_db),
@@ -552,9 +567,19 @@ def seller_target_suggestions(
     if not query:
         return []
 
+    params = {
+        "team_id": DEFAULT_TEAM_ID,
+        "workspace_id": DEFAULT_WORKSPACE_ID,
+        "q": f"%{query}%",
+    }
+    scope_clause = ""
+    if owner_scope_required(current_user):
+        scope_clause = "and owner_user_id = :scope_user_id"
+        params["scope_user_id"] = current_user.user_id
+
     rows = db.execute(
         text(
-            """
+            f"""
             with matches as (
               select
                 id, target_name, target_subject_name, business_summary, updated_at,
@@ -566,6 +591,7 @@ def seller_target_suggestions(
               where team_id = :team_id
                 and workspace_id = :workspace_id
                 and deleted_at is null
+                {scope_clause}
                 and target_name ilike :q
               union all
               select
@@ -578,6 +604,7 @@ def seller_target_suggestions(
               where team_id = :team_id
                 and workspace_id = :workspace_id
                 and deleted_at is null
+                {scope_clause}
                 and target_subject_name ilike :q
               union all
               select
@@ -590,6 +617,7 @@ def seller_target_suggestions(
               where team_id = :team_id
                 and workspace_id = :workspace_id
                 and deleted_at is null
+                {scope_clause}
                 and business_summary ilike :q
             )
             select distinct on (id)
@@ -599,11 +627,7 @@ def seller_target_suggestions(
             order by id, priority, updated_at desc
             """
         ),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "q": f"%{query}%",
-        },
+        params,
     ).mappings().all()
     sorted_rows = sorted(rows, key=lambda row: ({"target": 1, "subject": 2, "summary": 3}[row["match_type"]], row["target_name"]))
     return [
@@ -676,9 +700,11 @@ def batch_assign_seller_target_owner(
 @router.get("/{seller_target_id}/attachments", response_model=SellerTargetAttachmentListOut)
 def list_seller_target_attachments(
     seller_target_id: UUID,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     _get_seller_target_or_404(db, seller_target_id)
+    ensure_entity_visible(db, current_user, entity_type="seller_target", entity_id=seller_target_id)
     rows = _seller_target_attachment_rows(db, seller_target_id)
     related_updates = _attachment_related_business_updates(db, [row["id"] for row in rows])
     return {
@@ -694,9 +720,11 @@ def list_seller_target_attachments(
 def download_seller_target_attachment(
     seller_target_id: UUID,
     attachment_id: UUID,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> Response:
     _get_seller_target_or_404(db, seller_target_id)
+    ensure_entity_visible(db, current_user, entity_type="seller_target", entity_id=seller_target_id)
     attachment = _get_seller_target_attachment_or_404(db, seller_target_id, attachment_id)
     settings = get_settings()
     try:
@@ -753,6 +781,7 @@ def delete_seller_target_attachment(
     db: Session = Depends(get_db),
 ) -> None:
     _get_seller_target_or_404(db, seller_target_id)
+    ensure_entity_writable(db, current_user, entity_type="seller_target", entity_id=seller_target_id)
     _get_seller_target_attachment_or_404(db, seller_target_id, attachment_id)
     db.execute(
         text(
@@ -776,8 +805,14 @@ def delete_seller_target_attachment(
 
 
 @router.get("/{seller_target_id}", response_model=SellerTargetOut)
-def get_seller_target(seller_target_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
-    return _get_seller_target_or_404(db, seller_target_id)
+def get_seller_target(
+    seller_target_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    target = _get_seller_target_or_404(db, seller_target_id)
+    ensure_entity_visible(db, current_user, entity_type="seller_target", entity_id=seller_target_id)
+    return target
 
 
 @router.post("/{seller_target_id}/parse", response_model=SellerTargetParseJobOut)
@@ -788,6 +823,7 @@ def parse_seller_target(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     target = _get_seller_target_or_404(db, seller_target_id)
+    ensure_entity_writable(db, current_user, entity_type="seller_target", entity_id=seller_target_id)
     request = payload or SellerTargetParseRequest()
     raw_target_text = request.raw_target_text or _seller_target_parse_fallback_text(target)
     if not raw_target_text or not raw_target_text.strip():
@@ -853,9 +889,11 @@ def parse_seller_target(
 @router.get("/{seller_target_id}/parse-status", response_model=SellerTargetParseStatusOut)
 def get_seller_target_parse_status(
     seller_target_id: UUID,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     target = _get_seller_target_or_404(db, seller_target_id)
+    ensure_entity_visible(db, current_user, entity_type="seller_target", entity_id=seller_target_id)
     latest_job = _latest_parse_job(db, seller_target_id)
     latest_trace = _latest_parse_trace(db, seller_target_id)
     return {
@@ -870,10 +908,12 @@ def get_seller_target_parse_status(
 @router.get("/{seller_target_id}/follow-ups", response_model=list[TargetFollowUpOut])
 def list_target_follow_ups(
     seller_target_id: UUID,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[dict[str, Any]]:
     _get_seller_target_or_404(db, seller_target_id)
+    ensure_entity_visible(db, current_user, entity_type="seller_target", entity_id=seller_target_id)
     rows = db.execute(
         text(
             """
@@ -911,6 +951,7 @@ def create_target_follow_up(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     _get_seller_target_or_404(db, seller_target_id)
+    ensure_entity_writable(db, current_user, entity_type="seller_target", entity_id=seller_target_id)
     content = payload.content.strip()
     if not content:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="content is required.")
@@ -1039,6 +1080,7 @@ def update_seller_target(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     original = _get_seller_target_or_404(db, seller_target_id)
+    ensure_entity_writable(db, current_user, entity_type="seller_target", entity_id=seller_target_id)
     changes = payload.model_dump(exclude_unset=True)
 
     if "owner_user_id" in changes:

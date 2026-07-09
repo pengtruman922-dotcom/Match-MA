@@ -7,6 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from backend.app.api.authn import CurrentUser, require_admin
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 
@@ -55,8 +56,10 @@ class DebugCenterOut(BaseModel):
 @router.get("/business-updates/{business_update_id}", response_model=BusinessUpdateDebugOut)
 def get_business_update_debug(
     business_update_id: UUID,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    require_admin(current_user)
     business_update = _get_business_update(db, business_update_id)
     jobs = _jobs(db, business_update_id)
     traces = _traces(db, business_update_id)
@@ -73,9 +76,11 @@ def get_business_update_debug(
 
 @router.get("/center", response_model=DebugCenterOut)
 def get_debug_center(
+    current_user: CurrentUser,
     limit: int = Query(default=20, ge=1, le=100),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    require_admin(current_user)
     overview = _debug_center_overview(db)
     return {
         "overview": overview,
@@ -91,11 +96,17 @@ def get_debug_center(
 
 
 @router.get("/entities/{entity_type}/{entity_id}", response_model=DebugEntityOut)
-def get_debug_entity(entity_type: str, entity_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+def get_debug_entity(
+    entity_type: str,
+    entity_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    require_admin(current_user)
     if entity_type == "business_update":
-        payload = get_business_update_debug(entity_id, db)
+        payload = get_business_update_debug(entity_id, current_user, db)
     elif entity_type == "recommendation_session":
-        payload = get_recommendation_session_debug(entity_id, db)
+        payload = get_recommendation_session_debug(entity_id, current_user, db)
     elif entity_type == "background_job":
         payload = _background_job_debug(db, entity_id)
     elif entity_type == "seller_target":
@@ -123,8 +134,10 @@ def get_debug_entity(entity_type: str, entity_id: UUID, db: Session = Depends(ge
 @router.get("/recommendation-sessions/{session_id}", response_model=RecommendationSessionDebugOut)
 def get_recommendation_session_debug(
     session_id: UUID,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    require_admin(current_user)
     session = _get_recommendation_session(db, session_id)
     jobs = _recommendation_jobs(db, session_id)
     traces = _recommendation_traces(db, session_id)

@@ -4,7 +4,8 @@ import pytest
 from fastapi import HTTPException
 
 from backend.app.api.authn import AuthContext, require_admin
-from backend.app.api.routes.utils import owner_filter_condition
+from backend.app.api.routes.utils import owner_filter_condition, owner_scope_required
+from backend.app.config import get_settings
 from backend.app.security import (
     create_access_token,
     decode_access_token,
@@ -79,3 +80,19 @@ def test_owner_filter_condition_parsing() -> None:
 
     with pytest.raises(HTTPException):
         owner_filter_condition("not-a-uuid")
+
+
+def test_owner_scope_required_respects_setting_and_admin_role(monkeypatch) -> None:
+    admin = AuthContext(user_id=uuid4(), role="admin", name="admin")
+    consultant = AuthContext(user_id=uuid4(), role="consultant", name="consultant")
+
+    monkeypatch.setenv("OWNER_SCOPE_ENFORCED", "false")
+    get_settings.cache_clear()
+    assert owner_scope_required(admin) is False
+    assert owner_scope_required(consultant) is False
+
+    monkeypatch.setenv("OWNER_SCOPE_ENFORCED", "true")
+    get_settings.cache_clear()
+    assert owner_scope_required(admin) is False
+    assert owner_scope_required(consultant) is True
+    get_settings.cache_clear()

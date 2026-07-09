@@ -6,6 +6,8 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from backend.app.api.authn import CurrentUser
+from backend.app.api.routes.utils import owner_scope_required, relation_visible_sql, visible_scope_sql
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 
@@ -32,6 +34,7 @@ class FieldValueSourceOut(BaseModel):
 
 @router.get("", response_model=list[FieldValueSourceOut])
 def list_field_sources(
+    current_user: CurrentUser,
     entity_type: str = Query(pattern="^(seller_target|buyer_intent|buyer_party|buyer_seller_relation)$"),
     entity_id: UUID | None = None,
     field_path: str | None = Query(default=None, max_length=200),
@@ -52,6 +55,52 @@ def list_field_sources(
         "limit": limit,
         "offset": offset,
     }
+    if owner_scope_required(current_user):
+        params["scope_user_id"] = current_user.user_id
+        if entity_type == "seller_target":
+            where.append(
+                f"""
+                exists (
+                  select 1 from seller_target scope_st
+                  where scope_st.id = fvs.entity_id
+                    and scope_st.deleted_at is null
+                    and {visible_scope_sql("seller_target", "scope_st")}
+                )
+                """
+            )
+        elif entity_type == "buyer_intent":
+            where.append(
+                f"""
+                exists (
+                  select 1 from buyer_intent scope_bi
+                  where scope_bi.id = fvs.entity_id
+                    and scope_bi.deleted_at is null
+                    and {visible_scope_sql("buyer_intent", "scope_bi")}
+                )
+                """
+            )
+        elif entity_type == "buyer_party":
+            where.append(
+                f"""
+                exists (
+                  select 1 from buyer_party scope_bp
+                  where scope_bp.id = fvs.entity_id
+                    and scope_bp.deleted_at is null
+                    and {visible_scope_sql("buyer_party", "scope_bp")}
+                )
+                """
+            )
+        elif entity_type == "buyer_seller_relation":
+            where.append(
+                f"""
+                exists (
+                  select 1 from buyer_seller_relation scope_r
+                  where scope_r.id = fvs.entity_id
+                    and scope_r.deleted_at is null
+                    and {relation_visible_sql("scope_r")}
+                )
+                """
+            )
     if entity_id is not None:
         where.append("fvs.entity_id = :entity_id")
         params["entity_id"] = entity_id

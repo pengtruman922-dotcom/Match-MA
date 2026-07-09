@@ -1,14 +1,23 @@
-from uuid import UUID
+import json
+from uuid import UUID, uuid4
 
+import pytest
+from fastapi import HTTPException
+
+from backend.app.api.authn import AuthContext
 from backend.app.api.routes.recommendations import (
+    RecommendationSelectedItemCreate,
     _build_recommendation_report_status,
     _build_recommendation_selected_status,
+    _ensure_selected_item_allowed_from_session_candidates,
+    _ensure_selected_item_matches_session,
     _filter_recommendation_session_summaries,
     _recommendation_page_overview,
     _recommendation_session_display,
     _recommendation_session_is_processing,
     _recommendation_session_polling_hint,
 )
+from backend.app.config import get_settings
 
 SESSION_ID = UUID("00000000-0000-0000-0000-000000000001")
 BUYER_INTENT_ID = UUID("00000000-0000-0000-0000-000000000002")
@@ -132,3 +141,95 @@ def test_recommendation_session_filter_and_polling_hint() -> None:
     assert hint["enabled"] is True
     assert hint["endpoint"] == f"/api/v1/recommendations/sessions/{SESSION_ID}/page-state"
     assert hint["watched_jobs"][0]["job_type"] == "recommendation_rerank"
+
+
+def test_selected_item_must_match_session_anchor() -> None:
+    payload = RecommendationSelectedItemCreate(
+        mode="buyer_to_target",
+        buyer_intent_id=uuid4(),
+        seller_target_id=SELLER_TARGET_ID,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _ensure_selected_item_matches_session(
+            {
+                "mode": "buyer_to_target",
+                "buyer_intent_id": BUYER_INTENT_ID,
+                "seller_target_id": None,
+            },
+            payload,
+        )
+
+    assert exc_info.value.status_code == 400
+
+
+class _MessageResult:
+    def __init__(self, rows: list[dict]) -> None:
+        self._rows = rows
+
+    def mappings(self) -> "_MessageResult":
+        return self
+
+    def all(self) -> list[dict]:
+        return self._rows
+
+
+class _MessageDb:
+    def __init__(self, rows: list[dict]) -> None:
+        self._rows = rows
+
+    def execute(self, *_args, **_kwargs) -> _MessageResult:
+        return _MessageResult(self._rows)
+
+
+def test_owner_scoped_selected_item_must_come_from_session_candidates(monkeypatch) -> None:
+    monkeypatch.setenv("OWNER_SCOPE_ENFORCED", "true")
+    get_settings.cache_clear()
+    current_user = AuthContext(user_id=uuid4(), role="consultant", name="consultant")
+    db = _MessageDb(
+        [
+            {
+                "id": uuid4(),
+                "content_type": "json",
+                "content": json.dumps(
+                    {
+                        "message_type": "initial_candidates",
+                        "candidates": [
+                            {
+                                "seller_target_id": str(SELLER_TARGET_ID),
+                                "buyer_intent_id": str(BUYER_INTENT_ID),
+                            }
+                        ],
+                    }
+                ),
+                "metadata_json": {"message_type": "initial_candidates"},
+                "created_at": "2026-07-09T00:00:00",
+            }
+        ]
+    )
+
+    _ensure_selected_item_allowed_from_session_candidates(
+        db,
+        current_user,
+        SESSION_ID,
+        RecommendationSelectedItemCreate(
+            mode="buyer_to_target",
+            buyer_intent_id=BUYER_INTENT_ID,
+            seller_target_id=SELLER_TARGET_ID,
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _ensure_selected_item_allowed_from_session_candidates(
+            db,
+            current_user,
+            SESSION_ID,
+            RecommendationSelectedItemCreate(
+                mode="buyer_to_target",
+                buyer_intent_id=BUYER_INTENT_ID,
+                seller_target_id=uuid4(),
+            ),
+        )
+
+    assert exc_info.value.status_code == 403
+    get_settings.cache_clear()

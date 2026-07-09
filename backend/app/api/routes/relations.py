@@ -6,6 +6,14 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from backend.app.api.authn import CurrentUser
+from backend.app.api.routes.utils import (
+    ensure_relation_visible,
+    exclusion_visible_sql,
+    owner_scope_required,
+    relation_event_visible_sql,
+    relation_visible_sql,
+)
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 
@@ -70,6 +78,7 @@ class BuyerIntentTargetExclusionOut(BaseModel):
 
 @router.get("/relations", response_model=list[BuyerSellerRelationOut])
 def list_relations(
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     seller_target_id: UUID | None = None,
     buyer_intent_id: UUID | None = None,
@@ -108,6 +117,9 @@ def list_relations(
             """
         )
         params["q"] = f"%{q}%"
+    if owner_scope_required(current_user):
+        where.append(relation_visible_sql("r"))
+        params["scope_user_id"] = current_user.user_id
 
     rows = db.execute(
         text(
@@ -128,7 +140,8 @@ def list_relations(
 
 
 @router.get("/relations/{relation_id}", response_model=BuyerSellerRelationOut)
-def get_relation(relation_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+def get_relation(relation_id: UUID, current_user: CurrentUser, db: Session = Depends(get_db)) -> dict[str, Any]:
+    ensure_relation_visible(db, current_user, relation_id)
     row = db.execute(
         text(
             f"""
@@ -157,13 +170,15 @@ def get_relation(relation_id: UUID, db: Session = Depends(get_db)) -> dict[str, 
 @router.get("/relations/{relation_id}/events", response_model=list[RelationEventOut])
 def list_relation_events(
     relation_id: UUID,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
-    _ensure_relation_exists(db, relation_id)
+    ensure_relation_visible(db, current_user, relation_id)
     return _list_relation_events(
         db,
+        current_user,
         ["e.relation_id = :relation_id"],
         {"relation_id": relation_id},
         limit=limit,
@@ -173,6 +188,7 @@ def list_relation_events(
 
 @router.get("/relation-events", response_model=list[RelationEventOut])
 def list_relation_events_by_entity(
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     relation_id: UUID | None = None,
     seller_target_id: UUID | None = None,
@@ -199,11 +215,12 @@ def list_relation_events_by_entity(
     if event_type:
         filters.append("e.event_type = :event_type")
         params["event_type"] = event_type
-    return _list_relation_events(db, filters, params, limit=limit, offset=offset)
+    return _list_relation_events(db, current_user, filters, params, limit=limit, offset=offset)
 
 
 @router.get("/buyer-intent-target-exclusions", response_model=list[BuyerIntentTargetExclusionOut])
 def list_buyer_intent_target_exclusions(
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     buyer_intent_id: UUID | None = None,
     seller_target_id: UUID | None = None,
@@ -227,6 +244,9 @@ def list_buyer_intent_target_exclusions(
     if active is not None:
         where.append("x.active = :active")
         params["active"] = active
+    if owner_scope_required(current_user):
+        where.append(exclusion_visible_sql("x"))
+        params["scope_user_id"] = current_user.user_id
 
     rows = db.execute(
         text(
@@ -283,6 +303,7 @@ def _event_select_columns() -> str:
 
 def _list_relation_events(
     db: Session,
+    current_user: CurrentUser,
     filters: list[str],
     params: dict[str, Any],
     *,
@@ -290,6 +311,9 @@ def _list_relation_events(
     offset: int,
 ) -> list[dict[str, Any]]:
     where = ["e.team_id = :team_id", "e.workspace_id = :workspace_id", *filters]
+    if owner_scope_required(current_user):
+        where.append(relation_event_visible_sql("e"))
+        params["scope_user_id"] = current_user.user_id
     rows = db.execute(
         text(
             f"""

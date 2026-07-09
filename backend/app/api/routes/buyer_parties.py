@@ -9,11 +9,17 @@ from sqlalchemy.orm import Session
 
 from backend.app.api.authn import AuthContext, CurrentUser, require_admin
 from backend.app.api.routes.utils import (
+    append_owner_scope,
+    append_visible_scope,
     assign_owner_bulk,
     diff_payload,
+    ensure_entity_visible,
+    ensure_entity_writable,
     ensure_active_user,
+    owner_scope_required,
     owner_filter_condition,
     owner_filter_options,
+    owner_scope_sql,
     write_action_log,
     write_action_logs_for_diff,
 )
@@ -25,6 +31,7 @@ router = APIRouter(prefix="/buyer-parties", tags=["buyer-parties"])
 
 class BuyerPartyCreate(BaseModel):
     buyer_name: str = Field(min_length=1, max_length=300)
+    owner_user_id: UUID | None = None
     legal_name: str | None = None
     aliases_json: list[str] = Field(default_factory=list)
     buyer_type: str | None = None
@@ -104,6 +111,20 @@ class BuyerPartySuggestionOut(BaseModel):
     snippet: str | None
 
 
+class BuyerPartyDedupMatchOut(BaseModel):
+    buyer_name: str
+    legal_name: str | None = None
+    owner_name: str | None = None
+    match_type: Literal["buyer_name", "legal_name", "alias"]
+    status: str
+
+
+class BuyerPartyDedupCheckOut(BaseModel):
+    exists: bool
+    query: str
+    matches: list[BuyerPartyDedupMatchOut]
+
+
 class BuyerPartyBulkDeleteRequest(BaseModel):
     ids: list[UUID] = Field(min_length=1, max_length=200)
 
@@ -164,6 +185,7 @@ def create_buyer_party(
 
 @router.get("", response_model=BuyerPartyListOut)
 def list_buyer_parties(
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
@@ -182,6 +204,8 @@ def list_buyer_parties(
         "limit": limit,
         "offset": offset,
     }
+
+    append_owner_scope(where, params, current_user, entity_type="buyer_party", alias="buyer_party")
 
     owner_condition = owner_filter_condition(owner)
     if owner_condition:
@@ -243,16 +267,21 @@ def list_buyer_parties(
 
 
 @router.get("/filter-options", response_model=BuyerPartyFilterOptionsOut)
-def buyer_party_filter_options(db: Session = Depends(get_db)) -> dict[str, Any]:
+def buyer_party_filter_options(current_user: CurrentUser, db: Session = Depends(get_db)) -> dict[str, Any]:
     params = {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID}
+    scope_clause = ""
+    if owner_scope_required(current_user):
+        params["scope_user_id"] = current_user.user_id
+        scope_clause = f"and {owner_scope_sql('buyer_party', 'buyer_party')}"
     buyer_types = _filter_options(
         db,
-        """
+        f"""
         select buyer_type as value, count(*) as count
         from buyer_party
         where team_id = :team_id
           and workspace_id = :workspace_id
           and deleted_at is null
+          {scope_clause}
           and nullif(buyer_type, '') is not null
         group by buyer_type
         order by count desc, buyer_type asc
@@ -270,7 +299,7 @@ def buyer_party_filter_options(db: Session = Depends(get_db)) -> dict[str, Any]:
     )
     regions = _filter_options(
         db,
-        """
+        f"""
         select
           concat_ws(' ', nullif(region_province, ''), nullif(region_city, '')) as value,
           count(*) as count
@@ -278,6 +307,7 @@ def buyer_party_filter_options(db: Session = Depends(get_db)) -> dict[str, Any]:
         where team_id = :team_id
           and workspace_id = :workspace_id
           and deleted_at is null
+          {scope_clause}
           and concat_ws(' ', nullif(region_province, ''), nullif(region_city, '')) <> ''
         group by value
         order by count desc, value asc
@@ -287,12 +317,13 @@ def buyer_party_filter_options(db: Session = Depends(get_db)) -> dict[str, Any]:
     )
     listed_statuses = _filter_options(
         db,
-        """
+        f"""
         select listed_status as value, count(*) as count
         from buyer_party
         where team_id = :team_id
           and workspace_id = :workspace_id
           and deleted_at is null
+          {scope_clause}
         group by listed_status
         order by count desc, listed_status asc
         """,
@@ -301,19 +332,20 @@ def buyer_party_filter_options(db: Session = Depends(get_db)) -> dict[str, Any]:
     )
     statuses = _filter_options(
         db,
-        """
+        f"""
         select status as value, count(*) as count
         from buyer_party
         where team_id = :team_id
           and workspace_id = :workspace_id
           and deleted_at is null
+          {scope_clause}
         group by status
         order by count desc, status asc
         """,
         params,
         labels={"active": "活跃", "archived": "已归档", "merged": "已合并"},
     )
-    owners = owner_filter_options(db, "buyer_party", params)
+    owners = [] if owner_scope_required(current_user) else owner_filter_options(db, "buyer_party", params)
     return {
         "buyer_types": buyer_types,
         "regions": regions,
@@ -323,8 +355,72 @@ def buyer_party_filter_options(db: Session = Depends(get_db)) -> dict[str, Any]:
     }
 
 
+@router.get("/dedup-check", response_model=BuyerPartyDedupCheckOut)
+def buyer_party_dedup_check(
+    current_user: CurrentUser,
+    q: str = Query(min_length=1, max_length=100),
+    limit: int = Query(default=5, ge=1, le=10),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = q.strip()
+    if not query:
+        return {"exists": False, "query": "", "matches": []}
+
+    rows = db.execute(
+        text(
+            """
+            with candidate as (
+              select
+                bp.buyer_name,
+                bp.legal_name,
+                coalesce(au.name, '未指派') as owner_name,
+                bp.status,
+                case
+                  when lower(bp.buyer_name) = lower(:q) then 'buyer_name'
+                  when lower(coalesce(bp.legal_name, '')) = lower(:q) then 'legal_name'
+                  else 'alias'
+                end as match_type,
+                case
+                  when lower(bp.buyer_name) = lower(:q) then 1
+                  when lower(coalesce(bp.legal_name, '')) = lower(:q) then 2
+                  else 3
+                end as priority,
+                bp.updated_at
+              from buyer_party bp
+              left join app_user au on au.id = bp.owner_user_id
+              where bp.team_id = :team_id
+                and bp.workspace_id = :workspace_id
+                and bp.deleted_at is null
+                and (
+                  lower(bp.buyer_name) = lower(:q)
+                  or lower(coalesce(bp.legal_name, '')) = lower(:q)
+                  or exists (
+                    select 1
+                    from jsonb_array_elements_text(bp.aliases_json) alias_name
+                    where lower(alias_name) = lower(:q)
+                  )
+                )
+            )
+            select buyer_name, legal_name, owner_name, match_type, status
+            from candidate
+            order by priority asc, updated_at desc
+            limit :limit
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "q": query,
+            "limit": limit,
+        },
+    ).mappings().all()
+    matches = [dict(row) for row in rows]
+    return {"exists": bool(matches), "query": query, "matches": matches}
+
+
 @router.get("/suggestions", response_model=list[BuyerPartySuggestionOut])
 def buyer_party_suggestions(
+    current_user: CurrentUser,
     q: str = Query(min_length=1, max_length=100),
     limit: int = Query(default=5, ge=1, le=10),
     db: Session = Depends(get_db),
@@ -333,9 +429,19 @@ def buyer_party_suggestions(
     if not query:
         return []
 
+    params = {
+        "team_id": DEFAULT_TEAM_ID,
+        "workspace_id": DEFAULT_WORKSPACE_ID,
+        "q": f"%{query}%",
+    }
+    scope_clause = ""
+    if owner_scope_required(current_user):
+        params["scope_user_id"] = current_user.user_id
+        scope_clause = f"and {owner_scope_sql('buyer_party', 'buyer_party')}"
+
     rows = db.execute(
         text(
-            """
+            f"""
             with matches as (
               select
                 id, buyer_name, legal_name, main_business, profile_summary, updated_at,
@@ -347,6 +453,7 @@ def buyer_party_suggestions(
               where team_id = :team_id
                 and workspace_id = :workspace_id
                 and deleted_at is null
+                {scope_clause}
                 and buyer_name ilike :q
               union all
               select
@@ -359,6 +466,7 @@ def buyer_party_suggestions(
               where team_id = :team_id
                 and workspace_id = :workspace_id
                 and deleted_at is null
+                {scope_clause}
                 and legal_name ilike :q
               union all
               select
@@ -371,6 +479,7 @@ def buyer_party_suggestions(
               where team_id = :team_id
                 and workspace_id = :workspace_id
                 and deleted_at is null
+                {scope_clause}
                 and main_business ilike :q
               union all
               select
@@ -383,6 +492,7 @@ def buyer_party_suggestions(
               where team_id = :team_id
                 and workspace_id = :workspace_id
                 and deleted_at is null
+                {scope_clause}
                 and profile_summary ilike :q
             )
             select distinct on (id)
@@ -392,11 +502,7 @@ def buyer_party_suggestions(
             order by id, priority, updated_at desc
             """
         ),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "q": f"%{query}%",
-        },
+        params,
     ).mappings().all()
     sorted_rows = sorted(
         rows,
@@ -472,50 +578,65 @@ def bulk_delete_buyer_parties(
 
 
 @router.get("/{buyer_party_id}", response_model=BuyerPartyOut)
-def get_buyer_party(buyer_party_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
-    return _get_buyer_party_or_404(db, buyer_party_id)
+def get_buyer_party(
+    buyer_party_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    party = _get_buyer_party_or_404(db, buyer_party_id)
+    ensure_entity_visible(db, current_user, entity_type="buyer_party", entity_id=buyer_party_id)
+    return party
 
 
 @router.get("/{buyer_party_id}/intents")
 def list_buyer_party_intents(
     buyer_party_id: UUID,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     _get_buyer_party_or_404(db, buyer_party_id)
+    ensure_entity_visible(db, current_user, entity_type="buyer_party", entity_id=buyer_party_id)
+    where = [
+        "bi.buyer_party_id = :buyer_party_id",
+        "bi.team_id = :team_id",
+        "bi.workspace_id = :workspace_id",
+        "bi.deleted_at is null",
+    ]
+    params: dict[str, Any] = {
+        "buyer_party_id": buyer_party_id,
+        "team_id": DEFAULT_TEAM_ID,
+        "workspace_id": DEFAULT_WORKSPACE_ID,
+        "limit": limit,
+        "offset": offset,
+    }
+    append_visible_scope(where, params, current_user, entity_type="buyer_intent", alias="bi")
     rows = db.execute(
         text(
-            """
+            f"""
             select
-              id, buyer_party_id, intent_name, status, contact_name,
-              raw_requirement_text, intent_summary, industry_primary, industry_secondary,
-              region_scope_summary, min_revenue_yuan, min_net_profit_yuan, max_pe,
-              max_valuation_yuan, min_market_cap_yuan, max_market_cap_yuan,
-              market_cap_range_summary, requires_control, requires_consolidation,
-              accepts_minority_investment, preferred_listed_status,
-              listing_board_requirement_summary, financing_stage_requirement_summary,
-              transaction_type, transaction_types_json, premium_tolerance_summary,
-              max_premium_rate, max_debt_ratio, debt_ratio_requirement_summary,
-              major_risk_tolerance_summary, buyer_industry_advantage_summary,
-              negative_summary, preference_summary, unknown_summary,
-              created_at::text as created_at, updated_at::text as updated_at
-            from buyer_intent
-            where buyer_party_id = :buyer_party_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
-              and deleted_at is null
-            order by updated_at desc
+              bi.id, bi.buyer_party_id, bi.intent_name, bi.status, bi.contact_name,
+              bi.raw_requirement_text, bi.intent_summary, bi.industry_primary, bi.industry_secondary,
+              bi.region_scope_summary, bi.min_revenue_yuan, bi.min_net_profit_yuan, bi.max_pe,
+              bi.max_valuation_yuan, bi.min_market_cap_yuan, bi.max_market_cap_yuan,
+              bi.market_cap_range_summary, bi.requires_control, bi.requires_consolidation,
+              bi.accepts_minority_investment, bi.preferred_listed_status,
+              bi.listing_board_requirement_summary, bi.financing_stage_requirement_summary,
+              bi.transaction_type, bi.transaction_types_json, bi.premium_tolerance_summary,
+              bi.max_premium_rate, bi.max_debt_ratio, bi.debt_ratio_requirement_summary,
+              bi.major_risk_tolerance_summary, bi.buyer_industry_advantage_summary,
+              bi.negative_summary, bi.preference_summary, bi.unknown_summary,
+              bi.owner_user_id,
+              (select au.name from app_user au where au.id = bi.owner_user_id) as owner_name,
+              bi.created_at::text as created_at, bi.updated_at::text as updated_at
+            from buyer_intent bi
+            where {' and '.join(where)}
+            order by bi.updated_at desc
             limit :limit offset :offset
             """
         ),
-        {
-            "buyer_party_id": buyer_party_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "limit": limit,
-            "offset": offset,
-        },
+        params,
     ).mappings().all()
     return [dict(row) for row in rows]
 
@@ -528,6 +649,7 @@ def update_buyer_party(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     original = _get_buyer_party_or_404(db, buyer_party_id)
+    ensure_entity_writable(db, current_user, entity_type="buyer_party", entity_id=buyer_party_id)
     changes = payload.model_dump(exclude_unset=True)
 
     if "owner_user_id" in changes:

@@ -30,6 +30,7 @@ import type {
   BuyerIntentParseStatus,
   BuyerParty,
   BuyerPartyCreate,
+  BuyerPartyDedupCheck,
   BuyerPartyFilterOptions,
   BuyerPartyListResponse,
   BuyerPartySearchField,
@@ -54,6 +55,7 @@ import type {
   RecommendationSession,
   RecommendationSessionBundle,
   AppUser,
+  AppUserActivitySummary,
   AppUserCreate,
   AppUserOption,
   BatchAssignOwnerResponse,
@@ -76,6 +78,7 @@ export const auth = {
 export const users = {
   list: () => apiRequest<AppUser[]>('/users'),
   options: () => apiRequest<AppUserOption[]>('/users/options'),
+  activitySummary: () => apiRequest<AppUserActivitySummary[]>('/users/activity-summary'),
   create: (data: AppUserCreate) =>
     apiRequest<AppUser>('/users', { method: 'POST', body: JSON.stringify(data) }),
   update: (id: string, data: { name?: string; role?: string; status?: string }) =>
@@ -151,6 +154,8 @@ export const buyerParties = {
     offset?: number;
   }) => apiRequest<BuyerPartyListResponse>(`/buyer-parties${buildQuery(params || {})}`),
   filterOptions: () => apiRequest<BuyerPartyFilterOptions>('/buyer-parties/filter-options'),
+  dedupCheck: (params: { q: string; limit?: number }) =>
+    apiRequest<BuyerPartyDedupCheck>(`/buyer-parties/dedup-check${buildQuery(params)}`),
   suggestions: (params: { q: string; limit?: number }) =>
     apiRequest<BuyerPartySuggestion[]>(`/buyer-parties/suggestions${buildQuery(params)}`),
   get: (id: string) => apiRequest<BuyerParty>(`/buyer-parties/${id}`),

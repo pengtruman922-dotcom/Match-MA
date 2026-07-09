@@ -7,6 +7,7 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
+from backend.app.api.authn import CurrentUser, require_admin
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 from backend.app.services.background_job_governance import (
@@ -39,7 +40,16 @@ from backend.app.services.background_job_governance import (
     _utc_now_text,
 )
 
-router = APIRouter(prefix="/background-jobs", tags=["background-jobs"])
+
+def _require_admin_route(current_user: CurrentUser) -> None:
+    require_admin(current_user)
+
+
+router = APIRouter(
+    prefix="/background-jobs",
+    tags=["background-jobs"],
+    dependencies=[Depends(_require_admin_route)],
+)
 
 
 class BackgroundJobCreate(BaseModel):

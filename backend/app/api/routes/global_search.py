@@ -5,6 +5,8 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from backend.app.api.authn import CurrentUser
+from backend.app.api.routes.utils import owner_scope_required, owner_scope_sql
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 
@@ -38,6 +40,7 @@ class GlobalSearchOut(BaseModel):
 
 @router.get("", response_model=GlobalSearchOut)
 def global_search(
+    current_user: CurrentUser,
     q: str = Query(min_length=1, max_length=200),
     limit_per_type: int = Query(default=8, ge=1, le=30),
     db: Session = Depends(get_db),
@@ -54,10 +57,12 @@ def global_search(
         "q_plain": query,
         "limit": limit_per_type,
     }
+    if owner_scope_required(current_user):
+        params["scope_user_id"] = current_user.user_id
     groups = [
-        _search_seller_targets(db, params),
-        _search_buyer_parties(db, params),
-        _search_buyer_intents(db, params),
+        _search_seller_targets(db, params, current_user),
+        _search_buyer_parties(db, params, current_user),
+        _search_buyer_intents(db, params, current_user),
     ]
     return {
         "query": query,
@@ -66,10 +71,13 @@ def global_search(
     }
 
 
-def _search_seller_targets(db: Session, params: dict[str, Any]) -> dict[str, Any]:
+def _search_seller_targets(db: Session, params: dict[str, Any], current_user: Any) -> dict[str, Any]:
+    scope_clause = ""
+    if owner_scope_required(current_user):
+        scope_clause = f"and {owner_scope_sql('seller_target', 'seller_target')}"
     rows = db.execute(
         text(
-            """
+            f"""
             select
               'seller_target' as entity_type,
               id::text as entity_id,
@@ -95,6 +103,7 @@ def _search_seller_targets(db: Session, params: dict[str, Any]) -> dict[str, Any
             where team_id = :team_id
               and workspace_id = :workspace_id
               and deleted_at is null
+              {scope_clause}
               and (
                 target_name ilike :q
                 or coalesce(business_summary, '') ilike :q
@@ -118,10 +127,13 @@ def _search_seller_targets(db: Session, params: dict[str, Any]) -> dict[str, Any
     return _group("seller_targets", "标的", rows)
 
 
-def _search_buyer_parties(db: Session, params: dict[str, Any]) -> dict[str, Any]:
+def _search_buyer_parties(db: Session, params: dict[str, Any], current_user: Any) -> dict[str, Any]:
+    scope_clause = ""
+    if owner_scope_required(current_user):
+        scope_clause = f"and {owner_scope_sql('buyer_party', 'buyer_party')}"
     rows = db.execute(
         text(
-            """
+            f"""
             select
               'buyer_party' as entity_type,
               id::text as entity_id,
@@ -147,6 +159,7 @@ def _search_buyer_parties(db: Session, params: dict[str, Any]) -> dict[str, Any]
             where team_id = :team_id
               and workspace_id = :workspace_id
               and deleted_at is null
+              {scope_clause}
               and (
                 buyer_name ilike :q
                 or coalesce(legal_name, '') ilike :q
@@ -171,10 +184,13 @@ def _search_buyer_parties(db: Session, params: dict[str, Any]) -> dict[str, Any]
     return _group("buyer_parties", "买家", rows)
 
 
-def _search_buyer_intents(db: Session, params: dict[str, Any]) -> dict[str, Any]:
+def _search_buyer_intents(db: Session, params: dict[str, Any], current_user: Any) -> dict[str, Any]:
+    scope_clause = ""
+    if owner_scope_required(current_user):
+        scope_clause = f"and {owner_scope_sql('buyer_intent', 'bi')}"
     rows = db.execute(
         text(
-            """
+            f"""
             select
               'buyer_intent' as entity_type,
               bi.id::text as entity_id,
@@ -210,6 +226,7 @@ def _search_buyer_intents(db: Session, params: dict[str, Any]) -> dict[str, Any]
             where bi.team_id = :team_id
               and bi.workspace_id = :workspace_id
               and bi.deleted_at is null
+              {scope_clause}
               and (
                 bi.intent_name ilike :q
                 or coalesce(bi.raw_requirement_text, '') ilike :q

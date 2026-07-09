@@ -8,6 +8,14 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
+from backend.app.api.authn import CurrentUser
+from backend.app.api.routes.utils import (
+    ensure_entity_writable,
+    ensure_recommendation_session_visible,
+    owner_scope_required,
+    recommendation_report_visible_sql,
+    recommendation_session_visible_sql,
+)
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 
@@ -250,9 +258,11 @@ class RecommendationSessionPageStateOut(BaseModel):
 @router.post("/candidates", response_model=RecommendationCandidateResponse)
 def generate_recommendation_candidates(
     payload: RecommendationCandidateRequest,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     if payload.mode == "buyer_to_target":
+        ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=payload.buyer_intent_id)
         anchor = _get_buyer_intent_anchor(db, payload.buyer_intent_id)
         candidates = _candidate_targets_for_intent(db, anchor, payload.limit)
         session_anchor = {
@@ -261,6 +271,7 @@ def generate_recommendation_candidates(
             "seller_target_id": None,
         }
     else:
+        ensure_entity_writable(db, current_user, entity_type="seller_target", entity_id=payload.seller_target_id)
         anchor = _get_seller_target_anchor(db, payload.seller_target_id)
         candidates = _candidate_intents_for_target(db, anchor, payload.limit)
         session_anchor = {
@@ -279,6 +290,7 @@ def generate_recommendation_candidates(
             user_message=payload.user_message,
             initial_snapshot=anchor,
             candidates=candidates,
+            created_by=current_user.user_id,
             **session_anchor,
         )
         _insert_recommendation_message(
@@ -293,6 +305,7 @@ def generate_recommendation_candidates(
                 "candidates": candidates,
             },
             metadata_json={"message_type": "initial_candidates"},
+            created_by=current_user.user_id,
         )
         if payload.enable_rerank and len(candidates) > 1:
             rerank_job_id = _enqueue_recommendation_rerank_job(
@@ -328,8 +341,10 @@ def generate_recommendation_candidates(
 @router.post("/sessions", response_model=RecommendationSessionOut, status_code=status.HTTP_201_CREATED)
 def create_recommendation_session(
     payload: RecommendationSessionCreate,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    _ensure_recommendation_anchor_writable(db, current_user, payload)
     row = db.execute(
         _session_returning_statement(
             """
@@ -361,7 +376,7 @@ def create_recommendation_session(
             "anonymous_input_snapshot": payload.anonymous_input_snapshot,
             "initial_condition_snapshot_json": payload.initial_condition_snapshot_json,
             "latest_condition_snapshot_json": payload.latest_condition_snapshot_json,
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": current_user.user_id,
             "metadata_json": payload.metadata_json,
         },
     ).mappings().one()
@@ -371,6 +386,7 @@ def create_recommendation_session(
 
 @router.get("/sessions", response_model=list[RecommendationSessionOut])
 def list_recommendation_sessions(
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     mode: str | None = None,
     buyer_intent_id: UUID | None = None,
@@ -394,6 +410,9 @@ def list_recommendation_sessions(
     if seller_target_id:
         where.append("seller_target_id = :seller_target_id")
         params["seller_target_id"] = seller_target_id
+    if owner_scope_required(current_user):
+        where.append(recommendation_session_visible_sql("recommendation_session"))
+        params["scope_user_id"] = current_user.user_id
 
     rows = db.execute(
         text(
@@ -412,6 +431,7 @@ def list_recommendation_sessions(
 
 @router.get("/sessions/recent", response_model=list[RecommendationSessionSummaryOut])
 def list_recent_recommendation_session_summaries(
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     mode: str | None = None,
     status_filter: str | None = Query(
@@ -424,7 +444,13 @@ def list_recent_recommendation_session_summaries(
     preview_limit: int = Query(default=3, ge=0, le=20),
 ) -> list[dict[str, Any]]:
     scan_limit = min(200, max(limit + offset, limit * 4))
-    rows = _list_recommendation_session_overview_rows(db, mode=mode, limit=scan_limit, offset=0)
+    rows = _list_recommendation_session_overview_rows(
+        db,
+        current_user=current_user,
+        mode=mode,
+        limit=scan_limit,
+        offset=0,
+    )
     summaries = [
         _build_recommendation_session_summary(db, session=row, preview_limit=preview_limit) for row in rows
     ]
@@ -434,11 +460,18 @@ def list_recent_recommendation_session_summaries(
 
 @router.get("/page", response_model=RecommendationPageOut)
 def get_recommendation_page(
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     mode: str | None = None,
     limit: int = Query(default=12, ge=1, le=50),
 ) -> dict[str, Any]:
-    recent_rows = _list_recommendation_session_overview_rows(db, mode=mode, limit=limit, offset=0)
+    recent_rows = _list_recommendation_session_overview_rows(
+        db,
+        current_user=current_user,
+        mode=mode,
+        limit=limit,
+        offset=0,
+    )
     recent_summaries = [
         _build_recommendation_session_summary(db, session=row, preview_limit=5) for row in recent_rows
     ]
@@ -447,10 +480,11 @@ def get_recommendation_page(
     running_summaries = [
         summary for summary in recent_summaries if _recommendation_session_is_processing(summary)
     ]
-    for session_id in _list_running_recommendation_session_ids(db, limit=20):
+    for session_id in _list_running_recommendation_session_ids(db, current_user=current_user, limit=20):
         if str(session_id) in recent_ids:
             continue
         row = _get_recommendation_session_overview_or_404(db, session_id)
+        ensure_recommendation_session_visible(db, current_user, session_id)
         if mode and row.get("mode") != mode:
             continue
         running_summaries.append(_build_recommendation_session_summary(db, session=row, preview_limit=5))
@@ -472,16 +506,23 @@ def get_recommendation_page(
 
 
 @router.get("/sessions/{session_id}", response_model=RecommendationSessionOut)
-def get_recommendation_session(session_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+def get_recommendation_session(
+    session_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    ensure_recommendation_session_visible(db, current_user, session_id)
     return _get_recommendation_session_or_404(db, session_id)
 
 
 @router.get("/sessions/{session_id}/status", response_model=RecommendationSessionStatusOut)
 def get_recommendation_session_status(
     session_id: UUID,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     preview_limit: int = Query(default=8, ge=0, le=50),
 ) -> dict[str, Any]:
+    ensure_recommendation_session_visible(db, current_user, session_id)
     session = _get_recommendation_session_overview_or_404(db, session_id)
     return _build_recommendation_session_summary(db, session=session, preview_limit=preview_limit)
 
@@ -489,9 +530,11 @@ def get_recommendation_session_status(
 @router.get("/sessions/{session_id}/bundle", response_model=RecommendationSessionBundleOut)
 def get_recommendation_session_bundle(
     session_id: UUID,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     include_canceled: bool = Query(default=True),
 ) -> dict[str, Any]:
+    ensure_recommendation_session_visible(db, current_user, session_id)
     return _build_recommendation_session_bundle(
         db,
         session_id=session_id,
@@ -502,10 +545,12 @@ def get_recommendation_session_bundle(
 @router.get("/sessions/{session_id}/page-state", response_model=RecommendationSessionPageStateOut)
 def get_recommendation_session_page_state(
     session_id: UUID,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     include_canceled: bool = Query(default=True),
     preview_limit: int = Query(default=8, ge=0, le=50),
 ) -> dict[str, Any]:
+    ensure_recommendation_session_visible(db, current_user, session_id)
     session = _get_recommendation_session_overview_or_404(db, session_id)
     summary = _build_recommendation_session_summary(db, session=session, preview_limit=preview_limit)
     bundle = _build_recommendation_session_bundle(
@@ -587,8 +632,10 @@ def _build_recommendation_session_bundle(
 def create_recommendation_rerank_job(
     session_id: UUID,
     payload: RecommendationRerankJobCreate,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    ensure_recommendation_session_visible(db, current_user, session_id)
     session = _get_recommendation_session_or_404(db, session_id)
     if session["mode"] not in {"buyer_to_target", "target_to_buyer"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported recommendation mode.")
@@ -630,10 +677,12 @@ def create_recommendation_rerank_job(
 @router.get("/sessions/{session_id}/messages", response_model=list[RecommendationMessageOut])
 def list_recommendation_messages(
     session_id: UUID,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
+    ensure_recommendation_session_visible(db, current_user, session_id)
     _get_recommendation_session_or_404(db, session_id)
     return _list_recommendation_messages(db, session_id=session_id, limit=limit, offset=offset)
 
@@ -646,8 +695,10 @@ def list_recommendation_messages(
 def create_recommendation_message(
     session_id: UUID,
     payload: RecommendationMessageCreate,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    ensure_recommendation_session_visible(db, current_user, session_id)
     _get_recommendation_session_or_404(db, session_id)
     row = db.execute(
         _message_returning_statement(
@@ -670,7 +721,7 @@ def create_recommendation_message(
             "content": payload.content,
             "content_type": payload.content_type,
             "metadata_json": payload.metadata_json,
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": current_user.user_id,
         },
     ).mappings().one()
     _touch_recommendation_session(db, session_id)
@@ -686,9 +737,13 @@ def create_recommendation_message(
 def create_selected_item(
     session_id: UUID,
     payload: RecommendationSelectedItemCreate,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    _get_recommendation_session_or_404(db, session_id)
+    ensure_recommendation_session_visible(db, current_user, session_id)
+    session = _get_recommendation_session_or_404(db, session_id)
+    _ensure_selected_item_matches_session(session, payload)
+    _ensure_selected_item_allowed_from_session_candidates(db, current_user, session_id, payload)
     existing = _get_active_selected_item_for_pair(
         db,
         session_id=session_id,
@@ -733,7 +788,7 @@ def create_selected_item(
             "gap_summary": payload.gap_summary,
             "reason_snapshot": payload.reason_snapshot,
             "evidence_snapshot_json": payload.evidence_snapshot_json,
-            "selected_by": DEFAULT_ADMIN_USER_ID,
+            "selected_by": current_user.user_id,
             "metadata_json": payload.metadata_json,
         },
     ).mappings().one()
@@ -766,6 +821,7 @@ def create_selected_item(
 
 @router.get("/selected-items", response_model=list[RecommendationSelectedItemOut])
 def list_all_selected_items(
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     session_id: UUID | None = None,
     buyer_intent_id: UUID | None = None,
@@ -796,6 +852,18 @@ def list_all_selected_items(
         params["relation_id"] = str(relation_id)
     if not include_canceled:
         where.append("ri.canceled_at is null")
+    if owner_scope_required(current_user):
+        where.append(
+            f"""
+            exists (
+              select 1
+              from recommendation_session scope_rs
+              where scope_rs.id = ri.session_id
+                and {recommendation_session_visible_sql("scope_rs")}
+            )
+            """
+        )
+        params["scope_user_id"] = current_user.user_id
 
     rows = db.execute(
         text(
@@ -818,9 +886,11 @@ def list_all_selected_items(
 @router.get("/sessions/{session_id}/selected-items", response_model=list[RecommendationSelectedItemOut])
 def list_selected_items(
     session_id: UUID,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     include_canceled: bool = Query(default=False),
 ) -> list[dict[str, Any]]:
+    ensure_recommendation_session_visible(db, current_user, session_id)
     _get_recommendation_session_or_404(db, session_id)
     return _list_selected_items(
         db,
@@ -839,8 +909,10 @@ def list_selected_items(
 def create_recommendation_report(
     session_id: UUID,
     payload: RecommendationReportCreate,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    ensure_recommendation_session_visible(db, current_user, session_id)
     session = _get_recommendation_session_or_404(db, session_id)
     selected_items = _list_selected_items_for_report(
         db,
@@ -890,7 +962,7 @@ def create_recommendation_report(
             "markdown_content": markdown_content,
             "generated_by_model": "rule_template_v0",
             "prompt_version": None,
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": current_user.user_id,
             "metadata_json": {
                 **payload.metadata_json,
                 "source": "recommendation_report_api",
@@ -906,6 +978,7 @@ def create_recommendation_report(
         content_type="markdown",
         content=markdown_content,
         metadata_json={"report_id": str(report["id"]), "message_type": "recommendation_report"},
+        created_by=current_user.user_id,
     )
     _refresh_session_report_count(db, session_id)
     db.commit()
@@ -920,8 +993,10 @@ def create_recommendation_report(
 def create_recommendation_report_job(
     session_id: UUID,
     payload: RecommendationReportCreate,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    ensure_recommendation_session_visible(db, current_user, session_id)
     session = _get_recommendation_session_or_404(db, session_id)
     selected_items = _list_selected_items_for_report(
         db,
@@ -969,7 +1044,7 @@ def create_recommendation_report_job(
             "selected_item_ids_json": selected_item_ids_json,
             "title": title,
             "markdown_content": fallback_markdown,
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": current_user.user_id,
             "metadata_json": {
                 **payload.metadata_json,
                 "source": "recommendation_report_job_api",
@@ -999,10 +1074,12 @@ def create_recommendation_report_job(
 @router.get("/sessions/{session_id}/reports", response_model=list[RecommendationReportOut])
 def list_recommendation_reports(
     session_id: UUID,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
+    ensure_recommendation_session_visible(db, current_user, session_id)
     _get_recommendation_session_or_404(db, session_id)
     return _list_recommendation_reports(db, session_id=session_id, limit=limit, offset=offset)
 
@@ -1010,6 +1087,7 @@ def list_recommendation_reports(
 def _list_recommendation_session_overview_rows(
     db: Session,
     *,
+    current_user: CurrentUser,
     mode: str | None,
     limit: int,
     offset: int,
@@ -1024,6 +1102,9 @@ def _list_recommendation_session_overview_rows(
     if mode:
         where.append("rs.mode = :mode")
         params["mode"] = mode
+    if owner_scope_required(current_user):
+        where.append(recommendation_session_visible_sql("rs"))
+        params["scope_user_id"] = current_user.user_id
 
     rows = db.execute(
         text(
@@ -1068,10 +1149,31 @@ def _get_recommendation_session_overview_or_404(db: Session, session_id: UUID) -
     return dict(row)
 
 
-def _list_running_recommendation_session_ids(db: Session, *, limit: int) -> list[UUID]:
+def _list_running_recommendation_session_ids(
+    db: Session,
+    *,
+    current_user: CurrentUser,
+    limit: int,
+) -> list[UUID]:
+    scope_join = ""
+    scope_where = ""
+    params: dict[str, Any] = {
+        "team_id": DEFAULT_TEAM_ID,
+        "workspace_id": DEFAULT_WORKSPACE_ID,
+        "limit": limit,
+    }
+    if owner_scope_required(current_user):
+        scope_join = """
+            join recommendation_session rs
+              on rs.id = running_jobs.session_id
+             and rs.team_id = :team_id
+             and rs.workspace_id = :workspace_id
+        """
+        scope_where = f"and {recommendation_session_visible_sql('rs')}"
+        params["scope_user_id"] = current_user.user_id
     rows = db.execute(
         text(
-            """
+            f"""
             with running_jobs as (
               select
                 case
@@ -1092,12 +1194,14 @@ def _list_running_recommendation_session_ids(db: Session, *, limit: int) -> list
             )
             select distinct session_id
             from running_jobs
+            {scope_join}
             where session_id is not null
+            {scope_where}
             order by session_id
             limit :limit
             """
         ),
-        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID, "limit": limit},
+        params,
     ).mappings().all()
     return [row["session_id"] for row in rows if row.get("session_id") is not None]
 
@@ -1877,7 +1981,12 @@ def _get_rerank_anchor_for_session(db: Session, session: dict[str, Any]) -> dict
 
 
 @router.get("/reports/{report_id}", response_model=RecommendationReportOut)
-def get_recommendation_report(report_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+def get_recommendation_report(
+    report_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    _ensure_recommendation_report_visible(db, current_user, report_id)
     row = db.execute(
         text(
             f"""
@@ -1900,8 +2009,13 @@ def get_recommendation_report(report_id: UUID, db: Session = Depends(get_db)) ->
 
 
 @router.post("/selected-items/{selected_item_id}/cancel", response_model=RecommendationSelectedItemOut)
-def cancel_selected_item(selected_item_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+def cancel_selected_item(
+    selected_item_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     current = _get_selected_item_or_404(db, selected_item_id)
+    ensure_recommendation_session_visible(db, current_user, current["session_id"])
     if current["canceled_at"] is not None:
         return current
     row = db.execute(
@@ -1919,7 +2033,7 @@ def cancel_selected_item(selected_item_id: UUID, db: Session = Depends(get_db)) 
             "selected_item_id": selected_item_id,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
-            "canceled_by": DEFAULT_ADMIN_USER_ID,
+            "canceled_by": current_user.user_id,
         },
     ).mappings().one()
     _insert_selected_item_cancel_event(db, dict(row))
@@ -2486,6 +2600,7 @@ def _create_recommendation_session(
     user_message: str | None,
     initial_snapshot: dict[str, Any],
     candidates: list[dict[str, Any]],
+    created_by: UUID,
 ) -> UUID:
     row = db.execute(
         text(
@@ -2519,7 +2634,7 @@ def _create_recommendation_session(
             "anonymous_input_snapshot": user_message,
             "initial_condition_snapshot_json": _json_safe(initial_snapshot),
             "latest_condition_snapshot_json": _json_safe(initial_snapshot),
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": created_by,
             "metadata_json": {
                 "source": "recommendation_candidate_api",
                 "candidate_count": len(candidates),
@@ -2533,6 +2648,7 @@ def _create_recommendation_session(
             role="user",
             content_type="text",
             content=user_message,
+            created_by=created_by,
         )
     return row["id"]
 
@@ -2545,6 +2661,7 @@ def _insert_recommendation_message(
     content_type: str,
     content: str | dict[str, Any],
     metadata_json: dict[str, Any] | None = None,
+    created_by: UUID = DEFAULT_ADMIN_USER_ID,
 ) -> None:
     db.execute(
         text(
@@ -2567,7 +2684,7 @@ def _insert_recommendation_message(
             "content": content if isinstance(content, str) else _json_dumps(content),
             "content_type": content_type,
             "metadata_json": metadata_json or {},
-            "created_by": DEFAULT_ADMIN_USER_ID,
+            "created_by": created_by,
         },
     )
 
@@ -3019,6 +3136,97 @@ def _build_rerank_query(*, mode: str, anchor: dict[str, Any]) -> str:
             anchor.get("risk_summary"),
         ]
     return "\n".join(str(part) for part in parts if part)
+
+
+def _ensure_recommendation_anchor_writable(
+    db: Session,
+    current_user: CurrentUser,
+    payload: RecommendationSessionCreate,
+) -> None:
+    if payload.buyer_intent_id:
+        ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=payload.buyer_intent_id)
+    if payload.buyer_party_id:
+        ensure_entity_writable(db, current_user, entity_type="buyer_party", entity_id=payload.buyer_party_id)
+    if payload.seller_target_id:
+        ensure_entity_writable(db, current_user, entity_type="seller_target", entity_id=payload.seller_target_id)
+    if payload.mode == "buyer_to_target" and not (payload.buyer_intent_id or payload.buyer_party_id):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Buyer anchor is required.")
+    if payload.mode == "target_to_buyer" and not payload.seller_target_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Seller target anchor is required.")
+
+
+def _ensure_recommendation_report_visible(db: Session, current_user: CurrentUser, report_id: UUID) -> None:
+    if not owner_scope_required(current_user):
+        return
+    row = db.execute(
+        text(
+            f"""
+            select 1
+            from recommendation_report rr
+            where rr.id = :report_id
+              and rr.team_id = :team_id
+              and rr.workspace_id = :workspace_id
+              and {recommendation_report_visible_sql("rr")}
+            """
+        ),
+        {
+            "report_id": report_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "scope_user_id": current_user.user_id,
+        },
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recommendation report not found.")
+
+
+def _ensure_selected_item_matches_session(
+    session: dict[str, Any],
+    payload: RecommendationSelectedItemCreate,
+) -> None:
+    if payload.mode != session["mode"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Selected item mode does not match session.")
+    if session["mode"] == "buyer_to_target":
+        if not payload.seller_target_id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="seller_target_id is required.")
+        if session.get("buyer_intent_id") and payload.buyer_intent_id != session["buyer_intent_id"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Selected buyer intent does not match session anchor.",
+            )
+    if session["mode"] == "target_to_buyer":
+        if not payload.buyer_intent_id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="buyer_intent_id is required.")
+        if session.get("seller_target_id") and payload.seller_target_id != session["seller_target_id"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Selected seller target does not match session anchor.",
+            )
+
+
+def _ensure_selected_item_allowed_from_session_candidates(
+    db: Session,
+    current_user: CurrentUser,
+    session_id: UUID,
+    payload: RecommendationSelectedItemCreate,
+) -> None:
+    if not owner_scope_required(current_user):
+        return
+    requested_key = _candidate_pair_key(payload.model_dump())
+    messages = _list_recommendation_messages(db, session_id=session_id, limit=500, offset=0)
+    candidate_sets = _extract_recommendation_candidate_sets(messages)
+    allowed_keys = {
+        _candidate_pair_key(candidate)
+        for candidate in [
+            *candidate_sets["initial_candidates"],
+            *candidate_sets["reranked_candidates"],
+        ]
+    }
+    if requested_key not in allowed_keys:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Selected item must come from this recommendation session's generated candidates.",
+        )
 
 
 def _refresh_session_report_count(db: Session, session_id: UUID) -> None:

@@ -11,11 +11,16 @@ from sqlalchemy.orm import Session
 from backend.app.api.authn import AuthContext, CurrentUser, require_admin
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.api.routes.utils import (
+    append_owner_scope,
     assign_owner_bulk,
     diff_payload,
+    ensure_entity_visible,
+    ensure_entity_writable,
     ensure_active_user,
+    owner_scope_required,
     owner_filter_condition,
     owner_filter_options,
+    owner_scope_sql,
     write_action_log,
     write_action_logs_for_diff,
 )
@@ -269,6 +274,8 @@ def create_buyer_intent(
     current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    if payload.buyer_party_id is not None:
+        ensure_entity_writable(db, current_user, entity_type="buyer_party", entity_id=payload.buyer_party_id)
     row = db.execute(
         text(
             """
@@ -332,6 +339,7 @@ def create_buyer_intent(
 
 @router.get("", response_model=BuyerIntentListOut)
 def list_buyer_intents(
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
@@ -354,6 +362,8 @@ def list_buyer_intents(
         "limit": limit,
         "offset": offset,
     }
+
+    append_owner_scope(where, params, current_user, entity_type="buyer_intent", alias="bi")
 
     owner_condition = owner_filter_condition(owner, column="bi.owner_user_id")
     if owner_condition:
@@ -428,11 +438,15 @@ def list_buyer_intents(
 
 
 @router.get("/filter-options", response_model=BuyerIntentFilterOptionsOut)
-def buyer_intent_filter_options(db: Session = Depends(get_db)) -> dict[str, Any]:
+def buyer_intent_filter_options(current_user: CurrentUser, db: Session = Depends(get_db)) -> dict[str, Any]:
     params = {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID}
+    scope_clause = ""
+    if owner_scope_required(current_user):
+        params["scope_user_id"] = current_user.user_id
+        scope_clause = "and owner_user_id = :scope_user_id"
     industries = _filter_options(
         db,
-        """
+        f"""
         select
           concat_ws(' / ', nullif(industry_primary, ''), nullif(industry_secondary, '')) as value,
           count(*) as count
@@ -440,6 +454,7 @@ def buyer_intent_filter_options(db: Session = Depends(get_db)) -> dict[str, Any]
         where team_id = :team_id
           and workspace_id = :workspace_id
           and deleted_at is null
+          {scope_clause}
           and concat_ws(' / ', nullif(industry_primary, ''), nullif(industry_secondary, '')) <> ''
         group by value
         order by count desc, value asc
@@ -449,12 +464,13 @@ def buyer_intent_filter_options(db: Session = Depends(get_db)) -> dict[str, Any]
     )
     regions = _filter_options(
         db,
-        """
+        f"""
         select region_scope_summary as value, count(*) as count
         from buyer_intent
         where team_id = :team_id
           and workspace_id = :workspace_id
           and deleted_at is null
+          {scope_clause}
           and nullif(region_scope_summary, '') is not null
         group by region_scope_summary
         order by count desc, region_scope_summary asc
@@ -464,12 +480,13 @@ def buyer_intent_filter_options(db: Session = Depends(get_db)) -> dict[str, Any]
     )
     statuses = _filter_options(
         db,
-        """
+        f"""
         select status as value, count(*) as count
         from buyer_intent
         where team_id = :team_id
           and workspace_id = :workspace_id
           and deleted_at is null
+          {scope_clause}
         group by status
         order by count desc, status asc
         """,
@@ -478,12 +495,13 @@ def buyer_intent_filter_options(db: Session = Depends(get_db)) -> dict[str, Any]
     )
     listed_statuses = _filter_options(
         db,
-        """
+        f"""
         select preferred_listed_status as value, count(*) as count
         from buyer_intent
         where team_id = :team_id
           and workspace_id = :workspace_id
           and deleted_at is null
+          {scope_clause}
           and nullif(preferred_listed_status, '') is not null
         group by preferred_listed_status
         order by count desc, preferred_listed_status asc
@@ -499,19 +517,20 @@ def buyer_intent_filter_options(db: Session = Depends(get_db)) -> dict[str, Any]
     )
     consolidation_requirements = _filter_options(
         db,
-        """
+        f"""
         select requires_consolidation as value, count(*) as count
         from buyer_intent
         where team_id = :team_id
           and workspace_id = :workspace_id
           and deleted_at is null
+          {scope_clause}
         group by requires_consolidation
         order by count desc, requires_consolidation asc
         """,
         params,
         labels={"yes": "需要并表", "likely": "可能需要", "no": "不需要并表", "unknown": "未知"},
     )
-    owners = owner_filter_options(db, "buyer_intent", params)
+    owners = [] if owner_scope_required(current_user) else owner_filter_options(db, "buyer_intent", params)
     return {
         "industries": industries,
         "regions": regions,
@@ -524,6 +543,7 @@ def buyer_intent_filter_options(db: Session = Depends(get_db)) -> dict[str, Any]
 
 @router.get("/suggestions", response_model=list[BuyerIntentSuggestionOut])
 def buyer_intent_suggestions(
+    current_user: CurrentUser,
     q: str = Query(min_length=1, max_length=100),
     limit: int = Query(default=5, ge=1, le=10),
     db: Session = Depends(get_db),
@@ -532,9 +552,19 @@ def buyer_intent_suggestions(
     if not query:
         return []
 
+    params = {
+        "team_id": DEFAULT_TEAM_ID,
+        "workspace_id": DEFAULT_WORKSPACE_ID,
+        "q": f"%{query}%",
+    }
+    scope_clause = ""
+    if owner_scope_required(current_user):
+        params["scope_user_id"] = current_user.user_id
+        scope_clause = f"and {owner_scope_sql('buyer_intent', 'bi')}"
+
     rows = db.execute(
         text(
-            """
+            f"""
             with matches as (
               select
                 bi.id, bi.intent_name, bi.buyer_party_id, bp.buyer_name,
@@ -548,6 +578,7 @@ def buyer_intent_suggestions(
               where bi.team_id = :team_id
                 and bi.workspace_id = :workspace_id
                 and bi.deleted_at is null
+                {scope_clause}
                 and bi.intent_name ilike :q
               union all
               select
@@ -562,6 +593,7 @@ def buyer_intent_suggestions(
               where bi.team_id = :team_id
                 and bi.workspace_id = :workspace_id
                 and bi.deleted_at is null
+                {scope_clause}
                 and bp.buyer_name ilike :q
               union all
               select
@@ -576,6 +608,7 @@ def buyer_intent_suggestions(
               where bi.team_id = :team_id
                 and bi.workspace_id = :workspace_id
                 and bi.deleted_at is null
+                {scope_clause}
                 and bi.raw_requirement_text ilike :q
               union all
               select
@@ -590,6 +623,7 @@ def buyer_intent_suggestions(
               where bi.team_id = :team_id
                 and bi.workspace_id = :workspace_id
                 and bi.deleted_at is null
+                {scope_clause}
                 and bi.intent_summary ilike :q
             )
             select distinct on (id)
@@ -599,11 +633,7 @@ def buyer_intent_suggestions(
             order by id, priority, updated_at desc
             """
         ),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "q": f"%{query}%",
-        },
+        params,
     ).mappings().all()
     sorted_rows = sorted(
         rows,
@@ -683,8 +713,14 @@ def bulk_delete_buyer_intents(
 
 
 @router.get("/{buyer_intent_id}", response_model=BuyerIntentOut)
-def get_buyer_intent(buyer_intent_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
-    return _get_buyer_intent_or_404(db, buyer_intent_id)
+def get_buyer_intent(
+    buyer_intent_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    intent = _get_buyer_intent_or_404(db, buyer_intent_id)
+    ensure_entity_visible(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
+    return intent
 
 
 @router.post("/{buyer_intent_id}/parse", response_model=BuyerIntentParseJobOut)
@@ -695,6 +731,7 @@ def parse_buyer_intent(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     intent = _get_buyer_intent_or_404(db, buyer_intent_id)
+    ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
     request = payload or BuyerIntentParseRequest()
     raw_requirement_text = request.raw_requirement_text or intent.get("raw_requirement_text")
     if not raw_requirement_text or not raw_requirement_text.strip():
@@ -783,9 +820,11 @@ def parse_buyer_intent(
 @router.get("/{buyer_intent_id}/parse-status", response_model=BuyerIntentParseStatusOut)
 def get_buyer_intent_parse_status(
     buyer_intent_id: UUID,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     intent = _get_buyer_intent_or_404(db, buyer_intent_id)
+    ensure_entity_visible(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
     latest_job = _latest_parse_job(db, buyer_intent_id)
     latest_trace = _latest_parse_trace(db, buyer_intent_id)
     return {
@@ -805,6 +844,7 @@ def update_buyer_intent(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     original = _get_buyer_intent_or_404(db, buyer_intent_id)
+    ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
     changes = payload.model_dump(exclude_unset=True)
 
     if "owner_user_id" in changes:
