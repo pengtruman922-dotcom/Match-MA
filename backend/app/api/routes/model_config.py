@@ -11,10 +11,20 @@ from sqlalchemy.orm import Session
 from backend.app.ai.embedding_client import EmbeddingCallError, call_openai_compatible_embedding
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
 from backend.app.ai.rerank_client import RerankCallError, call_dashscope_compatible_rerank
+from backend.app.api.authn import CurrentUser, require_admin
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 
-router = APIRouter(prefix="/model-config", tags=["model-config"])
+
+def _require_admin_route(current_user: CurrentUser) -> None:
+    require_admin(current_user)
+
+
+router = APIRouter(
+    prefix="/model-config",
+    tags=["model-config"],
+    dependencies=[Depends(_require_admin_route)],
+)
 
 PROVIDER_TYPES = {"openai_compatible", "dashscope", "deepseek", "azure_openai", "ocr", "embedding", "custom"}
 AUTH_TYPES = {"none", "bearer", "api_key_header", "custom"}

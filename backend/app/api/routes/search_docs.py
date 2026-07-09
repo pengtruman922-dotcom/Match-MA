@@ -6,6 +6,8 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from backend.app.api.authn import CurrentUser, require_admin
+from backend.app.api.routes.utils import ensure_entity_visible, ensure_entity_writable
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 from backend.app.services.search_docs import (
@@ -57,7 +59,12 @@ class SearchDocBulkJobOut(BaseModel):
 
 
 @router.get("/search-docs/seller-targets/{seller_target_id}", response_model=SearchDocOut)
-def get_seller_target_search_doc(seller_target_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+def get_seller_target_search_doc(
+    seller_target_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    ensure_entity_visible(db, current_user, entity_type="seller_target", entity_id=seller_target_id)
     row = db.execute(
         text(
             """
@@ -85,7 +92,12 @@ def get_seller_target_search_doc(seller_target_id: UUID, db: Session = Depends(g
 
 
 @router.get("/search-docs/buyer-intents/{buyer_intent_id}", response_model=SearchDocOut)
-def get_buyer_intent_search_doc(buyer_intent_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+def get_buyer_intent_search_doc(
+    buyer_intent_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    ensure_entity_visible(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
     row = db.execute(
         text(
             """
@@ -114,9 +126,11 @@ def get_buyer_intent_search_doc(buyer_intent_id: UUID, db: Session = Depends(get
 @router.post("/search-docs/seller-targets/{seller_target_id}/rebuild", response_model=SearchDocRebuildOut)
 def rebuild_seller_target_search_doc_now(
     seller_target_id: UUID,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     enqueue_embedding: bool = Query(default=True),
 ) -> dict[str, Any]:
+    ensure_entity_writable(db, current_user, entity_type="seller_target", entity_id=seller_target_id)
     result = rebuild_seller_target_search_doc(db, seller_target_id)
     embedding_job_id = None
     if enqueue_embedding:
@@ -141,9 +155,11 @@ def rebuild_seller_target_search_doc_now(
 @router.post("/search-docs/buyer-intents/{buyer_intent_id}/rebuild", response_model=SearchDocRebuildOut)
 def rebuild_buyer_intent_search_doc_now(
     buyer_intent_id: UUID,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     enqueue_embedding: bool = Query(default=True),
 ) -> dict[str, Any]:
+    ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
     result = rebuild_buyer_intent_search_doc(db, buyer_intent_id)
     embedding_job_id = None
     if enqueue_embedding:
@@ -167,10 +183,12 @@ def rebuild_buyer_intent_search_doc_now(
 
 @router.post("/search-docs/jobs/seller-targets/rebuild", response_model=SearchDocBulkJobOut)
 def create_seller_target_search_doc_jobs(
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     limit: int = Query(default=200, ge=1, le=1000),
     include_embedded: bool = Query(default=False),
 ) -> dict[str, Any]:
+    require_admin(current_user)
     rows = db.execute(
         text(
             f"""
@@ -214,10 +232,12 @@ def create_seller_target_search_doc_jobs(
 
 @router.post("/search-docs/jobs/buyer-intents/rebuild", response_model=SearchDocBulkJobOut)
 def create_buyer_intent_search_doc_jobs(
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     limit: int = Query(default=200, ge=1, le=1000),
     include_embedded: bool = Query(default=False),
 ) -> dict[str, Any]:
+    require_admin(current_user)
     rows = db.execute(
         text(
             f"""
@@ -259,7 +279,12 @@ def create_buyer_intent_search_doc_jobs(
 
 
 @router.post("/search-docs/seller-targets/{seller_target_id}/jobs", response_model=SearchDocJobOut)
-def create_seller_target_search_doc_job(seller_target_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+def create_seller_target_search_doc_job(
+    seller_target_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    ensure_entity_writable(db, current_user, entity_type="seller_target", entity_id=seller_target_id)
     result = create_search_doc_rebuild_job(
         db,
         entity_type="seller_target",
@@ -271,7 +296,12 @@ def create_seller_target_search_doc_job(seller_target_id: UUID, db: Session = De
 
 
 @router.post("/search-docs/buyer-intents/{buyer_intent_id}/jobs", response_model=SearchDocJobOut)
-def create_buyer_intent_search_doc_job(buyer_intent_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+def create_buyer_intent_search_doc_job(
+    buyer_intent_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
     result = create_search_doc_rebuild_job(
         db,
         entity_type="buyer_intent",

@@ -10,6 +10,8 @@ from backend.app.api.routes.debug import (
 from backend.app.api.routes.workbench import (
     WorkbenchTaskBoardOut,
     _categorize_action,
+    _empty_failure_summary,
+    _empty_queue_summary,
     _task_priority,
     _task_title,
     _truncate_text,
@@ -65,6 +67,28 @@ def test_workbench_task_board_schema_includes_queue_summary() -> None:
 
     assert board.queue_summary["queues"][0]["queue_name"] == "llm"
     assert board.failure_summary["totals"]["failed_job_count"] == 0
+
+
+class _NowResult:
+    def scalar_one(self) -> str:
+        return "2026-07-09 00:00:00+00"
+
+
+class _FakeDb:
+    def execute(self, *_args, **_kwargs) -> _NowResult:
+        return _NowResult()
+
+
+def test_workbench_empty_job_summaries_keep_public_shape() -> None:
+    db = _FakeDb()
+
+    queue_summary = _empty_queue_summary(db)
+    failure_summary = _empty_failure_summary(db)
+
+    assert queue_summary["totals"]["active_job_count"] == 0
+    assert queue_summary["totals"]["failed_job_count"] == 0
+    assert failure_summary["totals"]["failed_job_count"] == 0
+    assert failure_summary["totals"]["failed_queue_count"] == 0
 
 
 def test_debug_summary_supports_unified_entity_types() -> None:

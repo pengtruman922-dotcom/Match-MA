@@ -9,7 +9,13 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
-from backend.app.api.authn import CurrentUser
+from backend.app.api.authn import CurrentUser, require_admin
+from backend.app.api.routes.utils import (
+    business_update_visible_sql,
+    ensure_business_update_visible,
+    ensure_entity_writable,
+    owner_scope_required,
+)
 from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
@@ -143,6 +149,13 @@ def create_business_update(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     _validate_business_update_input_type(payload.input_type)
+    _ensure_bound_entities_writable(
+        db,
+        current_user,
+        seller_target_ids=payload.bound_seller_target_ids,
+        buyer_party_ids=payload.bound_buyer_party_ids,
+        buyer_intent_ids=payload.bound_buyer_intent_ids,
+    )
     statement = text(
         """
         insert into business_update (
@@ -234,6 +247,13 @@ def upload_business_update(
     seller_target_ids = _parse_uuid_list_form(bound_seller_target_ids)
     buyer_party_ids = _parse_uuid_list_form(bound_buyer_party_ids)
     buyer_intent_ids = _parse_uuid_list_form(bound_buyer_intent_ids)
+    _ensure_bound_entities_writable(
+        db,
+        current_user,
+        seller_target_ids=seller_target_ids,
+        buyer_party_ids=buyer_party_ids,
+        buyer_intent_ids=buyer_intent_ids,
+    )
     form_metadata = _parse_metadata_json_form(metadata_json)
     settings = get_settings()
 
@@ -316,10 +336,12 @@ def upload_business_update(
 @router.post("/{business_update_id}/process", response_model=BusinessUpdateProcessOut)
 def process_business_update(
     business_update_id: UUID,
+    current_user: CurrentUser,
     payload: BusinessUpdateProcessRequest | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     _ensure_business_update_exists(db, business_update_id)
+    ensure_business_update_visible(db, current_user, business_update_id)
     request = payload or BusinessUpdateProcessRequest()
     job = _enqueue_business_update_process_job(
         db,
@@ -342,9 +364,11 @@ def process_business_update(
 def add_business_update_attachments(
     business_update_id: UUID,
     payload: BusinessUpdateAttachmentIngest,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    business_update = get_business_update(business_update_id, db)
+    business_update = get_business_update(business_update_id, current_user, db)
+    ensure_business_update_visible(db, current_user, business_update_id)
     result = _ingest_business_update_attachments(
         db,
         business_update_id=business_update_id,
@@ -367,6 +391,7 @@ def add_business_update_attachments(
 
 @router.get("", response_model=list[BusinessUpdateOut])
 def list_business_updates(
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
@@ -381,6 +406,9 @@ def list_business_updates(
         "limit": limit,
         "offset": offset,
     }
+    if owner_scope_required(current_user):
+        where.append(business_update_visible_sql("business_update"))
+        params["scope_user_id"] = current_user.user_id
 
     if processing_status:
         where.append("processing_status = :processing_status")
@@ -413,12 +441,14 @@ def list_business_updates(
 
 @router.get("/summary/sample-runs", response_model=BusinessUpdateSampleRunsOut)
 def summarize_business_update_sample_runs(
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     lookback_hours: int = Query(default=720, ge=1, le=8760),
     limit: int = Query(default=50, ge=1, le=200),
     include_all: bool = False,
     sample_label: str | None = Query(default=None, max_length=200),
 ) -> dict[str, Any]:
+    require_admin(current_user)
     generated_at = datetime.now(UTC)
     created_after = generated_at - timedelta(hours=lookback_hours)
     where = [
@@ -632,6 +662,7 @@ def summarize_business_update_sample_runs(
 @router.get("/{business_update_id}", response_model=BusinessUpdateOut)
 def get_business_update(
     business_update_id: UUID,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     row = db.execute(
@@ -658,15 +689,18 @@ def get_business_update(
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Business update not found.")
 
+    ensure_business_update_visible(db, current_user, business_update_id)
+
     return dict(row)
 
 
 @router.get("/{business_update_id}/review-page", response_model=BusinessUpdateReviewPageOut)
 def get_business_update_review_page(
     business_update_id: UUID,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    business_update = get_business_update(business_update_id, db)
+    business_update = get_business_update(business_update_id, current_user, db)
     actions = _review_page_actions(db, business_update_id)
     application_logs = _review_page_application_logs(db, business_update_id)
     jobs = _review_page_jobs(db, business_update_id)
@@ -717,6 +751,22 @@ def _ensure_business_update_exists(db: Session, business_update_id: UUID) -> Non
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Business update not found.")
+
+
+def _ensure_bound_entities_writable(
+    db: Session,
+    current_user: CurrentUser,
+    *,
+    seller_target_ids: list[UUID],
+    buyer_party_ids: list[UUID],
+    buyer_intent_ids: list[UUID],
+) -> None:
+    for seller_target_id in dict.fromkeys(seller_target_ids):
+        ensure_entity_writable(db, current_user, entity_type="seller_target", entity_id=seller_target_id)
+    for buyer_party_id in dict.fromkeys(buyer_party_ids):
+        ensure_entity_writable(db, current_user, entity_type="buyer_party", entity_id=buyer_party_id)
+    for buyer_intent_id in dict.fromkeys(buyer_intent_ids):
+        ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
 
 
 def _ingest_business_update_attachments(

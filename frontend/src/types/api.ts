@@ -224,6 +224,20 @@ export interface BuyerPartySuggestion {
   snippet: string | null;
 }
 
+export interface BuyerPartyDedupMatch {
+  buyer_name: string;
+  legal_name: string | null;
+  owner_name: string | null;
+  match_type: 'buyer_name' | 'legal_name' | 'alias';
+  status: string;
+}
+
+export interface BuyerPartyDedupCheck {
+  exists: boolean;
+  query: string;
+  matches: BuyerPartyDedupMatch[];
+}
+
 export interface BuyerBulkDeleteResponse {
   status: string;
   deleted_count: number;
@@ -333,6 +347,21 @@ export interface AppUserCreate {
   name: string;
   password: string;
   role: 'admin' | 'consultant';
+}
+
+export interface AppUserActivitySummary {
+  user: AppUserOption;
+  owned_seller_targets: number;
+  owned_buyer_parties: number;
+  owned_buyer_intents: number;
+  seller_target_status_counts: Record<string, number>;
+  weekly_new_seller_targets: number;
+  weekly_new_buyer_parties: number;
+  weekly_new_buyer_intents: number;
+  weekly_business_updates: number;
+  weekly_follow_ups: number;
+  weekly_application_logs: number;
+  latest_activity_at: string | null;
 }
 
 export interface BatchAssignOwnerResponse {

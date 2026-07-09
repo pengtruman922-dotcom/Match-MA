@@ -8,6 +8,7 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
+from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 
 
@@ -180,6 +181,549 @@ def owner_filter_options(db: Session, table: str, params: dict[str, Any]) -> lis
         {"value": row["value"], "label": row["label"], "count": int(row["count"])}
         for row in rows
     ]
+
+
+def owner_scope_required(current_user: Any) -> bool:
+    return bool(get_settings().owner_scope_enforced and not current_user.is_admin)
+
+
+def scoped_params(params: dict[str, Any], current_user: Any) -> dict[str, Any]:
+    if owner_scope_required(current_user):
+        params["scope_user_id"] = current_user.user_id
+    return params
+
+
+def append_owner_scope(
+    where: list[str],
+    params: dict[str, Any],
+    current_user: Any,
+    *,
+    entity_type: str,
+    alias: str,
+) -> None:
+    if not owner_scope_required(current_user):
+        return
+    where.append(owner_scope_sql(entity_type, alias))
+    params["scope_user_id"] = current_user.user_id
+
+
+def append_visible_scope(
+    where: list[str],
+    params: dict[str, Any],
+    current_user: Any,
+    *,
+    entity_type: str,
+    alias: str,
+) -> None:
+    if not owner_scope_required(current_user):
+        return
+    where.append(visible_scope_sql(entity_type, alias))
+    params["scope_user_id"] = current_user.user_id
+
+
+def owner_scope_sql(entity_type: str, alias: str) -> str:
+    if entity_type == "seller_target":
+        return f"{alias}.owner_user_id = :scope_user_id"
+    if entity_type == "buyer_intent":
+        return f"{alias}.owner_user_id = :scope_user_id"
+    if entity_type == "buyer_party":
+        # A consultant may need the buyer shell for an intent they own, even
+        # when the buyer_party owner differs from the intent owner.
+        return f"""(
+            {alias}.owner_user_id = :scope_user_id
+            or exists (
+              select 1
+              from buyer_intent scope_bi
+              where scope_bi.buyer_party_id = {alias}.id
+                and scope_bi.owner_user_id = :scope_user_id
+                and scope_bi.deleted_at is null
+            )
+        )"""
+    raise ValueError(f"Unsupported owner scope entity_type: {entity_type}")
+
+
+def visible_scope_sql(entity_type: str, alias: str) -> str:
+    owner_sql = owner_scope_sql(entity_type, alias)
+    if entity_type == "seller_target":
+        return f"""(
+            {owner_sql}
+            or exists (
+              select 1
+              from buyer_seller_relation scope_r
+              join buyer_intent scope_bi
+                on scope_bi.id = scope_r.buyer_intent_id
+               and scope_bi.deleted_at is null
+              left join buyer_party scope_bp
+                on scope_bp.id = coalesce(scope_r.buyer_party_id, scope_bi.buyer_party_id)
+               and scope_bp.deleted_at is null
+              where scope_r.seller_target_id = {alias}.id
+                and scope_r.deleted_at is null
+                and (
+                  scope_bi.owner_user_id = :scope_user_id
+                  or scope_bp.owner_user_id = :scope_user_id
+                )
+            )
+        )"""
+    if entity_type == "buyer_intent":
+        return f"""(
+            {owner_sql}
+            or exists (
+              select 1
+              from buyer_seller_relation scope_r
+              join seller_target scope_st
+                on scope_st.id = scope_r.seller_target_id
+               and scope_st.deleted_at is null
+              where scope_r.buyer_intent_id = {alias}.id
+                and scope_r.deleted_at is null
+                and scope_st.owner_user_id = :scope_user_id
+            )
+        )"""
+    if entity_type == "buyer_party":
+        return f"""(
+            {owner_sql}
+            or exists (
+              select 1
+              from buyer_seller_relation scope_r
+              join seller_target scope_st
+                on scope_st.id = scope_r.seller_target_id
+               and scope_st.deleted_at is null
+              left join buyer_intent scope_bi
+                on scope_bi.id = scope_r.buyer_intent_id
+               and scope_bi.deleted_at is null
+              where coalesce(scope_r.buyer_party_id, scope_bi.buyer_party_id) = {alias}.id
+                and scope_r.deleted_at is null
+                and scope_st.owner_user_id = :scope_user_id
+            )
+        )"""
+    raise ValueError(f"Unsupported visible scope entity_type: {entity_type}")
+
+
+def business_update_visible_sql(alias: str) -> str:
+    return f"""(
+        {alias}.created_by = :scope_user_id
+        or exists (
+          select 1
+          from seller_target scope_st
+          where scope_st.id::text in (
+            select jsonb_array_elements_text({alias}.bound_seller_target_ids_json)
+          )
+            and scope_st.owner_user_id = :scope_user_id
+            and scope_st.deleted_at is null
+        )
+        or exists (
+          select 1
+          from buyer_party scope_bp
+          where scope_bp.id::text in (
+            select jsonb_array_elements_text({alias}.bound_buyer_party_ids_json)
+          )
+            and scope_bp.owner_user_id = :scope_user_id
+            and scope_bp.deleted_at is null
+        )
+        or exists (
+          select 1
+          from buyer_intent scope_bi
+          where scope_bi.id::text in (
+            select jsonb_array_elements_text({alias}.bound_buyer_intent_ids_json)
+          )
+            and scope_bi.owner_user_id = :scope_user_id
+            and scope_bi.deleted_at is null
+        )
+        or exists (
+          select 1
+          from recommendation_session scope_rs
+          left join buyer_intent scope_bi on scope_bi.id = scope_rs.buyer_intent_id
+          left join buyer_party scope_bp on scope_bp.id = coalesce(scope_rs.buyer_party_id, scope_bi.buyer_party_id)
+          left join seller_target scope_st on scope_st.id = scope_rs.seller_target_id
+          where scope_rs.id = {alias}.bound_recommendation_session_id
+            and (
+              scope_rs.created_by = :scope_user_id
+              or scope_bi.owner_user_id = :scope_user_id
+              or scope_bp.owner_user_id = :scope_user_id
+              or scope_st.owner_user_id = :scope_user_id
+            )
+        )
+    )"""
+
+
+def relation_visible_sql(alias: str) -> str:
+    return f"""(
+        exists (
+          select 1
+          from seller_target scope_st
+          where scope_st.id = {alias}.seller_target_id
+            and scope_st.owner_user_id = :scope_user_id
+            and scope_st.deleted_at is null
+        )
+        or exists (
+          select 1
+          from buyer_intent scope_bi
+          where scope_bi.id = {alias}.buyer_intent_id
+            and scope_bi.owner_user_id = :scope_user_id
+            and scope_bi.deleted_at is null
+        )
+        or exists (
+          select 1
+          from buyer_party scope_bp
+          where scope_bp.id = coalesce(
+                {alias}.buyer_party_id,
+                (select scope_bi2.buyer_party_id from buyer_intent scope_bi2 where scope_bi2.id = {alias}.buyer_intent_id)
+              )
+            and scope_bp.owner_user_id = :scope_user_id
+            and scope_bp.deleted_at is null
+        )
+    )"""
+
+
+def relation_event_visible_sql(alias: str) -> str:
+    return f"""(
+        exists (
+          select 1
+          from buyer_seller_relation scope_r
+          where scope_r.id = {alias}.relation_id
+            and scope_r.deleted_at is null
+            and {relation_visible_sql("scope_r")}
+        )
+        or exists (
+          select 1
+          from seller_target scope_st
+          where scope_st.id = {alias}.seller_target_id
+            and scope_st.owner_user_id = :scope_user_id
+            and scope_st.deleted_at is null
+        )
+        or exists (
+          select 1
+          from buyer_intent scope_bi
+          where scope_bi.id = {alias}.buyer_intent_id
+            and scope_bi.owner_user_id = :scope_user_id
+            and scope_bi.deleted_at is null
+        )
+        or exists (
+          select 1
+          from buyer_party scope_bp
+          where scope_bp.id = {alias}.buyer_party_id
+            and scope_bp.owner_user_id = :scope_user_id
+            and scope_bp.deleted_at is null
+        )
+    )"""
+
+
+def exclusion_visible_sql(alias: str) -> str:
+    return f"""(
+        exists (
+          select 1
+          from seller_target scope_st
+          where scope_st.id = {alias}.seller_target_id
+            and scope_st.owner_user_id = :scope_user_id
+            and scope_st.deleted_at is null
+        )
+        or exists (
+          select 1
+          from buyer_intent scope_bi
+          where scope_bi.id = {alias}.buyer_intent_id
+            and scope_bi.owner_user_id = :scope_user_id
+            and scope_bi.deleted_at is null
+        )
+        or exists (
+          select 1
+          from buyer_party scope_bp
+          where scope_bp.id = {alias}.buyer_party_id
+            and scope_bp.owner_user_id = :scope_user_id
+            and scope_bp.deleted_at is null
+        )
+    )"""
+
+
+def recommendation_session_visible_sql(alias: str) -> str:
+    return f"""(
+        {alias}.created_by = :scope_user_id
+        or exists (
+          select 1 from buyer_intent scope_bi
+          where scope_bi.id = {alias}.buyer_intent_id
+            and scope_bi.owner_user_id = :scope_user_id
+            and scope_bi.deleted_at is null
+        )
+        or exists (
+          select 1 from buyer_party scope_bp
+          where scope_bp.id = {alias}.buyer_party_id
+            and scope_bp.owner_user_id = :scope_user_id
+            and scope_bp.deleted_at is null
+        )
+        or exists (
+          select 1 from seller_target scope_st
+          where scope_st.id = {alias}.seller_target_id
+            and scope_st.owner_user_id = :scope_user_id
+            and scope_st.deleted_at is null
+        )
+    )"""
+
+
+def recommendation_report_visible_sql(alias: str) -> str:
+    return f"""exists (
+        select 1
+        from recommendation_session scope_rs
+        where scope_rs.id = {alias}.session_id
+          and {recommendation_session_visible_sql("scope_rs")}
+    )"""
+
+
+def extracted_action_visible_sql(alias: str) -> str:
+    return f"""(
+        exists (
+          select 1
+          from business_update scope_bu
+          where scope_bu.id = {alias}.business_update_id
+            and scope_bu.team_id = :team_id
+            and scope_bu.workspace_id = :workspace_id
+            and {business_update_visible_sql("scope_bu")}
+        )
+        or (
+          {alias}.target_entity_type = 'seller_target'
+          and exists (
+            select 1 from seller_target scope_st
+            where scope_st.id = {alias}.target_entity_id
+              and scope_st.deleted_at is null
+              and {visible_scope_sql("seller_target", "scope_st")}
+          )
+        )
+        or (
+          {alias}.target_entity_type = 'buyer_intent'
+          and exists (
+            select 1 from buyer_intent scope_bi
+            where scope_bi.id = {alias}.target_entity_id
+              and scope_bi.deleted_at is null
+              and {visible_scope_sql("buyer_intent", "scope_bi")}
+          )
+        )
+        or (
+          {alias}.target_entity_type = 'buyer_party'
+          and exists (
+            select 1 from buyer_party scope_bp
+            where scope_bp.id = {alias}.target_entity_id
+              and scope_bp.deleted_at is null
+              and {visible_scope_sql("buyer_party", "scope_bp")}
+          )
+        )
+        or (
+          {alias}.target_entity_type = 'buyer_seller_relation'
+          and exists (
+            select 1 from buyer_seller_relation scope_r
+            where scope_r.id = {alias}.target_entity_id
+              and scope_r.deleted_at is null
+              and {relation_visible_sql("scope_r")}
+          )
+        )
+    )"""
+
+
+def attachment_visible_sql(alias: str) -> str:
+    return f"""(
+        {alias}.uploaded_by = :scope_user_id
+        or exists (
+          select 1
+          from attachment_link scope_al
+          where scope_al.attachment_id = {alias}.id
+            and scope_al.team_id = {alias}.team_id
+            and scope_al.workspace_id = {alias}.workspace_id
+            and (
+              (
+                scope_al.entity_type = 'seller_target'
+                and exists (
+                  select 1 from seller_target scope_st
+                  where scope_st.id = scope_al.entity_id
+                    and scope_st.deleted_at is null
+                    and {visible_scope_sql("seller_target", "scope_st")}
+                )
+              )
+              or (
+                scope_al.entity_type = 'buyer_intent'
+                and exists (
+                  select 1 from buyer_intent scope_bi
+                  where scope_bi.id = scope_al.entity_id
+                    and scope_bi.deleted_at is null
+                    and {visible_scope_sql("buyer_intent", "scope_bi")}
+                )
+              )
+              or (
+                scope_al.entity_type = 'buyer_party'
+                and exists (
+                  select 1 from buyer_party scope_bp
+                  where scope_bp.id = scope_al.entity_id
+                    and scope_bp.deleted_at is null
+                    and {visible_scope_sql("buyer_party", "scope_bp")}
+                )
+              )
+              or (
+                scope_al.entity_type = 'business_update'
+                and exists (
+                  select 1 from business_update scope_bu
+                  where scope_bu.id = scope_al.entity_id
+                    and scope_bu.team_id = :team_id
+                    and scope_bu.workspace_id = :workspace_id
+                    and {business_update_visible_sql("scope_bu")}
+                )
+              )
+              or (
+                scope_al.entity_type = 'recommendation_session'
+                and exists (
+                  select 1 from recommendation_session scope_rs
+                  where scope_rs.id = scope_al.entity_id
+                    and {recommendation_session_visible_sql("scope_rs")}
+                )
+              )
+              or (
+                scope_al.entity_type = 'recommendation_report'
+                and exists (
+                  select 1 from recommendation_report scope_rr
+                  where scope_rr.id = scope_al.entity_id
+                    and {recommendation_report_visible_sql("scope_rr")}
+                )
+              )
+            )
+        )
+    )"""
+
+
+def ensure_entity_visible(
+    db: Session,
+    current_user: Any,
+    *,
+    entity_type: str,
+    entity_id: UUID,
+) -> None:
+    _ensure_scoped_entity(db, current_user, entity_type=entity_type, entity_id=entity_id, access="visible")
+
+
+def ensure_entity_writable(
+    db: Session,
+    current_user: Any,
+    *,
+    entity_type: str,
+    entity_id: UUID,
+) -> None:
+    _ensure_scoped_entity(db, current_user, entity_type=entity_type, entity_id=entity_id, access="owner")
+
+
+def ensure_business_update_visible(db: Session, current_user: Any, business_update_id: UUID) -> None:
+    if not owner_scope_required(current_user):
+        return
+    row = db.execute(
+        text(
+            f"""
+            select 1
+            from business_update bu
+            where bu.id = :entity_id
+              and bu.team_id = :team_id
+              and bu.workspace_id = :workspace_id
+              and {business_update_visible_sql("bu")}
+            """
+        ),
+        {
+            "entity_id": business_update_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "scope_user_id": current_user.user_id,
+        },
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Business update not found.")
+
+
+def ensure_relation_visible(db: Session, current_user: Any, relation_id: UUID) -> None:
+    if not owner_scope_required(current_user):
+        return
+    row = db.execute(
+        text(
+            f"""
+            select 1
+            from buyer_seller_relation r
+            where r.id = :relation_id
+              and r.team_id = :team_id
+              and r.workspace_id = :workspace_id
+              and r.deleted_at is null
+              and {relation_visible_sql("r")}
+            """
+        ),
+        {
+            "relation_id": relation_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "scope_user_id": current_user.user_id,
+        },
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Relation not found.")
+
+
+def ensure_recommendation_session_visible(db: Session, current_user: Any, session_id: UUID) -> None:
+    if not owner_scope_required(current_user):
+        return
+    row = db.execute(
+        text(
+            f"""
+            select 1
+            from recommendation_session rs
+            where rs.id = :session_id
+              and rs.team_id = :team_id
+              and rs.workspace_id = :workspace_id
+              and {recommendation_session_visible_sql("rs")}
+            """
+        ),
+        {
+            "session_id": session_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "scope_user_id": current_user.user_id,
+        },
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recommendation session not found.")
+
+
+def _ensure_scoped_entity(
+    db: Session,
+    current_user: Any,
+    *,
+    entity_type: str,
+    entity_id: UUID,
+    access: str,
+) -> None:
+    if not owner_scope_required(current_user):
+        return
+    table_alias = {
+        "seller_target": ("seller_target", "st"),
+        "buyer_party": ("buyer_party", "bp"),
+        "buyer_intent": ("buyer_intent", "bi"),
+    }.get(entity_type)
+    if table_alias is None:
+        raise ValueError(f"Unsupported scoped entity_type: {entity_type}")
+    table, alias = table_alias
+    if access == "owner" and entity_type == "buyer_party":
+        scope_sql = f"{alias}.owner_user_id = :scope_user_id"
+    else:
+        scope_sql = owner_scope_sql(entity_type, alias) if access == "owner" else visible_scope_sql(entity_type, alias)
+    row = db.execute(
+        text(
+            f"""
+            select 1
+            from {table} {alias}
+            where {alias}.id = :entity_id
+              and {alias}.team_id = :team_id
+              and {alias}.workspace_id = :workspace_id
+              and {alias}.deleted_at is null
+              and {scope_sql}
+            """
+        ),
+        {
+            "entity_id": entity_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "scope_user_id": current_user.user_id,
+        },
+    ).first()
+    if row is None:
+        if access == "owner":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You are not the owner of this entity.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entity not found.")
 
 
 def assign_owner_bulk(

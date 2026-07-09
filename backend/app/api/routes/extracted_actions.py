@@ -13,6 +13,10 @@ from backend.app.api.authn import CurrentUser
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
 from backend.app.api.routes.utils import (
     diff_payload,
+    ensure_business_update_visible,
+    ensure_entity_writable,
+    extracted_action_visible_sql,
+    owner_scope_required,
     write_action_logs_for_diff,
     write_field_value_sources_for_diff,
 )
@@ -72,9 +76,19 @@ class ApplyActionOut(BaseModel):
 def create_extracted_action(
     business_update_id: UUID,
     payload: ExtractedActionCreate,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     _ensure_business_update_exists(db, business_update_id)
+    ensure_business_update_visible(db, current_user, business_update_id)
+    _ensure_action_target_writable(
+        db,
+        current_user,
+        action_type=payload.action_type,
+        target_entity_type=payload.target_entity_type,
+        target_entity_id=payload.target_entity_id,
+        proposed_changes=payload.proposed_changes_json,
+    )
 
     statement = text(
         """
@@ -134,6 +148,7 @@ def create_extracted_action(
 
 @router.get("/extracted-actions", response_model=list[ExtractedActionOut])
 def list_extracted_actions(
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     business_update_id: UUID | None = None,
     review_status: str | None = None,
@@ -162,6 +177,9 @@ def list_extracted_actions(
     if target_entity_id:
         where.append("target_entity_id = :target_entity_id")
         params["target_entity_id"] = target_entity_id
+    if owner_scope_required(current_user):
+        where.append(extracted_action_visible_sql("extracted_action"))
+        params["scope_user_id"] = current_user.user_id
 
     rows = db.execute(
         text(
@@ -183,8 +201,14 @@ def list_extracted_actions(
 
 
 @router.get("/extracted-actions/{extracted_action_id}", response_model=ExtractedActionOut)
-def get_extracted_action(extracted_action_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
-    return _get_extracted_action_or_404(db, extracted_action_id)
+def get_extracted_action(
+    extracted_action_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    action = _get_extracted_action_or_404(db, extracted_action_id)
+    _ensure_extracted_action_visible(db, current_user, extracted_action_id)
+    return action
 
 
 @router.patch("/extracted-actions/{extracted_action_id}", response_model=ExtractedActionOut)
@@ -194,7 +218,8 @@ def update_extracted_action_review(
     current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    _get_extracted_action_or_404(db, extracted_action_id)
+    action = _get_extracted_action_or_404(db, extracted_action_id)
+    _ensure_extracted_action_writable(db, current_user, action)
 
     row = db.execute(
         text(
@@ -226,8 +251,13 @@ def update_extracted_action_review(
 
 
 @router.post("/extracted-actions/{extracted_action_id}/apply", response_model=ApplyActionOut)
-def apply_extracted_action(extracted_action_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+def apply_extracted_action(
+    extracted_action_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     action = _get_extracted_action_or_404(db, extracted_action_id)
+    _ensure_extracted_action_writable(db, current_user, action)
     if action["action_type"] == "seller_fact_update":
         result = apply_seller_fact_update_action(db, action, require_accepted=True)
     elif action["action_type"] == "buyer_intent_update":
@@ -873,6 +903,169 @@ def apply_buyer_intent_target_exclusion_action(
         "entity_id": row["id"],
         "applied_fields": ["buyer_intent_target_exclusion", "relation.status", "relation_event"],
     }
+
+
+def _ensure_extracted_action_visible(db: Session, current_user: CurrentUser, extracted_action_id: UUID) -> None:
+    if not owner_scope_required(current_user):
+        return
+    row = db.execute(
+        text(
+            f"""
+            select 1
+            from extracted_action action_scope
+            where action_scope.id = :extracted_action_id
+              and action_scope.team_id = :team_id
+              and action_scope.workspace_id = :workspace_id
+              and {extracted_action_visible_sql("action_scope")}
+            """
+        ),
+        {
+            "extracted_action_id": extracted_action_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "scope_user_id": current_user.user_id,
+        },
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Extracted action not found.")
+
+
+def _ensure_extracted_action_writable(
+    db: Session,
+    current_user: CurrentUser,
+    action: dict[str, Any],
+) -> None:
+    _ensure_action_target_writable(
+        db,
+        current_user,
+        action_type=action.get("action_type"),
+        target_entity_type=action.get("target_entity_type"),
+        target_entity_id=action.get("target_entity_id"),
+        proposed_changes=action.get("proposed_changes_json") or {},
+    )
+    if owner_scope_required(current_user) and not action.get("target_entity_id"):
+        ensure_business_update_visible(db, current_user, action["business_update_id"])
+
+
+def _ensure_action_target_writable(
+    db: Session,
+    current_user: CurrentUser,
+    *,
+    action_type: str | None,
+    target_entity_type: str | None,
+    target_entity_id: UUID | None,
+    proposed_changes: dict[str, Any],
+) -> None:
+    if not owner_scope_required(current_user):
+        return
+    if target_entity_type in {"seller_target", "buyer_intent", "buyer_party"} and target_entity_id:
+        ensure_entity_writable(
+            db,
+            current_user,
+            entity_type=target_entity_type,
+            entity_id=target_entity_id,
+        )
+        return
+    if target_entity_type == "buyer_seller_relation" and target_entity_id:
+        if _relation_has_owned_side(db, current_user, relation_id=target_entity_id):
+            return
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You cannot modify this relation.")
+    if action_type in {"buyer_seller_relation_update", "buyer_intent_target_exclusion"}:
+        seller_target_id = _optional_uuid(proposed_changes.get("seller_target_id"))
+        buyer_intent_id = _optional_uuid(proposed_changes.get("buyer_intent_id"))
+        buyer_party_id = _optional_uuid(proposed_changes.get("buyer_party_id"))
+        if _relation_payload_has_owned_side(
+            db,
+            current_user,
+            seller_target_id=seller_target_id,
+            buyer_intent_id=buyer_intent_id,
+            buyer_party_id=buyer_party_id,
+        ):
+            return
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You cannot modify this relation.")
+
+
+def _relation_has_owned_side(db: Session, current_user: CurrentUser, *, relation_id: UUID) -> bool:
+    return bool(
+        db.execute(
+            text(
+                """
+                select 1
+                from buyer_seller_relation r
+                left join buyer_intent bi on bi.id = r.buyer_intent_id and bi.deleted_at is null
+                left join buyer_party bp on bp.id = coalesce(r.buyer_party_id, bi.buyer_party_id) and bp.deleted_at is null
+                left join seller_target st on st.id = r.seller_target_id and st.deleted_at is null
+                where r.id = :relation_id
+                  and r.team_id = :team_id
+                  and r.workspace_id = :workspace_id
+                  and r.deleted_at is null
+                  and (
+                    st.owner_user_id = :scope_user_id
+                    or bi.owner_user_id = :scope_user_id
+                    or bp.owner_user_id = :scope_user_id
+                  )
+                """
+            ),
+            {
+                "relation_id": relation_id,
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+                "scope_user_id": current_user.user_id,
+            },
+        ).first()
+    )
+
+
+def _relation_payload_has_owned_side(
+    db: Session,
+    current_user: CurrentUser,
+    *,
+    seller_target_id: UUID | None,
+    buyer_intent_id: UUID | None,
+    buyer_party_id: UUID | None,
+) -> bool:
+    row = db.execute(
+        text(
+            """
+            select 1
+            where
+              (
+                cast(:seller_target_id as uuid) is not null
+                and exists (
+                  select 1 from seller_target st
+                  where st.id = cast(:seller_target_id as uuid)
+                    and st.owner_user_id = :scope_user_id
+                    and st.deleted_at is null
+                )
+              )
+              or (
+                cast(:buyer_intent_id as uuid) is not null
+                and exists (
+                  select 1 from buyer_intent bi
+                  where bi.id = cast(:buyer_intent_id as uuid)
+                    and bi.owner_user_id = :scope_user_id
+                    and bi.deleted_at is null
+                )
+              )
+              or (
+                cast(:buyer_party_id as uuid) is not null
+                and exists (
+                  select 1 from buyer_party bp
+                  where bp.id = cast(:buyer_party_id as uuid)
+                    and bp.owner_user_id = :scope_user_id
+                    and bp.deleted_at is null
+                )
+              )
+            """
+        ),
+        {
+            "seller_target_id": seller_target_id,
+            "buyer_intent_id": buyer_intent_id,
+            "buyer_party_id": buyer_party_id,
+            "scope_user_id": current_user.user_id,
+        },
+    ).first()
+    return bool(row)
 
 
 def _ensure_business_update_exists(db: Session, business_update_id: UUID) -> None:

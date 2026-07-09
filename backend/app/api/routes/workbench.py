@@ -5,6 +5,13 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from backend.app.api.authn import CurrentUser
+from backend.app.api.routes.utils import (
+    business_update_visible_sql,
+    extracted_action_visible_sql,
+    owner_scope_required,
+    relation_visible_sql,
+)
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 from backend.app.api.routes.background_jobs import _failure_summary, _queue_summary
@@ -83,12 +90,12 @@ FIELD_LABELS = {
 
 
 @router.get("", response_model=WorkbenchOut)
-def get_workbench(db: Session = Depends(get_db)) -> dict[str, Any]:
-    pending_actions = _pending_actions(db)
+def get_workbench(current_user: CurrentUser, db: Session = Depends(get_db)) -> dict[str, Any]:
+    pending_actions = _pending_actions(db, current_user, limit=80)
     groups = _group_actions(pending_actions)
-    recent_updates = _recent_updates(db)
-    recent_relations = _recent_relations(db)
-    overview = _overview(db, pending_review_count=sum(group["count"] for group in groups))
+    recent_updates = _recent_updates(db, current_user)
+    recent_relations = _recent_relations(db, current_user)
+    overview = _overview(db, current_user, pending_review_count=sum(group["count"] for group in groups))
     return {
         "groups": groups,
         "recent_updates": recent_updates,
@@ -98,20 +105,29 @@ def get_workbench(db: Session = Depends(get_db)) -> dict[str, Any]:
 
 
 @router.get("/task-board", response_model=WorkbenchTaskBoardOut)
-def get_workbench_task_board(db: Session = Depends(get_db)) -> dict[str, Any]:
-    pending_actions = _pending_actions(db, limit=120)
+def get_workbench_task_board(current_user: CurrentUser, db: Session = Depends(get_db)) -> dict[str, Any]:
+    pending_actions = _pending_actions(db, current_user, limit=120)
     groups = _group_actions(pending_actions, item_limit=8)
-    auto_applied_recent = _auto_applied_recent(db)
-    exception_items = _exception_items(db)
-    recent_activity = _recent_activity(db)
+    auto_applied_recent = _auto_applied_recent(db, current_user)
+    exception_items = _exception_items(db, current_user)
+    recent_activity = _recent_activity(db, current_user)
     overview = _task_board_overview(
         db,
+        current_user,
         pending_review_count=sum(group["count"] for group in groups),
         auto_applied_count=len(auto_applied_recent),
         exception_count=len(exception_items),
     )
-    queue_summary = _queue_summary(db, include_empty=True, lookback_hours=24)
-    failure_summary = _failure_summary(db, lookback_hours=168, limit=10)
+    queue_summary = (
+        _queue_summary(db, include_empty=True, lookback_hours=24)
+        if current_user.is_admin
+        else _empty_queue_summary(db)
+    )
+    failure_summary = (
+        _failure_summary(db, lookback_hours=168, limit=10)
+        if current_user.is_admin
+        else _empty_failure_summary(db)
+    )
     return {
         "groups": groups,
         "auto_applied_recent": auto_applied_recent,
@@ -124,10 +140,15 @@ def get_workbench_task_board(db: Session = Depends(get_db)) -> dict[str, Any]:
     }
 
 
-def _pending_actions(db: Session, *, limit: int = 80) -> list[dict[str, Any]]:
+def _pending_actions(db: Session, current_user: CurrentUser, *, limit: int = 80) -> list[dict[str, Any]]:
+    scope_clause = ""
+    params: dict[str, Any] = {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID, "limit": limit}
+    if owner_scope_required(current_user):
+        scope_clause = f"and {extracted_action_visible_sql('a')}"
+        params["scope_user_id"] = current_user.user_id
     rows = db.execute(
         text(
-            """
+            f"""
             select
               a.id, a.business_update_id, a.action_type, a.target_entity_type, a.target_entity_id,
               a.proposed_changes_json, a.raw_evidence_text, a.evidence_id, a.confidence, a.review_status,
@@ -145,11 +166,12 @@ def _pending_actions(db: Session, *, limit: int = 80) -> list[dict[str, Any]]:
             where a.team_id = :team_id
               and a.workspace_id = :workspace_id
               and a.review_status = 'pending_review'
+              {scope_clause}
             order by a.created_at desc
             limit :limit
             """
         ),
-        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID, "limit": limit},
+        params,
     ).mappings().all()
     return [_with_task_fields(dict(row)) for row in rows]
 
@@ -240,10 +262,15 @@ def _task_priority(action: dict[str, Any]) -> str:
     return "normal"
 
 
-def _auto_applied_recent(db: Session) -> list[dict[str, Any]]:
+def _auto_applied_recent(db: Session, current_user: CurrentUser) -> list[dict[str, Any]]:
+    scope_clause = ""
+    params: dict[str, Any] = {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID}
+    if owner_scope_required(current_user):
+        scope_clause = f"and {extracted_action_visible_sql('a')}"
+        params["scope_user_id"] = current_user.user_id
     rows = db.execute(
         text(
-            """
+            f"""
             select
               a.id, a.business_update_id, a.action_type, a.target_entity_type, a.target_entity_id,
               a.proposed_changes_json, a.raw_evidence_text, a.evidence_id, a.confidence, a.review_status,
@@ -261,16 +288,19 @@ def _auto_applied_recent(db: Session) -> list[dict[str, Any]]:
               and a.workspace_id = :workspace_id
               and a.review_status = 'auto_accepted'
               and a.applied_at is not null
+              {scope_clause}
             order by a.applied_at desc
             limit 10
             """
         ),
-        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+        params,
     ).mappings().all()
     return [_with_task_fields(dict(row)) for row in rows]
 
 
-def _exception_items(db: Session) -> list[dict[str, Any]]:
+def _exception_items(db: Session, current_user: CurrentUser) -> list[dict[str, Any]]:
+    if not current_user.is_admin:
+        return []
     rows = db.execute(
         text(
             """
@@ -302,10 +332,17 @@ def _exception_items(db: Session) -> list[dict[str, Any]]:
     ]
 
 
-def _recent_activity(db: Session) -> list[dict[str, Any]]:
+def _recent_activity(db: Session, current_user: CurrentUser) -> list[dict[str, Any]]:
+    bu_scope_clause = ""
+    relation_scope_clause = ""
+    params: dict[str, Any] = {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID}
+    if owner_scope_required(current_user):
+        bu_scope_clause = f"and {business_update_visible_sql('bu')}"
+        relation_scope_clause = f"and {relation_visible_sql('r')}"
+        params["scope_user_id"] = current_user.user_id
     rows = db.execute(
         text(
-            """
+            f"""
             with action_summary as (
               select
                 a.business_update_id,
@@ -353,6 +390,7 @@ def _recent_activity(db: Session) -> list[dict[str, Any]]:
               from business_update bu
               left join action_summary summary on summary.business_update_id = bu.id
               where bu.team_id = :team_id and bu.workspace_id = :workspace_id
+                {bu_scope_clause}
             ),
             relation_activity as (
               select
@@ -365,10 +403,12 @@ def _recent_activity(db: Session) -> list[dict[str, Any]]:
                 event.event_time as happened_at,
                 '/targets/' || event.seller_target_id::text as route
               from relation_event event
+              join buyer_seller_relation r on r.id = event.relation_id
               join seller_target st on st.id = event.seller_target_id
               join buyer_intent bi on bi.id = event.buyer_intent_id
               left join buyer_party bp on bp.id = event.buyer_party_id
               where event.team_id = :team_id and event.workspace_id = :workspace_id
+                {relation_scope_clause}
             )
             select *
             from (
@@ -380,7 +420,7 @@ def _recent_activity(db: Session) -> list[dict[str, Any]]:
             limit 20
             """
         ),
-        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+        params,
     ).mappings().all()
     return [
         {
@@ -402,12 +442,13 @@ def _activity_title(row: dict[str, Any]) -> str:
 
 def _task_board_overview(
     db: Session,
+    current_user: CurrentUser,
     *,
     pending_review_count: int,
     auto_applied_count: int,
     exception_count: int,
 ) -> dict[str, Any]:
-    overview = _overview(db, pending_review_count=pending_review_count)
+    overview = _overview(db, current_user, pending_review_count=pending_review_count)
     return {
         **overview,
         "auto_applied_review_count": auto_applied_count,
@@ -451,31 +492,42 @@ def _truncate_text(value: Any, max_length: int) -> str | None:
     return text_value[: max_length - 1] + "…"
 
 
-def _recent_updates(db: Session) -> list[dict[str, Any]]:
+def _recent_updates(db: Session, current_user: CurrentUser) -> list[dict[str, Any]]:
+    scope_clause = ""
+    params: dict[str, Any] = {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID}
+    if owner_scope_required(current_user):
+        scope_clause = f"and {business_update_visible_sql('bu')}"
+        params["scope_user_id"] = current_user.user_id
     rows = db.execute(
         text(
-            """
+            f"""
             select
-              id, raw_text, input_type, processing_status,
-              bound_seller_target_ids_json, bound_buyer_party_ids_json, bound_buyer_intent_ids_json,
-              bound_recommendation_session_id, created_by,
-              created_at::text as created_at, metadata_json
-            from business_update
-            where team_id = :team_id
-              and workspace_id = :workspace_id
-            order by created_at desc
+              bu.id, bu.raw_text, bu.input_type, bu.processing_status,
+              bu.bound_seller_target_ids_json, bu.bound_buyer_party_ids_json, bu.bound_buyer_intent_ids_json,
+              bu.bound_recommendation_session_id, bu.created_by,
+              bu.created_at::text as created_at, bu.metadata_json
+            from business_update bu
+            where bu.team_id = :team_id
+              and bu.workspace_id = :workspace_id
+              {scope_clause}
+            order by bu.created_at desc
             limit 8
             """
         ),
-        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+        params,
     ).mappings().all()
     return [dict(row) for row in rows]
 
 
-def _recent_relations(db: Session) -> list[dict[str, Any]]:
+def _recent_relations(db: Session, current_user: CurrentUser) -> list[dict[str, Any]]:
+    scope_clause = ""
+    params: dict[str, Any] = {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID}
+    if owner_scope_required(current_user):
+        scope_clause = f"and {relation_visible_sql('r')}"
+        params["scope_user_id"] = current_user.user_id
     rows = db.execute(
         text(
-            """
+            f"""
             select
               r.id, r.status, r.status_reason, r.last_event_at::text as last_event_at,
               r.last_event_summary, r.buyer_intent_id, r.buyer_party_id, r.seller_target_id,
@@ -487,41 +539,68 @@ def _recent_relations(db: Session) -> list[dict[str, Any]]:
             where r.team_id = :team_id
               and r.workspace_id = :workspace_id
               and r.deleted_at is null
+              {scope_clause}
             order by coalesce(r.last_event_at, r.updated_at, r.created_at) desc
             limit 8
             """
         ),
-        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+        params,
     ).mappings().all()
     return [dict(row) for row in rows]
 
 
-def _overview(db: Session, *, pending_review_count: int) -> dict[str, int]:
+def _overview(db: Session, current_user: CurrentUser, *, pending_review_count: int) -> dict[str, int]:
+    target_scope = ""
+    intent_scope = ""
+    business_update_scope = ""
+    update_log_scope = ""
+    relation_scope = ""
+    params: dict[str, Any] = {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID}
+    if owner_scope_required(current_user):
+        target_scope = "and seller_target.owner_user_id = :scope_user_id"
+        intent_scope = "and buyer_intent.owner_user_id = :scope_user_id"
+        business_update_scope = f"and {business_update_visible_sql('business_update')}"
+        update_log_scope = """
+                 and exists (
+                   select 1
+                   from seller_target st
+                   where st.id = action_application_log.entity_id
+                     and st.owner_user_id = :scope_user_id
+                     and st.deleted_at is null
+                 )
+        """
+        relation_scope = f"and {relation_visible_sql('buyer_seller_relation')}"
+        params["scope_user_id"] = current_user.user_id
     row = db.execute(
         text(
-            """
+            f"""
             with week_boundary as (
               select (date_trunc('week', now() at time zone 'Asia/Shanghai') at time zone 'Asia/Shanghai') as week_start
             )
             select
               (select count(*) from business_update
                where team_id = :team_id and workspace_id = :workspace_id
-                 and created_at >= now() - interval '7 days') as recent_update_count,
+                 and created_at >= now() - interval '7 days'
+                 {business_update_scope}) as recent_update_count,
               (select count(*) from seller_target, week_boundary
                where team_id = :team_id and workspace_id = :workspace_id
                  and deleted_at is null
-                 and created_at >= week_boundary.week_start) as weekly_new_target_count,
+                 and created_at >= week_boundary.week_start
+                 {target_scope}) as weekly_new_target_count,
               (select count(*) from buyer_intent, week_boundary
                where team_id = :team_id and workspace_id = :workspace_id
                  and deleted_at is null
-                 and created_at >= week_boundary.week_start) as weekly_new_buyer_intent_count,
+                 and created_at >= week_boundary.week_start
+                 {intent_scope}) as weekly_new_buyer_intent_count,
               (select count(distinct entity_id) from action_application_log, week_boundary
                where team_id = :team_id and workspace_id = :workspace_id
                  and entity_type = 'seller_target'
-                 and applied_at >= week_boundary.week_start) as weekly_updated_target_count,
+                 and applied_at >= week_boundary.week_start
+                 {update_log_scope}) as weekly_updated_target_count,
               (select count(*) from business_update, week_boundary
                where team_id = :team_id and workspace_id = :workspace_id
-                 and created_at >= week_boundary.week_start) as weekly_business_update_count,
+                 and created_at >= week_boundary.week_start
+                 {business_update_scope}) as weekly_business_update_count,
               (select count(*) from background_job
                where team_id = :team_id and workspace_id = :workspace_id
                  and status = 'failed'
@@ -531,19 +610,61 @@ def _overview(db: Session, *, pending_review_count: int) -> dict[str, int]:
                  and status in ('queued', 'running', 'retry_waiting')) as running_job_count,
               (select count(*) from buyer_seller_relation
                where team_id = :team_id and workspace_id = :workspace_id
-                 and deleted_at is null) as active_relation_count
+                 and deleted_at is null
+                 {relation_scope}) as active_relation_count
             """
         ),
-        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+        params,
     ).mappings().one()
     return {
         "pending_review_count": pending_review_count,
         "recent_update_count": int(row["recent_update_count"]),
-        "failed_job_count": int(row["failed_job_count"]),
-        "running_job_count": int(row["running_job_count"]),
+        "failed_job_count": int(row["failed_job_count"]) if current_user.is_admin else 0,
+        "running_job_count": int(row["running_job_count"]) if current_user.is_admin else 0,
         "active_relation_count": int(row["active_relation_count"]),
         "weekly_new_target_count": int(row["weekly_new_target_count"]),
         "weekly_new_buyer_intent_count": int(row["weekly_new_buyer_intent_count"]),
         "weekly_updated_target_count": int(row["weekly_updated_target_count"]),
         "weekly_business_update_count": int(row["weekly_business_update_count"]),
+    }
+
+
+def _empty_queue_summary(db: Session) -> dict[str, Any]:
+    generated_at = db.execute(text("select now()::text")).scalar_one()
+    return {
+        "generated_at": generated_at,
+        "totals": {
+            "queue_count": 0,
+            "active_queue_count": 0,
+            "failed_queue_count": 0,
+            "active_job_count": 0,
+            "failed_job_count": 0,
+            "ignored_failed_job_count": 0,
+            "queued_job_count": 0,
+            "running_job_count": 0,
+            "retry_waiting_job_count": 0,
+        },
+        "queues": [],
+        "debug_ref": {},
+    }
+
+
+def _empty_failure_summary(db: Session) -> dict[str, Any]:
+    generated_at = db.execute(text("select now()::text")).scalar_one()
+    return {
+        "generated_at": generated_at,
+        "lookback_hours": 168,
+        "include_ignored": False,
+        "include_archived": False,
+        "include_test_data": False,
+        "totals": {
+            "failed_job_count": 0,
+            "failed_queue_count": 0,
+            "failed_job_type_count": 0,
+            "recent_failure_count": 0,
+        },
+        "by_queue": [],
+        "by_job_type": [],
+        "recent_failures": [],
+        "debug_ref": {},
     }

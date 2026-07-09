@@ -10,6 +10,14 @@ from sqlalchemy.orm import Session
 
 from backend.app.config import get_settings
 from backend.app.api.authn import CurrentUser
+from backend.app.api.routes.utils import (
+    attachment_visible_sql,
+    ensure_business_update_visible,
+    ensure_entity_writable,
+    ensure_recommendation_session_visible,
+    owner_scope_required,
+    recommendation_report_visible_sql,
+)
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 from backend.app.services.attachment_storage import (
@@ -167,7 +175,7 @@ def create_attachment(
     _validate_attachment_payload(payload)
     links = _attachment_link_payloads(payload)
     for link in links:
-        _validate_attachment_link(db, link)
+        _validate_attachment_link(db, link, current_user=current_user, require_writable=True)
 
     row = db.execute(
         text(
@@ -230,7 +238,7 @@ def upload_attachment(
     links = []
     if entity_type and entity_id:
         link = AttachmentLinkCreate(entity_type=entity_type, entity_id=entity_id, link_type=link_type)
-        _validate_attachment_link(db, link)
+        _validate_attachment_link(db, link, current_user=current_user, require_writable=True)
         links.append(link)
 
     parse_types = _parse_entity_types_form(parse_entity_types)
@@ -332,6 +340,7 @@ def upload_attachment(
 
 @router.get("", response_model=list[AttachmentOut])
 def list_attachments(
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
     parse_status: str | None = Query(default=None),
     entity_type: str | None = Query(default=None, max_length=80),
@@ -375,6 +384,9 @@ def list_attachments(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="entity_type is required when entity_id is provided.",
         )
+    if owner_scope_required(current_user):
+        where.append(attachment_visible_sql("a"))
+        params["scope_user_id"] = current_user.user_id
 
     rows = db.execute(
         text(
@@ -400,15 +412,18 @@ def get_attachment_upload_policy() -> dict[str, Any]:
 
 
 @router.get("/{attachment_id}", response_model=AttachmentOut)
-def get_attachment(attachment_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+def get_attachment(attachment_id: UUID, current_user: CurrentUser, db: Session = Depends(get_db)) -> dict[str, Any]:
+    _ensure_attachment_visible(db, current_user, attachment_id)
     return _attachment_with_links(db, attachment_id)
 
 
 @router.get("/{attachment_id}/parse-readiness", response_model=AttachmentParseReadinessOut)
 def get_attachment_parse_readiness(
     attachment_id: UUID,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    _ensure_attachment_visible(db, current_user, attachment_id)
     attachment = _attachment_with_links(db, attachment_id)
     return _attachment_parse_readiness(attachment)
 
@@ -416,10 +431,12 @@ def get_attachment_parse_readiness(
 @router.post("/{attachment_id}/ocr", response_model=AttachmentOcrJobOut)
 def create_attachment_ocr_job(
     attachment_id: UUID,
+    current_user: CurrentUser,
     payload: AttachmentOcrRequest | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     request = payload or AttachmentOcrRequest()
+    _ensure_attachment_writable(db, current_user, attachment_id)
     _get_attachment_or_404(db, attachment_id)
     _validate_parse_entity_types(request.parse_entity_types)
     row = _enqueue_attachment_ocr_job(
@@ -438,8 +455,10 @@ def create_attachment_ocr_job(
 @router.get("/{attachment_id}/ocr-status", response_model=AttachmentOcrStatusOut)
 def get_attachment_ocr_status(
     attachment_id: UUID,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    _ensure_attachment_visible(db, current_user, attachment_id)
     attachment = _attachment_with_links(db, attachment_id)
     latest_job = _latest_ocr_job(db, attachment_id)
     latest_trace = _latest_ocr_trace(db, attachment_id)
@@ -774,7 +793,13 @@ def _attachment_link_payloads(payload: AttachmentCreate) -> list[AttachmentLinkC
     return list(unique.values())
 
 
-def _validate_attachment_link(db: Session, link: AttachmentLinkCreate) -> None:
+def _validate_attachment_link(
+    db: Session,
+    link: AttachmentLinkCreate,
+    *,
+    current_user: CurrentUser | None = None,
+    require_writable: bool = False,
+) -> None:
     if link.entity_type not in ATTACHMENT_LINK_ENTITY_TYPES:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -785,6 +810,116 @@ def _validate_attachment_link(db: Session, link: AttachmentLinkCreate) -> None:
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Linked entity not found: {link.entity_type}/{link.entity_id}",
         )
+    if require_writable and current_user is not None:
+        _ensure_attachment_link_writable(db, current_user, link)
+
+
+def _ensure_attachment_link_writable(db: Session, current_user: CurrentUser, link: AttachmentLinkCreate) -> None:
+    if not owner_scope_required(current_user):
+        return
+    if link.entity_type in {"seller_target", "buyer_party", "buyer_intent"}:
+        ensure_entity_writable(
+            db,
+            current_user,
+            entity_type=link.entity_type,
+            entity_id=link.entity_id,
+        )
+        return
+    if link.entity_type == "business_update":
+        ensure_business_update_visible(db, current_user, link.entity_id)
+        return
+    if link.entity_type == "recommendation_session":
+        ensure_recommendation_session_visible(db, current_user, link.entity_id)
+        return
+    if link.entity_type == "recommendation_report":
+        _ensure_recommendation_report_visible(db, current_user, link.entity_id)
+        return
+
+
+def _ensure_attachment_visible(db: Session, current_user: CurrentUser, attachment_id: UUID) -> None:
+    if not owner_scope_required(current_user):
+        return
+    row = db.execute(
+        text(
+            f"""
+            select 1
+            from attachment a
+            where a.id = :attachment_id
+              and a.team_id = :team_id
+              and a.workspace_id = :workspace_id
+              and a.deleted_at is null
+              and {attachment_visible_sql("a")}
+            """
+        ),
+        {
+            "attachment_id": attachment_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "scope_user_id": current_user.user_id,
+        },
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attachment not found.")
+
+
+def _ensure_attachment_writable(db: Session, current_user: CurrentUser, attachment_id: UUID) -> None:
+    if not owner_scope_required(current_user):
+        return
+    row = db.execute(
+        text(
+            """
+            select 1
+            from attachment
+            where id = :attachment_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+              and uploaded_by = :scope_user_id
+            """
+        ),
+        {
+            "attachment_id": attachment_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "scope_user_id": current_user.user_id,
+        },
+    ).first()
+    if row is not None:
+        return
+
+    links = _attachment_links(db, attachment_id)
+    for link in links:
+        try:
+            _ensure_attachment_link_writable(db, current_user, AttachmentLinkCreate(**link))
+            return
+        except HTTPException:
+            continue
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You cannot modify this attachment.")
+
+
+def _ensure_recommendation_report_visible(db: Session, current_user: CurrentUser, report_id: UUID) -> None:
+    if not owner_scope_required(current_user):
+        return
+    row = db.execute(
+        text(
+            f"""
+            select 1
+            from recommendation_report rr
+            where rr.id = :report_id
+              and rr.team_id = :team_id
+              and rr.workspace_id = :workspace_id
+              and {recommendation_report_visible_sql("rr")}
+            """
+        ),
+        {
+            "report_id": report_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "scope_user_id": current_user.user_id,
+        },
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recommendation report not found.")
 
 
 def _parse_entity_types_form(value: str | None) -> list[str]:

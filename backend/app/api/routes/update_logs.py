@@ -7,6 +7,8 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
+from backend.app.api.authn import CurrentUser, require_admin
+from backend.app.api.routes.utils import owner_scope_required, relation_visible_sql, visible_scope_sql
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 from backend.app.services.search_docs import create_search_doc_rebuild_job
@@ -48,6 +50,7 @@ class UpdateLogRollbackOut(BaseModel):
 
 @router.get("", response_model=list[UpdateLogOut])
 def list_update_logs(
+    current_user: CurrentUser,
     entity_type: str = Query(pattern="^(seller_target|buyer_intent|buyer_party|buyer_seller_relation)$"),
     entity_id: UUID | None = None,
     limit: int = Query(default=50, ge=1, le=200),
@@ -66,6 +69,52 @@ def list_update_logs(
         "limit": limit,
         "offset": offset,
     }
+    if owner_scope_required(current_user):
+        params["scope_user_id"] = current_user.user_id
+        if entity_type == "seller_target":
+            where.append(
+                f"""
+                exists (
+                  select 1 from seller_target scope_st
+                  where scope_st.id = action_application_log.entity_id
+                    and scope_st.deleted_at is null
+                    and {visible_scope_sql("seller_target", "scope_st")}
+                )
+                """
+            )
+        elif entity_type == "buyer_intent":
+            where.append(
+                f"""
+                exists (
+                  select 1 from buyer_intent scope_bi
+                  where scope_bi.id = action_application_log.entity_id
+                    and scope_bi.deleted_at is null
+                    and {visible_scope_sql("buyer_intent", "scope_bi")}
+                )
+                """
+            )
+        elif entity_type == "buyer_party":
+            where.append(
+                f"""
+                exists (
+                  select 1 from buyer_party scope_bp
+                  where scope_bp.id = action_application_log.entity_id
+                    and scope_bp.deleted_at is null
+                    and {visible_scope_sql("buyer_party", "scope_bp")}
+                )
+                """
+            )
+        elif entity_type == "buyer_seller_relation":
+            where.append(
+                f"""
+                exists (
+                  select 1 from buyer_seller_relation scope_r
+                  where scope_r.id = action_application_log.entity_id
+                    and scope_r.deleted_at is null
+                    and {relation_visible_sql("scope_r")}
+                )
+                """
+            )
 
     if entity_id is not None:
         where.append("entity_id = :entity_id")
@@ -96,9 +145,11 @@ def list_update_logs(
 @router.post("/{log_id}/rollback", response_model=UpdateLogRollbackOut)
 def rollback_update_log(
     log_id: UUID,
+    current_user: CurrentUser,
     payload: UpdateLogRollbackRequest | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    require_admin(current_user)
     request = payload or UpdateLogRollbackRequest()
     log = _get_update_log_or_404(db, log_id)
     result = _rollback_logs(db, [log], force=request.force, reason=request.reason)
@@ -109,9 +160,11 @@ def rollback_update_log(
 @router.post("/actions/{extracted_action_id}/rollback", response_model=UpdateLogRollbackOut)
 def rollback_extracted_action_logs(
     extracted_action_id: UUID,
+    current_user: CurrentUser,
     payload: UpdateLogRollbackRequest | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    require_admin(current_user)
     request = payload or UpdateLogRollbackRequest()
     logs = _get_rollbackable_logs_for_action(db, extracted_action_id)
     if not logs:
