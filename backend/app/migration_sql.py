@@ -13,14 +13,48 @@ def split_sql_statements(sql: str) -> list[str]:
     statements: list[str] = []
     current: list[str] = []
     in_single_quote = False
+    in_line_comment = False
+    in_block_comment = False
     index = 0
 
     while index < len(sql):
         character = sql[index]
+        next_character = sql[index + 1] if index + 1 < len(sql) else ""
+
+        if in_line_comment:
+            current.append(character)
+            if character in {"\n", "\r"}:
+                in_line_comment = False
+            index += 1
+            continue
+
+        if in_block_comment:
+            current.append(character)
+            if character == "*" and next_character == "/":
+                current.append(next_character)
+                in_block_comment = False
+                index += 2
+                continue
+            index += 1
+            continue
+
+        if not in_single_quote and character == "-" and next_character == "-":
+            current.append(character)
+            current.append(next_character)
+            in_line_comment = True
+            index += 2
+            continue
+
+        if not in_single_quote and character == "/" and next_character == "*":
+            current.append(character)
+            current.append(next_character)
+            in_block_comment = True
+            index += 2
+            continue
+
         current.append(character)
 
         if character == "'":
-            next_character = sql[index + 1] if index + 1 < len(sql) else ""
             if in_single_quote and next_character == "'":
                 current.append(next_character)
                 index += 2
