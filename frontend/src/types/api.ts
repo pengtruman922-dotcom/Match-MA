@@ -535,6 +535,35 @@ export interface AttachmentUploadPolicy {
   user_guidance: string[];
 }
 
+export interface TargetAttachmentItem {
+  id: string;
+  file_name: string;
+  file_type: string | null;
+  mime_type: string | null;
+  file_size: number | null;
+  uploaded_by: string | null;
+  uploaded_by_name: string | null;
+  uploaded_at: string;
+  link_type: string | null;
+  linked_at: string | null;
+  parse_status: string;
+  display_status: string;
+  parse_readiness: Record<string, unknown>;
+  latest_job: Record<string, unknown> | null;
+  latest_parsed_document: Record<string, unknown> | null;
+  latest_evidence: Record<string, unknown> | null;
+  evidence_count: number;
+  related_business_updates: Array<Record<string, unknown>>;
+  download_route: string;
+  delete_route: string;
+  debug_ref: DebugRef;
+}
+
+export interface TargetAttachmentListResponse {
+  seller_target_id: string;
+  items: TargetAttachmentItem[];
+}
+
 export interface ExtractedAction {
   id: string;
   business_update_id: string;

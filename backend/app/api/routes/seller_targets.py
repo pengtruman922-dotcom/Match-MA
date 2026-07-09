@@ -1,17 +1,28 @@
 from datetime import date
 from decimal import Decimal
 from typing import Any, Literal
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
-from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+from backend.app.api.routes.attachments import _attachment_parse_readiness
 from backend.app.api.routes.utils import diff_payload, write_action_log, write_action_logs_for_diff
+from backend.app.config import get_settings
+from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
+from backend.app.services.attachment_storage import (
+    AttachmentNotFoundError,
+    AttachmentStorageError,
+    AttachmentTooLargeError,
+    read_attachment_bytes,
+)
+from backend.app.services.image_inputs import is_supported_multimodal_image
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 
 router = APIRouter(prefix="/seller-targets", tags=["seller-targets"])
@@ -225,6 +236,35 @@ class SellerTargetBulkDeleteOut(BaseModel):
     deleted_count: int
     deleted_ids: list[UUID]
     skipped_ids: list[UUID]
+
+
+class SellerTargetAttachmentItemOut(BaseModel):
+    id: UUID
+    file_name: str
+    file_type: str | None
+    mime_type: str | None
+    file_size: int | None
+    uploaded_by: UUID | None
+    uploaded_by_name: str | None
+    uploaded_at: str
+    link_type: str | None
+    linked_at: str | None
+    parse_status: str
+    display_status: str
+    parse_readiness: dict[str, Any]
+    latest_job: dict[str, Any] | None
+    latest_parsed_document: dict[str, Any] | None
+    latest_evidence: dict[str, Any] | None
+    evidence_count: int
+    related_business_updates: list[dict[str, Any]]
+    download_route: str
+    delete_route: str
+    debug_ref: dict[str, str]
+
+
+class SellerTargetAttachmentListOut(BaseModel):
+    seller_target_id: UUID
+    items: list[SellerTargetAttachmentItemOut]
 
 
 class TargetFollowUpCreate(BaseModel):
@@ -569,6 +609,107 @@ def bulk_delete_seller_targets(
         "deleted_ids": deleted_ids,
         "skipped_ids": skipped_ids,
     }
+
+
+@router.get("/{seller_target_id}/attachments", response_model=SellerTargetAttachmentListOut)
+def list_seller_target_attachments(
+    seller_target_id: UUID,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    _get_seller_target_or_404(db, seller_target_id)
+    rows = _seller_target_attachment_rows(db, seller_target_id)
+    related_updates = _attachment_related_business_updates(db, [row["id"] for row in rows])
+    return {
+        "seller_target_id": seller_target_id,
+        "items": [
+            _compact_target_attachment(row, related_updates.get(row["id"], []))
+            for row in rows
+        ],
+    }
+
+
+@router.get("/{seller_target_id}/attachments/{attachment_id}/download")
+def download_seller_target_attachment(
+    seller_target_id: UUID,
+    attachment_id: UUID,
+    db: Session = Depends(get_db),
+) -> Response:
+    _get_seller_target_or_404(db, seller_target_id)
+    attachment = _get_seller_target_attachment_or_404(db, seller_target_id, attachment_id)
+    settings = get_settings()
+    try:
+        content = read_attachment_bytes(
+            attachment,
+            storage_dir=settings.attachment_storage_dir,
+            max_bytes=settings.attachment_max_upload_bytes,
+            s3_endpoint_url=settings.effective_attachment_s3_endpoint_url,
+            s3_region=settings.effective_attachment_s3_region,
+            s3_bucket=settings.effective_attachment_s3_bucket,
+            s3_access_key_id=settings.effective_attachment_s3_access_key_id,
+            s3_secret_access_key=settings.effective_attachment_s3_secret_access_key,
+            s3_force_path_style=settings.attachment_s3_force_path_style,
+        )
+    except AttachmentTooLargeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=str(exc),
+        ) from exc
+    except AttachmentNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except AttachmentStorageError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+    if content is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Attachment bytes not found.",
+        )
+
+    file_name = attachment.get("file_name") or "attachment"
+    quoted_file_name = quote(str(file_name))
+    return Response(
+        content=content,
+        media_type=attachment.get("mime_type") or "application/octet-stream",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quoted_file_name}",
+            "Content-Length": str(len(content)),
+        },
+    )
+
+
+@router.delete(
+    "/{seller_target_id}/attachments/{attachment_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_seller_target_attachment(
+    seller_target_id: UUID,
+    attachment_id: UUID,
+    db: Session = Depends(get_db),
+) -> None:
+    _get_seller_target_or_404(db, seller_target_id)
+    _get_seller_target_attachment_or_404(db, seller_target_id, attachment_id)
+    db.execute(
+        text(
+            """
+            update attachment
+            set deleted_at = now(), deleted_by = :deleted_by
+            where id = :attachment_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ),
+        {
+            "attachment_id": attachment_id,
+            "deleted_by": DEFAULT_ADMIN_USER_ID,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )
+    db.commit()
 
 
 @router.get("/{seller_target_id}", response_model=SellerTargetOut)
@@ -945,6 +1086,274 @@ def _soft_delete_seller_targets(db: Session, seller_target_ids: list[UUID]) -> l
             new_value="now()",
         )
     return deleted_ids
+
+
+def _seller_target_attachment_rows(db: Session, seller_target_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            with target_links as (
+              select distinct on (attachment_id)
+                id, attachment_id, link_type, created_at
+              from attachment_link
+              where team_id = :team_id
+                and workspace_id = :workspace_id
+                and entity_type = 'seller_target'
+                and entity_id = :seller_target_id
+              order by attachment_id, created_at desc
+            )
+            select
+              :seller_target_id as seller_target_id,
+              a.id, a.visibility, a.file_name, a.file_type, a.mime_type, a.file_size,
+              a.storage_path, a.uploaded_by, coalesce(u.name, '管理员') as uploaded_by_name,
+              a.uploaded_at::text as uploaded_at, a.parse_status, a.metadata_json,
+              a.deleted_at::text as deleted_at,
+              tl.link_type, tl.created_at::text as linked_at,
+              job.id as latest_job_id, job.status as latest_job_status,
+              job.queue_name as latest_job_queue, job.error_message as latest_job_error_message,
+              pd.id as latest_parsed_document_id, pd.parse_status as latest_parsed_document_status,
+              pd.page_count as latest_parsed_document_page_count,
+              pd.token_count as latest_parsed_document_token_count,
+              pd.error_message as latest_parsed_document_error_message,
+              ev.id as latest_evidence_id, ev.text_excerpt as latest_evidence_text_excerpt,
+              ev.page_no as latest_evidence_page_no,
+              coalesce(evc.evidence_count, 0) as evidence_count
+            from target_links tl
+            join attachment a on a.id = tl.attachment_id
+            left join app_user u on u.id = a.uploaded_by
+            left join lateral (
+              select id, status, queue_name, error_message
+              from background_job
+              where team_id = a.team_id
+                and workspace_id = a.workspace_id
+                and job_type in ('attachment_ocr_parse', 'attachment_ocr_poll')
+                and entity_type = 'attachment'
+                and entity_id = a.id
+              order by created_at desc
+              limit 1
+            ) job on true
+            left join lateral (
+              select id, parse_status, page_count, token_count, error_message
+              from parsed_document
+              where team_id = a.team_id
+                and workspace_id = a.workspace_id
+                and attachment_id = a.id
+              order by created_at desc
+              limit 1
+            ) pd on true
+            left join lateral (
+              select id, text_excerpt, page_no
+              from evidence_span
+              where team_id = a.team_id
+                and workspace_id = a.workspace_id
+                and attachment_id = a.id
+              order by created_at desc
+              limit 1
+            ) ev on true
+            left join lateral (
+              select count(*)::int as evidence_count
+              from evidence_span
+              where team_id = a.team_id
+                and workspace_id = a.workspace_id
+                and attachment_id = a.id
+            ) evc on true
+            where a.team_id = :team_id
+              and a.workspace_id = :workspace_id
+              and a.deleted_at is null
+            order by a.uploaded_at desc
+            """
+        ),
+        {
+            "seller_target_id": seller_target_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _attachment_related_business_updates(
+    db: Session,
+    attachment_ids: list[UUID],
+) -> dict[UUID, list[dict[str, Any]]]:
+    if not attachment_ids:
+        return {}
+    rows = db.execute(
+        text(
+            """
+            select
+              al.attachment_id, bu.id, bu.processing_status,
+              bu.created_at::text as created_at, bu.raw_text
+            from attachment_link al
+            join business_update bu on bu.id = al.entity_id
+            where al.team_id = :team_id
+              and al.workspace_id = :workspace_id
+              and al.entity_type = 'business_update'
+              and al.attachment_id in :attachment_ids
+            order by bu.created_at desc
+            """
+        ).bindparams(bindparam("attachment_ids", expanding=True)),
+        {
+            "attachment_ids": attachment_ids,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    result: dict[UUID, list[dict[str, Any]]] = {}
+    for row in rows:
+        attachment_id = row["attachment_id"]
+        result.setdefault(attachment_id, []).append(
+            {
+                "id": row["id"],
+                "processing_status": row.get("processing_status"),
+                "created_at": row.get("created_at"),
+                "raw_text_preview": _truncate_text(row.get("raw_text"), 120),
+                "review_route": f"/updates/{row['id']}",
+            }
+        )
+    return result
+
+
+def _get_seller_target_attachment_or_404(
+    db: Session,
+    seller_target_id: UUID,
+    attachment_id: UUID,
+) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            """
+            select
+              a.id, a.visibility, a.file_name, a.file_type, a.mime_type, a.file_size,
+              a.storage_path, a.uploaded_by, a.uploaded_at::text as uploaded_at,
+              a.parse_status, a.metadata_json, a.deleted_at::text as deleted_at
+            from attachment a
+            where a.id = :attachment_id
+              and a.team_id = :team_id
+              and a.workspace_id = :workspace_id
+              and a.deleted_at is null
+              and exists (
+                select 1
+                from attachment_link al
+                where al.attachment_id = a.id
+                  and al.team_id = a.team_id
+                  and al.workspace_id = a.workspace_id
+                  and al.entity_type = 'seller_target'
+                  and al.entity_id = :seller_target_id
+              )
+            """
+        ),
+        {
+            "seller_target_id": seller_target_id,
+            "attachment_id": attachment_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attachment not found.")
+    return dict(row)
+
+
+def _compact_target_attachment(
+    row: dict[str, Any],
+    related_business_updates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    parse_readiness = _compact_target_attachment_readiness(row)
+    display_status = _target_attachment_display_status(row, parse_readiness)
+    attachment_id = row["id"]
+    seller_target_id = row["seller_target_id"]
+    return {
+        "id": attachment_id,
+        "file_name": row.get("file_name"),
+        "file_type": row.get("file_type"),
+        "mime_type": row.get("mime_type"),
+        "file_size": row.get("file_size"),
+        "uploaded_by": row.get("uploaded_by"),
+        "uploaded_by_name": row.get("uploaded_by_name"),
+        "uploaded_at": row.get("uploaded_at"),
+        "link_type": row.get("link_type"),
+        "linked_at": row.get("linked_at"),
+        "parse_status": row.get("parse_status"),
+        "display_status": display_status,
+        "parse_readiness": parse_readiness,
+        "latest_job": _compact_target_attachment_job(row),
+        "latest_parsed_document": _compact_target_attachment_parsed_document(row),
+        "latest_evidence": _compact_target_attachment_evidence(row),
+        "evidence_count": int(row.get("evidence_count") or 0),
+        "related_business_updates": related_business_updates,
+        "download_route": (
+            f"/seller-targets/{seller_target_id}/attachments/{attachment_id}/download"
+        ),
+        "delete_route": f"/seller-targets/{seller_target_id}/attachments/{attachment_id}",
+        "debug_ref": _debug_ref("attachment", attachment_id),
+    }
+
+
+def _compact_target_attachment_readiness(row: dict[str, Any]) -> dict[str, Any]:
+    readiness = _attachment_parse_readiness(row)
+    return {key: value for key, value in readiness.items() if key != "attachment"}
+
+
+def _target_attachment_display_status(row: dict[str, Any], parse_readiness: dict[str, Any]) -> str:
+    latest_job_status = str(row.get("latest_job_status") or "")
+    parse_status = str(row.get("parse_status") or "")
+    parsed_document_status = str(row.get("latest_parsed_document_status") or "")
+    evidence_count = int(row.get("evidence_count") or 0)
+
+    if (
+        latest_job_status == "failed"
+        or parse_status == "failed"
+        or parsed_document_status == "failed"
+    ):
+        return "failed"
+    if latest_job_status in {"queued", "running"} or parse_status == "parsing":
+        return "parsing"
+    if is_supported_multimodal_image(row):
+        return "image_evidence"
+    if (
+        parse_status == "parsed"
+        or parsed_document_status == "parsed"
+        or evidence_count > 0
+        or parse_readiness.get("readiness_status") == "parsed"
+    ):
+        return "parsed"
+    if parse_readiness.get("readiness_status") == "ready":
+        return "ready"
+    return "pending"
+
+
+def _compact_target_attachment_job(row: dict[str, Any]) -> dict[str, Any] | None:
+    if not row.get("latest_job_id"):
+        return None
+    return {
+        "id": row.get("latest_job_id"),
+        "status": row.get("latest_job_status"),
+        "queue_name": row.get("latest_job_queue"),
+        "error_message": _truncate_text(row.get("latest_job_error_message"), 240),
+        "debug_ref": _debug_ref("background_job", row["latest_job_id"]),
+    }
+
+
+def _compact_target_attachment_parsed_document(row: dict[str, Any]) -> dict[str, Any] | None:
+    if not row.get("latest_parsed_document_id"):
+        return None
+    return {
+        "id": row.get("latest_parsed_document_id"),
+        "parse_status": row.get("latest_parsed_document_status"),
+        "page_count": row.get("latest_parsed_document_page_count"),
+        "token_count": row.get("latest_parsed_document_token_count"),
+        "error_message": _truncate_text(row.get("latest_parsed_document_error_message"), 240),
+    }
+
+
+def _compact_target_attachment_evidence(row: dict[str, Any]) -> dict[str, Any] | None:
+    if not row.get("latest_evidence_id"):
+        return None
+    return {
+        "id": row.get("latest_evidence_id"),
+        "text_excerpt": _truncate_text(row.get("latest_evidence_text_excerpt"), 500),
+        "page_no": row.get("latest_evidence_page_no"),
+    }
 
 
 def _get_seller_target_or_404(db: Session, seller_target_id: UUID) -> dict[str, Any]:

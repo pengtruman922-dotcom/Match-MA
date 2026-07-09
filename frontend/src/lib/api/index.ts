@@ -7,6 +7,7 @@ import type {
   SellerTargetSearchField,
   SellerTargetSuggestion,
   SellerTargetUpdate,
+  TargetAttachmentListResponse,
   TargetFollowUp,
   TargetFollowUpCreate,
   AttachmentUploadPolicy,
@@ -60,7 +61,7 @@ import type {
   QueueSummary,
 } from '../../types/api';
 import type { AuthUser, LoginResponse } from '../auth';
-import { apiRequest, buildQuery } from './client';
+import { apiBlobResponse, apiRequest, buildQuery } from './client';
 
 export const auth = {
   login: (data: { username: string; password: string }) =>
@@ -106,6 +107,11 @@ export const sellerTargets = {
     }),
   deleteFollowUp: (id: string, followUpId: string) =>
     apiRequest<{ status: string }>(`/seller-targets/${id}/follow-ups/${followUpId}`, { method: 'DELETE' }),
+  attachments: (id: string) => apiRequest<TargetAttachmentListResponse>(`/seller-targets/${id}/attachments`),
+  downloadAttachment: (id: string, attachmentId: string) =>
+    apiBlobResponse(`/seller-targets/${id}/attachments/${attachmentId}/download`),
+  deleteAttachment: (id: string, attachmentId: string) =>
+    apiRequest<{ status: string }>(`/seller-targets/${id}/attachments/${attachmentId}`, { method: 'DELETE' }),
 };
 
 export const buyerParties = {

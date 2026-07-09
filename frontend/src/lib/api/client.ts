@@ -47,3 +47,20 @@ export async function apiRequest<T>(path: string, options?: RequestInit): Promis
 
   return response.json() as Promise<T>;
 }
+
+export async function apiBlobResponse(path: string, options?: RequestInit): Promise<Response> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...options,
+    headers: {
+      ...authHeaders(),
+      ...options?.headers,
+    },
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`API ${response.status}: ${errorText}`);
+  }
+
+  return response;
+}

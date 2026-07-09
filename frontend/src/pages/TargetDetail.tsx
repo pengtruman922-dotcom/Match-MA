@@ -11,9 +11,19 @@ import {
   Clock,
   Loader2,
   Trash2,
+  Download,
+  RefreshCw,
+  ExternalLink,
 } from 'lucide-react';
 import { relations, sellerTargets, updateLogs } from '../lib/api';
-import type { BuyerSellerRelation, RelationEvent, SellerTarget, TargetFollowUp, UpdateLog } from '../types/api';
+import type {
+  BuyerSellerRelation,
+  RelationEvent,
+  SellerTarget,
+  TargetAttachmentItem,
+  TargetFollowUp,
+  UpdateLog,
+} from '../types/api';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
 import {
   sellerTargetDisplayStatus,
@@ -189,7 +199,7 @@ export default function TargetDetail() {
             </div>
             <div className="p-5">
               {activeTab === 'info' && <InfoTab target={target} />}
-              {activeTab === 'attachments' && <AttachmentsTab />}
+              {activeTab === 'attachments' && <AttachmentsTab targetId={target.id} />}
               {activeTab === 'relations' && (
                 <FollowUpsTab
                   targetId={target.id}
@@ -315,7 +325,222 @@ function InfoTab({ target }: { target: SellerTarget }) {
   );
 }
 
-function AttachmentsTab() {
+function AttachmentsTab({ targetId }: { targetId: string }) {
+  const [items, setItems] = useState<TargetAttachmentItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const refresh = () => {
+    setLoading(true);
+    setError(null);
+    sellerTargets
+      .attachments(targetId)
+      .then((data) => setItems(data.items))
+      .catch((err) => setError(err instanceof Error ? err.message : '附件读取失败'))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    refresh();
+  }, [targetId]);
+
+  const handleDownload = async (item: TargetAttachmentItem) => {
+    setDownloadingId(item.id);
+    try {
+      const response = await sellerTargets.downloadAttachment(targetId, item.id);
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = item.file_name || 'attachment';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '下载失败');
+    } finally {
+      setDownloadingId(null);
+    }
+  };
+
+  const handleDelete = async (item: TargetAttachmentItem) => {
+    if (!window.confirm('确认删除该材料？已入库的标的信息不会回滚。')) return;
+    setDeletingId(item.id);
+    try {
+      await sellerTargets.deleteAttachment(targetId, item.id);
+      setItems((current) => current.filter((candidate) => candidate.id !== item.id));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '删除失败');
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-12 text-sm text-gray-400">
+        <Loader2 className="w-4 h-4 animate-spin mr-2" />
+        正在读取附件
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
+        <p>{error}</p>
+        <button onClick={refresh} className="mt-2 text-xs font-medium text-red-700 underline">
+          重新加载
+        </button>
+      </div>
+    );
+  }
+
+  if (items.length === 0) {
+    return (
+      <div className="text-center py-10">
+        <FileText className="w-8 h-8 text-gray-300 mx-auto mb-2" />
+        <p className="text-sm text-gray-500">暂无附件</p>
+        <p className="text-xs text-gray-400 mt-1">新建标的或录入更新时上传的文件，会自动出现在这里。</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <p className="text-sm text-gray-500">共 {items.length} 个附件</p>
+        <button
+          onClick={refresh}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium border border-gray-200 text-gray-600 hover:border-brand-500 hover:text-brand-600"
+        >
+          <RefreshCw className="w-3.5 h-3.5" />
+          刷新
+        </button>
+      </div>
+
+      <div className="divide-y divide-gray-100 border border-gray-100">
+        {items.map((item) => (
+          <AttachmentCard
+            key={item.id}
+            item={item}
+            downloading={downloadingId === item.id}
+            deleting={deletingId === item.id}
+            onDownload={() => handleDownload(item)}
+            onDelete={() => handleDelete(item)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AttachmentCard({
+  item,
+  downloading,
+  deleting,
+  onDownload,
+  onDelete,
+}: {
+  item: TargetAttachmentItem;
+  downloading: boolean;
+  deleting: boolean;
+  onDownload: () => void;
+  onDelete: () => void;
+}) {
+  const failed = item.display_status === 'failed';
+  const latestJob = item.latest_job || {};
+  const latestEvidence = item.latest_evidence || {};
+  const relatedUpdate = item.related_business_updates[0] || {};
+  const latestJobDebug = recordValue(latestJob.debug_ref);
+  const evidencePage = stringValue(latestEvidence.page_no);
+  const evidenceText = stringValue(latestEvidence.text_excerpt);
+  const failedMessage =
+    stringValue(latestJob.error_message) ||
+    stringValue(item.latest_parsed_document?.error_message) ||
+    firstString(item.parse_readiness.blocking_reasons) ||
+    '解析失败，请查看失败任务。';
+
+  return (
+    <div className="px-4 py-4">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 min-w-0">
+            <FileText className="w-4 h-4 text-gray-400 shrink-0" />
+            <p className="truncate text-sm font-medium text-gray-900">{item.file_name || '未命名附件'}</p>
+            <AttachmentStatusBadge status={item.display_status} />
+          </div>
+          <p className="mt-1 text-xs text-gray-400">
+            {item.file_type || item.mime_type || 'unknown'} · {formatBytes(item.file_size)} · 上传时间：
+            {formatDateTime(item.uploaded_at)} · 上传人：{item.uploaded_by_name || '管理员'}
+          </p>
+          {item.link_type && <p className="mt-1 text-xs text-gray-400">来源：{attachmentLinkTypeLabel(item.link_type)}</p>}
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            onClick={onDownload}
+            disabled={downloading}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium border border-gray-200 text-gray-600 hover:border-brand-500 hover:text-brand-600 disabled:opacity-50"
+          >
+            {downloading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+            下载
+          </button>
+          <button
+            onClick={onDelete}
+            disabled={deleting}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium border border-gray-200 text-gray-500 hover:border-red-300 hover:text-red-600 disabled:opacity-50"
+          >
+            {deleting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+            删除
+          </button>
+        </div>
+      </div>
+
+      {evidenceText && (
+        <div className="mt-3 bg-gray-50 px-3 py-2.5">
+          <p className="text-xs text-gray-400 mb-1">
+            最新证据{evidencePage ? ` · 第 ${evidencePage} 页` : ''}
+          </p>
+          <p className="text-sm text-gray-700 line-clamp-3">{evidenceText}</p>
+        </div>
+      )}
+
+      {failed && (
+        <div className="mt-3 border border-red-100 bg-red-50 px-3 py-2.5">
+          <p className="text-xs font-medium text-red-700">解析失败</p>
+          <p className="mt-1 text-xs text-red-600 line-clamp-2">{failedMessage}</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {stringValue(latestJobDebug.route) && (
+              <Link to={stringValue(latestJobDebug.route)} className="inline-flex items-center gap-1 text-xs font-medium text-red-700 underline">
+                <ExternalLink className="w-3 h-3" />
+                查看失败任务
+              </Link>
+            )}
+            {stringValue(relatedUpdate.review_route) && (
+              <Link to={stringValue(relatedUpdate.review_route)} className="inline-flex items-center gap-1 text-xs font-medium text-red-700 underline">
+                <ExternalLink className="w-3 h-3" />
+                查看业务更新
+              </Link>
+            )}
+            {item.debug_ref?.route && (
+              <Link to={item.debug_ref.route} className="inline-flex items-center gap-1 text-xs font-medium text-red-700 underline">
+                <ExternalLink className="w-3 h-3" />
+                查看 Debug
+              </Link>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/*
+function LegacyAttachmentsTab() {
   return (
     <div className="text-center py-10">
       <FileText className="w-8 h-8 text-gray-300 mx-auto mb-2" />
@@ -324,6 +549,7 @@ function AttachmentsTab() {
   );
 }
 
+*/
 function FollowUpsTab({
   targetId,
   followUps,
@@ -541,6 +767,76 @@ function HistoryTab({ logs }: { logs: UpdateLog[] }) {
       ))}
     </div>
   );
+}
+
+function AttachmentStatusBadge({ status }: { status: string }) {
+  const labels: Record<string, string> = {
+    parsed: '已解析',
+    parsing: '解析中',
+    failed: '解析失败',
+    image_evidence: '图片证据',
+    ready: '可解析',
+    pending: '未解析',
+  };
+  const colors: Record<string, string> = {
+    parsed: 'bg-emerald-50 text-emerald-700',
+    parsing: 'bg-blue-50 text-blue-700',
+    failed: 'bg-red-50 text-red-700',
+    image_evidence: 'bg-purple-50 text-purple-700',
+    ready: 'bg-amber-50 text-amber-700',
+    pending: 'bg-gray-100 text-gray-600',
+  };
+
+  return (
+    <span className={`text-xs px-1.5 py-0.5 font-medium ${colors[status] || colors.pending}`}>
+      {labels[status] || status}
+    </span>
+  );
+}
+
+function attachmentLinkTypeLabel(value: string): string {
+  const labels: Record<string, string> = {
+    source_document: '直接上传',
+    business_update_context: '业务更新',
+  };
+  return labels[value] || value;
+}
+
+function formatBytes(value: number | null | undefined): string {
+  const size = Number(value || 0);
+  if (!Number.isFinite(size) || size <= 0) return '-';
+  if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
+  if (size >= 1024) return `${Math.round(size / 1024)} KB`;
+  return `${size} B`;
+}
+
+function formatDateTime(value: string | null | undefined): string {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function stringValue(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return '';
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function firstString(value: unknown): string {
+  if (!Array.isArray(value)) return '';
+  const found = value.find((item) => typeof item === 'string' && item.trim());
+  return found || '';
 }
 
 function StatusBadge({ status, type }: { status: string; type: 'recommendation' | 'information' }) {
