@@ -35,10 +35,15 @@ interface RecommendationItem {
   gapSummary: string;
   riskSummary: string | null;
   evidence: Record<string, unknown>;
+  deepEvalGrade: string | null;
+  deepEvalReason: string | null;
+  deepEvalRisks: string | null;
   inShortlist: boolean;
   persisted: boolean;
   selectedItemId: string | null;
 }
+
+type DeepEvalStatus = 'idle' | 'running' | 'done' | 'failed';
 
 interface ChatMessage {
   role: 'user' | 'system';
@@ -58,6 +63,8 @@ export default function Recommend() {
   const [conditionsOpen, setConditionsOpen] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [generationError, setGenerationError] = useState<string | null>(null);
+  const [deepEvalStatus, setDeepEvalStatus] = useState<DeepEvalStatus>('idle');
+  const pollTimerRef = useRef<number | null>(null);
 
   const [targetsList, setTargetsList] = useState<SellerTarget[]>([]);
   const [intentsList, setIntentsList] = useState<BuyerIntent[]>([]);
@@ -66,6 +73,12 @@ export default function Recommend() {
   const [selectedTargetId, setSelectedTargetId] = useState(urlTargetId);
 
   const initializedRef = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     sellerTargets.list({ limit: 50 }).then((response) => setTargetsList(response.items)).catch(() => {});
@@ -149,6 +162,52 @@ export default function Recommend() {
     );
   }
 
+  function stopDeepEvalPolling() {
+    if (pollTimerRef.current) {
+      window.clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  }
+
+  function startDeepEvalPolling(sessionId: string) {
+    stopDeepEvalPolling();
+    setDeepEvalStatus('running');
+    let attempts = 0;
+    pollTimerRef.current = window.setInterval(async () => {
+      attempts += 1;
+      if (attempts > 36) {
+        stopDeepEvalPolling();
+        setDeepEvalStatus('failed');
+        return;
+      }
+      try {
+        const bundle = await recommendations.bundle(sessionId);
+        const reranked = bundle.reranked_candidates || [];
+        if (reranked.length > 0) {
+          setItems((prev) => {
+            const stateById = new Map(prev.map((item) => [item.id, item]));
+            return reranked.map((candidate) => {
+              const mapped = mapCandidate(candidate, sessionId);
+              const previous = stateById.get(mapped.id);
+              return previous
+                ? { ...mapped, inShortlist: previous.inShortlist, persisted: previous.persisted, selectedItemId: previous.selectedItemId }
+                : mapped;
+            });
+          });
+          stopDeepEvalPolling();
+          setDeepEvalStatus('done');
+          return;
+        }
+        if (bundle.rerank_status?.status === 'failed') {
+          stopDeepEvalPolling();
+          setDeepEvalStatus('failed');
+        }
+      } catch {
+        // 网络抖动继续轮询，由 attempts 上限兜底
+      }
+    }, 5000);
+  }
+
   function switchMode(newMode: Mode) {
     setMode(newMode);
     setItems([]);
@@ -156,6 +215,8 @@ export default function Recommend() {
     setSelectedIntentId('');
     setSelectedTargetId('');
     setGenerationError(null);
+    stopDeepEvalPolling();
+    setDeepEvalStatus('idle');
     initializedRef.current = false;
   }
 
@@ -206,12 +267,20 @@ export default function Recommend() {
         create_session: true,
         user_message: userMessage,
       });
+      stopDeepEvalPolling();
+      setDeepEvalStatus('idle');
       setItems(response.candidates.map((candidate) => mapCandidate(candidate, response.session_id)));
+      const deepEvalRequested = Boolean((response.debug as Record<string, unknown>)?.rerank);
+      if (response.session_id && deepEvalRequested) {
+        startDeepEvalPolling(response.session_id);
+      }
       setChatMessages((prev) => [
         ...prev,
         {
           role: 'system',
-          content: `已生成 ${response.candidates.length} 个候选。本版使用结构化规则召回，后续会叠加 embedding 和 LLM rerank。`,
+          content: deepEvalRequested
+            ? `已生成 ${response.candidates.length} 个候选（规则初排）。AI 深度评估进行中，完成后将自动按评级重排并附推荐理由。`
+            : `已生成 ${response.candidates.length} 个候选（规则排序）。`,
         },
       ]);
     } catch (err) {
@@ -315,10 +384,29 @@ export default function Recommend() {
         </button>
       </div>
 
-      <div className="mb-3 bg-emerald-50 border border-emerald-200 px-4 py-2 flex items-center gap-2">
-        <Info className="w-4 h-4 text-emerald-600 shrink-0" />
-        <span className="text-xs text-emerald-700">当前已接入后端规则候选召回和推荐会话保存；embedding/LLM rerank 会继续增强排序和解释。</span>
-      </div>
+      {deepEvalStatus === 'running' ? (
+        <div className="mb-3 bg-amber-50 border border-amber-200 px-4 py-2 flex items-center gap-2">
+          <Loader2 className="w-4 h-4 text-amber-600 shrink-0 animate-spin" />
+          <span className="text-xs text-amber-700">
+            AI 深度评估进行中（约 1 分钟）……当前列表为规则初排，评估完成后会自动重排并标注 A/B/C 评级与推荐理由。离开本页后可在工作台的推荐会话中查看结果。
+          </span>
+        </div>
+      ) : deepEvalStatus === 'done' ? (
+        <div className="mb-3 bg-emerald-50 border border-emerald-200 px-4 py-2 flex items-center gap-2">
+          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+          <span className="text-xs text-emerald-700">AI 深度评估完成：已按评级重排，每个候选附评级与推荐理由。</span>
+        </div>
+      ) : deepEvalStatus === 'failed' ? (
+        <div className="mb-3 bg-gray-50 border border-gray-200 px-4 py-2 flex items-center gap-2">
+          <Info className="w-4 h-4 text-gray-500 shrink-0" />
+          <span className="text-xs text-gray-600">AI 深度评估暂未完成，当前展示规则初排结果；稍后可在工作台的推荐会话中查看。</span>
+        </div>
+      ) : (
+        <div className="mb-3 bg-emerald-50 border border-emerald-200 px-4 py-2 flex items-center gap-2">
+          <Info className="w-4 h-4 text-emerald-600 shrink-0" />
+          <span className="text-xs text-emerald-700">推荐先按结构化规则初排（秒出），随后 AI 深度评估自动重排并给出评级与理由。</span>
+        </div>
+      )}
 
       {generationError && (
         <div className="mb-3 bg-red-50 border border-red-200 px-4 py-2 text-xs text-red-700">
@@ -439,14 +527,31 @@ function RecommendationCard({
             <span className="text-xs font-mono text-gray-400 w-4">{index}</span>
             <span className="text-sm font-semibold text-gray-900">{item.name}</span>
           </div>
-          <span className="text-xs font-medium px-2 py-0.5 bg-brand-50 text-brand-700 border border-brand-200">
-            {item.strength}
+          <span className="flex items-center gap-1">
+            {item.deepEvalGrade && (
+              <span
+                className={`text-xs font-semibold px-2 py-0.5 border ${
+                  item.deepEvalGrade === 'A'
+                    ? 'bg-emerald-50 text-emerald-700 border-emerald-300'
+                    : item.deepEvalGrade === 'B'
+                      ? 'bg-blue-50 text-blue-700 border-blue-200'
+                      : 'bg-gray-50 text-gray-500 border-gray-200'
+                }`}
+              >
+                {item.deepEvalGrade} 档
+              </span>
+            )}
+            <span className="text-xs font-medium px-2 py-0.5 bg-brand-50 text-brand-700 border border-brand-200">
+              {item.strength}
+            </span>
           </span>
         </div>
 
         <div className="ml-6 text-xs text-gray-600 space-y-0.5">
+          {item.deepEvalReason && <p className="text-gray-800 font-medium">AI 评估：{item.deepEvalReason}</p>}
           {item.matchSummary && <p className="text-emerald-700">匹配：{item.matchSummary}</p>}
           {item.gapSummary && <p className="text-amber-700">缺口：{item.gapSummary}</p>}
+          {item.deepEvalRisks && item.deepEvalRisks !== '暂无' && <p className="text-amber-600">AI 风险提示：{item.deepEvalRisks}</p>}
           {item.riskSummary && <p className="text-gray-400">风险：{item.riskSummary}</p>}
         </div>
 
@@ -611,6 +716,9 @@ function mapCandidate(candidate: RecommendationCandidate, sessionId: string | nu
     gapSummary: candidate.gap_summary || '',
     riskSummary: candidate.risk_summary,
     evidence: candidate.evidence_json,
+    deepEvalGrade: candidate.deep_eval?.grade || null,
+    deepEvalReason: candidate.deep_eval?.reason || null,
+    deepEvalRisks: candidate.deep_eval?.risks || null,
     inShortlist: false,
     persisted: false,
     selectedItemId: null,

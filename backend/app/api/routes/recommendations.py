@@ -55,6 +55,7 @@ class RecommendationCandidateOut(BaseModel):
     gap_summary: str | None
     risk_summary: str | None
     evidence_json: dict[str, Any]
+    deep_eval: dict[str, Any] | None = None
     selected: bool = False
     selected_item_id: UUID | None = None
     selected_at: str | None = None
@@ -324,15 +325,15 @@ def generate_recommendation_candidates(
         "candidates": candidates,
         "debug": {
             "engine": (
-                "rule_sql_embedding_rerank_v0.3"
+                "rule_v2_embedding_deep_eval"
                 if rerank_job_id
-                else ("rule_sql_embedding_v0.2" if embedding_used else "rule_sql_v0.1")
+                else ("rule_v2_embedding" if embedding_used else "rule_v2")
             ),
             "rerank": bool(rerank_job_id),
             "rerank_job_id": str(rerank_job_id) if rerank_job_id else None,
             "embedding_similarity": embedding_used,
             "notes": [
-                "Returns rule/embedding ranking first; rerank runs asynchronously and writes a reranked_candidates message.",
+                "Returns rule/embedding ranking first; LLM deep eval runs asynchronously and writes a reranked_candidates message with grades and reasons.",
             ],
         },
     }
@@ -1851,6 +1852,10 @@ def _candidate_score_breakdown(candidate: dict[str, Any]) -> dict[str, Any]:
         "rerank_score": score_json.get("rerank_score"),
         "rerank_boost": score_json.get("rerank_boost"),
         "rerank_model": score_json.get("rerank_model"),
+        "hard_mismatches": score_json.get("hard_mismatches") or [],
+        "excluded_hit": score_json.get("excluded_hit"),
+        "deep_eval_grade": score_json.get("deep_eval_grade"),
+        "deep_eval_model": score_json.get("deep_eval_model"),
         "final_score": score_json.get("final_score") or candidate.get("score"),
     }
 
@@ -1869,6 +1874,12 @@ def _candidate_display_meta(candidate: dict[str, Any], score_breakdown: dict[str
 
 def _candidate_display_badges(candidate: dict[str, Any], score_breakdown: dict[str, Any]) -> list[str]:
     badges = [str(candidate.get("recommendation_level") or "unrated")]
+    if score_breakdown.get("deep_eval_grade"):
+        badges.append(f"深评{score_breakdown['deep_eval_grade']}档")
+    if score_breakdown.get("excluded_hit"):
+        badges.append("命中排除项")
+    elif score_breakdown.get("hard_mismatches"):
+        badges.append("硬性条件不符")
     if score_breakdown.get("embedding_similarity") is not None:
         badges.append("embedding")
     if score_breakdown.get("rerank_score") is not None:
@@ -2204,17 +2215,22 @@ def _candidate_targets_for_intent(
             select
               st.id as seller_target_id,
               st.target_name as seller_target_name,
+              st.industry_l1,
               st.industry_primary,
               st.industry_secondary,
               st.headquarter_province,
               st.headquarter_city,
+              st.current_revenue_yuan,
               st.current_net_profit_yuan,
               st.pe_ratio,
               st.valuation_yuan,
+              st.asking_price_yuan,
               st.market_cap_yuan,
               st.current_debt_ratio,
+              st.cash_flow_status,
               st.can_control,
               st.can_consolidate,
+              st.transfer_ratio_max,
               st.listed_status,
               st.risk_summary,
               st.gap_summary,
@@ -2244,17 +2260,22 @@ def _candidate_targets_for_intent(
               and st.recommendation_status = 'recommendable'
               and st.lifecycle_status = 'active'
             order by
-              case when st.industry_primary = :industry_primary then 0 else 1 end,
+              case
+                when st.industry_l1 is not null and st.industry_l1 in :intent_industries then 0
+                when st.industry_primary is not null and st.industry_primary = :industry_primary then 0
+                else 1
+              end,
               st.current_net_profit_yuan desc nulls last,
               st.updated_at desc
             limit :candidate_pool_limit
             """
-        ),
+        ).bindparams(bindparam("intent_industries", expanding=True)),
         {
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
             "buyer_intent_id": intent["id"],
             "industry_primary": intent.get("industry_primary"),
+            "intent_industries": _intent_industry_list(intent) or ["__none__"],
             "candidate_pool_limit": max(limit * 5, 50),
         },
     ).mappings().all()
@@ -2264,10 +2285,11 @@ def _candidate_targets_for_intent(
         item = dict(row)
         if item.pop("is_excluded"):
             continue
-        rule_score, evidence, gaps = _score_target_against_intent(item, intent)
+        rule_score, evidence, gaps, meta = _score_target_against_intent(item, intent)
         embedding_similarity = _optional_float(item.get("embedding_similarity"))
         score, embedding_boost = _apply_embedding_score(rule_score, evidence, embedding_similarity)
-        if score < 10:
+        score = _apply_score_caps(score, gaps, meta)
+        if score < 10 and not meta.get("excluded_hit"):
             continue
         candidates.append(
             {
@@ -2292,6 +2314,9 @@ def _candidate_targets_for_intent(
                         "embedding_similarity": embedding_similarity,
                         "embedding_boost": embedding_boost,
                         "final_score": score,
+                        "hard_mismatches": meta.get("hard_mismatches") or [],
+                        "excluded_hit": meta.get("excluded_hit"),
+                        "score_engine": meta.get("score_engine"),
                     },
                 },
             }
@@ -2318,7 +2343,10 @@ def _candidate_intents_for_target(
               bp.buyer_name,
               bi.industry_primary,
               bi.industry_secondary,
+              bi.industries_json,
+              bi.excluded_industries_json,
               bi.region_scope_summary,
+              bi.min_revenue_yuan,
               bi.min_net_profit_yuan,
               bi.max_pe,
               bi.max_valuation_yuan,
@@ -2328,7 +2356,9 @@ def _candidate_intents_for_target(
               bi.requires_control,
               bi.requires_consolidation,
               bi.accepts_minority_investment,
+              bi.desired_equity_ratio_min,
               bi.preferred_listed_status,
+              bi.major_risk_tolerance_summary,
               bi.negative_summary,
               bi.preference_summary,
               case
@@ -2356,7 +2386,11 @@ def _candidate_intents_for_target(
               and bi.deleted_at is null
               and bi.status = 'active'
             order by
-              case when bi.industry_primary = :industry_primary then 0 else 1 end,
+              case
+                when :target_industry_l1 is not null and bi.industries_json ? :target_industry_l1 then 0
+                when bi.industry_primary is not null and bi.industry_primary = :industry_primary then 0
+                else 1
+              end,
               bi.updated_at desc
             limit :candidate_pool_limit
             """
@@ -2366,6 +2400,7 @@ def _candidate_intents_for_target(
             "workspace_id": DEFAULT_WORKSPACE_ID,
             "seller_target_id": target["id"],
             "industry_primary": target.get("industry_primary"),
+            "target_industry_l1": target.get("industry_l1"),
             "candidate_pool_limit": max(limit * 5, 50),
         },
     ).mappings().all()
@@ -2375,10 +2410,11 @@ def _candidate_intents_for_target(
         item = dict(row)
         if item.pop("is_excluded"):
             continue
-        rule_score, evidence, gaps = _score_target_against_intent(target, item)
+        rule_score, evidence, gaps, meta = _score_target_against_intent(target, item)
         embedding_similarity = _optional_float(item.get("embedding_similarity"))
         score, embedding_boost = _apply_embedding_score(rule_score, evidence, embedding_similarity)
-        if score < 10:
+        score = _apply_score_caps(score, gaps, meta)
+        if score < 10 and not meta.get("excluded_hit"):
             continue
         candidates.append(
             {
@@ -2403,6 +2439,9 @@ def _candidate_intents_for_target(
                         "embedding_similarity": embedding_similarity,
                         "embedding_boost": embedding_boost,
                         "final_score": score,
+                        "hard_mismatches": meta.get("hard_mismatches") or [],
+                        "excluded_hit": meta.get("excluded_hit"),
+                        "score_engine": meta.get("score_engine"),
                     },
                 },
             }
@@ -2414,121 +2453,317 @@ def _candidate_intents_for_target(
     return candidates[:limit]
 
 
+# Region groups let phrases like 长三角 in region_scope_summary match concrete
+# provinces. Province names are stored without 省/市 suffixes.
+REGION_GROUPS: dict[str, tuple[str, ...]] = {
+    "长三角": ("上海", "江苏", "浙江", "安徽"),
+    "珠三角": ("广东",),
+    "大湾区": ("广东", "香港", "澳门"),
+    "京津冀": ("北京", "天津", "河北"),
+    "成渝": ("四川", "重庆"),
+    "东北": ("辽宁", "吉林", "黑龙江"),
+    "长江中游": ("湖北", "湖南", "江西"),
+    "华东": ("上海", "江苏", "浙江", "安徽", "福建", "江西", "山东"),
+    "华南": ("广东", "广西", "海南"),
+    "华北": ("北京", "天津", "河北", "山西", "内蒙古"),
+    "华中": ("湖北", "湖南", "河南", "江西"),
+    "西北": ("陕西", "甘肃", "青海", "宁夏", "新疆"),
+    "西南": ("四川", "重庆", "云南", "贵州", "西藏"),
+}
+
+# Score caps: hard mismatches and exclusion hits sink candidates instead of
+# deleting them (business rule: never hide an opportunity, but label it).
+HARD_MISMATCH_CAP_BASE = 45.0
+EXCLUDED_HIT_CAP = 15.0
+UNKNOWN_DIMENSION_CREDIT = 0.3
+
+
+def _strip_region_suffix(value: Any) -> str:
+    text_value = str(value or "").strip()
+    for suffix in ("维吾尔自治区", "壮族自治区", "回族自治区", "自治区", "特别行政区", "省", "市"):
+        if text_value.endswith(suffix):
+            return text_value[: -len(suffix)]
+    return text_value
+
+
+def _region_scope_matches(region_scope: str, province: Any, city: Any) -> bool:
+    for part in (province, city):
+        part_text = str(part or "").strip()
+        if not part_text:
+            continue
+        if part_text in region_scope or _strip_region_suffix(part_text) in region_scope:
+            return True
+    province_short = _strip_region_suffix(province)
+    if not province_short:
+        return False
+    for group_name, provinces in REGION_GROUPS.items():
+        if group_name in region_scope and province_short in provinces:
+            return True
+    return False
+
+
+def _intent_industry_list(intent: dict[str, Any]) -> list[str]:
+    values = intent.get("industries_json")
+    if isinstance(values, list):
+        return [str(item).strip() for item in values if item is not None and str(item).strip()]
+    return []
+
+
+def _excluded_industry_hit(target: dict[str, Any], intent: dict[str, Any]) -> str | None:
+    values = intent.get("excluded_industries_json")
+    if not isinstance(values, list):
+        return None
+    industry_l1 = str(target.get("industry_l1") or "")
+    descriptive = "／".join(
+        str(target.get(key) or "")
+        for key in ("industry_primary", "industry_secondary", "business_summary")
+    )
+    for value in values:
+        term = str(value or "").strip()
+        if not term:
+            continue
+        if term == industry_l1:
+            return term
+        if term in descriptive:
+            return term
+        industry_primary = str(target.get("industry_primary") or "")
+        if industry_primary and industry_primary in term:
+            return term
+    return None
+
+
 def _score_target_against_intent(
     target: dict[str, Any],
     intent: dict[str, Any],
-) -> tuple[float, list[str], list[str]]:
-    score = 0.0
+) -> tuple[float, list[str], list[str], dict[str, Any]]:
+    """Three-state normalized scoring.
+
+    Each dimension the buyer actually asked for contributes weight to the
+    denominator; targets earn full weight on match, a small credit when the
+    target-side information is missing, and zero on mismatch. Hard mismatches
+    and exclusion hits are reported in meta so callers can sink the candidate.
+    """
     evidence: list[str] = []
     gaps: list[str] = []
+    hard_mismatches: list[str] = []
+    earned = 0.0
+    possible = 0.0
 
-    if intent.get("industry_primary") and target.get("industry_primary") == intent.get("industry_primary"):
-        score += 30
-        evidence.append(f"一级行业匹配：{intent['industry_primary']}")
+    def add_dimension(
+        weight: float,
+        state: str,
+        *,
+        match_text: str | None = None,
+        gap_text: str | None = None,
+        hard: bool = False,
+        earned_override: float | None = None,
+    ) -> None:
+        nonlocal earned, possible
+        possible += weight
+        if state == "match":
+            earned += weight if earned_override is None else earned_override
+            if match_text:
+                evidence.append(match_text)
+        elif state == "mismatch":
+            if gap_text:
+                gaps.append(gap_text)
+            if hard and gap_text:
+                hard_mismatches.append(gap_text)
+        else:
+            earned += weight * UNKNOWN_DIMENSION_CREDIT
+            if gap_text:
+                gaps.append(gap_text)
+
+    # 行业（多值，任一命中；主赛道全分，其余 85%）
+    intent_industries = _intent_industry_list(intent)
+    target_l1 = str(target.get("industry_l1") or "").strip()
+    if intent_industries:
+        if not target_l1:
+            add_dimension(30, "unknown", gap_text="标的行业待归类")
+        elif target_l1 in intent_industries:
+            is_primary_track = target_l1 == intent_industries[0]
+            add_dimension(
+                30,
+                "match",
+                match_text=f"行业命中：{target_l1}" + ("（主赛道）" if is_primary_track else ""),
+                earned_override=30.0 if is_primary_track else 25.5,
+            )
+        else:
+            add_dimension(30, "mismatch", gap_text="行业不在买家关注赛道", hard=True)
     elif intent.get("industry_primary"):
-        gaps.append("一级行业不完全匹配")
-    else:
-        score += 8
+        # 旧数据兜底：字符串相等，不命中只降分不沉底
+        if target.get("industry_primary") == intent.get("industry_primary"):
+            add_dimension(30, "match", match_text=f"一级行业匹配：{intent['industry_primary']}")
+        else:
+            add_dimension(30, "mismatch", gap_text="一级行业不完全匹配")
 
-    if intent.get("industry_secondary") and target.get("industry_secondary") == intent.get("industry_secondary"):
-        score += 12
-        evidence.append(f"二级行业匹配：{intent['industry_secondary']}")
+    # 区域（含区域组展开；偏好性，不沉底）
+    region_scope = str(intent.get("region_scope_summary") or "").strip()
+    if region_scope:
+        province = target.get("headquarter_province")
+        city = target.get("headquarter_city")
+        if not province and not city:
+            add_dimension(12, "unknown", gap_text="标的区域缺失")
+        elif _region_scope_matches(region_scope, province, city):
+            target_region = "".join(str(item) for item in [province, city] if item)
+            add_dimension(12, "match", match_text=f"区域匹配：{target_region}")
+        else:
+            add_dimension(12, "mismatch", gap_text="区域不符合买家范围，需人工复核")
 
-    region_scope = intent.get("region_scope_summary") or ""
-    target_region = "".join(str(item) for item in [target.get("headquarter_province"), target.get("headquarter_city")] if item)
-    if region_scope and target_region and any(part and part in region_scope for part in [target.get("headquarter_province"), target.get("headquarter_city")]):
-        score += 15
-        evidence.append(f"区域匹配：{target_region}")
-    elif region_scope:
-        gaps.append("区域需要人工复核")
-
+    # 财务门槛：净利润 + 营收。两个门槛都提出时按“任一达标”弱化处理（买家常用或条件）
     min_profit = _optional_decimal(intent.get("min_net_profit_yuan"))
     target_profit = _optional_decimal(target.get("current_net_profit_yuan"))
-    if min_profit is not None and target_profit is not None:
-        if target_profit >= min_profit:
-            score += 18
-            evidence.append("净利润达到门槛")
+    min_revenue = _optional_decimal(intent.get("min_revenue_yuan"))
+    target_revenue = _optional_decimal(target.get("current_revenue_yuan"))
+    profit_ok = target_profit is not None and min_profit is not None and target_profit >= min_profit
+    revenue_ok = target_revenue is not None and min_revenue is not None and target_revenue >= min_revenue
+    both_thresholds = min_profit is not None and min_revenue is not None
+    if min_profit is not None:
+        if target_profit is None:
+            add_dimension(16, "unknown", gap_text="标的净利润缺失")
+        elif profit_ok:
+            add_dimension(16, "match", match_text="净利润达到门槛")
         else:
-            gaps.append("净利润低于买家门槛")
-    elif min_profit is None:
-        score += 6
-    else:
-        gaps.append("标的净利润缺失")
+            softened = both_thresholds and revenue_ok
+            add_dimension(16, "mismatch", gap_text="净利润低于买家门槛", hard=not softened)
+    if min_revenue is not None:
+        if target_revenue is None:
+            add_dimension(12, "unknown", gap_text="标的营收缺失")
+        elif revenue_ok:
+            add_dimension(12, "match", match_text="营收达到门槛")
+        else:
+            softened = both_thresholds and profit_ok
+            add_dimension(12, "mismatch", gap_text="营收低于买家门槛", hard=not softened)
 
-    max_pe = _optional_decimal(intent.get("max_pe"))
-    target_pe = _optional_decimal(target.get("pe_ratio"))
-    if max_pe is not None and target_pe is not None:
-        if target_pe <= max_pe:
-            score += 12
-            evidence.append("PE 未超过上限")
-        else:
-            gaps.append("PE 超过买家上限")
-    elif max_pe is None:
-        score += 4
-    else:
-        gaps.append("标的 PE 缺失")
-
-    if _yes_like(intent.get("requires_consolidation")):
-        if _yes_like(target.get("can_consolidate")):
-            score += 12
-            evidence.append("满足并表要求")
-        else:
-            gaps.append("并表能力待确认")
-    if _yes_like(intent.get("requires_control")):
-        if _yes_like(target.get("can_control")):
-            score += 10
-            evidence.append("满足控股要求")
-        else:
-            gaps.append("控股能力待确认")
-
+    # 价格（预算 vs 报价/估值：付不起是硬约束）
     max_valuation = _optional_decimal(intent.get("max_valuation_yuan"))
-    target_valuation = _optional_decimal(target.get("valuation_yuan"))
-    if max_valuation is not None and target_valuation is not None:
-        if target_valuation <= max_valuation:
-            score += 6
-            evidence.append("估值未超过上限")
+    if max_valuation is not None:
+        target_price = (
+            _optional_decimal(target.get("asking_price_yuan"))
+            or _optional_decimal(target.get("valuation_yuan"))
+            or _optional_decimal(target.get("market_cap_yuan"))
+        )
+        if target_price is None:
+            add_dimension(14, "unknown", gap_text="标的报价与估值缺失")
+        elif target_price <= max_valuation:
+            add_dimension(14, "match", match_text="报价/估值在买家预算内")
         else:
-            gaps.append("估值超过买家上限")
+            add_dimension(14, "mismatch", gap_text="报价/估值超出买家预算", hard=True)
 
+    # PE 上限
+    max_pe = _optional_decimal(intent.get("max_pe"))
+    if max_pe is not None:
+        target_pe = _optional_decimal(target.get("pe_ratio"))
+        if target_pe is None:
+            add_dimension(10, "unknown", gap_text="标的 PE 缺失")
+        elif target_pe <= max_pe:
+            add_dimension(10, "match", match_text="PE 未超过上限")
+        else:
+            add_dimension(10, "mismatch", gap_text="PE 超过买家上限", hard=True)
+
+    # 市值区间（上市标的体量偏好，不沉底）
     min_market_cap = _optional_decimal(intent.get("min_market_cap_yuan"))
     max_market_cap = _optional_decimal(intent.get("max_market_cap_yuan"))
-    target_market_cap = _optional_decimal(target.get("market_cap_yuan"))
-    if target_market_cap is not None:
-        if min_market_cap is not None and target_market_cap < min_market_cap:
-            gaps.append("市值低于买家下限")
+    if min_market_cap is not None or max_market_cap is not None:
+        target_market_cap = _optional_decimal(target.get("market_cap_yuan")) or _optional_decimal(
+            target.get("valuation_yuan")
+        )
+        if target_market_cap is None:
+            add_dimension(6, "unknown", gap_text="标的市值缺失")
+        elif min_market_cap is not None and target_market_cap < min_market_cap:
+            add_dimension(6, "mismatch", gap_text="市值低于买家下限")
         elif max_market_cap is not None and target_market_cap > max_market_cap:
-            gaps.append("市值超过买家上限")
-        elif min_market_cap is not None or max_market_cap is not None:
-            score += 6
-            evidence.append("市值处于买家要求范围")
-    elif min_market_cap is not None or max_market_cap is not None:
-        gaps.append("标的市值缺失")
-
-    max_debt_ratio = _optional_decimal(intent.get("max_debt_ratio"))
-    target_debt_ratio = _optional_decimal(target.get("current_debt_ratio"))
-    if max_debt_ratio is not None and target_debt_ratio is not None:
-        if target_debt_ratio <= max_debt_ratio:
-            score += 5
-            evidence.append("负债率未超过买家上限")
+            add_dimension(6, "mismatch", gap_text="市值超过买家上限")
         else:
-            gaps.append("负债率超过买家上限")
-    elif max_debt_ratio is not None:
-        gaps.append("标的负债率缺失")
+            add_dimension(6, "match", match_text="市值处于买家要求范围")
 
+    # 股比/控股/并表：取买家提出的最强要求；标的明确说“不行”才算硬不符
+    requires_control = _yes_like(intent.get("requires_control"))
+    requires_consolidation = _yes_like(intent.get("requires_consolidation"))
+    desired_min_ratio = _optional_decimal(intent.get("desired_equity_ratio_min"))
+    if requires_control or requires_consolidation:
+        requirement_label = "控股" if requires_control else "并表"
+        capability = target.get("can_control") if requires_control else target.get("can_consolidate")
+        if _yes_like(capability):
+            add_dimension(12, "match", match_text=f"满足{requirement_label}要求")
+        elif str(capability or "").lower() == "no":
+            add_dimension(12, "mismatch", gap_text=f"标的明确不可{requirement_label}", hard=True)
+        else:
+            add_dimension(12, "unknown", gap_text=f"{requirement_label}能力待确认")
+    elif desired_min_ratio is not None:
+        transfer_max = _optional_decimal(target.get("transfer_ratio_max"))
+        if transfer_max is None:
+            add_dimension(12, "unknown", gap_text="标的可转让股比未知")
+        elif transfer_max >= desired_min_ratio:
+            add_dimension(12, "match", match_text="可转让股比满足买家要求")
+        else:
+            add_dimension(12, "mismatch", gap_text="可转让股比低于买家要求", hard=True)
+
+    # 上市状态偏好（不沉底）
     preferred_listed_status = intent.get("preferred_listed_status")
-    target_listed_status = target.get("listed_status")
     if preferred_listed_status and preferred_listed_status not in {"any", "unknown"}:
+        target_listed_status = target.get("listed_status")
         if preferred_listed_status == target_listed_status or (
             preferred_listed_status == "preparing_listing" and target_listed_status == "pre_ipo"
         ):
-            score += 5
-            evidence.append("上市状态符合偏好")
-        elif target_listed_status:
-            gaps.append("上市状态不符合偏好")
+            add_dimension(8, "match", match_text="上市状态符合偏好")
+        elif target_listed_status and target_listed_status != "unknown":
+            add_dimension(8, "mismatch", gap_text="上市状态不符合偏好")
         else:
-            gaps.append("标的上市状态缺失")
+            add_dimension(8, "unknown", gap_text="标的上市状态缺失")
 
-    return min(score, 100.0), evidence, gaps
+    # 负债率上限（弱信号）
+    max_debt_ratio = _optional_decimal(intent.get("max_debt_ratio"))
+    if max_debt_ratio is not None:
+        target_debt_ratio = _optional_decimal(target.get("current_debt_ratio"))
+        if target_debt_ratio is None:
+            add_dimension(4, "unknown", gap_text="标的负债率缺失")
+        elif target_debt_ratio <= max_debt_ratio:
+            add_dimension(4, "match", match_text="负债率未超过买家上限")
+        else:
+            add_dimension(4, "mismatch", gap_text="负债率超过买家上限")
+
+    if possible > 0:
+        score = 100.0 * earned / possible
+    else:
+        # 买家没有任何结构化要求：给中性分，排序交给语义层
+        score = 40.0
+
+    # 加分项（不参与归一化）：二级行业一致、现金流状态
+    if intent.get("industry_secondary") and target.get("industry_secondary") == intent.get("industry_secondary"):
+        score += 4
+        evidence.append(f"二级行业一致：{intent['industry_secondary']}")
+    cash_flow_status = str(target.get("cash_flow_status") or "")
+    if cash_flow_status == "stable_positive":
+        score += 3
+        evidence.append("现金流稳定为正")
+    elif cash_flow_status == "positive":
+        score += 1.5
+        evidence.append("现金流为正")
+
+    # 风险提示：买家有风险容忍要求且标的存在风险记录时提示人工核对（不改分）
+    if intent.get("major_risk_tolerance_summary") and target.get("risk_summary"):
+        gaps.append("买家有风险容忍要求且标的存在风险记录，需人工核对")
+
+    meta = {
+        "hard_mismatches": hard_mismatches,
+        "excluded_hit": _excluded_industry_hit(target, intent),
+        "score_engine": "rule_v2",
+    }
+    return min(round(score, 2), 100.0), evidence, gaps, meta
+
+
+def _apply_score_caps(score: float, gaps: list[str], meta: dict[str, Any]) -> float:
+    """Sink hard-mismatch and excluded candidates without removing them."""
+    capped = score
+    hard_count = len(meta.get("hard_mismatches") or [])
+    if hard_count:
+        capped = min(capped, max(HARD_MISMATCH_CAP_BASE - 5.0 * (hard_count - 1), 20.0))
+    excluded_hit = meta.get("excluded_hit")
+    if excluded_hit:
+        capped = min(capped, EXCLUDED_HIT_CAP)
+        gaps.insert(0, f"命中排除项：{excluded_hit}")
+    return round(capped, 2)
 
 
 def _get_buyer_intent_anchor(db: Session, buyer_intent_id: UUID | None) -> dict[str, Any]:
@@ -2538,10 +2773,12 @@ def _get_buyer_intent_anchor(db: Session, buyer_intent_id: UUID | None) -> dict[
             select
               bi.id, bi.buyer_party_id, bp.buyer_name,
               bi.intent_name, bi.industry_primary, bi.industry_secondary,
-              bi.region_scope_summary, bi.min_net_profit_yuan, bi.max_pe,
+              bi.industries_json, bi.excluded_industries_json,
+              bi.region_scope_summary, bi.min_revenue_yuan, bi.min_net_profit_yuan, bi.max_pe,
               bi.max_valuation_yuan, bi.min_market_cap_yuan, bi.max_market_cap_yuan,
               bi.max_debt_ratio, bi.requires_control, bi.requires_consolidation,
-              bi.accepts_minority_investment, bi.preferred_listed_status,
+              bi.accepts_minority_investment, bi.desired_equity_ratio_min,
+              bi.preferred_listed_status, bi.major_risk_tolerance_summary,
               bi.negative_summary, bi.preference_summary
             from buyer_intent bi
             left join buyer_party bp on bp.id = bi.buyer_party_id
@@ -2567,10 +2804,11 @@ def _get_seller_target_anchor(db: Session, seller_target_id: UUID | None) -> dic
         text(
             """
             select
-              id, target_name, industry_primary, industry_secondary,
-              headquarter_province, headquarter_city, current_net_profit_yuan,
-              pe_ratio, valuation_yuan, market_cap_yuan, current_debt_ratio,
-              can_control, can_consolidate,
+              id, target_name, industry_l1, industry_primary, industry_secondary,
+              headquarter_province, headquarter_city,
+              current_revenue_yuan, current_net_profit_yuan,
+              pe_ratio, valuation_yuan, asking_price_yuan, market_cap_yuan, current_debt_ratio,
+              cash_flow_status, can_control, can_consolidate, transfer_ratio_max,
               listed_status, risk_summary, gap_summary, business_summary
             from seller_target
             where id = :seller_target_id

@@ -22,6 +22,7 @@ def rebuild_seller_target_search_doc(db: Session, seller_target_id: UUID) -> dic
             f"标的：{target['target_name']}",
             _kv("标的主体", target.get("target_subject_name")),
             f"类型：{target['target_type']}",
+            _kv("行业大类", target.get("industry_l1")),
             _kv("一级行业", target.get("industry_primary")),
             _kv("二级行业", target.get("industry_secondary")),
             _kv("区域", _region_text(target)),
@@ -130,8 +131,11 @@ def rebuild_buyer_intent_search_doc(db: Session, buyer_intent_id: UUID) -> dict[
             party_text,
         ]
     )
+    industries = intent.get("industries_json")
+    industries_text = "、".join(str(item) for item in industries if item) if isinstance(industries, list) else None
     constraint_text = _join_lines(
         [
+            _kv("关注行业", industries_text),
             _kv("一级行业", intent.get("industry_primary")),
             _kv("二级行业", intent.get("industry_secondary")),
             _kv("区域", intent.get("region_scope_summary")),
@@ -161,7 +165,10 @@ def rebuild_buyer_intent_search_doc(db: Session, buyer_intent_id: UUID) -> dict[
     preference_text = _join_lines([intent.get("preference_summary"), intent.get("priority_summary")])
     negative_text = intent.get("negative_summary")
     history_text = _get_relation_history_text(db, buyer_intent_id)
-    full_text = _join_lines([requirement_summary, constraint_text, preference_text, negative_text, history_text])
+    # negative_text is intentionally NOT part of full_text: the embedding of
+    # "不投风电" would otherwise pull the intent CLOSER to wind-power targets.
+    # Exclusions stay in the negative_text column for display and LLM context.
+    full_text = _join_lines([requirement_summary, constraint_text, preference_text, history_text])
 
     row = db.execute(
         text(
@@ -373,7 +380,7 @@ def _get_seller_target(db: Session, seller_target_id: UUID) -> dict[str, Any]:
         text(
             """
             select
-              id, target_name, target_type, target_subject_name, industry_primary, industry_secondary,
+              id, target_name, target_type, target_subject_name, industry_l1, industry_primary, industry_secondary,
               headquarter_province, headquarter_city, listed_status,
               current_revenue_yuan, current_net_profit_yuan, valuation_yuan, valuation_date,
               asking_price_yuan, asking_price_date, pe_ratio, is_for_sale, can_control,
@@ -447,7 +454,7 @@ def _get_buyer_intent(db: Session, buyer_intent_id: UUID) -> dict[str, Any]:
             """
             select
               id, buyer_party_id, intent_name, raw_requirement_text, intent_summary,
-              industry_primary, industry_secondary, region_scope_summary,
+              industry_primary, industry_secondary, industries_json, region_scope_summary,
               min_revenue_yuan, min_net_profit_yuan, max_pe, max_valuation_yuan,
               min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
               requires_control, requires_consolidation, accepts_minority_investment,
