@@ -84,6 +84,7 @@ class SellerTargetOut(BaseModel):
     lifecycle_status: str
     recommendation_status: str
     information_status: str
+    industry_l1: str | None = None
     industry_primary: str | None
     industry_secondary: str | None
     registered_province: str | None
@@ -306,7 +307,7 @@ class TargetFollowUpOut(BaseModel):
 
 SELLER_TARGET_OUT_COLUMNS = """
               id, target_name, target_type, target_subject_name, lifecycle_status, recommendation_status, information_status,
-              industry_primary, industry_secondary, registered_province, registered_city,
+              industry_l1, industry_primary, industry_secondary, registered_province, registered_city,
               headquarter_province, headquarter_city, raw_region_text, region_granularity,
               listed_status, market_cap_yuan, current_revenue_yuan, current_net_profit_yuan,
               current_total_profit_yuan, current_assets_yuan, current_debt_ratio,

@@ -1195,6 +1195,13 @@ export interface RecommendationCandidate {
   gap_summary: string | null;
   risk_summary: string | null;
   evidence_json: Record<string, unknown>;
+  deep_eval?: {
+    grade: string;
+    reason?: string | null;
+    risks?: string | null;
+    info_gaps?: string | null;
+    model?: string | null;
+  } | null;
 }
 
 export interface RecommendationCandidateRequest {
@@ -1318,6 +1325,16 @@ export interface RecommendationReportJob {
 export interface RecommendationSessionBundle {
   session: RecommendationSession;
   messages: RecommendationMessage[];
+  initial_candidates?: RecommendationCandidate[];
+  reranked_candidates?: RecommendationCandidate[];
+  latest_candidates?: RecommendationCandidate[];
+  candidate_source?: string;
+  rerank_status?: {
+    requested: boolean;
+    status: string;
+    job_id: string | null;
+    [key: string]: unknown;
+  };
   selected_items: RecommendationSelectedItem[];
   reports: RecommendationReport[];
   debug: {

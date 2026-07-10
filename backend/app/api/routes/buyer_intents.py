@@ -86,6 +86,8 @@ class BuyerIntentOut(BaseModel):
     intent_summary: str | None
     industry_primary: str | None
     industry_secondary: str | None
+    industries_json: list[Any] = []
+    excluded_industries_json: list[Any] = []
     region_scope_summary: str | None
     parsed_requirement_json: dict[str, Any]
     region_constraints_json: list[Any] | dict[str, Any]
@@ -142,6 +144,8 @@ class BuyerIntentUpdate(BaseModel):
     intent_summary: str | None = None
     industry_primary: str | None = None
     industry_secondary: str | None = None
+    industries_json: list[Any] | None = None
+    excluded_industries_json: list[Any] | None = None
     region_scope_summary: str | None = None
     parsed_requirement_json: dict[str, Any] | None = None
     region_constraints_json: list[Any] | dict[str, Any] | None = None
@@ -241,7 +245,8 @@ class BuyerIntentBulkDeleteOut(BaseModel):
 BUYER_INTENT_OUT_COLUMNS = """
               bi.id, bi.buyer_party_id, bp.buyer_name as buyer_name, bi.intent_name, bi.status, bi.contact_name,
               bi.raw_requirement_text, bi.intent_summary, bi.parsed_requirement_json,
-              bi.industry_primary, bi.industry_secondary, bi.region_scope_summary,
+              bi.industry_primary, bi.industry_secondary,
+              bi.industries_json, bi.excluded_industries_json, bi.region_scope_summary,
               bi.region_constraints_json, bi.min_revenue_yuan, bi.min_net_profit_yuan,
               bi.min_total_profit_yuan, bi.max_pe, bi.max_valuation_yuan,
               bi.min_market_cap_yuan, bi.max_market_cap_yuan, bi.market_cap_range_summary,
@@ -881,6 +886,8 @@ def update_buyer_intent(
         "region_constraints_json",
         "acceptable_control_paths_json",
         "transaction_types_json",
+        "industries_json",
+        "excluded_industries_json",
     }
     bind_params = [bindparam(field, type_=JSONB) for field in changes if field in json_fields]
     if bind_params:

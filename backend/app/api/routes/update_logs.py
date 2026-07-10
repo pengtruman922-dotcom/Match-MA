@@ -194,6 +194,7 @@ ROLLBACK_FIELDS_BY_ENTITY = {
         "target_name",
         "target_type",
         "target_subject_name",
+        "industry_l1",
         "industry_primary",
         "industry_secondary",
         "registered_province",
@@ -253,6 +254,8 @@ ROLLBACK_FIELDS_BY_ENTITY = {
         "parsed_requirement_json",
         "industry_primary",
         "industry_secondary",
+        "industries_json",
+        "excluded_industries_json",
         "region_scope_summary",
         "region_constraints_json",
         "min_revenue_yuan",
@@ -318,6 +321,8 @@ JSONB_ROLLBACK_FIELDS = {
     ("buyer_intent", "region_constraints_json"),
     ("buyer_intent", "acceptable_control_paths_json"),
     ("buyer_intent", "transaction_types_json"),
+    ("buyer_intent", "industries_json"),
+    ("buyer_intent", "excluded_industries_json"),
     ("buyer_party", "aliases_json"),
 }
 

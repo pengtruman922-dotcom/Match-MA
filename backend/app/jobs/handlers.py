@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import time
 from datetime import date, timedelta
@@ -47,6 +48,12 @@ from backend.app.services.image_inputs import (
     is_supported_multimodal_image,
     multimodal_image_constraints,
     prepare_image_for_multimodal,
+)
+from backend.app.services.industry_taxonomy import (
+    industry_l1_prompt_list,
+    normalize_excluded_terms,
+    normalize_l1_values,
+    resolve_l1,
 )
 from backend.app.services.office_inspection import inspect_office_text, office_document_kind
 from backend.app.services.pdf_inspection import inspect_pdf_text_layer
@@ -438,6 +445,7 @@ def _handle_seller_target_parse(db: Session, job: JobClaim) -> dict[str, object]
         {
             "raw_target_text": raw_target_text,
             "target_context_json": target_context_json,
+            "industry_l1_list": industry_l1_prompt_list(db),
         },
     )
     input_json = {
@@ -483,6 +491,7 @@ def _handle_seller_target_parse(db: Session, job: JobClaim) -> dict[str, object]
     parsed_output_json = llm_result.parsed_output_json
     schema_validation_json = _validate_seller_target_parse_output(parsed_output_json)
     changes, normalization_notes = _normalize_seller_target_parse_changes(parsed_output_json)
+    normalization_notes.extend(_normalize_seller_target_industry_changes(db, changes))
     _insert_seller_target_parse_trace(
         db,
         job=job,
@@ -557,6 +566,7 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
         {
             "raw_requirement_text": raw_requirement_text,
             "buyer_profile_json": buyer_profile_json,
+            "industry_l1_list": industry_l1_prompt_list(db),
         },
     )
     input_json = {
@@ -601,6 +611,7 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
     parsed_output_json = llm_result.parsed_output_json
     schema_validation_json = _validate_buyer_intent_parse_output(parsed_output_json)
     changes, normalization_notes = _normalize_buyer_intent_parse_changes(parsed_output_json, raw_requirement_text)
+    normalization_notes.extend(_normalize_buyer_intent_industry_changes(db, changes))
     _insert_buyer_intent_parse_trace(
         db,
         job=job,
@@ -1606,6 +1617,21 @@ def _handle_recommendation_rerank(db: Session, job: JobClaim) -> dict[str, objec
     if not isinstance(candidates, list) or len(candidates) < 2:
         raise ValueError("recommendation_rerank job requires at least two candidates.")
 
+    try:
+        deep_eval_config = _get_default_node_config(db, "recommendation_deep_eval")
+    except ValueError:
+        deep_eval_config = None
+    if deep_eval_config is not None:
+        return _run_recommendation_deep_eval(
+            db,
+            job,
+            session_id=session_id,
+            mode=mode,
+            query=query,
+            candidates=candidates,
+            node_config=deep_eval_config,
+        )
+
     node_config = _get_default_rerank_node_config(db, "recommendation_reranker")
     documents = _build_rerank_documents(db, mode=mode, candidates=candidates)
     input_json = {
@@ -1690,6 +1716,233 @@ def _handle_recommendation_rerank(db: Session, job: JobClaim) -> dict[str, objec
         "reranked_count": len(reranked_candidates),
         "trace_created": True,
     }
+
+
+DEEP_EVAL_GRADES = ("A", "B", "C")
+DEEP_EVAL_PROFILE_CHARS = 1200
+
+
+def _run_recommendation_deep_eval(
+    db: Session,
+    job: JobClaim,
+    *,
+    session_id: UUID,
+    mode: str,
+    query: str,
+    candidates: list[Any],
+    node_config: dict[str, Any],
+) -> dict[str, object]:
+    anchor = job.payload_json.get("anchor") if isinstance(job.payload_json.get("anchor"), dict) else {}
+    anchor_doc_mode = "target_to_buyer" if mode == "buyer_to_target" else "buyer_to_target"
+    anchor_doc_key = "buyer_intent_id" if mode == "buyer_to_target" else "seller_target_id"
+    anchor_doc_text = None
+    if anchor.get("id"):
+        anchor_doc_text = _get_candidate_search_doc_text(
+            db, mode=anchor_doc_mode, candidate={anchor_doc_key: anchor.get("id")}
+        )
+    anchor_context = "\n\n".join(
+        part
+        for part in (
+            query or None,
+            json.dumps(anchor, ensure_ascii=False, default=str) if anchor else None,
+            anchor_doc_text,
+        )
+        if part
+    )
+
+    documents = _build_rerank_documents(db, mode=mode, candidates=candidates)
+    candidate_items: list[dict[str, Any]] = []
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, dict):
+            continue
+        evidence_json = candidate.get("evidence_json") if isinstance(candidate.get("evidence_json"), dict) else {}
+        candidate_items.append(
+            {
+                "index": index,
+                "name": candidate.get("seller_target_name") if mode == "buyer_to_target" else candidate.get("buyer_intent_name"),
+                "rule_score": candidate.get("score"),
+                "recommendation_level": candidate.get("recommendation_level"),
+                "matches": evidence_json.get("matches") or [],
+                "gaps": evidence_json.get("gaps") or [],
+                "profile": (documents[index]["text"] if index < len(documents) else "")[:DEEP_EVAL_PROFILE_CHARS],
+            }
+        )
+
+    prompt_messages = _render_prompt_messages(
+        node_config,
+        {
+            "mode": mode,
+            "anchor_context": anchor_context,
+            "candidates_json": json.dumps(candidate_items, ensure_ascii=False, default=str),
+        },
+    )
+    input_json = {
+        "session_id": str(session_id),
+        "mode": mode,
+        "engine": "llm_deep_eval",
+        "candidate_count": len(candidates),
+        "anchor_context_preview": anchor_context[:1000],
+    }
+
+    started = time.perf_counter()
+    try:
+        llm_result = call_openai_compatible_chat(
+            base_url=node_config["base_url"],
+            api_key_secret_ref=node_config["api_key_secret_ref"],
+            model_name=node_config["model_name"],
+            messages=prompt_messages,
+            temperature=node_config["temperature"],
+            top_p=node_config["top_p"],
+            max_tokens=node_config["max_tokens"],
+            timeout_seconds=node_config["timeout_seconds"] or 180,
+            response_format=node_config["response_format"],
+        )
+    except LlmCallError as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        _insert_rerank_trace(
+            db,
+            job=job,
+            session_id=session_id,
+            node_config=node_config,
+            status="failed",
+            input_json=input_json,
+            parsed_output_json=None,
+            latency_ms=latency_ms,
+            total_tokens=None,
+            error_code="deep_eval_call_failed",
+            error_message=str(exc),
+        )
+        raise
+
+    results = _validate_deep_eval_results(llm_result.parsed_output_json, len(candidates))
+    reranked_candidates = _apply_deep_eval_results_to_candidates(
+        candidates=candidates,
+        results=results,
+        model_name=llm_result.model_name or str(node_config["model_name"]),
+    )
+    _insert_rerank_trace(
+        db,
+        job=job,
+        session_id=session_id,
+        node_config=node_config,
+        status="succeeded",
+        input_json=input_json,
+        parsed_output_json={
+            "engine": "llm_deep_eval",
+            "model": llm_result.model_name,
+            "results": results,
+            "reranked_candidates": reranked_candidates,
+        },
+        latency_ms=llm_result.latency_ms,
+        total_tokens=llm_result.total_tokens,
+    )
+    _insert_recommendation_rerank_message(
+        db,
+        session_id=session_id,
+        job_id=job.id,
+        reranked_candidates=reranked_candidates,
+        model_name=llm_result.model_name or str(node_config["model_name"]),
+    )
+    return {
+        "handled": True,
+        "job_type": job.job_type,
+        "session_id": str(session_id),
+        "engine": "llm_deep_eval",
+        "model_name": llm_result.model_name,
+        "candidate_count": len(candidates),
+        "reranked_count": len(reranked_candidates),
+        "trace_created": True,
+    }
+
+
+def _validate_deep_eval_results(
+    parsed_output_json: dict[str, Any] | None,
+    candidate_count: int,
+) -> list[dict[str, Any]]:
+    if not isinstance(parsed_output_json, dict):
+        raise ValueError("Deep eval output is not a JSON object.")
+    raw_results = parsed_output_json.get("results")
+    if not isinstance(raw_results, list) or not raw_results:
+        raise ValueError("Deep eval output has no results array.")
+    results: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for item in raw_results:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("index"))
+        except (TypeError, ValueError):
+            continue
+        if index < 0 or index >= candidate_count or index in seen:
+            continue
+        grade = str(item.get("grade") or "").strip().upper()
+        if grade not in DEEP_EVAL_GRADES:
+            grade = "C"
+        seen.add(index)
+        results.append(
+            {
+                "index": index,
+                "grade": grade,
+                "reason": str(item.get("reason") or "").strip() or None,
+                "risks": str(item.get("risks") or "").strip() or None,
+                "info_gaps": str(item.get("info_gaps") or "").strip() or None,
+            }
+        )
+    if not results:
+        raise ValueError("Deep eval output contained no valid results.")
+    return results
+
+
+def _apply_deep_eval_results_to_candidates(
+    *,
+    candidates: list[Any],
+    results: list[dict[str, Any]],
+    model_name: str,
+) -> list[dict[str, Any]]:
+    normalized = [dict(candidate) for candidate in candidates if isinstance(candidate, dict)]
+    result_by_index = {item["index"]: item for item in results}
+    order_by_index = {item["index"]: position for position, item in enumerate(results)}
+
+    for index, candidate in enumerate(normalized):
+        result = result_by_index.get(index)
+        if result is None:
+            continue
+        candidate["deep_eval"] = {
+            "grade": result["grade"],
+            "reason": result.get("reason"),
+            "risks": result.get("risks"),
+            "info_gaps": result.get("info_gaps"),
+            "model": model_name,
+        }
+        evidence_json = candidate.get("evidence_json") if isinstance(candidate.get("evidence_json"), dict) else {}
+        score_json = evidence_json.get("score") if isinstance(evidence_json.get("score"), dict) else {}
+        candidate["evidence_json"] = {
+            **evidence_json,
+            "score": {
+                **score_json,
+                "deep_eval_grade": result["grade"],
+                "deep_eval_model": model_name,
+            },
+        }
+
+    grade_rank = {"A": 0, "B": 1, "C": 2}
+    decorated = []
+    for index, candidate in enumerate(normalized):
+        grade = (candidate.get("deep_eval") or {}).get("grade")
+        decorated.append(
+            (
+                grade_rank.get(grade, 3),
+                order_by_index.get(index, 999),
+                -float(candidate.get("score") or 0),
+                index,
+                candidate,
+            )
+        )
+    decorated.sort(key=lambda row: row[:4])
+    ordered = [row[4] for row in decorated]
+    for rank, candidate in enumerate(ordered, start=1):
+        candidate["rank"] = rank
+    return ordered
 
 
 def _handle_model_node_test(db: Session, job: JobClaim) -> dict[str, object]:
@@ -3726,6 +3979,8 @@ BUYER_INTENT_PARSE_FIELDS = {
     "parsed_requirement_json",
     "industry_primary",
     "industry_secondary",
+    "industries_json",
+    "excluded_industries_json",
     "region_scope_summary",
     "region_constraints_json",
     "min_revenue_yuan",
@@ -3765,6 +4020,7 @@ SELLER_TARGET_PARSE_FIELDS = {
     "target_name",
     "target_type",
     "target_subject_name",
+    "industry_l1",
     "industry_primary",
     "industry_secondary",
     "registered_province",
@@ -3877,6 +4133,8 @@ BUYER_INTENT_PARSE_JSON_FIELDS = {
     "region_constraints_json",
     "acceptable_control_paths_json",
     "transaction_types_json",
+    "industries_json",
+    "excluded_industries_json",
 }
 
 BUYER_INTENT_PARSE_NUMERIC_FIELDS = {
@@ -4207,6 +4465,45 @@ def _normalize_buyer_intent_parse_changes(
             "llm_fields": parsed_output_json,
         }
     return {key: value for key, value in changes.items() if value is not None}, notes
+
+
+def _normalize_buyer_intent_industry_changes(db: Session, changes: dict[str, Any]) -> list[str]:
+    """Map parser industry output onto the closed L1 dictionary in place."""
+    notes: list[str] = []
+    if "industries_json" in changes:
+        normalized, industry_notes = normalize_l1_values(db, changes["industries_json"])
+        notes.extend(industry_notes)
+        if normalized:
+            changes["industries_json"] = normalized
+        else:
+            changes.pop("industries_json", None)
+    if "excluded_industries_json" in changes:
+        cleaned = normalize_excluded_terms(changes["excluded_industries_json"])
+        if cleaned:
+            changes["excluded_industries_json"] = cleaned
+        else:
+            changes.pop("excluded_industries_json", None)
+    if "industries_json" not in changes and changes.get("industry_primary"):
+        l1_name = resolve_l1(db, changes["industry_primary"])
+        if l1_name:
+            changes["industries_json"] = [l1_name]
+    return notes
+
+
+def _normalize_seller_target_industry_changes(db: Session, changes: dict[str, Any]) -> list[str]:
+    """Validate industry_l1 against the dictionary, deriving it from industry_primary as fallback."""
+    notes: list[str] = []
+    value = changes.get("industry_l1")
+    l1_name = resolve_l1(db, value) if value else None
+    if value and l1_name is None:
+        notes.append(f"industry_l1_unmapped:{str(value)[:50]}")
+    if l1_name is None and changes.get("industry_primary"):
+        l1_name = resolve_l1(db, changes["industry_primary"])
+    if l1_name:
+        changes["industry_l1"] = l1_name
+    else:
+        changes.pop("industry_l1", None)
+    return notes
 
 
 def _apply_buyer_intent_parse_changes(
