@@ -66,7 +66,8 @@ const BUYER_PARTY_FIELD_LABELS: Record<string, string> = {
   region_city: '所在城市',
   main_business: '主营业务',
   capital_strength_summary: '资金实力',
-  profile_summary: '买家画像',
+  profile_summary: '材料摘要',
+  notes: '备注',
   status: '状态',
   deleted_at: '删除时间',
 };
@@ -140,7 +141,8 @@ Object.assign(BUYER_PARTY_FIELD_LABELS, {
   region_city: '所在城市',
   main_business: '主营业务',
   capital_strength_summary: '资金实力',
-  profile_summary: '买家画像',
+  profile_summary: '材料摘要',
+  notes: '备注',
   status: '状态',
   deleted_at: '删除时间',
 });
@@ -317,6 +319,7 @@ Object.assign(VALUE_LABELS, {
   buyer_intent_status: {
     active: '持续推荐',
     paused: '暂停推荐',
+    closed: '已结束',
   },
   preferred_listed_status: {
     listed: '已上市',

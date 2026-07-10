@@ -69,7 +69,7 @@ export default function Recommend() {
 
   useEffect(() => {
     sellerTargets.list({ limit: 50 }).then((response) => setTargetsList(response.items)).catch(() => {});
-    buyerIntents.list({ limit: 50 }).then((response) => setIntentsList(response.items)).catch(() => {});
+    buyerIntents.list({ status: 'active', limit: 50 }).then((response) => setIntentsList(response.items)).catch(() => {});
     buyerParties.list({ limit: 50 }).then((response) => setPartiesList(response.items)).catch(() => {});
   }, []);
 

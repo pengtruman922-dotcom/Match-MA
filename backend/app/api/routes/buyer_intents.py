@@ -350,7 +350,7 @@ def list_buyer_intents(
     buyer_party_id: UUID | None = None,
     industry: str | None = Query(default=None, max_length=200),
     region: str | None = Query(default=None, max_length=200),
-    status: Literal["active", "paused"] | None = Query(default=None),
+    status: Literal["active", "paused", "closed"] | None = Query(default=None),
     listed_status: str | None = Query(default=None, max_length=80),
     requires_consolidation: Literal["yes", "no", "likely", "unknown"] | None = Query(default=None),
     owner: str | None = Query(default=None, max_length=50),
@@ -491,7 +491,7 @@ def buyer_intent_filter_options(current_user: CurrentUser, db: Session = Depends
         order by count desc, status asc
         """,
         params,
-        labels={"active": "持续推荐", "paused": "暂停推荐"},
+        labels={"active": "持续推荐", "paused": "暂停推荐", "closed": "已结束"},
     )
     listed_statuses = _filter_options(
         db,

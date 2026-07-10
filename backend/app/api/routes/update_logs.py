@@ -299,6 +299,7 @@ ROLLBACK_FIELDS_BY_ENTITY = {
         "main_business",
         "capital_strength_summary",
         "profile_summary",
+        "notes",
         "status",
     },
     "buyer_seller_relation": {
