@@ -183,6 +183,7 @@ export interface BuyerParty {
   main_business: string | null;
   capital_strength_summary: string | null;
   profile_summary: string | null;
+  notes: string | null;
   status: string;
   owner_user_id?: string | null;
   owner_name?: string | null;
@@ -247,13 +248,16 @@ export interface BuyerBulkDeleteResponse {
 
 export interface BuyerPartyCreate {
   buyer_name: string;
-  legal_name?: string;
-  buyer_type?: string;
-  listed_status?: string;
-  region_province?: string;
-  region_city?: string;
-  main_business?: string;
-  profile_summary?: string;
+  legal_name?: string | null;
+  buyer_type?: string | null;
+  group_name?: string | null;
+  listed_status?: string | null;
+  region_province?: string | null;
+  region_city?: string | null;
+  main_business?: string | null;
+  capital_strength_summary?: string | null;
+  profile_summary?: string | null;
+  notes?: string | null;
   owner_user_id?: string | null;
 }
 
@@ -296,6 +300,7 @@ export interface BuyerIntent {
   major_risk_tolerance_summary: string | null;
   buyer_industry_advantage_summary: string | null;
   negative_summary: string | null;
+  priority_summary: string | null;
   preference_summary: string | null;
   unknown_summary: string | null;
   owner_user_id?: string | null;

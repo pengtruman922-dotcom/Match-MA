@@ -6,6 +6,7 @@ import Targets from './pages/Targets';
 import TargetDetail from './pages/TargetDetail';
 import Buyers from './pages/Buyers';
 import BuyerDetail from './pages/BuyerDetail';
+import BuyerIntentDetail from './pages/BuyerIntentDetail';
 import Updates from './pages/Updates';
 import Recommend from './pages/Recommend';
 import Dashboard from './pages/Dashboard';
@@ -29,6 +30,7 @@ function App() {
             <Route path="targets/:id" element={<TargetDetail />} />
             <Route path="buyers" element={<Buyers />} />
             <Route path="buyers/:id" element={<BuyerDetail />} />
+            <Route path="buyer-intents/:id" element={<BuyerIntentDetail />} />
             <Route path="recommendations" element={<Recommend />} />
             <Route path="search" element={<SearchResults />} />
             <Route path="debug" element={<DebugCenter />} />

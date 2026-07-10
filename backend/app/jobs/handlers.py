@@ -289,7 +289,7 @@ SELLER_TARGET_POST_PARSE_STATUSES = {"parsing", "pending_review", "insufficient"
 SELLER_TARGET_PARSE_FAILURE_STATUSES = {"parsing"}
 
 BUYER_INTENT_ENUM_FIELDS = {
-    "status": {"active", "paused"},
+    "status": {"active", "paused", "closed"},
     "requires_control": {"yes", "no", "unknown", "likely"},
     "requires_consolidation": {"yes", "no", "unknown", "likely"},
     "accepts_minority_investment": {"yes", "no", "unknown", "likely"},
@@ -361,6 +361,10 @@ ENUM_VALUE_ALIASES = {
     "不感兴趣": "not_interested",
     "暂停": "paused",
     "暂不推进": "paused",
+    "已结束": "closed",
+    "结束": "closed",
+    "终止": "closed",
+    "已终止": "closed",
     "失败": "lost",
     "已成交": "deal_closed",
     "推荐反馈": "other",

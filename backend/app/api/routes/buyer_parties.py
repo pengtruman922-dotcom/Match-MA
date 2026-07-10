@@ -42,6 +42,7 @@ class BuyerPartyCreate(BaseModel):
     main_business: str | None = None
     capital_strength_summary: str | None = None
     profile_summary: str | None = None
+    notes: str | None = None
 
 
 class BuyerPartyUpdate(BaseModel):
@@ -56,6 +57,7 @@ class BuyerPartyUpdate(BaseModel):
     main_business: str | None = None
     capital_strength_summary: str | None = None
     profile_summary: str | None = None
+    notes: str | None = None
     owner_user_id: UUID | None = None
 
 
@@ -72,6 +74,7 @@ class BuyerPartyOut(BaseModel):
     main_business: str | None
     capital_strength_summary: str | None
     profile_summary: str | None
+    notes: str | None = None
     status: str
     owner_user_id: UUID | None = None
     owner_name: str | None = None
@@ -139,7 +142,7 @@ class BuyerPartyBulkDeleteOut(BaseModel):
 BUYER_PARTY_OUT_COLUMNS = """
           id, buyer_name, legal_name, aliases_json, buyer_type, group_name,
           listed_status, region_province, region_city, main_business,
-          capital_strength_summary, profile_summary, status,
+          capital_strength_summary, profile_summary, notes, status,
           owner_user_id,
           (select au.name from app_user au where au.id = buyer_party.owner_user_id) as owner_name,
           created_at::text as created_at, updated_at::text as updated_at
@@ -165,13 +168,13 @@ def create_buyer_party(
         insert into buyer_party (
           team_id, workspace_id, buyer_name, legal_name, aliases_json,
           buyer_type, group_name, listed_status, region_province, region_city,
-          main_business, capital_strength_summary, profile_summary,
+          main_business, capital_strength_summary, profile_summary, notes,
           owner_user_id, created_by, updated_by
         )
         values (
           :team_id, :workspace_id, :buyer_name, :legal_name, :aliases_json,
           :buyer_type, :group_name, :listed_status, :region_province, :region_city,
-          :main_business, :capital_strength_summary, :profile_summary,
+          :main_business, :capital_strength_summary, :profile_summary, :notes,
           :owner_user_id, :created_by, :updated_by
         )
         returning
@@ -798,6 +801,7 @@ def _buyer_party_params(payload: BuyerPartyCreate, current_user: AuthContext) ->
         "main_business": payload.main_business,
         "capital_strength_summary": payload.capital_strength_summary,
         "profile_summary": payload.profile_summary,
+        "notes": payload.notes,
         "owner_user_id": owner_user_id,
         "created_by": current_user.user_id,
         "updated_by": current_user.user_id,

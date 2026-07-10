@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import type { ReactNode } from 'react';
 import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft,
@@ -16,7 +17,7 @@ import {
 } from 'lucide-react';
 import { buyerParties, relations, updateLogs, users } from '../lib/api';
 import { isAdmin } from '../lib/auth';
-import type { AppUserOption, BuyerParty, BuyerIntent, BuyerSellerRelation, RelationEvent, UpdateLog } from '../types/api';
+import type { AppUserOption, BuyerParty, BuyerPartyCreate, BuyerIntent, BuyerSellerRelation, RelationEvent, UpdateLog } from '../types/api';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
 import { fieldLabel, valueLabel } from '../lib/fieldLabels';
 
@@ -164,7 +165,7 @@ export default function BuyerDetail() {
               ))}
             </div>
             <div className="p-5">
-              {activeTab === 'info' && <BuyerInfoTab party={party} />}
+              {activeTab === 'info' && <BuyerInfoTab party={party} onSaved={setParty} />}
               {activeTab === 'intents' && (
                 <IntentsTab
                   intents={intents}
@@ -207,30 +208,142 @@ export default function BuyerDetail() {
   );
 }
 
-function BuyerInfoTab({ party }: { party: BuyerParty }) {
+function BuyerInfoTab({ party, onSaved }: { party: BuyerParty; onSaved: (party: BuyerParty) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [draft, setDraft] = useState<Partial<BuyerPartyCreate>>({});
+
+  useEffect(() => {
+    setDraft({
+      buyer_name: party.buyer_name,
+      legal_name: party.legal_name || '',
+      buyer_type: party.buyer_type || '',
+      group_name: party.group_name || '',
+      listed_status: party.listed_status || 'unknown',
+      region_province: party.region_province || '',
+      region_city: party.region_city || '',
+      main_business: party.main_business || '',
+      capital_strength_summary: party.capital_strength_summary || '',
+      profile_summary: party.profile_summary || '',
+      notes: party.notes || '',
+    });
+  }, [party]);
+
+  const updateDraft = (key: keyof BuyerPartyCreate, value: string) => {
+    setDraft((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const payload: Partial<BuyerPartyCreate> = {
+        buyer_name: draft.buyer_name?.trim() || party.buyer_name,
+        legal_name: nullIfEmpty(draft.legal_name),
+        buyer_type: nullIfEmpty(draft.buyer_type),
+        group_name: nullIfEmpty(draft.group_name),
+        listed_status: draft.listed_status || 'unknown',
+        region_province: nullIfEmpty(draft.region_province),
+        region_city: nullIfEmpty(draft.region_city),
+        main_business: nullIfEmpty(draft.main_business),
+        capital_strength_summary: nullIfEmpty(draft.capital_strength_summary),
+        profile_summary: nullIfEmpty(draft.profile_summary),
+        notes: nullIfEmpty(draft.notes),
+      };
+      const updated = await buyerParties.update(party.id, payload);
+      onSaved(updated);
+      setEditing(false);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '保存失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="space-y-5">
-      <div>
-        <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">基本信息</h4>
-        <div className="grid grid-cols-2 gap-x-8 gap-y-2.5">
-          <Field label="买家名称" value={party.buyer_name} />
-          <Field label="法人全称" value={party.legal_name} />
-          <Field label="类型" value={party.buyer_type} />
-          <Field label="集团" value={party.group_name} />
-          <Field label="地区" value={`${party.region_province || ''} ${party.region_city || ''}`} />
-          <Field label="上市状态" value={party.listed_status} />
-        </div>
+      <div className="flex items-center justify-between">
+        <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">基本信息</h4>
+        {editing ? (
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => setEditing(false)} className="px-3 py-1.5 text-xs border border-gray-200 text-gray-700">取消</button>
+            <button type="button" onClick={handleSave} disabled={saving} className="px-3 py-1.5 text-xs bg-brand-600 text-white disabled:opacity-50">{saving ? '保存中' : '保存'}</button>
+          </div>
+        ) : (
+          <button type="button" onClick={() => setEditing(true)} className="px-3 py-1.5 text-xs border border-gray-200 text-gray-700 hover:border-brand-500 hover:text-brand-600">编辑</button>
+        )}
       </div>
-      <div>
-        <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">画像</h4>
-        <div className="space-y-2">
-          <Field label="主营业务" value={party.main_business} />
-          <Field label="资金实力" value={party.capital_strength_summary} />
-          <Field label="画像摘要" value={party.profile_summary} />
+
+      {editing ? (
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <EditField label="买家名称">
+              <input className="input" value={draft.buyer_name || ''} onChange={(event) => updateDraft('buyer_name', event.target.value)} />
+            </EditField>
+            <EditField label="法人全称">
+              <input className="input" value={draft.legal_name || ''} onChange={(event) => updateDraft('legal_name', event.target.value)} />
+            </EditField>
+            <EditField label="类型">
+              <input className="input" value={draft.buyer_type || ''} onChange={(event) => updateDraft('buyer_type', event.target.value)} placeholder="industrial_buyer / state_owned_platform" />
+            </EditField>
+            <EditField label="集团">
+              <input className="input" value={draft.group_name || ''} onChange={(event) => updateDraft('group_name', event.target.value)} />
+            </EditField>
+            <EditField label="省份">
+              <input className="input" value={draft.region_province || ''} onChange={(event) => updateDraft('region_province', event.target.value)} />
+            </EditField>
+            <EditField label="城市">
+              <input className="input" value={draft.region_city || ''} onChange={(event) => updateDraft('region_city', event.target.value)} />
+            </EditField>
+            <EditField label="上市状态">
+              <select className="input" value={draft.listed_status || 'unknown'} onChange={(event) => updateDraft('listed_status', event.target.value)}>
+                <option value="unknown">未知</option>
+                <option value="listed">已上市</option>
+                <option value="unlisted">未上市</option>
+                <option value="pre_ipo">拟上市</option>
+              </select>
+            </EditField>
+          </div>
+          <EditField label="主营业务">
+            <textarea className="input min-h-[70px] resize-y" value={draft.main_business || ''} onChange={(event) => updateDraft('main_business', event.target.value)} />
+          </EditField>
+          <EditField label="资金实力/规模">
+            <textarea className="input min-h-[70px] resize-y" value={draft.capital_strength_summary || ''} onChange={(event) => updateDraft('capital_strength_summary', event.target.value)} />
+          </EditField>
+          <EditField label="材料摘要">
+            <textarea className="input min-h-[70px] resize-y" value={draft.profile_summary || ''} onChange={(event) => updateDraft('profile_summary', event.target.value)} />
+          </EditField>
+          <EditField label="备注">
+            <textarea className="input min-h-[90px] resize-y" value={draft.notes || ''} onChange={(event) => updateDraft('notes', event.target.value)} placeholder="人工维护，不参与推荐" />
+          </EditField>
         </div>
-      </div>
+      ) : (
+        <div className="space-y-5">
+          <div className="grid grid-cols-2 gap-x-8 gap-y-2.5">
+            <Field label="买家名称" value={party.buyer_name} />
+            <Field label="法人全称" value={party.legal_name} />
+            <Field label="类型" value={party.buyer_type ? valueLabel('buyer_type', party.buyer_type) : null} />
+            <Field label="集团" value={party.group_name} />
+            <Field label="地区" value={`${party.region_province || ''} ${party.region_city || ''}`.trim()} />
+            <Field label="上市状态" value={valueLabel('listed_status', party.listed_status)} />
+          </div>
+          <div>
+            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">基本资料</h4>
+            <div className="space-y-2">
+              <Field label="主营业务" value={party.main_business} />
+              <Field label="资金实力" value={party.capital_strength_summary} />
+              <Field label="材料摘要" value={party.profile_summary} />
+              <Field label="备注" value={party.notes} />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
+}
+
+function nullIfEmpty(value: string | null | undefined): string | null {
+  const trimmed = (value || '').trim();
+  return trimmed || null;
 }
 
 function Field({ label, value }: { label: string; value: string | null | undefined }) {
@@ -239,6 +352,15 @@ function Field({ label, value }: { label: string; value: string | null | undefin
       <span className="text-xs text-gray-500 w-16 shrink-0">{label}</span>
       <span className="text-sm text-gray-800">{value || '-'}</span>
     </div>
+  );
+}
+
+function EditField({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="block">
+      <span className="block text-xs font-medium text-gray-600 mb-1">{label}</span>
+      {children}
+    </label>
   );
 }
 
@@ -268,7 +390,13 @@ function IntentsTab({
           }`}
         >
           <div className="flex items-center justify-between">
-            <span className="text-sm font-medium text-gray-900">{intent.intent_name}</span>
+            <Link
+              to={`/buyer-intents/${intent.id}`}
+              onClick={(event) => event.stopPropagation()}
+              className="text-sm font-medium text-gray-900 hover:text-brand-600"
+            >
+              {intent.intent_name}
+            </Link>
             <span className={`text-xs px-1.5 py-0.5 font-medium ${
               intent.status === 'active'
                 ? 'bg-emerald-50 text-emerald-700'

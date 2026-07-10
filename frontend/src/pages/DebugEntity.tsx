@@ -314,11 +314,7 @@ function businessRoute(data: DebugEntity): string | null {
   if (data.entity_type === 'business_update') return `/updates/${data.entity_id}`;
   if (data.entity_type === 'seller_target') return `/targets/${data.entity_id}`;
   if (data.entity_type === 'buyer_party') return `/buyers/${data.entity_id}`;
-  if (data.entity_type === 'buyer_intent') {
-    const entity = asRecord(data.payload.entity);
-    const buyerPartyId = entity?.buyer_party_id;
-    return typeof buyerPartyId === 'string' ? `/buyers/${buyerPartyId}?intentId=${data.entity_id}` : '/buyers';
-  }
+  if (data.entity_type === 'buyer_intent') return `/buyer-intents/${data.entity_id}`;
   if (data.entity_type === 'recommendation_session') return '/recommendations';
   if (data.entity_type === 'background_job') {
     const job = asRecord(data.payload.job);
@@ -327,6 +323,7 @@ function businessRoute(data: DebugEntity): string | null {
     if (type === 'business_update' && typeof id === 'string') return `/updates/${id}`;
     if (type === 'seller_target' && typeof id === 'string') return `/targets/${id}`;
     if (type === 'buyer_party' && typeof id === 'string') return `/buyers/${id}`;
+    if (type === 'buyer_intent' && typeof id === 'string') return `/buyer-intents/${id}`;
   }
   return null;
 }

@@ -27,7 +27,6 @@ import type {
   AttachmentUploadPolicy,
   BuyerFilterOption,
   BuyerIntent,
-  BuyerIntentCreate,
   BuyerIntentFilterOptions,
   BuyerIntentParseStatus,
   BuyerIntentSearchField,
@@ -78,7 +77,7 @@ const PARTY_SEARCH_FIELD_LABELS: Record<BuyerPartySearchField | 'all', string> =
   buyer_name: '买家',
   legal_name: '法律主体',
   main_business: '主营业务',
-  profile_summary: '画像',
+  profile_summary: '材料摘要',
 };
 
 type BuyerIntentFilters = {
@@ -112,13 +111,6 @@ export default function Buyers() {
   const [intentRefreshKey, setIntentRefreshKey] = useState(0);
   const [partyRefreshKey, setPartyRefreshKey] = useState(0);
 
-  const setTab = useCallback((nextTab: Tab) => {
-    const next = new URLSearchParams(searchParams);
-    if (nextTab === 'intents') next.delete('tab');
-    else next.set('tab', nextTab);
-    setSearchParams(next);
-  }, [searchParams, setSearchParams]);
-
   useEffect(() => {
     const action = searchParams.get('action');
     if (action !== 'new-intent' && action !== 'new-party') return;
@@ -139,7 +131,7 @@ export default function Buyers() {
       <div className="flex items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold text-gray-900">买家管理</h1>
-          <p className="text-xs text-gray-400 mt-1">统一维护买家意向、买家主体和后续推荐入口</p>
+          <p className="text-xs text-gray-400 mt-1">一行对应一个买家和当前进行中的并购需求</p>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -147,31 +139,9 @@ export default function Buyers() {
             className="flex items-center gap-1.5 px-4 py-2 bg-brand-600 text-white text-sm font-medium hover:bg-brand-700 transition-colors"
           >
             <Plus className="w-4 h-4" />
-            新建买家意向
-          </button>
-          <button
-            onClick={() => { setTab('parties'); setShowCreateParty(true); }}
-            className="flex items-center gap-1.5 px-3 py-2 border border-gray-200 text-sm font-medium text-gray-700 hover:border-brand-500 hover:text-brand-600 transition-colors bg-white"
-          >
-            <Plus className="w-4 h-4" />
             新建买家
           </button>
         </div>
-      </div>
-
-      <div className="border-b border-gray-200 flex items-center gap-0.5">
-        <button
-          onClick={() => setTab('intents')}
-          className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px ${tab === 'intents' ? 'border-brand-600 text-brand-600' : 'border-transparent text-gray-600 hover:text-gray-900'}`}
-        >
-          买家意向
-        </button>
-        <button
-          onClick={() => setTab('parties')}
-          className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px ${tab === 'parties' ? 'border-brand-600 text-brand-600' : 'border-transparent text-gray-600 hover:text-gray-900'}`}
-        >
-          买家主体
-        </button>
       </div>
 
       {tab === 'intents' ? (
@@ -481,24 +451,21 @@ function IntentsList({
           <thead>
             <tr className="border-b border-gray-100 bg-gray-50">
               <th className="text-left px-4 py-3 w-12"><input type="checkbox" disabled={visibleIds.length === 0} checked={allVisibleSelected} onChange={toggleSelectAllVisible} aria-label="选择当前页买家意向" className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600" /></th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600">意向名称</th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600">买家主体</th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600">行业</th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600">地区</th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600">上市要求</th>
-              <th className="text-right px-4 py-3 font-medium text-gray-600">利润要求</th>
-              <th className="text-right px-4 py-3 font-medium text-gray-600">市值范围</th>
+              <th className="text-left px-4 py-3 font-medium text-gray-600 min-w-[180px]">买家</th>
+              <th className="text-left px-4 py-3 font-medium text-gray-600 min-w-[220px]">并购方向</th>
+              <th className="text-left px-4 py-3 font-medium text-gray-600 min-w-[260px]">关键门槛</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">解析状态</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">状态</th>
               <th className="text-left px-4 py-3 font-medium text-gray-600">负责人</th>
+              <th className="text-left px-4 py-3 font-medium text-gray-600">最近更新</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">操作</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {loading ? (
-              <tr><td colSpan={12} className="px-4 py-8 text-center"><div className="w-5 h-5 border-2 border-brand-600 border-t-transparent rounded-full animate-spin mx-auto" /></td></tr>
+              <tr><td colSpan={9} className="px-4 py-8 text-center"><div className="w-5 h-5 border-2 border-brand-600 border-t-transparent rounded-full animate-spin mx-auto" /></td></tr>
             ) : items.length === 0 ? (
-              <tr><td colSpan={12} className="px-4 py-8 text-center text-gray-400">暂无匹配的买家意向</td></tr>
+              <tr><td colSpan={9} className="px-4 py-8 text-center text-gray-400">暂无匹配的买家</td></tr>
             ) : items.map((item) => (
               <IntentRow
                 key={item.id}
@@ -540,20 +507,32 @@ function IntentRow({
     <>
       <tr className="hover:bg-brand-50/30 transition-colors">
         <td className="px-4 py-3"><input type="checkbox" checked={selected} onChange={(event) => onSelectedChange(event.target.checked)} aria-label={`选择${item.intent_name}`} className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600" /></td>
-        <td className="px-4 py-3"><div className="flex items-center gap-1"><button onClick={onToggle} className="text-gray-400 hover:text-gray-600" type="button">{expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}</button><span className="font-medium text-gray-900">{item.intent_name}</span></div></td>
-        <td className="px-4 py-3 text-gray-600">{item.buyer_party_id ? <Link to={`/buyers/${item.buyer_party_id}?intentId=${item.id}`} className="hover:text-brand-600 transition-colors">{item.buyer_name || '已关联买家'}</Link> : '-'}</td>
-        <td className="px-4 py-3 text-gray-600">{item.industry_primary || '-'}</td>
-        <td className="px-4 py-3 text-gray-600 max-w-[180px] truncate" title={item.region_scope_summary || undefined}>{item.region_scope_summary || '-'}</td>
-        <td className="px-4 py-3 text-gray-600">{listingRequirementLabel(item)}</td>
-        <td className="px-4 py-3 text-right text-gray-600 font-mono">{item.min_net_profit_yuan ? `${(Number(item.min_net_profit_yuan) / 10000).toFixed(0)}万` : '-'}</td>
-        <td className="px-4 py-3 text-right text-gray-600 font-mono">{marketCapRangeLabel(item)}</td>
+        <td className="px-4 py-3 text-gray-700">
+          {item.buyer_party_id ? (
+            <Link to={`/buyers/${item.buyer_party_id}`} className="font-medium text-gray-900 hover:text-brand-600 transition-colors line-clamp-2" title={item.buyer_name || undefined}>
+              {item.buyer_name || '已关联买家'}
+            </Link>
+          ) : (
+            <span className="text-amber-600">未关联买家</span>
+          )}
+        </td>
+        <td className="px-4 py-3">
+          <div className="flex items-center gap-1">
+            <button onClick={onToggle} className="text-gray-400 hover:text-gray-600" type="button">{expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}</button>
+            <Link to={`/buyer-intents/${item.id}`} className="font-medium text-gray-900 hover:text-brand-600 transition-colors line-clamp-2" title={item.intent_name}>{item.intent_name}</Link>
+          </div>
+        </td>
+        <td className="px-4 py-3 text-gray-600">
+          <p className="line-clamp-2" title={compactRequirementNotes(item)}>{compactRequirementNotes(item) || '-'}</p>
+        </td>
         <td className="px-4 py-3 text-center"><ParseStatusBadge item={item} parseStatus={parseStatus} /></td>
         <td className="px-4 py-3 text-center"><IntentStatusBadge status={item.status} /></td>
         <td className="px-4 py-3 text-gray-600">{item.owner_name || <span className="text-gray-300">未指派</span>}</td>
-        <td className="px-4 py-3"><div className="flex items-center justify-center gap-1"><Link to={`/recommendations?mode=buyer-to-target&intentId=${item.id}`} className="inline-flex items-center gap-1 px-2 py-1 text-xs text-brand-600 hover:bg-brand-50 transition-colors"><Sparkles className="w-3 h-3" />推荐标的</Link><span className="text-gray-200">|</span><button className="inline-flex items-center gap-1 px-2 py-1 text-xs text-brand-600 hover:bg-brand-50 transition-colors" type="button"><MessageSquarePlus className="w-3 h-3" />录入更新</button></div></td>
+        <td className="px-4 py-3 text-gray-500 whitespace-nowrap">{shortDate(item.updated_at)}</td>
+        <td className="px-4 py-3"><div className="flex items-center justify-center gap-1"><Link to={`/recommendations?mode=buyer-to-target&intentId=${item.id}`} className="inline-flex items-center gap-1 px-2 py-1 text-xs text-brand-600 hover:bg-brand-50 transition-colors"><Sparkles className="w-3 h-3" />推荐标的</Link><span className="text-gray-200">|</span><Link to={`/buyer-intents/${item.id}`} className="inline-flex items-center gap-1 px-2 py-1 text-xs text-brand-600 hover:bg-brand-50 transition-colors"><MessageSquarePlus className="w-3 h-3" />更新</Link></div></td>
       </tr>
       {expanded && (
-        <tr className="bg-gray-50/50"><td colSpan={12} className="px-8 py-2.5"><div className="space-y-1"><p className="text-xs text-gray-600 line-clamp-2">{item.raw_requirement_text || item.intent_summary || '暂无摘要'}{item.requires_consolidation === 'yes' && <span className="text-gray-500 ml-2">· 需并表</span>}{item.buyer_party_id ? '' : <span className="text-amber-600 ml-2">· 未关联买家主体</span>}</p><p className="text-xs text-gray-500 line-clamp-1">{compactRequirementNotes(item)}</p></div></td></tr>
+        <tr className="bg-gray-50/50"><td colSpan={9} className="px-8 py-2.5"><div className="space-y-1"><p className="text-xs text-gray-600 line-clamp-2">{item.intent_summary || item.raw_requirement_text || '暂无摘要'}{item.requires_consolidation === 'yes' && <span className="text-gray-500 ml-2">· 需并表</span>}{item.buyer_party_id ? '' : <span className="text-amber-600 ml-2">· 未关联买家主体</span>}</p><p className="text-xs text-gray-500 line-clamp-1">{compactRequirementNotes(item)}</p></div></td></tr>
       )}
     </>
   );
@@ -1024,8 +1003,35 @@ function marketCapRangeLabel(item: BuyerIntent): string {
 }
 
 function compactRequirementNotes(item: BuyerIntent): string {
-  const parts = [item.max_debt_ratio ? `负债率≤${Number(item.max_debt_ratio).toFixed(0)}%` : null, item.max_premium_rate ? `溢价≤${Number(item.max_premium_rate).toFixed(0)}%` : item.premium_tolerance_summary, item.major_risk_tolerance_summary, item.buyer_industry_advantage_summary].filter(Boolean);
-  return parts.length ? parts.join(' · ') : '暂无补充约束';
+  const industry = [item.industry_primary, item.industry_secondary].filter(Boolean).join('/');
+  const profit = item.min_net_profit_yuan ? `净利≥${formatCompactMoney(Number(item.min_net_profit_yuan))}` : null;
+  const marketCap = marketCapRangeLabel(item);
+  const parts = [
+    industry || null,
+    item.region_scope_summary,
+    listingRequirementLabel(item) !== '-' ? listingRequirementLabel(item) : null,
+    profit,
+    item.max_pe ? `PE≤${Number(item.max_pe).toFixed(0)}` : null,
+    marketCap !== '-' ? `市值${marketCap}` : null,
+    item.max_debt_ratio ? `负债率≤${Number(item.max_debt_ratio).toFixed(0)}%` : null,
+    item.max_premium_rate ? `溢价≤${Number(item.max_premium_rate).toFixed(0)}%` : item.premium_tolerance_summary,
+    item.major_risk_tolerance_summary,
+  ].filter(Boolean);
+  return parts.length ? parts.join(' · ') : '暂无关键门槛';
+}
+
+function formatCompactMoney(value: number): string {
+  if (!Number.isFinite(value)) return '-';
+  if (Math.abs(value) < 10000) return `${value.toFixed(0)}元`;
+  if (Math.abs(value) < 100000000) return `${(value / 10000).toFixed(0)}万`;
+  return `${(value / 100000000).toFixed(1)}亿`;
+}
+
+function shortDate(value: string | null | undefined): string {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+  return date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' });
 }
 
 function ParseStatusBadge({ item, parseStatus }: { item: BuyerIntent; parseStatus?: BuyerIntentParseStatus }) {
@@ -1091,8 +1097,12 @@ function hasStructuredIntentFields(item: BuyerIntent): boolean {
 }
 
 function IntentStatusBadge({ status }: { status: string }) {
-  const isActive = status === 'active';
-  return <span className={`text-xs px-2 py-0.5 font-medium ${isActive ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-600'}`}>{valueLabel('buyer_intent_status', status)}</span>;
+  const color = status === 'active'
+    ? 'bg-emerald-50 text-emerald-700'
+    : status === 'paused'
+      ? 'bg-amber-50 text-amber-700'
+      : 'bg-gray-100 text-gray-600';
+  return <span className={`text-xs px-2 py-0.5 font-medium ${color}`}>{valueLabel('buyer_intent_status', status)}</span>;
 }
 
 function PartyStatusBadge({ status }: { status: string }) {
@@ -1134,50 +1144,21 @@ function suggestionSubtitle(suggestion: BuyerSuggestion): string {
   return suggestion.buyer_name || suggestion.snippet || '点击按该字段检索';
 }
 
-type IntentStep = 'buyer_link' | 'buyer_search' | 'buyer_new' | 'intent_details';
-type BuyerLinkChoice = 'link_existing' | 'create_new' | 'no_link';
-
-type IntentForm = {
-  intent_name: string;
-  industry_primary: string;
-  region_scope_summary: string;
-  min_net_profit_yuan: string;
-  max_pe: string;
-  market_cap_range: string;
-  preferred_listed_status: string;
-  requires_consolidation: string;
-  max_premium_rate: string;
-  max_debt_ratio: string;
+type BuyerIntakeForm = {
+  buyer_name: string;
   raw_requirement_text: string;
-  negative_summary: string;
 };
 
-const DEFAULT_INTENT_FORM: IntentForm = {
-  intent_name: '',
-  industry_primary: '',
-  region_scope_summary: '',
-  min_net_profit_yuan: '',
-  max_pe: '',
-  market_cap_range: '',
-  preferred_listed_status: '',
-  requires_consolidation: '',
-  max_premium_rate: '',
-  max_debt_ratio: '',
+const DEFAULT_BUYER_INTAKE_FORM: BuyerIntakeForm = {
+  buyer_name: '',
   raw_requirement_text: '',
-  negative_summary: '',
 };
 
 function CreateIntentModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
-  const [step, setStep] = useState<IntentStep>('buyer_link');
-  const [linkChoice, setLinkChoice] = useState<BuyerLinkChoice | null>(null);
-  const [selectedParty, setSelectedParty] = useState<BuyerParty | null>(null);
-  const [newPartyName, setNewPartyName] = useState('');
   const [dedupCheck, setDedupCheck] = useState<BuyerPartyDedupCheck | null>(null);
   const [dedupChecked, setDedupChecked] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<BuyerParty[]>([]);
-  const [searching, setSearching] = useState(false);
-  const [form, setForm] = useState<IntentForm>(DEFAULT_INTENT_FORM);
+  const [checkingDedup, setCheckingDedup] = useState(false);
+  const [form, setForm] = useState<BuyerIntakeForm>(DEFAULT_BUYER_INTAKE_FORM);
   const [saving, setSaving] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -1188,7 +1169,7 @@ function CreateIntentModal({ onClose, onCreated }: { onClose: () => void; onCrea
   const [fileError, setFileError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (step !== 'intent_details' || uploadPolicy) return;
+    if (uploadPolicy) return;
     let cancelled = false;
     setPolicyError(null);
     setPolicyLoading(true);
@@ -1209,9 +1190,9 @@ function CreateIntentModal({ onClose, onCreated }: { onClose: () => void; onCrea
     return () => {
       cancelled = true;
     };
-  }, [step, uploadPolicy]);
+  }, [uploadPolicy]);
 
-  function updateForm<K extends keyof IntentForm>(key: K, value: IntentForm[K]) {
+  function updateForm<K extends keyof BuyerIntakeForm>(key: K, value: BuyerIntakeForm[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
   }
 
@@ -1254,123 +1235,63 @@ function CreateIntentModal({ onClose, onCreated }: { onClose: () => void; onCrea
     setFileError(null);
   }
 
-  const handleBuyerLinkChoice = (choice: BuyerLinkChoice) => {
-    setLinkChoice(choice);
-    if (choice === 'link_existing') setStep('buyer_search');
-    else if (choice === 'create_new') setStep('buyer_new');
-    else setStep('intent_details');
-  };
-
-  const handleSearch = async (q: string) => {
-    if (!q.trim()) return;
-    setSearching(true);
+  const handleDedupCheck = async () => {
+    const buyerName = form.buyer_name.trim();
+    if (!buyerName) return;
+    setCheckingDedup(true);
     try {
-      const response = await buyerParties.list({ q: q.trim(), limit: 10 });
-      setSearchResults(response.items);
-    } catch {
-      setSearchResults([]);
-    } finally {
-      setSearching(false);
-    }
-  };
-
-  const handleNewPartyCheck = async () => {
-    if (!newPartyName.trim()) return;
-    setSearching(true);
-    try {
-      const response = await buyerParties.dedupCheck({ q: newPartyName.trim(), limit: 5 });
+      const response = await buyerParties.dedupCheck({ q: buyerName, limit: 5 });
       setDedupCheck(response);
       setDedupChecked(true);
     } catch {
       setDedupCheck(null);
       setDedupChecked(true);
     } finally {
-      setSearching(false);
-    }
-  };
-
-  const handleSelectExisting = (party: BuyerParty) => {
-    setSelectedParty(party);
-    setStep('intent_details');
-  };
-
-  const handleConfirmNewParty = async () => {
-    if (!newPartyName.trim()) return;
-    setSaving(true);
-    try {
-      const created = await buyerParties.create({ buyer_name: newPartyName.trim() });
-      setSelectedParty(created);
-      setStep('intent_details');
-    } catch {
-      alert('创建买家主体失败');
-    } finally {
-      setSaving(false);
+      setCheckingDedup(false);
     }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const intentName = form.intent_name.trim();
-    if (!intentName) return;
-
-    const marketCap = parseMarketCapRange(form.market_cap_range);
-    if (form.market_cap_range.trim() && marketCap.min === undefined && marketCap.max === undefined) {
-      setSubmitError('市值范围暂无法识别，请使用如 5亿-30亿、5亿以上、30亿以内。');
-      return;
-    }
+    const buyerName = form.buyer_name.trim();
+    if (!buyerName) return;
 
     setSaving(true);
     setSubmitError(null);
     try {
-      const supplement = form.raw_requirement_text.trim();
-      const shouldParse = selectedFiles.length > 0 || supplement.length > 0;
-      const payload: BuyerIntentCreate = {
-        intent_name: intentName,
-        buyer_party_id: selectedParty?.id,
-        raw_requirement_text: normalizeOptional(form.raw_requirement_text),
-        industry_primary: normalizeOptional(form.industry_primary),
-        region_scope_summary: normalizeOptional(form.region_scope_summary),
-        min_net_profit_yuan: parseMoneyToYuan(form.min_net_profit_yuan),
-        max_pe: parseNumberInput(form.max_pe),
-        min_market_cap_yuan: marketCap.min,
-        max_market_cap_yuan: marketCap.max,
-        market_cap_range_summary: normalizeOptional(form.market_cap_range),
-        preferred_listed_status: normalizeOptional(form.preferred_listed_status),
-        requires_consolidation: normalizeOptional(form.requires_consolidation),
-        max_premium_rate: parseNumberInput(form.max_premium_rate),
-        max_debt_ratio: parseNumberInput(form.max_debt_ratio),
-        negative_summary: normalizeOptional(form.negative_summary),
-      };
+      const materialText = form.raw_requirement_text.trim();
+      const shouldParse = selectedFiles.length > 0 || materialText.length > 0;
+      const rawText = buildBuyerIntakeRawText(buyerName, materialText);
+      const createdParty = await buyerParties.create({ buyer_name: buyerName });
+      const createdIntent = await buyerIntents.create({
+        buyer_party_id: createdParty.id,
+        intent_name: defaultBuyerIntentName(buyerName),
+        raw_requirement_text: shouldParse ? rawText : undefined,
+      });
 
-      const created = await buyerIntents.create(payload);
       if (shouldParse) {
-        const rawText = buildIntentRawText(form, payload, selectedParty);
         if (selectedFiles.length > 0) {
-          // Attachments (incl. images) go through the business_update pipeline so OCR
-          // + multimodal extraction fill the intent, mirroring the target create flow.
           const formData = new FormData();
           formData.set('raw_text', rawText);
           formData.set('input_type', 'mixed');
           formData.set('auto_process', 'true');
           formData.set('process_after_ocr', 'true');
           formData.set('include_attachment_text', 'true');
-          formData.set('bound_buyer_intent_ids', JSON.stringify([created.id]));
-          if (selectedParty) {
-            formData.set('bound_buyer_party_ids', JSON.stringify([selectedParty.id]));
-          }
+          formData.set('bound_buyer_party_ids', JSON.stringify([createdParty.id]));
+          formData.set('bound_buyer_intent_ids', JSON.stringify([createdIntent.id]));
           formData.set(
             'metadata_json',
             JSON.stringify({
-              source: 'frontend_intent_create_modal',
-              create_payload: payload,
-              bound_buyer_intent_ids: [created.id],
+              source: 'frontend_buyer_create_modal',
+              buyer_party_id: createdParty.id,
+              buyer_intent_id: createdIntent.id,
+              buyer_name: buyerName,
             })
           );
           selectedFiles.forEach((file) => formData.append('files', file));
           await businessUpdates.upload(formData);
         } else {
-          // Text-only requirements use the dedicated buyer intent parser.
-          await buyerIntents.parse(created.id, { raw_requirement_text: supplement });
+          await buyerIntents.parse(createdIntent.id, { raw_requirement_text: rawText });
         }
       }
       onCreated();
@@ -1381,355 +1302,131 @@ function CreateIntentModal({ onClose, onCreated }: { onClose: () => void; onCrea
     }
   };
 
-  const stepTitles: Record<IntentStep, string> = {
-    buyer_link: '新建买家意向 — 关联买家',
-    buyer_search: '新建买家意向 — 搜索买家',
-    buyer_new: '新建买家意向 — 新建买家主体',
-    intent_details: '新建买家意向 — 意向详情',
-  };
-
   return (
-    <Modal title={stepTitles[step]} onClose={onClose}>
-      {/* Step indicator */}
-      <div className="flex items-center gap-1.5 mb-5">
-        {(['buyer_link', 'intent_details'] as const).map((s, i) => (
-          <div key={s} className="flex items-center gap-1.5">
-            <div className={`w-5 h-5 rounded-full flex items-center justify-center text-xs font-medium ${
-              step === s || (i === 1 && (step === 'intent_details'))
-                ? 'bg-brand-600 text-white'
-                : step === 'intent_details' && s === 'buyer_link'
-                  ? 'bg-emerald-500 text-white'
-                  : 'bg-gray-200 text-gray-500'
-            }`}>
-              {i === 0 && step === 'intent_details' ? '✓' : i + 1}
-            </div>
-            <span className="text-xs text-gray-500">{i === 0 ? '关联买家' : '意向信息'}</span>
-            {i === 0 && <div className="w-6 h-px bg-gray-200" />}
-          </div>
-        ))}
-      </div>
-
-      {/* Step 1a: Link choice */}
-      {step === 'buyer_link' && (
-        <div className="space-y-3">
-          <p className="text-sm text-gray-600 mb-4">请选择如何关联买家主体：</p>
-          {[
-            { key: 'link_existing' as BuyerLinkChoice, label: '关联已有买家', desc: '从现有买家主体中搜索并关联' },
-            { key: 'create_new' as BuyerLinkChoice, label: '新建买家主体', desc: '先创建买家主体，再建意向' },
-            { key: 'no_link' as BuyerLinkChoice, label: '暂不关联', desc: '直接创建意向，后续再关联买家' },
-          ].map((opt) => (
-            <button
-              key={opt.key}
-              onClick={() => handleBuyerLinkChoice(opt.key)}
-              className={`w-full text-left px-4 py-3 border transition-colors ${
-                linkChoice === opt.key ? 'border-brand-500 bg-brand-50' : 'border-gray-200 hover:border-gray-300 bg-white'
-              }`}
-            >
-              <div className="text-sm font-medium text-gray-900">{opt.label}</div>
-              <div className="text-xs text-gray-500 mt-0.5">{opt.desc}</div>
-            </button>
-          ))}
+    <Modal title="新建买家" onClose={onClose}>
+      <form onSubmit={handleSubmit} className="space-y-5">
+        <div className="border border-brand-100 bg-brand-50 px-3 py-2.5 text-xs text-brand-800 flex gap-2">
+          <Building2 className="w-4 h-4 mt-0.5 shrink-0" />
+          <p className="leading-relaxed">
+            录入一个买家主体及其当前并购需求。结构化字段会由系统从文本和附件中解析回填，买家备注后续在主体详情里手动维护。
+          </p>
         </div>
-      )}
 
-      {/* Step 1b: Search existing buyer */}
-      {step === 'buyer_search' && (
-        <div className="space-y-3">
+        <Field label="买家名称 *">
           <div className="flex gap-2">
             <input
               type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSearch(searchQuery)}
-              placeholder="输入买家名称搜索..."
+              value={form.buyer_name}
+              onChange={(e) => {
+                updateForm('buyer_name', e.target.value);
+                setDedupChecked(false);
+                setDedupCheck(null);
+              }}
+              placeholder="例如：北控集团、杭州某上市公司"
               className="input flex-1"
               autoFocus
             />
             <button
-              onClick={() => handleSearch(searchQuery)}
-              disabled={searching}
-              className="px-3 py-2 bg-brand-600 text-white text-sm hover:bg-brand-700 disabled:opacity-50"
+              type="button"
+              onClick={handleDedupCheck}
+              disabled={checkingDedup || !form.buyer_name.trim()}
+              className="px-3 py-2 border border-gray-200 text-sm text-gray-700 hover:border-brand-500 hover:text-brand-600 disabled:opacity-50 whitespace-nowrap"
             >
-              {searching ? '搜索中' : '搜索'}
+              {checkingDedup ? '查重中' : '查重'}
             </button>
           </div>
-          {searchResults.length > 0 && (
-            <div className="border border-gray-200 divide-y divide-gray-100 max-h-48 overflow-y-auto">
-              {searchResults.map((p) => (
-                <button
-                  key={p.id}
-                  onClick={() => handleSelectExisting(p)}
-                  className="w-full text-left px-4 py-2.5 hover:bg-brand-50 transition-colors"
-                >
-                  <span className="text-sm font-medium text-gray-900">{p.buyer_name}</span>
-                  {p.legal_name && <span className="text-xs text-gray-400 ml-2">{p.legal_name}</span>}
-                  {p.region_province && <span className="text-xs text-gray-400 ml-2">· {p.region_province}</span>}
-                </button>
-              ))}
-            </div>
-          )}
-          {searchResults.length === 0 && searchQuery && !searching && (
-            <p className="text-sm text-gray-400 text-center py-3">未找到匹配买家</p>
-          )}
-          <div className="flex justify-between pt-2">
-            <button onClick={() => setStep('buyer_link')} className="px-3 py-2 text-sm border border-gray-200 text-gray-700">返回</button>
-            <button onClick={() => { setStep('intent_details'); }} className="px-3 py-2 text-sm text-gray-500 hover:text-gray-700">跳过关联</button>
-          </div>
-        </div>
-      )}
+        </Field>
 
-      {/* Step 1c: Create new buyer party */}
-      {step === 'buyer_new' && (
-        <div className="space-y-3">
-          <Field label="买家名称 *">
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={newPartyName}
-                onChange={(e) => { setNewPartyName(e.target.value); setDedupChecked(false); setDedupCheck(null); }}
-                placeholder="例如：浙江某国资平台"
-                className="input flex-1"
-                autoFocus
-              />
-              <button
-                onClick={handleNewPartyCheck}
-                disabled={searching || !newPartyName.trim()}
-                className="px-3 py-2 border border-gray-200 text-sm text-gray-700 hover:border-brand-500 hover:text-brand-600 disabled:opacity-50 whitespace-nowrap"
-              >
-                {searching ? '查重中' : '查重'}
-              </button>
-            </div>
-          </Field>
-          {dedupChecked && Boolean(dedupCheck?.matches.length) && (
-            <div className="border border-amber-200 bg-amber-50 p-3 space-y-2">
-              <p className="text-xs font-medium text-amber-700">发现相似买家，请确认是否已存在：</p>
-              {dedupCheck!.matches.map((match) => (
-                <div key={`${match.buyer_name}-${match.match_type}`} className="text-sm text-gray-800">
-                  <span className="font-medium">{match.buyer_name}</span>
-                  {match.legal_name && <span className="text-xs text-gray-500"> · {match.legal_name}</span>}
-                  <span className="ml-2 text-xs text-amber-700">负责人：{match.owner_name || '未指派'}</span>
-                  <span className="ml-2 text-xs text-gray-500">匹配：{dedupMatchLabel(match.match_type)}</span>
-                </div>
-              ))}
-            </div>
-          )}
-          {dedupChecked && !dedupCheck?.matches.length && (
-            <p className="text-xs text-emerald-600">未发现重名买家</p>
-          )}
-          <div className="flex justify-between pt-2">
-            <button onClick={() => setStep('buyer_link')} className="px-3 py-2 text-sm border border-gray-200 text-gray-700">返回</button>
-            <button
-              onClick={handleConfirmNewParty}
-              disabled={saving || !newPartyName.trim()}
-              className="px-4 py-2 text-sm bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50"
-            >
-              {saving ? '创建中...' : '创建并继续'}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Step 2: Intent details */}
-      {step === 'intent_details' && (
-        <form onSubmit={handleSubmit} className="space-y-5">
-          <div className="border border-brand-100 bg-brand-50 px-3 py-2.5 text-xs text-brand-800 flex gap-2">
-            <Building2 className="w-4 h-4 mt-0.5 shrink-0" />
-            <p className="leading-relaxed">
-              可以先填关键条件，再粘贴买家需求原文或上传附件。若材料里识别到更完整的行业、地区、利润/市值/溢价等要求，解析结果会自动补全字段。
-            </p>
-          </div>
-
-          {selectedParty && (
-            <div className="flex items-center gap-2 px-3 py-2 bg-gray-50 border border-gray-200 text-sm">
-              <span className="text-gray-500">关联买家：</span>
-              <span className="font-medium text-gray-900">{selectedParty.buyer_name}</span>
-            </div>
-          )}
-
-          <Field label="意向名称 *">
-            <input
-              type="text"
-              value={form.intent_name}
-              onChange={(e) => updateForm('intent_name', e.target.value)}
-              className="input"
-              placeholder="例如：浙江国资医药健康并表需求"
-              autoFocus
-            />
-          </Field>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <Field label="行业">
-              <input type="text" value={form.industry_primary} onChange={(e) => updateForm('industry_primary', e.target.value)} className="input" placeholder="可选，如医药健康；留空由系统解析" />
-            </Field>
-            <Field label="地区范围">
-              <input type="text" value={form.region_scope_summary} onChange={(e) => updateForm('region_scope_summary', e.target.value)} className="input" placeholder="如：浙江优先，长三角可接受" />
-            </Field>
-            <Field label="最低净利润">
-              <input type="text" value={form.min_net_profit_yuan} onChange={(e) => updateForm('min_net_profit_yuan', e.target.value)} className="input" placeholder="例如：2000万、1亿" />
-            </Field>
-            <Field label="PE 上限">
-              <input type="text" value={form.max_pe} onChange={(e) => updateForm('max_pe', e.target.value)} className="input" placeholder="例如：13" />
-            </Field>
-            <Field label="市值范围">
-              <input type="text" value={form.market_cap_range} onChange={(e) => updateForm('market_cap_range', e.target.value)} className="input" placeholder="例如：5亿-30亿、5亿以上、30亿以内" />
-            </Field>
-            <Field label="上市状态偏好">
-              <select value={form.preferred_listed_status} onChange={(e) => updateForm('preferred_listed_status', e.target.value)} className="input">
-                <option value="">未明确</option>
-                <option value="listed">已上市</option>
-                <option value="preparing_listing">准备上市</option>
-                <option value="unlisted">未上市</option>
-                <option value="any">均可</option>
-              </select>
-            </Field>
-            <Field label="并表要求">
-              <select value={form.requires_consolidation} onChange={(e) => updateForm('requires_consolidation', e.target.value)} className="input">
-                <option value="">未明确</option>
-                <option value="yes">需要并表</option>
-                <option value="no">不需要并表</option>
-              </select>
-            </Field>
-            <Field label="溢价上限 (%)">
-              <input type="text" value={form.max_premium_rate} onChange={(e) => updateForm('max_premium_rate', e.target.value)} className="input" placeholder="例如：20" />
-            </Field>
-            <Field label="负债率上限 (%)">
-              <input type="text" value={form.max_debt_ratio} onChange={(e) => updateForm('max_debt_ratio', e.target.value)} className="input" placeholder="例如：65" />
-            </Field>
-          </div>
-
-          <Field label="买家需求原文 / 补充材料">
-            <textarea
-              value={form.raw_requirement_text}
-              onChange={(e) => updateForm('raw_requirement_text', e.target.value)}
-              className="input min-h-[130px] resize-y leading-relaxed"
-              placeholder="可粘贴买家的聊天记录、需求邮件、投资偏好说明等大段文本，系统会解析补全上面的结构化字段。"
-            />
-          </Field>
-
-          <Field label="其他要求 / 排除项">
-            <textarea
-              value={form.negative_summary}
-              onChange={(e) => updateForm('negative_summary', e.target.value)}
-              className="input min-h-[60px] resize-y"
-              placeholder="例如：不接受重大诉讼、冻结、执行或违规违法风险"
-            />
-          </Field>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">附件/截图</label>
-            <div
-              className="border border-dashed border-gray-300 bg-gray-50 px-4 py-4 text-sm text-gray-600 transition-colors hover:border-brand-300 hover:bg-brand-50/40"
-              onDragOver={(event) => event.preventDefault()}
-              onDrop={handleFileDrop}
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex items-center gap-2 text-gray-800 font-medium">
-                  <Upload className="w-4 h-4 text-brand-600" />
-                  拖拽文件到这里，或上传图片、PDF、Office、文本附件
-                </div>
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  className="shrink-0 bg-white border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:border-brand-300 hover:text-brand-700"
-                >
-                  选择文件
-                </button>
+        {dedupChecked && Boolean(dedupCheck?.matches.length) && (
+          <div className="border border-amber-200 bg-amber-50 p-3 space-y-2">
+            <p className="text-xs font-medium text-amber-700">发现相似买家，请确认是否重复录入：</p>
+            {dedupCheck!.matches.map((match) => (
+              <div key={`${match.buyer_name}-${match.match_type}`} className="text-sm text-gray-800">
+                <span className="font-medium">{match.buyer_name}</span>
+                {match.legal_name && <span className="text-xs text-gray-500"> · {match.legal_name}</span>}
+                <span className="ml-2 text-xs text-amber-700">负责人：{match.owner_name || '未指派'}</span>
+                <span className="ml-2 text-xs text-gray-500">匹配：{dedupMatchLabel(match.match_type)}</span>
               </div>
-              <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
-              <UploadPolicyCard policy={uploadPolicy} loading={policyLoading} error={policyError} />
-              <SelectedFiles files={selectedFiles} onRemove={removeFile} />
-              {fileError && <InlineWarning message={fileError} />}
-            </div>
+            ))}
+            <p className="text-xs text-amber-700">如确认为同一买家，建议取消后在该买家详情中录入更新；当前仍允许继续创建。</p>
           </div>
+        )}
+        {dedupChecked && !dedupCheck?.matches.length && (
+          <p className="text-xs text-emerald-600">未发现同名买家。</p>
+        )}
 
-          {submitError && <div className="border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{submitError}</div>}
+        <Field label="需求材料">
+          <textarea
+            value={form.raw_requirement_text}
+            onChange={(e) => updateForm('raw_requirement_text', e.target.value)}
+            className="input min-h-[170px] resize-y leading-relaxed"
+            placeholder={'可粘贴买家的聊天记录、邮件、投资偏好或访谈纪要。\n建议包含：关注行业、地区范围、上市/非上市偏好、市值或估值、利润/PE/负债率、股权比例、交易方式、排除项。\n示例：关注长三角医药健康资产，净利润2000万以上，优先控股并表，不接受重大诉讼或执行风险。'}
+          />
+        </Field>
 
-          <div className="flex items-center justify-between gap-3 pt-2">
-            <p className="text-xs text-gray-400">
-              {selectedFiles.length > 0 || form.raw_requirement_text.trim()
-                ? '创建后会自动进入解析队列，解析结果可在意向详情查看。'
-                : '仅创建基础意向，不触发解析。'}
-            </p>
-            <div className="flex justify-end gap-2">
-              <button type="button" onClick={() => setStep('buyer_link')} className="px-3 py-2 text-sm border border-gray-200 text-gray-700">返回</button>
-              <button type="button" onClick={onClose} className="px-4 py-2 text-sm border border-gray-200 text-gray-700">取消</button>
-              <button type="submit" disabled={saving || !form.intent_name.trim()} className="px-4 py-2 text-sm bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50 inline-flex items-center gap-2">
-                {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                {saving ? '创建中...' : selectedFiles.length > 0 || form.raw_requirement_text.trim() ? '创建并解析' : '创建意向'}
+        <div>
+          <label className="block text-xs font-medium text-gray-600 mb-1">附件/截图</label>
+          <div
+            className="border border-dashed border-gray-300 bg-gray-50 px-4 py-4 text-sm text-gray-600 transition-colors hover:border-brand-300 hover:bg-brand-50/40"
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={handleFileDrop}
+          >
+            <div className="flex gap-2">
+              <div className="flex items-center gap-2 text-gray-800 font-medium">
+                <Upload className="w-4 h-4 text-brand-600" />
+                拖拽文件到这里，或上传图片、PDF、Office、文本附件
+              </div>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="ml-auto shrink-0 bg-white border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:border-brand-300 hover:text-brand-700"
+              >
+                选择文件
               </button>
             </div>
+            <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
+            <UploadPolicyCard policy={uploadPolicy} loading={policyLoading} error={policyError} />
+            <SelectedFiles files={selectedFiles} onRemove={removeFile} />
+            {fileError && <InlineWarning message={fileError} />}
           </div>
-        </form>
-      )}
+        </div>
+
+        {submitError && <div className="border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{submitError}</div>}
+
+        <div className="flex items-center justify-between gap-3 pt-2">
+          <p className="text-xs text-gray-400">
+            {selectedFiles.length > 0 || form.raw_requirement_text.trim()
+              ? '创建后会自动进入解析队列，解析结果可在意向详情查看。'
+              : '仅创建买家和基础意向，不触发解析。'}
+          </p>
+          <div className="flex justify-end gap-2">
+            <button type="button" onClick={onClose} className="px-4 py-2 text-sm border border-gray-200 text-gray-700">取消</button>
+            <button type="submit" disabled={saving || !form.buyer_name.trim()} className="px-4 py-2 text-sm bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50 inline-flex items-center gap-2">
+              {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+              {saving ? '创建中...' : selectedFiles.length > 0 || form.raw_requirement_text.trim() ? '创建并解析' : '创建买家'}
+            </button>
+          </div>
+        </div>
+      </form>
     </Modal>
   );
 }
 
-function parseMoneyToYuan(value: string): number | undefined {
-  const text = value.trim();
-  if (!text) return undefined;
-  const normalized = text.replace(/[,，\s]/g, '').replace(/人民币|CNY|RMB/gi, '');
-  const match = normalized.match(/^(\d+(?:\.\d+)?)(亿元|亿|万元|万|元)?$/);
-  if (!match) return undefined;
-  const amount = Number(match[1]);
-  if (!Number.isFinite(amount)) return undefined;
-  const unit = match[2] || '元';
-  if (unit === '亿元' || unit === '亿') return amount * 100000000;
-  if (unit === '万元' || unit === '万') return amount * 10000;
-  return amount;
+function defaultBuyerIntentName(buyerName: string): string {
+  const yearMonth = new Date().toISOString().slice(0, 7);
+  return `${buyerName}-并购需求（${yearMonth}）`;
 }
 
-function parseNumberInput(value: string): number | undefined {
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-  const num = Number(trimmed.replace(/[,，%\s]/g, ''));
-  return Number.isFinite(num) ? num : undefined;
-}
-
-function parseMarketCapRange(value: string): { min?: number; max?: number } {
-  const raw = value.trim();
-  if (!raw) return {};
-  const normalized = raw.replace(/\s/g, '');
-  const rangeMatch = normalized.match(/^(.+?)(?:[-~—]|至|到)(.+)$/);
-  if (rangeMatch) {
-    return { min: parseMoneyToYuan(rangeMatch[1]), max: parseMoneyToYuan(rangeMatch[2]) };
-  }
-  if (/(以上|起|\+)$/.test(normalized) || /^(>=?|大于|超过)/.test(normalized)) {
-    return { min: parseMoneyToYuan(normalized.replace(/以上|起|\+|>=?|大于|超过/g, '')) };
-  }
-  if (/(以内|以下)$/.test(normalized) || /^(<=?|不超过|小于)/.test(normalized)) {
-    return { max: parseMoneyToYuan(normalized.replace(/以内|以下|<=?|不超过|小于/g, '')) };
-  }
-  const single = parseMoneyToYuan(normalized);
-  return single !== undefined ? { min: single } : {};
-}
-
-function normalizeOptional(value: string | undefined): string | undefined {
-  const trimmed = (value || '').trim();
-  return trimmed || undefined;
-}
-
-function buildIntentRawText(form: IntentForm, payload: BuyerIntentCreate, party: BuyerParty | null): string {
+function buildBuyerIntakeRawText(buyerName: string, materialText: string): string {
   const lines = [
-    '【新建买家意向初始输入】',
-    `意向名称：${payload.intent_name}`,
-    party ? `关联买家：${party.buyer_name}` : null,
-    form.industry_primary.trim() ? `行业：${form.industry_primary.trim()}` : null,
-    form.region_scope_summary.trim() ? `地区范围：${form.region_scope_summary.trim()}` : null,
-    form.min_net_profit_yuan.trim() ? `最低净利润：${form.min_net_profit_yuan.trim()}` : null,
-    form.max_pe.trim() ? `PE上限：${form.max_pe.trim()}` : null,
-    form.market_cap_range.trim() ? `市值范围：${form.market_cap_range.trim()}` : null,
-    form.preferred_listed_status ? `上市状态偏好：${form.preferred_listed_status}` : null,
-    form.requires_consolidation ? `并表要求：${form.requires_consolidation}` : null,
-    form.max_premium_rate.trim() ? `溢价上限：${form.max_premium_rate.trim()}%` : null,
-    form.max_debt_ratio.trim() ? `负债率上限：${form.max_debt_ratio.trim()}%` : null,
-    form.negative_summary.trim() ? `其他要求/排除项：${form.negative_summary.trim()}` : null,
+    '【新建买家及并购需求初始输入】',
+    `买家名称：${buyerName}`,
     '',
-    '解析要求：请从下方需求原文和附件中提取买家的行业、地区、利润/市值/PE/溢价/负债率要求、上市偏好、并表控股要求、交易方式、风险容忍度等；如与上述初始输入冲突，以材料为准。行业和地区请输出中文，不要臆造材料中没有的信息。',
-  ].filter((line): line is string => line !== null);
+    '解析要求：请提取买家主体的基本信息（类型、集团、地区、主营业务、资金实力/规模、材料摘要）以及买家意向字段（行业、地区、利润、市值/估值、PE、溢价、负债率、上市偏好、股权比例、交易方式、风险容忍和排除项）。备注字段为人工维护，不要自动生成或覆盖。行业和地区请输出中文，不要臆造材料中没有的信息。',
+  ];
 
-  if (form.raw_requirement_text.trim()) {
-    lines.push('', '【需求原文/补充材料】', form.raw_requirement_text.trim());
+  if (materialText) {
+    lines.push('', '【需求原文/补充材料】', materialText);
   }
 
   return lines.join('\n');
@@ -1944,8 +1641,14 @@ function CreatePartyModal({ onClose, onCreated }: { onClose: () => void; onCreat
         <Field label="主营业务">
           <input type="text" value={form.main_business || ''} onChange={(e) => setForm({ ...form, main_business: e.target.value })} className="input" placeholder="国资产业投资与并购整合" />
         </Field>
-        <Field label="画像摘要">
+        <Field label="资金实力/规模">
+          <textarea value={form.capital_strength_summary || ''} onChange={(e) => setForm({ ...form, capital_strength_summary: e.target.value })} className="input min-h-[60px] resize-y" />
+        </Field>
+        <Field label="材料摘要">
           <textarea value={form.profile_summary || ''} onChange={(e) => setForm({ ...form, profile_summary: e.target.value })} className="input min-h-[60px] resize-y" />
+        </Field>
+        <Field label="备注">
+          <textarea value={form.notes || ''} onChange={(e) => setForm({ ...form, notes: e.target.value })} className="input min-h-[70px] resize-y" placeholder="人工维护，不参与推荐" />
         </Field>
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} className="px-4 py-2 text-sm border border-gray-200 text-gray-700">取消</button>
