@@ -1,4 +1,18 @@
 from pathlib import Path
+from typing import Any
+
+
+def run_migration_sql(bind: Any, name: str) -> None:
+    """Execute a migration SQL file statement by statement.
+
+    All alembic version files must route through this function instead of
+    calling bind.exec_driver_sql directly: psycopg3 scans driver-level SQL for
+    %-placeholders even when no parameters are bound, so literal percent signs
+    (e.g. LIKE '%x%') must be doubled or the migration fails in production
+    (incident: migration 031 on Railway).
+    """
+    for statement in split_sql_statements(load_migration_sql(name)):
+        bind.exec_driver_sql(statement.replace("%", "%%"))
 
 
 def load_migration_sql(name: str) -> str:

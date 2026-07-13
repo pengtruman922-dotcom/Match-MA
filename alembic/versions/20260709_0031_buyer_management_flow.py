@@ -9,7 +9,7 @@ from collections.abc import Sequence
 
 from alembic import op
 
-from backend.app.migration_sql import load_migration_sql, split_sql_statements
+from backend.app.migration_sql import run_migration_sql
 
 revision: str = "20260709_0031"
 down_revision: str | None = "20260709_0030"
@@ -18,10 +18,7 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    bind = op.get_bind()
-    sql = load_migration_sql("031_buyer_management_flow.sql")
-    for statement in split_sql_statements(sql):
-        bind.exec_driver_sql(statement)
+    run_migration_sql(op.get_bind(), "031_buyer_management_flow.sql")
 
 
 def downgrade() -> None:
