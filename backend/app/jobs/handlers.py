@@ -1818,7 +1818,7 @@ def _run_recommendation_deep_eval(
     reranked_candidates = _apply_deep_eval_results_to_candidates(
         candidates=candidates,
         results=results,
-        model_name=llm_result.model_name or str(node_config["model_name"]),
+        model_name=str(node_config["model_name"]),
     )
     _insert_rerank_trace(
         db,
@@ -1829,7 +1829,7 @@ def _run_recommendation_deep_eval(
         input_json=input_json,
         parsed_output_json={
             "engine": "llm_deep_eval",
-            "model": llm_result.model_name,
+            "model": str(node_config["model_name"]),
             "results": results,
             "reranked_candidates": reranked_candidates,
         },
@@ -1841,14 +1841,14 @@ def _run_recommendation_deep_eval(
         session_id=session_id,
         job_id=job.id,
         reranked_candidates=reranked_candidates,
-        model_name=llm_result.model_name or str(node_config["model_name"]),
+        model_name=str(node_config["model_name"]),
     )
     return {
         "handled": True,
         "job_type": job.job_type,
         "session_id": str(session_id),
         "engine": "llm_deep_eval",
-        "model_name": llm_result.model_name,
+        "model_name": str(node_config["model_name"]),
         "candidate_count": len(candidates),
         "reranked_count": len(reranked_candidates),
         "trace_created": True,
