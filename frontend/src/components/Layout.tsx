@@ -4,7 +4,6 @@ import { useState } from 'react';
 import { clearAuthSession, getStoredUser, isAdmin as isAdminRole } from '../lib/auth';
 
 const baseNavItems: Array<{ to: string; label: string; end?: boolean }> = [
-  { to: '/', label: '工作台', end: true },
   { to: '/targets', label: '标的管理' },
   { to: '/buyers', label: '买家管理' },
   { to: '/recommendations', label: '智能推荐' },

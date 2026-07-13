@@ -1420,7 +1420,7 @@ def _debug_center_quick_actions(overview: dict[str, Any]) -> list[dict[str, Any]
         {
             "key": "open_workbench",
             "label": "返回工作台",
-            "route": "/workbench",
+            "route": "/targets",
             "action": "open_workbench",
             "badge_count": overview.get("active_job_count"),
         },
@@ -1497,7 +1497,7 @@ def _compact_business_update_for_debug_center(row: dict[str, Any]) -> dict[str, 
         "failed_job_count": int(row.get("failed_job_count") or 0),
         "trace_count": int(row.get("trace_count") or 0),
         "created_at": row.get("created_at"),
-        "review_route": f"/updates/{row['id']}",
+        "review_route": f"/debug/entities/business_update/{row['id']}",
         "debug_ref": _debug_ref("business_update", row["id"]),
     }
 

@@ -32,12 +32,6 @@ import type {
   SellerTargetSuggestion,
 } from '../types/api';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
-import {
-  sellerTargetDisplayStatus,
-  sellerTargetDisplayStatusClass,
-  sellerTargetDisplayStatusLabel,
-  sellerTargetStatusLabel,
-} from '../lib/sellerTargetStatus';
 
 const PAGE_SIZE = 20;
 const PARSE_POLL_INTERVAL_MS = 4000;
@@ -58,7 +52,8 @@ type TargetFilters = {
   searchField?: SellerTargetSearchField;
   industry: string;
   region: string;
-  status: string;
+  recommendationStatus: string;
+  parseStatus: string;
   owner: string;
   page: number;
 };
@@ -70,7 +65,13 @@ export default function Targets() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState(filters.q);
-  const [filterOptions, setFilterOptions] = useState<SellerTargetFilterOptions>({ industries: [], regions: [], statuses: [] });
+  const [filterOptions, setFilterOptions] = useState<SellerTargetFilterOptions>({
+    industries: [],
+    regions: [],
+    statuses: [],
+    recommendation_statuses: [],
+    parse_statuses: [],
+  });
   const [suggestions, setSuggestions] = useState<SellerTargetSuggestion[]>([]);
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -88,7 +89,14 @@ export default function Targets() {
   const visibleIds = useMemo(() => items.map((item) => item.id), [items]);
   const selectedCount = selectedIds.size;
   const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
-  const activeFilterCount = [filters.q, filters.industry, filters.region, filters.status, filters.owner].filter(Boolean).length;
+  const activeFilterCount = [
+    filters.q,
+    filters.industry,
+    filters.region,
+    filters.recommendationStatus,
+    filters.parseStatus,
+    filters.owner,
+  ].filter(Boolean).length;
 
   const updateFilters = useCallback((patch: Partial<TargetFilters>, options?: { replace?: boolean }) => {
     const next = new URLSearchParams(searchParams);
@@ -96,7 +104,8 @@ export default function Targets() {
     if ('searchField' in patch) setOrDelete(next, 'searchField', patch.searchField);
     if ('industry' in patch) setOrDelete(next, 'industry', patch.industry);
     if ('region' in patch) setOrDelete(next, 'region', patch.region);
-    if ('status' in patch) setOrDelete(next, 'status', patch.status);
+    if ('recommendationStatus' in patch) setOrDelete(next, 'recommendationStatus', patch.recommendationStatus);
+    if ('parseStatus' in patch) setOrDelete(next, 'parseStatus', patch.parseStatus);
     if ('owner' in patch) setOrDelete(next, 'owner', patch.owner);
     if (patch.page !== undefined) {
       if (patch.page <= 1) next.delete('page');
@@ -113,7 +122,8 @@ export default function Targets() {
         search_field: filters.searchField,
         industry: filters.industry || undefined,
         region: filters.region || undefined,
-        status: filters.status || undefined,
+        recommendation_status: filters.recommendationStatus || undefined,
+        parse_status: filters.parseStatus || undefined,
         owner: filters.owner || undefined,
         limit: PAGE_SIZE,
         offset: (filters.page - 1) * PAGE_SIZE,
@@ -351,10 +361,16 @@ export default function Targets() {
           onChange={(value) => updateFilters({ region: value, page: 1 })}
         />
         <FilterSelect
-          label="状态"
-          value={filters.status}
-          options={filterOptions.statuses}
-          onChange={(value) => updateFilters({ status: value, page: 1 })}
+          label="推荐状态"
+          value={filters.recommendationStatus}
+          options={filterOptions.recommendation_statuses || []}
+          onChange={(value) => updateFilters({ recommendationStatus: value, page: 1 })}
+        />
+        <FilterSelect
+          label="解析状态"
+          value={filters.parseStatus}
+          options={filterOptions.parse_statuses || []}
+          onChange={(value) => updateFilters({ parseStatus: value, page: 1 })}
         />
         {admin && (
           <FilterSelect
@@ -371,7 +387,16 @@ export default function Targets() {
           <button
             onClick={() => {
               setSearchQuery('');
-              updateFilters({ q: '', searchField: undefined, industry: '', region: '', status: '', owner: '', page: 1 });
+              updateFilters({
+                q: '',
+                searchField: undefined,
+                industry: '',
+                region: '',
+                recommendationStatus: '',
+                parseStatus: '',
+                owner: '',
+                page: 1,
+              });
             }}
             className="px-3 py-2 text-sm text-gray-500 hover:text-gray-700"
           >
@@ -450,7 +475,8 @@ export default function Targets() {
                 </th>
                 <th className="sticky left-12 z-20 w-[220px] bg-gray-50 text-left px-4 py-3 font-medium text-gray-600">标的名称</th>
                 <th className="w-20 max-w-20 text-left px-3 py-3 font-medium text-gray-600">标的主体</th>
-                <th className="w-[110px] text-center px-4 py-3 font-medium text-gray-600">状态</th>
+                <th className="w-[110px] text-center px-4 py-3 font-medium text-gray-600">推荐状态</th>
+                <th className="w-[100px] text-center px-4 py-3 font-medium text-gray-600">解析状态</th>
                 <th className="w-[92px] text-left px-4 py-3 font-medium text-gray-600">类型</th>
                 <th className="w-[96px] text-left px-4 py-3 font-medium text-gray-600">上市状态</th>
                 <th className="w-[150px] text-left px-4 py-3 font-medium text-gray-600">行业</th>
@@ -471,13 +497,13 @@ export default function Targets() {
             <tbody className="divide-y divide-gray-100">
               {loading ? (
                 <tr>
-                  <td colSpan={19} className="px-4 py-8 text-center">
+                  <td colSpan={20} className="px-4 py-8 text-center">
                     <div className="w-5 h-5 border-2 border-brand-600 border-t-transparent rounded-full animate-spin mx-auto" />
                   </td>
                 </tr>
               ) : items.length === 0 ? (
                 <tr>
-                  <td colSpan={19} className="px-4 py-8 text-center text-gray-400">暂无匹配的标的数据</td>
+                  <td colSpan={20} className="px-4 py-8 text-center text-gray-400">暂无匹配的标的数据</td>
                 </tr>
               ) : (
                 items.map((item) => (
@@ -581,7 +607,8 @@ function TargetRow({
         )}
       </td>
       <td className="w-20 max-w-20 px-3 py-3 text-gray-600"><ClampedText value={subject} /></td>
-      <td className="px-4 py-3 text-center"><DisplayStatusBadge item={item} /></td>
+      <td className="px-4 py-3 text-center"><RecommendationStatusBadge item={item} /></td>
+      <td className="px-4 py-3 text-center"><TargetParseStatusBadge item={item} /></td>
       <td className="px-4 py-3 text-gray-600"><ClampedText value={formatTargetType(item.target_type)} /></td>
       <td className="px-4 py-3 text-gray-600"><ClampedText value={formatListedStatus(item.listed_status)} /></td>
       <td className="px-4 py-3 text-gray-600"><ClampedText value={industry} /></td>
@@ -765,7 +792,8 @@ function readTargetFilters(searchParams: URLSearchParams): TargetFilters {
     searchField,
     industry: searchParams.get('industry') || '',
     region: searchParams.get('region') || '',
-    status: searchParams.get('status') || '',
+    recommendationStatus: searchParams.get('recommendationStatus') || '',
+    parseStatus: searchParams.get('parseStatus') || '',
     owner: searchParams.get('owner') || '',
     page,
   };
@@ -780,17 +808,42 @@ function setOrDelete(params: URLSearchParams, key: string, value: string | undef
   else params.delete(key);
 }
 
-function DisplayStatusBadge({ item }: { item: SellerTarget }) {
-  const displayStatus = sellerTargetDisplayStatus(item);
+function RecommendationStatusBadge({ item }: { item: SellerTarget }) {
+  let label = '—';
+  let color = 'text-gray-300';
+  if (item.lifecycle_status === 'sold') {
+    label = '已售出';
+    color = 'bg-violet-50 text-violet-700';
+  } else if (item.lifecycle_status === 'off_market') {
+    label = '已停售';
+    color = 'bg-amber-50 text-amber-700';
+  } else if (item.recommendation_status === 'recommendable') {
+    label = '可推荐';
+    color = 'bg-emerald-50 text-emerald-700';
+  }
   return (
-    <span
-      className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 font-medium ${sellerTargetDisplayStatusClass(displayStatus)}`}
-      title={`信息状态：${sellerTargetStatusLabel(item.information_status, 'information')}`}
-    >
-      {displayStatus === 'parsing' && <Loader2 className="w-3 h-3 animate-spin" />}
-      {sellerTargetDisplayStatusLabel(displayStatus)}
+    <span className={`inline-flex items-center px-2 py-0.5 text-xs font-medium ${color}`}>
+      {label}
     </span>
   );
+}
+
+function TargetParseStatusBadge({ item }: { item: SellerTarget }) {
+  const parsing = isParsingTarget(item);
+  const failed = item.information_status === 'parse_failed';
+  const label = parsing ? '解析中' : failed ? '解析失败' : '已解析';
+  const color = parsing
+    ? 'bg-blue-50 text-blue-700'
+    : failed
+      ? 'bg-red-50 text-red-700'
+      : 'bg-emerald-50 text-emerald-700';
+  const content = (
+    <span className={`inline-flex items-center justify-center gap-1 whitespace-nowrap px-2 py-0.5 text-xs font-medium ${color}`}>
+      {parsing ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+      {label}
+    </span>
+  );
+  return failed ? <Link to={`/targets/${item.id}?tab=history`}>{content}</Link> : content;
 }
 
 function YesNoBadge({ value }: { value: string | null }) {
@@ -1024,7 +1077,7 @@ function CreateTargetModal({ onClose, onCreated }: { onClose: () => void; onCrea
         target_type: form.targetType,
         target_subject_name: normalizeOptional(form.targetSubjectName),
         recommendation_status: 'not_recommendable',
-        information_status: shouldParse ? 'parsing' : 'pending_review',
+        information_status: shouldParse ? 'parsing' : 'normal',
         industry_primary: normalizeOptional(form.industry),
         headquarter_province: region.province,
         headquarter_city: region.city,

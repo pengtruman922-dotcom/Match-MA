@@ -1202,7 +1202,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
     try:
         created_actions = _insert_extracted_actions(db, business_update_id, actions, job.id)
         auto_apply_results = _auto_apply_safe_actions(db, created_actions)
-        pending_review_target_count = _mark_bound_seller_targets_pending_review_after_business_update_parse(
+        completed_target_count = _mark_bound_seller_targets_complete_after_business_update_parse(
             db,
             business_update,
             auto_apply_results,
@@ -1240,7 +1240,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
                     "last_processing_result": "llm_parsed",
                     "last_actions_created": len(created_actions),
                     "last_auto_applied_actions": len(auto_apply_results),
-                    "last_bound_seller_targets_pending_review": pending_review_target_count,
+                    "last_bound_seller_targets_completed": completed_target_count,
                     "last_schema_valid": schema_validation_json["valid"],
                 },
             },
@@ -1263,7 +1263,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
         "prompt_version": node_config["prompt_version"],
         "schema_valid": schema_validation_json["valid"],
         "auto_applied_actions": len(auto_apply_results),
-        "bound_seller_targets_pending_review": pending_review_target_count,
+        "bound_seller_targets_completed": completed_target_count,
     }
 
 
@@ -5650,7 +5650,7 @@ def _mark_bound_seller_targets_parse_failed_if_final_attempt(
     )
 
 
-def _mark_bound_seller_targets_pending_review_after_business_update_parse(
+def _mark_bound_seller_targets_complete_after_business_update_parse(
     db: Session,
     business_update: dict[str, Any],
     auto_apply_results: list[dict[str, Any]],
@@ -5671,7 +5671,7 @@ def _mark_bound_seller_targets_pending_review_after_business_update_parse(
         text(
             """
             update seller_target
-            set information_status = 'pending_review',
+            set information_status = 'normal',
                 updated_at = now(),
                 updated_by = :updated_by,
                 metadata_json = metadata_json || :metadata_patch
@@ -5688,8 +5688,8 @@ def _mark_bound_seller_targets_pending_review_after_business_update_parse(
             "seller_target_ids": remaining_ids,
             "updated_by": SYSTEM_USER_ID,
             "metadata_patch": {
-                "last_parse_pending_review_job_id": str(job_id),
-                "last_parse_pending_review_reason": "business_update_parsed_without_auto_apply",
+                "last_parse_completed_job_id": str(job_id),
+                "last_parse_completed_reason": "business_update_parsed_without_field_changes",
             },
         },
     )

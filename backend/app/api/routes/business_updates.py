@@ -2003,7 +2003,7 @@ def _enrich_review_action(
         "can_apply": apply_supported
         and action["applied_at"] is None
         and action["review_status"] in {"accepted", "auto_accepted"},
-        "review_route": f"/updates/{action['business_update_id']}?action={action['id']}",
+        "review_route": _history_route(target_ref.get("entity_type"), target_ref.get("entity_id")),
         "debug_ref": _debug_ref("business_update", action["business_update_id"]),
     }
 
@@ -2234,7 +2234,7 @@ def _review_page_quick_actions(business_update: dict[str, Any], overview: dict[s
         {
             "key": "review_pending",
             "label": "复核待处理",
-            "route": f"/updates/{business_update_id}",
+            "route": None,
             "action": "focus_pending_actions",
             "enabled": overview["pending_review_count"] > 0,
             "badge_count": overview["pending_review_count"],
@@ -2590,6 +2590,17 @@ def _entity_ref(entity_type: str, entity_id: Any) -> dict[str, Any]:
         "route": route_map.get(entity_type),
         "debug_ref": _debug_ref(entity_type, entity_id_text) if entity_type in debug_supported else None,
     }
+
+
+def _history_route(entity_type: Any, entity_id: Any) -> str | None:
+    if not entity_type or not entity_id:
+        return None
+    base_route = _entity_ref(str(entity_type), entity_id).get("route")
+    if not base_route:
+        return None
+    if entity_type in {"seller_target", "buyer_intent", "buyer_party"}:
+        return f"{base_route}?tab=history"
+    return base_route
 
 
 def _truncate_review_text(value: Any, max_length: int) -> str | None:

@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -8,8 +8,14 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from backend.app.api.authn import CurrentUser, require_admin
-from backend.app.api.routes.utils import owner_scope_required, relation_visible_sql, visible_scope_sql
-from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+from backend.app.api.routes.utils import (
+    ensure_entity_visible,
+    ensure_entity_writable,
+    owner_scope_required,
+    relation_visible_sql,
+    visible_scope_sql,
+)
+from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 
@@ -46,6 +52,59 @@ class UpdateLogRollbackOut(BaseModel):
     skipped_logs: list[dict[str, Any]]
     extracted_action_id: UUID | None = None
     business_update_id: UUID | None = None
+
+
+class UpdateBatchAttachmentOut(BaseModel):
+    id: UUID
+    file_name: str
+    mime_type: str | None = None
+    file_size: int | None = None
+    uploaded_at: str
+    download_route: str
+
+
+class UpdateBatchChangeOut(BaseModel):
+    log_id: UUID
+    field_path: str
+    old_value: Any
+    new_value: Any
+    applied_at: str
+    rollback_at: str | None = None
+
+
+class UpdateBatchOut(BaseModel):
+    batch_key: str
+    entity_type: str
+    entity_id: UUID
+    source_type: str
+    source_id: UUID | None = None
+    input_type: str | None = None
+    input_summary: str | None = None
+    raw_input: str | None = None
+    attachments: list[UpdateBatchAttachmentOut]
+    operator_user_id: UUID | None = None
+    operator_name: str
+    submitted_at: str
+    applied_at: str | None = None
+    status: str
+    changes: list[UpdateBatchChangeOut]
+    changed_field_count: int
+    is_latest_effective_batch: bool
+    can_rollback: bool
+    rollback_block_reason: str | None = None
+
+
+class UpdateBatchListOut(BaseModel):
+    items: list[UpdateBatchOut]
+    total: int
+    limit: int
+    offset: int
+
+
+class UpdateBatchRollbackRequest(BaseModel):
+    entity_type: Literal["seller_target", "buyer_intent"]
+    entity_id: UUID
+    reason: str | None = None
 
 
 @router.get("", response_model=list[UpdateLogOut])
@@ -142,6 +201,77 @@ def list_update_logs(
     return [dict(row) for row in rows]
 
 
+@router.get("/batches", response_model=UpdateBatchListOut)
+def list_update_batches(
+    current_user: CurrentUser,
+    entity_type: Literal["seller_target", "buyer_intent"] = Query(),
+    entity_id: UUID = Query(),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    ensure_entity_visible(db, current_user, entity_type=entity_type, entity_id=entity_id)
+    batches = _build_update_batches(db, entity_type=entity_type, entity_id=entity_id)
+    return {
+        "items": [_public_update_batch(item) for item in batches[offset : offset + limit]],
+        "total": len(batches),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@router.post("/batches/{batch_key}/rollback", response_model=UpdateLogRollbackOut)
+def rollback_update_batch(
+    batch_key: str,
+    payload: UpdateBatchRollbackRequest,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    ensure_entity_writable(
+        db,
+        current_user,
+        entity_type=payload.entity_type,
+        entity_id=payload.entity_id,
+    )
+    batch = next(
+        (
+            item
+            for item in _build_update_batches(
+                db,
+                entity_type=payload.entity_type,
+                entity_id=payload.entity_id,
+            )
+            if item["batch_key"] == batch_key
+        ),
+        None,
+    )
+    if batch is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Update batch not found.")
+    if not batch["can_rollback"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=batch.get("rollback_block_reason") or "This update batch cannot be rolled back.",
+        )
+
+    logs = batch.get("_active_logs") or []
+    if not logs:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This update batch has no active changes.")
+    result = _rollback_logs(
+        db,
+        logs,
+        force=False,
+        reason=payload.reason,
+        actor_user_id=current_user.user_id,
+    )
+    extracted_action_ids = {
+        log.get("extracted_action_id") for log in logs if log.get("extracted_action_id") is not None
+    }
+    for extracted_action_id in extracted_action_ids:
+        _mark_action_rejected_after_rollback(db, extracted_action_id, actor_user_id=current_user.user_id)
+    db.commit()
+    return result
+
+
 @router.post("/{log_id}/rollback", response_model=UpdateLogRollbackOut)
 def rollback_update_log(
     log_id: UUID,
@@ -152,7 +282,13 @@ def rollback_update_log(
     require_admin(current_user)
     request = payload or UpdateLogRollbackRequest()
     log = _get_update_log_or_404(db, log_id)
-    result = _rollback_logs(db, [log], force=request.force, reason=request.reason)
+    result = _rollback_logs(
+        db,
+        [log],
+        force=request.force,
+        reason=request.reason,
+        actor_user_id=current_user.user_id,
+    )
     db.commit()
     return result
 
@@ -176,10 +312,510 @@ def rollback_extracted_action_logs(
             "extracted_action_id": extracted_action_id,
             "business_update_id": None,
         }
-    result = _rollback_logs(db, logs, force=request.force, reason=request.reason)
-    _mark_action_rejected_after_rollback(db, extracted_action_id)
+    result = _rollback_logs(
+        db,
+        logs,
+        force=request.force,
+        reason=request.reason,
+        actor_user_id=current_user.user_id,
+    )
+    _mark_action_rejected_after_rollback(db, extracted_action_id, actor_user_id=current_user.user_id)
     db.commit()
     return {**result, "extracted_action_id": extracted_action_id}
+
+
+def _build_update_batches(
+    db: Session,
+    *,
+    entity_type: str,
+    entity_id: UUID,
+) -> list[dict[str, Any]]:
+    logs = _update_batch_logs(db, entity_type=entity_type, entity_id=entity_id)
+    business_update_ids = {
+        row["business_update_id"] for row in logs if row.get("business_update_id") is not None
+    }
+    business_updates = _entity_business_updates(
+        db,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        extra_ids=business_update_ids,
+    )
+    business_updates_by_id = {str(row["id"]): row for row in business_updates}
+    attachments_by_update = _business_update_attachments(db, [row["id"] for row in business_updates])
+    parse_jobs = _entity_parse_jobs(db, entity_type=entity_type, entity_id=entity_id)
+    parse_jobs_by_id = {str(row["id"]): row for row in parse_jobs}
+
+    grouped_logs: dict[str, list[dict[str, Any]]] = {}
+    manual_key_by_signature: dict[tuple[str, str, str], str] = {}
+    for row in logs:
+        batch_key = _batch_key_for_log(row, manual_key_by_signature)
+        grouped_logs.setdefault(batch_key, []).append(row)
+
+    batches: list[dict[str, Any]] = []
+    consumed_keys: set[str] = set()
+    for update in business_updates:
+        update_id = str(update["id"])
+        batch_key = f"business-update-{update_id}"
+        batch_logs = grouped_logs.get(batch_key, [])
+        batches.append(
+            _business_update_batch(
+                update,
+                batch_logs,
+                attachments_by_update.get(update_id, []),
+                entity_type=entity_type,
+                entity_id=entity_id,
+            )
+        )
+        consumed_keys.add(batch_key)
+
+    for job in parse_jobs:
+        business_update_id = _payload_uuid_text(job.get("payload_json"), "business_update_id")
+        if business_update_id and business_update_id in business_updates_by_id:
+            continue
+        job_id = str(job["id"])
+        batch_key = f"parse-job-{job_id}"
+        batches.append(
+            _parse_job_batch(
+                job,
+                grouped_logs.get(batch_key, []),
+                entity_type=entity_type,
+                entity_id=entity_id,
+            )
+        )
+        consumed_keys.add(batch_key)
+
+    for batch_key, batch_logs in grouped_logs.items():
+        if batch_key in consumed_keys:
+            continue
+        source_job = None
+        if batch_key.startswith("parse-job-"):
+            source_job = parse_jobs_by_id.get(batch_key.removeprefix("parse-job-"))
+        if source_job is not None:
+            batches.append(
+                _parse_job_batch(
+                    source_job,
+                    batch_logs,
+                    entity_type=entity_type,
+                    entity_id=entity_id,
+                )
+            )
+            continue
+        batches.append(
+            _log_only_batch(
+                batch_key,
+                batch_logs,
+                entity_type=entity_type,
+                entity_id=entity_id,
+            )
+        )
+
+    latest = _latest_effective_batch(batches)
+    for batch in batches:
+        active_logs = batch.get("_active_logs") or []
+        batch["is_latest_effective_batch"] = batch is latest
+        batch["can_rollback"] = False
+        batch["rollback_block_reason"] = _batch_rollback_block_reason(batch, latest)
+        if batch is latest and active_logs and batch["rollback_block_reason"] is None:
+            current_values_match = all(
+                _values_match_for_rollback(_get_current_field_value(db, log), log.get("new_value_json"))
+                for log in active_logs
+            )
+            if current_values_match:
+                batch["can_rollback"] = True
+            else:
+                batch["rollback_block_reason"] = "字段已发生后续变化，请手工修正"
+
+    return sorted(batches, key=_batch_sort_value, reverse=True)
+
+
+def _update_batch_logs(db: Session, *, entity_type: str, entity_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select
+              al.id, al.extracted_action_id, al.business_update_id,
+              al.entity_type, al.entity_id, al.field_path,
+              al.old_value_json, al.new_value_json, al.source_type, al.source_id,
+              al.applied_by, al.applied_at::text as applied_at,
+              al.edited_before_apply, al.can_rollback,
+              al.rollback_at::text as rollback_at, al.metadata_json,
+              applied_user.name as applied_by_name
+            from action_application_log al
+            left join app_user applied_user on applied_user.id = al.applied_by
+            where al.team_id = :team_id
+              and al.workspace_id = :workspace_id
+              and al.entity_type = :entity_type
+              and al.entity_id = :entity_id
+            order by al.applied_at desc, al.id desc
+            limit 1000
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _entity_business_updates(
+    db: Session,
+    *,
+    entity_type: str,
+    entity_id: UUID,
+    extra_ids: set[UUID],
+) -> list[dict[str, Any]]:
+    bound_column = {
+        "seller_target": "bound_seller_target_ids_json",
+        "buyer_intent": "bound_buyer_intent_ids_json",
+    }[entity_type]
+    extra_clause = ""
+    params: dict[str, Any] = {
+        "team_id": DEFAULT_TEAM_ID,
+        "workspace_id": DEFAULT_WORKSPACE_ID,
+        "entity_id_text": str(entity_id),
+    }
+    statement = f"""
+        select
+          bu.id, bu.raw_text, bu.input_type, bu.processing_status,
+          bu.created_by, bu.created_at::text as created_at, bu.metadata_json,
+          creator.name as created_by_name
+        from business_update bu
+        left join app_user creator on creator.id = bu.created_by
+        where bu.team_id = :team_id
+          and bu.workspace_id = :workspace_id
+          and (
+            bu.{bound_column} ? :entity_id_text
+            {{extra_clause}}
+          )
+        order by bu.created_at desc
+        limit 200
+    """
+    if extra_ids:
+        extra_clause = "or bu.id in :extra_ids"
+        params["extra_ids"] = tuple(extra_ids)
+        query = text(statement.format(extra_clause=extra_clause)).bindparams(bindparam("extra_ids", expanding=True))
+    else:
+        query = text(statement.format(extra_clause=""))
+    rows = db.execute(query, params).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _business_update_attachments(
+    db: Session,
+    business_update_ids: list[UUID],
+) -> dict[str, list[dict[str, Any]]]:
+    if not business_update_ids:
+        return {}
+    rows = db.execute(
+        text(
+            """
+            select
+              al.entity_id as business_update_id,
+              a.id, a.file_name, a.mime_type, a.file_size,
+              a.uploaded_at::text as uploaded_at
+            from attachment_link al
+            join attachment a on a.id = al.attachment_id
+            where al.team_id = :team_id
+              and al.workspace_id = :workspace_id
+              and al.entity_type = 'business_update'
+              and al.entity_id in :business_update_ids
+              and a.deleted_at is null
+            order by a.uploaded_at asc
+            """
+        ).bindparams(bindparam("business_update_ids", expanding=True)),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "business_update_ids": tuple(business_update_ids),
+        },
+    ).mappings().all()
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        item = dict(row)
+        update_id = str(item.pop("business_update_id"))
+        item["download_route"] = f"/attachments/{item['id']}/download"
+        grouped.setdefault(update_id, []).append(item)
+    return grouped
+
+
+def _entity_parse_jobs(db: Session, *, entity_type: str, entity_id: UUID) -> list[dict[str, Any]]:
+    job_type = {"seller_target": "seller_target_parse", "buyer_intent": "buyer_intent_parse"}[entity_type]
+    rows = db.execute(
+        text(
+            """
+            select
+              job.id, job.job_type, job.status, job.entity_type, job.entity_id,
+              job.payload_json, job.result_json, job.error_code, job.error_message,
+              job.created_by, job.created_at::text as created_at,
+              job.started_at::text as started_at, job.finished_at::text as finished_at,
+              creator.name as created_by_name
+            from background_job job
+            left join app_user creator on creator.id = job.created_by
+            where job.team_id = :team_id
+              and job.workspace_id = :workspace_id
+              and job.job_type = :job_type
+              and job.entity_type = :entity_type
+              and job.entity_id = :entity_id
+            order by job.created_at desc
+            limit 100
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "job_type": job_type,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _batch_key_for_log(
+    row: dict[str, Any],
+    manual_key_by_signature: dict[tuple[str, str, str], str],
+) -> str:
+    if row.get("source_type") == "rollback":
+        signature = (
+            "rollback",
+            str(row.get("applied_by") or "system"),
+            str(row.get("applied_at") or ""),
+        )
+        if signature not in manual_key_by_signature:
+            manual_key_by_signature[signature] = f"rollback-{row['id']}"
+        return manual_key_by_signature[signature]
+    if row.get("business_update_id"):
+        return f"business-update-{row['business_update_id']}"
+    if row.get("source_type") in {"seller_target_parse", "buyer_intent_parse"} and row.get("source_id"):
+        return f"parse-job-{row['source_id']}"
+    signature = (
+        str(row.get("source_type") or "direct_api"),
+        str(row.get("applied_by") or "system"),
+        str(row.get("applied_at") or ""),
+    )
+    if signature not in manual_key_by_signature:
+        prefix = "rollback" if row.get("source_type") == "rollback" else "manual"
+        manual_key_by_signature[signature] = f"{prefix}-{row['id']}"
+    return manual_key_by_signature[signature]
+
+
+def _business_update_batch(
+    update: dict[str, Any],
+    logs: list[dict[str, Any]],
+    attachments: list[dict[str, Any]],
+    *,
+    entity_type: str,
+    entity_id: UUID,
+) -> dict[str, Any]:
+    active_logs = _active_batch_logs(logs)
+    status_value = str(update.get("processing_status") or "pending")
+    if status_value in {"pending", "processing"}:
+        batch_status = "parsing"
+    elif status_value == "failed":
+        batch_status = "failed"
+    elif logs and not active_logs:
+        batch_status = "rolled_back"
+    else:
+        batch_status = "applied"
+    return _batch_record(
+        batch_key=f"business-update-{update['id']}",
+        entity_type=entity_type,
+        entity_id=entity_id,
+        source_type="business_update",
+        source_id=update["id"],
+        input_type=update.get("input_type"),
+        raw_input=update.get("raw_text"),
+        attachments=attachments,
+        operator_user_id=update.get("created_by"),
+        operator_name=update.get("created_by_name"),
+        submitted_at=update["created_at"],
+        status_value=batch_status,
+        logs=logs,
+    )
+
+
+def _parse_job_batch(
+    job: dict[str, Any],
+    logs: list[dict[str, Any]],
+    *,
+    entity_type: str,
+    entity_id: UUID,
+) -> dict[str, Any]:
+    status_value = str(job.get("status") or "queued")
+    if status_value in {"queued", "running", "retry_waiting"}:
+        batch_status = "parsing"
+    elif status_value == "failed":
+        batch_status = "failed"
+    elif logs and not _active_batch_logs(logs):
+        batch_status = "rolled_back"
+    else:
+        batch_status = "applied"
+    raw_key = "raw_target_text" if entity_type == "seller_target" else "raw_requirement_text"
+    return _batch_record(
+        batch_key=f"parse-job-{job['id']}",
+        entity_type=entity_type,
+        entity_id=entity_id,
+        source_type=job.get("job_type") or "parser",
+        source_id=job["id"],
+        input_type="text",
+        raw_input=(job.get("payload_json") or {}).get(raw_key),
+        attachments=[],
+        operator_user_id=job.get("created_by"),
+        operator_name=job.get("created_by_name"),
+        submitted_at=job["created_at"],
+        status_value=batch_status,
+        logs=logs,
+    )
+
+
+def _log_only_batch(
+    batch_key: str,
+    logs: list[dict[str, Any]],
+    *,
+    entity_type: str,
+    entity_id: UUID,
+) -> dict[str, Any]:
+    first = logs[0]
+    is_rollback = first.get("source_type") == "rollback"
+    return _batch_record(
+        batch_key=batch_key,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        source_type=first.get("source_type") or "direct_api",
+        source_id=first.get("source_id"),
+        input_type=None,
+        raw_input=None,
+        attachments=[],
+        operator_user_id=first.get("applied_by"),
+        operator_name=first.get("applied_by_name"),
+        submitted_at=first["applied_at"],
+        status_value="rolled_back" if is_rollback else "applied",
+        logs=logs,
+    )
+
+
+def _batch_record(
+    *,
+    batch_key: str,
+    entity_type: str,
+    entity_id: UUID,
+    source_type: str,
+    source_id: UUID | None,
+    input_type: str | None,
+    raw_input: Any,
+    attachments: list[dict[str, Any]],
+    operator_user_id: UUID | None,
+    operator_name: str | None,
+    submitted_at: str,
+    status_value: str,
+    logs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    active_logs = _active_batch_logs(logs)
+    visible_logs = logs if source_type == "rollback" else [row for row in logs if row.get("source_type") != "rollback"]
+    changes = [
+        {
+            "log_id": row["id"],
+            "field_path": row["field_path"],
+            "old_value": row.get("old_value_json"),
+            "new_value": row.get("new_value_json"),
+            "applied_at": row["applied_at"],
+            "rollback_at": row.get("rollback_at"),
+        }
+        for row in visible_logs
+    ]
+    applied_at = max((row["applied_at"] for row in logs), default=None)
+    raw_input_text = str(raw_input).strip() if raw_input is not None else None
+    return {
+        "batch_key": batch_key,
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "source_type": source_type,
+        "source_id": source_id,
+        "input_type": input_type,
+        "input_summary": _truncate_text(raw_input_text, 180),
+        "raw_input": raw_input_text,
+        "attachments": attachments,
+        "operator_user_id": operator_user_id,
+        "operator_name": operator_name or "系统助手",
+        "submitted_at": submitted_at,
+        "applied_at": applied_at,
+        "status": status_value,
+        "changes": changes,
+        "changed_field_count": len(changes),
+        "is_latest_effective_batch": False,
+        "can_rollback": False,
+        "rollback_block_reason": None,
+        "_active_logs": active_logs,
+    }
+
+
+def _active_batch_logs(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in logs
+        if row.get("source_type") != "rollback" and row.get("rollback_at") is None
+    ]
+
+
+def _latest_effective_batch(batches: list[dict[str, Any]]) -> dict[str, Any] | None:
+    effective = [item for item in batches if item.get("_active_logs")]
+    if not effective:
+        return None
+    return max(effective, key=_batch_effective_value)
+
+
+def _batch_effective_value(batch: dict[str, Any]) -> str:
+    active_logs = batch.get("_active_logs") or []
+    return max((row["applied_at"] for row in active_logs), default="")
+
+
+def _batch_sort_value(batch: dict[str, Any]) -> str:
+    return str(batch.get("applied_at") or batch.get("submitted_at") or "")
+
+
+def _batch_rollback_block_reason(
+    batch: dict[str, Any],
+    latest: dict[str, Any] | None,
+) -> str | None:
+    active_logs = batch.get("_active_logs") or []
+    if batch.get("status") == "failed":
+        return "本次更新未写入字段"
+    if batch.get("status") == "parsing":
+        return "本次更新仍在解析中"
+    if not active_logs:
+        if batch.get("status") == "rolled_back":
+            return "本次更新已撤回"
+        return "本次更新未写入字段"
+    if batch is not latest:
+        return "仅最近一次有效更新可以撤回"
+    unsupported = next((_rollbackability(log)["reason"] for log in active_logs if not _rollbackability(log)["ok"]), None)
+    if unsupported:
+        return "本次更新包含不可撤回字段"
+    return None
+
+
+def _public_update_batch(batch: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in batch.items() if not key.startswith("_")}
+
+
+def _payload_uuid_text(payload: Any, key: str) -> str | None:
+    if not isinstance(payload, dict) or not payload.get(key):
+        return None
+    try:
+        return str(UUID(str(payload[key])))
+    except (TypeError, ValueError):
+        return None
+
+
+def _truncate_text(value: str | None, max_length: int) -> str | None:
+    if not value:
+        return None
+    if len(value) <= max_length:
+        return value
+    return value[: max_length - 1] + "…"
 
 
 ROLLBACK_TABLE_BY_ENTITY = {
@@ -387,6 +1023,7 @@ def _rollback_logs(
     *,
     force: bool,
     reason: str | None,
+    actor_user_id: UUID,
 ) -> dict[str, Any]:
     rolled_back_logs: list[dict[str, Any]] = []
     skipped_logs: list[dict[str, Any]] = []
@@ -411,12 +1048,25 @@ def _rollback_logs(
                 ),
             )
 
-        _apply_field_rollback(db, log)
-        rollback_log = _insert_rollback_log(db, log, current_value=current_value, reason=reason)
+        _apply_field_rollback(db, log, actor_user_id=actor_user_id)
+        rollback_log = _insert_rollback_log(
+            db,
+            log,
+            current_value=current_value,
+            reason=reason,
+            actor_user_id=actor_user_id,
+        )
         _mark_field_sources_ignored_after_rollback(db, log)
         _mark_log_rolled_back(db, log["id"])
-        _enqueue_rebuild_after_rollback(db, log)
         rolled_back_logs.append(rollback_log)
+
+    rebuild_entities = {
+        (log["entity_type"], log["entity_id"])
+        for log in logs
+        if log["entity_type"] in {"seller_target", "buyer_intent"}
+    }
+    for entity_type, entity_id in rebuild_entities:
+        _enqueue_rebuild_after_rollback(db, entity_type=entity_type, entity_id=entity_id)
 
     return {
         "status": "rolled_back" if rolled_back_logs else "noop",
@@ -470,7 +1120,7 @@ def _get_current_field_value(db: Session, log: dict[str, Any]) -> Any:
     return row["value"]
 
 
-def _apply_field_rollback(db: Session, log: dict[str, Any]) -> None:
+def _apply_field_rollback(db: Session, log: dict[str, Any], *, actor_user_id: UUID) -> None:
     entity_type = log["entity_type"]
     field_path = log["field_path"]
     table_name = ROLLBACK_TABLE_BY_ENTITY[entity_type]
@@ -492,7 +1142,7 @@ def _apply_field_rollback(db: Session, log: dict[str, Any]) -> None:
         statement,
         {
             "rollback_value": log.get("old_value_json"),
-            "updated_by": DEFAULT_ADMIN_USER_ID,
+            "updated_by": actor_user_id,
             "entity_id": log["entity_id"],
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
@@ -508,6 +1158,7 @@ def _insert_rollback_log(
     *,
     current_value: Any,
     reason: str | None,
+    actor_user_id: UUID,
 ) -> dict[str, Any]:
     row = db.execute(
         text(
@@ -548,7 +1199,7 @@ def _insert_rollback_log(
             "old_value_json": _json_safe(current_value),
             "new_value_json": original_log.get("old_value_json"),
             "source_id": original_log["id"],
-            "applied_by": DEFAULT_ADMIN_USER_ID,
+            "applied_by": actor_user_id,
             "metadata_json": {
                 "source": "update_log_rollback",
                 "rolled_back_log_id": str(original_log["id"]),
@@ -602,7 +1253,12 @@ def _mark_field_sources_ignored_after_rollback(db: Session, log: dict[str, Any])
     )
 
 
-def _mark_action_rejected_after_rollback(db: Session, extracted_action_id: UUID) -> None:
+def _mark_action_rejected_after_rollback(
+    db: Session,
+    extracted_action_id: UUID,
+    *,
+    actor_user_id: UUID,
+) -> None:
     db.execute(
         text(
             """
@@ -618,20 +1274,18 @@ def _mark_action_rejected_after_rollback(db: Session, extracted_action_id: UUID)
         ),
         {
             "extracted_action_id": extracted_action_id,
-            "reviewed_by": DEFAULT_ADMIN_USER_ID,
+            "reviewed_by": actor_user_id,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
         },
     )
 
 
-def _enqueue_rebuild_after_rollback(db: Session, log: dict[str, Any]) -> None:
-    if log["entity_type"] not in {"seller_target", "buyer_intent"}:
-        return
+def _enqueue_rebuild_after_rollback(db: Session, *, entity_type: str, entity_id: UUID) -> None:
     create_search_doc_rebuild_job(
         db,
-        entity_type=log["entity_type"],
-        entity_id=log["entity_id"],
+        entity_type=entity_type,
+        entity_id=entity_id,
         source="update_log_rollback",
     )
 

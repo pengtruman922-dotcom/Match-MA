@@ -1497,7 +1497,7 @@ def _related_object_route(entity_type: Any, entity_id: Any) -> str | None:
         "seller_target": f"/targets/{entity_id_text}",
         "buyer_party": f"/buyers/{entity_id_text}",
         "buyer_intent": f"/buyer-intents/{entity_id_text}",
-        "business_update": f"/updates/{entity_id_text}",
+        "business_update": f"/debug/entities/business_update/{entity_id_text}",
         "recommendation_session": "/recommendations",
     }
     return routes.get(str(entity_type))
