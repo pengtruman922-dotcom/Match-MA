@@ -432,7 +432,6 @@ function tabCount(data: DebugCenterData, tab: DebugTab): number {
 }
 
 function frontendRoute(route: string): string {
-  if (route === '/workbench') return '/';
   return route;
 }
 

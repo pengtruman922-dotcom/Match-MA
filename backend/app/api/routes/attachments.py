@@ -1,8 +1,9 @@
 import json
 from typing import Any
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -21,11 +22,13 @@ from backend.app.api.routes.utils import (
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 from backend.app.services.attachment_storage import (
+    AttachmentNotFoundError,
     AttachmentStorageError,
     AttachmentTooLargeError,
     TEXT_FILE_EXTENSIONS,
     TEXT_MIME_PREFIXES,
     TEXT_MIME_TYPES,
+    read_attachment_bytes,
     save_upload_file,
 )
 from backend.app.services.image_inputs import is_supported_multimodal_image, multimodal_image_constraints
@@ -415,6 +418,47 @@ def get_attachment_upload_policy() -> dict[str, Any]:
 def get_attachment(attachment_id: UUID, current_user: CurrentUser, db: Session = Depends(get_db)) -> dict[str, Any]:
     _ensure_attachment_visible(db, current_user, attachment_id)
     return _attachment_with_links(db, attachment_id)
+
+
+@router.get("/{attachment_id}/download")
+def download_attachment(
+    attachment_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> Response:
+    _ensure_attachment_visible(db, current_user, attachment_id)
+    attachment = _get_attachment_or_404(db, attachment_id)
+    settings = get_settings()
+    try:
+        content = read_attachment_bytes(
+            attachment,
+            storage_dir=settings.attachment_storage_dir,
+            max_bytes=settings.attachment_max_upload_bytes,
+            s3_endpoint_url=settings.effective_attachment_s3_endpoint_url,
+            s3_region=settings.effective_attachment_s3_region,
+            s3_bucket=settings.effective_attachment_s3_bucket,
+            s3_access_key_id=settings.effective_attachment_s3_access_key_id,
+            s3_secret_access_key=settings.effective_attachment_s3_secret_access_key,
+            s3_force_path_style=settings.attachment_s3_force_path_style,
+        )
+    except AttachmentTooLargeError as exc:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
+    except AttachmentNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except AttachmentStorageError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    if content is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attachment bytes not found.")
+
+    file_name = attachment.get("file_name") or "attachment"
+    return Response(
+        content=content,
+        media_type=attachment.get("mime_type") or "application/octet-stream",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(str(file_name))}",
+            "Content-Length": str(len(content)),
+        },
+    )
 
 
 @router.get("/{attachment_id}/parse-readiness", response_model=AttachmentParseReadinessOut)
@@ -1376,7 +1420,7 @@ def _entity_route(entity_type: str, entity_id: Any) -> str | None:
         "seller_target": f"/targets/{entity_id_text}",
         "buyer_party": f"/buyers/{entity_id_text}",
         "buyer_intent": f"/buyer-intents/{entity_id_text}",
-        "business_update": f"/updates/{entity_id_text}",
+        "business_update": f"/debug/entities/business_update/{entity_id_text}",
         "recommendation_session": f"/recommendations/sessions/{entity_id_text}",
         "recommendation_report": f"/recommendations/reports/{entity_id_text}",
     }

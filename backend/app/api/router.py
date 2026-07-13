@@ -20,7 +20,6 @@ from backend.app.api.routes import (
     seller_targets,
     update_logs,
     users,
-    workbench,
 )
 
 api_router = APIRouter()
@@ -41,6 +40,5 @@ api_router.include_router(update_logs.router)
 api_router.include_router(business_updates.router)
 api_router.include_router(extracted_actions.router)
 api_router.include_router(field_sources.router)
-api_router.include_router(workbench.router)
 api_router.include_router(global_search.router)
 api_router.include_router(debug.router)

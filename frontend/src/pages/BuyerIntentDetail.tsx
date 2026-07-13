@@ -8,17 +8,17 @@ import {
   MessageSquarePlus,
   Sparkles,
 } from 'lucide-react';
-import { buyerIntents, buyerParties, relations, updateLogs } from '../lib/api';
+import { buyerIntents, buyerParties, relations } from '../lib/api';
 import type {
   BuyerIntent,
   BuyerIntentParseStatus,
   BuyerParty,
   BuyerSellerRelation,
   RelationEvent,
-  UpdateLog,
 } from '../types/api';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
-import { fieldLabel, valueLabel } from '../lib/fieldLabels';
+import UpdateHistory from '../components/UpdateHistory';
+import { valueLabel } from '../lib/fieldLabels';
 
 export default function BuyerIntentDetail() {
   const { id } = useParams<{ id: string }>();
@@ -28,10 +28,10 @@ export default function BuyerIntentDetail() {
   const [parseStatus, setParseStatus] = useState<BuyerIntentParseStatus | null>(null);
   const [relationItems, setRelationItems] = useState<BuyerSellerRelation[]>([]);
   const [relationEvents, setRelationEvents] = useState<RelationEvent[]>([]);
-  const [logs, setLogs] = useState<UpdateLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [statusSaving, setStatusSaving] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
 
   useEffect(() => {
     if (!id) return;
@@ -40,17 +40,15 @@ export default function BuyerIntentDetail() {
       .get(id)
       .then(async (nextIntent) => {
         setIntent(nextIntent);
-        const [nextParseStatus, nextRelations, nextEvents, nextLogs, nextParty] = await Promise.all([
+        const [nextParseStatus, nextRelations, nextEvents, nextParty] = await Promise.all([
           buyerIntents.parseStatus(id).catch(() => null),
           relations.list({ buyer_intent_id: id, limit: 50 }).catch(() => []),
           relations.listEvents({ buyer_intent_id: id, limit: 50 }).catch(() => []),
-          updateLogs.list({ entity_type: 'buyer_intent', entity_id: id }).catch(() => []),
           nextIntent.buyer_party_id ? buyerParties.get(nextIntent.buyer_party_id).catch(() => null) : Promise.resolve(null),
         ]);
         setParseStatus(nextParseStatus);
         setRelationItems(nextRelations);
         setRelationEvents(nextEvents);
-        setLogs(nextLogs);
         setParty(nextParty);
       })
       .catch(() => navigate('/buyers'))
@@ -188,11 +186,29 @@ export default function BuyerIntentDetail() {
             </div>
           </Section>
 
-          <Section title="更新记录">
-            <HistoryList logs={logs} />
-          </Section>
         </div>
       </div>
+
+      <Section title="更新记录">
+        <UpdateHistory
+          entityType="buyer_intent"
+          entityId={intent.id}
+          refreshKey={historyRefreshKey}
+          onProcessingSettled={async () => {
+            const [fresh, freshParseStatus] = await Promise.all([
+              buyerIntents.get(intent.id),
+              buyerIntents.parseStatus(intent.id).catch(() => null),
+            ]);
+            setIntent(fresh);
+            setParseStatus(freshParseStatus);
+          }}
+          onRolledBack={async () => {
+            const fresh = await buyerIntents.get(intent.id);
+            setIntent(fresh);
+            setParseStatus(await buyerIntents.parseStatus(intent.id).catch(() => null));
+          }}
+        />
+      </Section>
 
       <BusinessUpdateDrawer
         open={drawerOpen}
@@ -201,6 +217,10 @@ export default function BuyerIntentDetail() {
         defaultBuyerPartyName={intent.buyer_name || party?.buyer_name}
         defaultIntentId={intent.id}
         defaultIntentName={intent.intent_name}
+        onSuccess={() => {
+          buyerIntents.get(intent.id).then(setIntent).catch(() => {});
+          setHistoryRefreshKey((value) => value + 1);
+        }}
       />
     </div>
   );
@@ -271,22 +291,6 @@ function RelationsList({ relations: relationItems, events }: { relations: BuyerS
             {event.title && <p className="text-sm text-gray-800 mt-0.5">{event.title}</p>}
             {event.content && <p className="text-xs text-gray-600 mt-1 line-clamp-2">{event.content}</p>}
           </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function HistoryList({ logs }: { logs: UpdateLog[] }) {
-  if (logs.length === 0) return <p className="text-sm text-gray-400 py-4">暂无更新记录</p>;
-  return (
-    <div className="space-y-3">
-      {logs.slice(0, 12).map((log) => (
-        <div key={log.id} className="border-b border-gray-50 pb-2 last:border-0 last:pb-0">
-          <p className="text-xs text-gray-500">{shortDateTime(log.applied_at)}</p>
-          <p className="text-sm text-gray-800 mt-0.5">
-            {fieldLabel(log.entity_type, log.field_path)}: {valueLabel(log.field_path, log.old_value_json)} → {valueLabel(log.field_path, log.new_value_json)}
-          </p>
         </div>
       ))}
     </div>

@@ -231,6 +231,8 @@ class SellerTargetFilterOptionsOut(BaseModel):
     industries: list[SellerTargetFilterOptionOut]
     regions: list[SellerTargetFilterOptionOut]
     statuses: list[SellerTargetFilterOptionOut]
+    recommendation_statuses: list[SellerTargetFilterOptionOut] = []
+    parse_statuses: list[SellerTargetFilterOptionOut] = []
     owners: list[SellerTargetFilterOptionOut] = []
 
 
@@ -418,6 +420,8 @@ def list_seller_targets(
         "sold",
         "off_market",
     ] | None = Query(default=None),
+    recommendation_status: Literal["recommendable", "sold", "off_market"] | None = Query(default=None),
+    parse_status: Literal["parsing", "parse_failed", "parsed"] | None = Query(default=None),
     owner: str | None = Query(default=None, max_length=50),
 ) -> dict[str, Any]:
     where = ["team_id = :team_id", "workspace_id = :workspace_id", "deleted_at is null"]
@@ -456,6 +460,19 @@ def list_seller_targets(
     if status:
         where.append(f"({SELLER_TARGET_DISPLAY_STATUS_SQL}) = :status")
         params["status"] = status
+    if recommendation_status:
+        if recommendation_status in {"sold", "off_market"}:
+            where.append("lifecycle_status = :recommendation_status")
+        else:
+            where.append("lifecycle_status = 'active' and recommendation_status = 'recommendable'")
+        params["recommendation_status"] = recommendation_status
+    if parse_status:
+        if parse_status == "parsing":
+            where.append("information_status in ('parsing', 'researching')")
+        elif parse_status == "parse_failed":
+            where.append("information_status = 'parse_failed'")
+        else:
+            where.append("information_status not in ('parsing', 'researching', 'parse_failed')")
 
     where_sql = " and ".join(where)
     total = db.execute(
@@ -553,8 +570,58 @@ def seller_target_filter_options(current_user: CurrentUser, db: Session = Depend
         params,
         labels=SELLER_TARGET_DISPLAY_STATUS_LABELS,
     )
+    recommendation_statuses = _filter_options(
+        db,
+        f"""
+        select
+          case
+            when lifecycle_status = 'sold' then 'sold'
+            when lifecycle_status = 'off_market' then 'off_market'
+            when lifecycle_status = 'active' and recommendation_status = 'recommendable' then 'recommendable'
+            else null
+          end as value,
+          count(*) as count
+        from seller_target
+        where team_id = :team_id
+          and workspace_id = :workspace_id
+          and deleted_at is null
+          {scope_clause}
+        group by value
+        order by count desc, value asc
+        """,
+        params,
+        labels={"recommendable": "可推荐", "sold": "已售出", "off_market": "已停售"},
+    )
+    parse_statuses = _filter_options(
+        db,
+        f"""
+        select
+          case
+            when information_status in ('parsing', 'researching') then 'parsing'
+            when information_status = 'parse_failed' then 'parse_failed'
+            else 'parsed'
+          end as value,
+          count(*) as count
+        from seller_target
+        where team_id = :team_id
+          and workspace_id = :workspace_id
+          and deleted_at is null
+          {scope_clause}
+        group by value
+        order by count desc, value asc
+        """,
+        params,
+        labels={"parsing": "解析中", "parse_failed": "解析失败", "parsed": "已解析"},
+    )
     owners = [] if owner_scope_required(current_user) else owner_filter_options(db, "seller_target", params)
-    return {"industries": industries, "regions": regions, "statuses": statuses, "owners": owners}
+    return {
+        "industries": industries,
+        "regions": regions,
+        "statuses": statuses,
+        "recommendation_statuses": recommendation_statuses,
+        "parse_statuses": parse_statuses,
+        "owners": owners,
+    }
 
 
 @router.get("/suggestions", response_model=list[SellerTargetSuggestionOut])
@@ -1340,7 +1407,7 @@ def _attachment_related_business_updates(
                 "processing_status": row.get("processing_status"),
                 "created_at": row.get("created_at"),
                 "raw_text_preview": _truncate_text(row.get("raw_text"), 120),
-                "review_route": f"/updates/{row['id']}",
+                "review_route": None,
             }
         )
     return result

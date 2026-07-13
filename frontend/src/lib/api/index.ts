@@ -59,9 +59,9 @@ import type {
   AppUserCreate,
   AppUserOption,
   BatchAssignOwnerResponse,
+  UpdateBatchListResponse,
+  UpdateBatchRollbackResponse,
   UpdateLog,
-  WorkbenchData,
-  WorkbenchTaskBoardData,
   FailureSummary,
   GlobalSearchResponse,
   QueueSummary,
@@ -98,6 +98,8 @@ export const sellerTargets = {
     industry?: string;
     region?: string;
     status?: string;
+    recommendation_status?: string;
+    parse_status?: string;
     owner?: string;
     limit?: number;
     offset?: number;
@@ -242,6 +244,7 @@ export const businessUpdates = {
 
 export const attachments = {
   uploadPolicy: () => apiRequest<AttachmentUploadPolicy>('/attachments/upload-policy'),
+  download: (id: string) => apiBlobResponse(`/attachments/${id}/download`),
 };
 
 export const extractedActions = {
@@ -366,11 +369,15 @@ export const backgroundJobs = {
 export const updateLogs = {
   list: (params: { entity_type: string; entity_id: string }) =>
     apiRequest<UpdateLog[]>(`/update-logs${buildQuery(params)}`),
-};
-
-export const workbench = {
-  get: () => apiRequest<WorkbenchData>('/workbench'),
-  taskBoard: () => apiRequest<WorkbenchTaskBoardData>('/workbench/task-board'),
+  batches: (params: { entity_type: 'seller_target' | 'buyer_intent'; entity_id: string; limit?: number; offset?: number }) =>
+    apiRequest<UpdateBatchListResponse>(`/update-logs/batches${buildQuery(params)}`),
+  rollbackBatch: (
+    batchKey: string,
+    data: { entity_type: 'seller_target' | 'buyer_intent'; entity_id: string; reason?: string },
+  ) => apiRequest<UpdateBatchRollbackResponse>(`/update-logs/batches/${encodeURIComponent(batchKey)}/rollback`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
 };
 
 export const globalSearch = {

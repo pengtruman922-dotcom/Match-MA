@@ -78,6 +78,8 @@ export interface SellerTargetFilterOptions {
   industries: SellerTargetFilterOption[];
   regions: SellerTargetFilterOption[];
   statuses: SellerTargetFilterOption[];
+  recommendation_statuses?: SellerTargetFilterOption[];
+  parse_statuses?: SellerTargetFilterOption[];
   owners?: SellerTargetFilterOption[];
 }
 
@@ -694,6 +696,60 @@ export interface UpdateLog {
   rollback_at: string | null;
 }
 
+export interface UpdateBatchAttachment {
+  id: string;
+  file_name: string;
+  mime_type: string | null;
+  file_size: number | null;
+  uploaded_at: string;
+  download_route: string;
+}
+
+export interface UpdateBatchChange {
+  log_id: string;
+  field_path: string;
+  old_value: unknown;
+  new_value: unknown;
+  applied_at: string;
+  rollback_at: string | null;
+}
+
+export interface UpdateBatch {
+  batch_key: string;
+  entity_type: 'seller_target' | 'buyer_intent';
+  entity_id: string;
+  source_type: string;
+  source_id: string | null;
+  input_type: string | null;
+  input_summary: string | null;
+  raw_input: string | null;
+  attachments: UpdateBatchAttachment[];
+  operator_user_id: string | null;
+  operator_name: string;
+  submitted_at: string;
+  applied_at: string | null;
+  status: 'parsing' | 'failed' | 'applied' | 'rolled_back' | string;
+  changes: UpdateBatchChange[];
+  changed_field_count: number;
+  is_latest_effective_batch: boolean;
+  can_rollback: boolean;
+  rollback_block_reason: string | null;
+}
+
+export interface UpdateBatchListResponse {
+  items: UpdateBatch[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface UpdateBatchRollbackResponse {
+  status: string;
+  rollback_count: number;
+  rolled_back_logs: Array<Record<string, unknown>>;
+  skipped_logs: Array<Record<string, unknown>>;
+}
+
 export interface BuyerSellerRelation {
   id: string;
   buyer_intent_id: string;
@@ -1176,49 +1232,6 @@ export interface AiTrace {
   metadata_json: Record<string, unknown>;
 }
 
-export interface WorkbenchActionGroup {
-  key: string;
-  label: string;
-  count: number;
-  items: ExtractedAction[];
-}
-
-export interface WorkbenchOverview {
-  pending_review_count: number;
-  recent_update_count: number;
-  failed_job_count: number;
-  running_job_count: number;
-  active_relation_count: number;
-  weekly_new_target_count?: number;
-  weekly_new_buyer_intent_count?: number;
-  weekly_updated_target_count?: number;
-  weekly_business_update_count?: number;
-  auto_applied_review_count?: number;
-  exception_count?: number;
-  mode?: string;
-  [key: string]: unknown;
-}
-
-export interface WorkbenchActivity {
-  activity_type: string;
-  entity_id: string;
-  status: string;
-  activity_label?: string;
-  object_name?: string | null;
-  summary?: string | null;
-  title?: string;
-  subtitle?: string | null;
-  happened_at: string | null;
-  route?: string | null;
-}
-
-export interface WorkbenchData {
-  groups: WorkbenchActionGroup[];
-  recent_updates: BusinessUpdate[];
-  recent_relations: BuyerSellerRelation[];
-  overview: WorkbenchOverview;
-}
-
 export interface BusinessUpdateDebugBundle {
   business_update: BusinessUpdate;
   jobs: BackgroundJob[];
@@ -1403,17 +1416,6 @@ export interface RecommendationSessionBundle {
     report_count: number;
     engine_hint: string;
   };
-}
-
-export interface WorkbenchTaskBoardData {
-  groups: WorkbenchActionGroup[];
-  auto_applied_recent: ExtractedAction[];
-  exception_items: Record<string, unknown>[];
-  recent_activity: WorkbenchActivity[];
-  quick_actions: Record<string, unknown>[];
-  overview: WorkbenchOverview;
-  queue_summary: QueueSummary;
-  failure_summary: FailureSummary;
 }
 
 export interface GlobalSearchItem {

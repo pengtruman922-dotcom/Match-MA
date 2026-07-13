@@ -1,21 +1,19 @@
 import { useState, useEffect } from 'react';
-import { useParams, Link, useNavigate } from 'react-router-dom';
+import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft,
   Sparkles,
   MessageSquarePlus,
   Search as SearchIcon,
   UserRound,
-  AlertCircle,
   FileText,
-  Clock,
   Loader2,
   Trash2,
   Download,
   RefreshCw,
   ExternalLink,
 } from 'lucide-react';
-import { relations, sellerTargets, updateLogs, users } from '../lib/api';
+import { relations, sellerTargets, users } from '../lib/api';
 import { isAdmin } from '../lib/auth';
 import type {
   AppUserOption,
@@ -24,9 +22,9 @@ import type {
   SellerTarget,
   TargetAttachmentItem,
   TargetFollowUp,
-  UpdateLog,
 } from '../types/api';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
+import UpdateHistory from '../components/UpdateHistory';
 import {
   sellerTargetDisplayStatus,
   sellerTargetDisplayStatusClass,
@@ -34,17 +32,17 @@ import {
   sellerTargetStatusClass,
   sellerTargetStatusLabel,
 } from '../lib/sellerTargetStatus';
-import { fieldLabel, sourceTypeLabel, valueLabel } from '../lib/fieldLabels';
+import { valueLabel } from '../lib/fieldLabels';
 
 type Tab = 'info' | 'attachments' | 'relations' | 'history';
 
 export default function TargetDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [target, setTarget] = useState<SellerTarget | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<Tab>('info');
-  const [logs, setLogs] = useState<UpdateLog[]>([]);
+  const [activeTab, setActiveTab] = useState<Tab>(() => searchParams.get('tab') === 'history' ? 'history' : 'info');
   const [relationItems, setRelationItems] = useState<BuyerSellerRelation[]>([]);
   const [relationEvents, setRelationEvents] = useState<RelationEvent[]>([]);
   const [followUps, setFollowUps] = useState<TargetFollowUp[]>([]);
@@ -53,6 +51,7 @@ export default function TargetDetail() {
   const admin = isAdmin();
   const [ownerOptions, setOwnerOptions] = useState<AppUserOption[]>([]);
   const [ownerSaving, setOwnerSaving] = useState(false);
+  const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
 
   useEffect(() => {
     if (!admin) return;
@@ -67,13 +66,11 @@ export default function TargetDetail() {
       .catch(() => navigate('/targets'))
       .finally(() => setLoading(false));
     Promise.all([
-      updateLogs.list({ entity_type: 'seller_target', entity_id: id }),
       relations.list({ seller_target_id: id, limit: 50 }),
       relations.listEvents({ seller_target_id: id, limit: 50 }),
       sellerTargets.followUps(id),
     ])
-      .then(([nextLogs, nextRelations, nextEvents, nextFollowUps]) => {
-        setLogs(nextLogs);
+      .then(([nextRelations, nextEvents, nextFollowUps]) => {
         setRelationItems(nextRelations);
         setRelationEvents(nextEvents);
         setFollowUps(nextFollowUps);
@@ -92,13 +89,10 @@ export default function TargetDetail() {
         .then((fresh) => {
           setTarget(fresh);
           if (fresh.information_status !== 'parsing' && fresh.information_status !== 'researching') {
-            Promise.all([
-              updateLogs.list({ entity_type: 'seller_target', entity_id: id }),
-              sellerTargets.followUps(id),
-            ])
-              .then(([nextLogs, nextFollowUps]) => {
-                setLogs(nextLogs);
+            sellerTargets.followUps(id)
+              .then((nextFollowUps) => {
                 setFollowUps(nextFollowUps);
+                setHistoryRefreshKey((value) => value + 1);
               })
               .catch(() => {});
           }
@@ -225,7 +219,7 @@ export default function TargetDetail() {
       {/* Tabs + Content + Sidebar */}
       <div className="grid grid-cols-12 gap-5">
         {/* Main content */}
-        <div className="col-span-8">
+        <div className={activeTab === 'history' ? 'col-span-12' : 'col-span-8'}>
           <div className="bg-white border border-gray-200">
             <div className="flex items-center border-b border-gray-100 px-5">
               {tabs.map((tab) => (
@@ -254,20 +248,23 @@ export default function TargetDetail() {
                   relationEvents={relationEvents}
                 />
               )}
-              {activeTab === 'history' && <HistoryTab logs={logs} />}
+              {activeTab === 'history' && id && (
+                <UpdateHistory
+                  entityType="seller_target"
+                  entityId={id}
+                  refreshKey={historyRefreshKey}
+                  onRolledBack={async () => {
+                    const fresh = await sellerTargets.get(id);
+                    setTarget(fresh);
+                  }}
+                />
+              )}
             </div>
           </div>
         </div>
 
         {/* Right sidebar */}
-        <div className="col-span-4 space-y-4">
-          <div className="bg-white border border-gray-200 p-4">
-            <h3 className="text-sm font-semibold text-gray-900 mb-3 flex items-center gap-2">
-              <AlertCircle className="w-3.5 h-3.5 text-amber-500" />
-              自动更新待复核
-            </h3>
-            <p className="text-xs text-gray-400">暂无待复核项</p>
-          </div>
+        {activeTab !== 'history' && <div className="col-span-4 space-y-4">
           <div className="bg-white border border-gray-200 p-4">
             <h3 className="text-sm font-semibold text-gray-900 mb-3">信息缺口</h3>
             <div className="space-y-1.5 text-xs text-gray-600">
@@ -287,7 +284,7 @@ export default function TargetDetail() {
               )}
             </div>
           </div>
-        </div>
+        </div>}
       </div>
 
       <BusinessUpdateDrawer
@@ -296,7 +293,9 @@ export default function TargetDetail() {
         defaultTargetId={target.id}
         defaultTargetName={target.target_name}
         onSuccess={() => {
-          if (id) sellerTargets.get(id).then(setTarget).catch(() => {});
+          if (!id) return;
+          sellerTargets.get(id).then(setTarget).catch(() => {});
+          setHistoryRefreshKey((value) => value + 1);
         }}
       />
     </div>
@@ -778,35 +777,6 @@ function eventTypeLabel(type: string): string {
     other: '其他',
   };
   return labels[type] || type;
-}
-
-function HistoryTab({ logs }: { logs: UpdateLog[] }) {
-  if (logs.length === 0) {
-    return (
-      <div className="text-center py-10">
-        <Clock className="w-8 h-8 text-gray-300 mx-auto mb-2" />
-        <p className="text-sm text-gray-400">暂无更新记录</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-2">
-      {logs.map((log) => (
-        <div key={log.id} className="flex items-start gap-3 py-2 border-b border-gray-50 last:border-0">
-          <span className="text-xs text-gray-400 font-mono w-32 shrink-0">
-            {new Date(log.applied_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
-          </span>
-          <div className="min-w-0">
-            <span className="text-sm text-gray-700">
-              {fieldLabel(log.entity_type, log.field_path)}: {valueLabel(log.field_path, log.old_value_json)} → {valueLabel(log.field_path, log.new_value_json)}
-            </span>
-            <span className="text-xs text-gray-400 ml-2">来源: {sourceTypeLabel(log.source_type)}</span>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
 }
 
 function AttachmentStatusBadge({ status }: { status: string }) {
