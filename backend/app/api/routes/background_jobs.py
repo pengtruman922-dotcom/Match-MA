@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
@@ -166,6 +166,57 @@ class BackgroundJobRetryPreviewOut(BaseModel):
     debug_ref: dict[str, Any]
 
 
+class TaskCenterJobOut(BaseModel):
+    id: UUID
+    job_type: str
+    task_display_name: str
+    status: str
+    priority: int | None
+    queue_name: str | None
+    entity_type: str | None
+    entity_id: UUID | None
+    related_object_name: str
+    related_object_route: str | None
+    initiated_by_user_id: UUID | None
+    initiated_by_name: str
+    initiated_by_username: str | None
+    run_after: str | None
+    created_at: str | None
+    updated_at: str | None
+    started_at: str | None
+    finished_at: str | None
+    error_code: str | None
+    error_message: str | None
+    failure_category: str
+    failure_summary: str
+    attempt_count: int | None
+    max_attempts: int | None
+    ignored: bool
+    ignore_reason: str | None
+    ignored_at: str | None
+    archived: bool
+    archive_reason: str | None
+    archived_at: str | None
+    is_test_data: bool
+    test_data_label: str | None
+    can_retry: bool
+    retry_route: str | None
+    ignore_route: str | None
+    unignore_route: str | None
+    debug_ref: dict[str, Any]
+    related_entity_ref: dict[str, Any] | None
+
+
+class TaskCenterOut(BaseModel):
+    generated_at: str
+    status_group: str
+    lookback_hours: int
+    limit: int
+    offset: int
+    totals: dict[str, Any]
+    tasks: list[TaskCenterJobOut]
+
+
 @router.post("", response_model=BackgroundJobOut, status_code=status.HTTP_201_CREATED)
 def create_background_job(
     payload: BackgroundJobCreate,
@@ -304,6 +355,55 @@ def get_background_job_failure_summary(
         include_archived=include_archived,
         include_test_data=include_test_data,
     )
+
+
+@router.get("/task-center", response_model=TaskCenterOut)
+def get_task_center_jobs(
+    db: Session = Depends(get_db),
+    status_group: Literal["needs_attention", "active", "ignored", "archived", "failed", "all"] = Query(
+        default="needs_attention"
+    ),
+    initiated_by_user_id: UUID | None = None,
+    queue_name: str | None = None,
+    job_type: str | None = None,
+    q: str | None = Query(default=None, max_length=200),
+    lookback_hours: int = Query(default=720, ge=1, le=2160),
+    include_test_data: bool = Query(default=False),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    where, params = _task_center_filter_clauses(
+        initiated_by_user_id=initiated_by_user_id,
+        queue_name=queue_name,
+        job_type=job_type,
+        q=q,
+        lookback_hours=lookback_hours,
+        include_test_data=include_test_data,
+    )
+    status_clause = _task_center_status_clause(status_group, include_test_data=include_test_data)
+    rows = db.execute(
+        text(
+            f"""
+            select {_task_center_select_columns()}
+            from background_job bj
+            {_task_center_joins()}
+            where {' and '.join([*where, status_clause])}
+            order by bj.updated_at desc, bj.created_at desc
+            limit :limit offset :offset
+            """
+        ),
+        {**params, "limit": limit, "offset": offset},
+    ).mappings().all()
+    generated_at = db.execute(text("select now()::text")).scalar_one()
+    return {
+        "generated_at": generated_at,
+        "status_group": status_group,
+        "lookback_hours": lookback_hours,
+        "limit": limit,
+        "offset": offset,
+        "totals": _task_center_totals(db, where, params, include_test_data=include_test_data),
+        "tasks": [_task_center_item(dict(row)) for row in rows],
+    }
 
 
 @router.get("/{job_id}", response_model=BackgroundJobOut)
@@ -1155,6 +1255,260 @@ def _queue_latest_failed_job(
         },
     ).mappings().one_or_none()
     return _compact_queue_job(dict(row)) if row else None
+
+
+def _task_center_filter_clauses(
+    *,
+    initiated_by_user_id: UUID | None,
+    queue_name: str | None,
+    job_type: str | None,
+    q: str | None,
+    lookback_hours: int,
+    include_test_data: bool,
+) -> tuple[list[str], dict[str, Any]]:
+    where = [
+        "bj.team_id = :team_id",
+        "bj.workspace_id = :workspace_id",
+        "bj.updated_at >= now() - (:lookback_hours * interval '1 hour')",
+    ]
+    params: dict[str, Any] = {
+        "team_id": DEFAULT_TEAM_ID,
+        "workspace_id": DEFAULT_WORKSPACE_ID,
+        "lookback_hours": lookback_hours,
+    }
+    if initiated_by_user_id:
+        where.append("bj.created_by = :initiated_by_user_id")
+        params["initiated_by_user_id"] = initiated_by_user_id
+    if queue_name:
+        where.append("bj.queue_name = :queue_name")
+        params["queue_name"] = queue_name
+    if job_type:
+        where.append("bj.job_type = :job_type")
+        params["job_type"] = job_type
+    if not include_test_data:
+        where.append("coalesce(bj.metadata_json ->> 'is_test_data', 'false') <> 'true'")
+    if q and q.strip():
+        where.append(
+            """
+            (
+              bj.id::text ilike :q
+              or bj.job_type ilike :q
+              or coalesce(st.target_name, '') ilike :q
+              or coalesce(bp.buyer_name, '') ilike :q
+              or coalesce(bi.intent_name, '') ilike :q
+              or coalesce(bip.buyer_name, '') ilike :q
+              or coalesce(a.file_name, '') ilike :q
+              or coalesce(bu.raw_text, '') ilike :q
+              or coalesce(au.name, '') ilike :q
+              or coalesce(au.username, '') ilike :q
+            )
+            """
+        )
+        params["q"] = f"%{q.strip()}%"
+    return where, params
+
+
+def _task_center_status_clause(
+    status_group: str,
+    *,
+    include_test_data: bool,
+) -> str:
+    test_data_clause = "" if include_test_data else "and coalesce(bj.metadata_json ->> 'is_test_data', 'false') <> 'true'"
+    if status_group == "needs_attention":
+        return f"""
+          bj.status = 'failed'
+          and coalesce(bj.metadata_json ->> 'failure_ignored', 'false') <> 'true'
+          and coalesce(bj.metadata_json ->> 'archived', 'false') <> 'true'
+          {test_data_clause}
+        """
+    if status_group == "active":
+        return "bj.status in ('queued', 'running', 'retry_waiting')"
+    if status_group == "ignored":
+        return "bj.status = 'failed' and coalesce(bj.metadata_json ->> 'failure_ignored', 'false') = 'true'"
+    if status_group == "archived":
+        return "coalesce(bj.metadata_json ->> 'archived', 'false') = 'true'"
+    if status_group == "failed":
+        return f"bj.status = 'failed' {test_data_clause}"
+    return "true"
+
+
+def _task_center_joins() -> str:
+    return """
+      left join app_user au on au.id = bj.created_by
+      left join seller_target st on bj.entity_type = 'seller_target' and st.id = bj.entity_id
+      left join buyer_party bp on bj.entity_type = 'buyer_party' and bp.id = bj.entity_id
+      left join buyer_intent bi on bj.entity_type = 'buyer_intent' and bi.id = bj.entity_id
+      left join buyer_party bip on bip.id = bi.buyer_party_id
+      left join attachment a on bj.entity_type = 'attachment' and a.id = bj.entity_id
+      left join business_update bu on bj.entity_type = 'business_update' and bu.id = bj.entity_id
+      left join recommendation_session rs on bj.entity_type = 'recommendation_session' and rs.id = bj.entity_id
+      left join buyer_intent rs_bi on rs_bi.id = rs.buyer_intent_id
+      left join buyer_party rs_bp on rs_bp.id = rs.buyer_party_id
+      left join seller_target rs_st on rs_st.id = rs.seller_target_id
+    """
+
+
+def _task_center_select_columns() -> str:
+    return """
+      bj.id, bj.job_type, bj.status, bj.priority, bj.queue_name, bj.entity_type, bj.entity_id,
+      bj.run_after::text as run_after, bj.created_at::text as created_at,
+      bj.updated_at::text as updated_at, bj.started_at::text as started_at,
+      bj.finished_at::text as finished_at, bj.error_code, bj.error_message,
+      bj.attempt_count, bj.max_attempts, bj.metadata_json,
+      bj.created_by as initiated_by_user_id,
+      au.name as initiated_by_name,
+      au.username as initiated_by_username,
+      coalesce(
+        st.target_name,
+        bp.buyer_name,
+        nullif(concat_ws(' / ', bip.buyer_name, bi.intent_name), ''),
+        a.file_name,
+        nullif(trim(left(bu.raw_text, 80)), ''),
+        nullif(concat_ws(' / ', rs_bp.buyer_name, rs_bi.intent_name), ''),
+        rs_st.target_name
+      ) as related_object_name
+    """
+
+
+def _task_center_totals(
+    db: Session,
+    where: list[str],
+    params: dict[str, Any],
+    *,
+    include_test_data: bool,
+) -> dict[str, Any]:
+    base_where = " and ".join(where)
+    test_data_clause = "" if include_test_data else "and coalesce(bj.metadata_json ->> 'is_test_data', 'false') <> 'true'"
+    row = db.execute(
+        text(
+            f"""
+            select
+              count(*)::int as total_count,
+              count(*) filter (
+                where bj.status = 'failed'
+                  and coalesce(bj.metadata_json ->> 'failure_ignored', 'false') <> 'true'
+                  and coalesce(bj.metadata_json ->> 'archived', 'false') <> 'true'
+                  {test_data_clause}
+              )::int as needs_attention_count,
+              count(*) filter (where bj.status in ('queued', 'running', 'retry_waiting'))::int as active_count,
+              count(*) filter (
+                where bj.status = 'failed'
+                  and coalesce(bj.metadata_json ->> 'failure_ignored', 'false') = 'true'
+              )::int as ignored_count,
+              count(*) filter (
+                where coalesce(bj.metadata_json ->> 'archived', 'false') = 'true'
+              )::int as archived_count,
+              count(*) filter (where bj.status = 'failed' {test_data_clause})::int as failed_count
+            from background_job bj
+            {_task_center_joins()}
+            where {base_where}
+            """
+        ),
+        params,
+    ).mappings().one()
+    return {key: int(value or 0) for key, value in dict(row).items()}
+
+
+def _task_center_item(row: dict[str, Any]) -> dict[str, Any]:
+    metadata_json = row.get("metadata_json") or {}
+    ignored = _job_failure_ignored(row)
+    archived = _job_archived(row)
+    is_test_data = _job_test_data(row)
+    can_retry = row.get("status") in {"failed", "cancelled"}
+    failure_category = _failure_category(row.get("error_code"), row.get("error_message"))
+    entity_type = row.get("entity_type")
+    entity_id = row.get("entity_id")
+    return {
+        "id": row["id"],
+        "job_type": row["job_type"],
+        "task_display_name": _task_display_name(row.get("job_type")),
+        "status": row["status"],
+        "priority": row.get("priority"),
+        "queue_name": row.get("queue_name"),
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "related_object_name": _related_object_display_name(row),
+        "related_object_route": _related_object_route(entity_type, entity_id),
+        "initiated_by_user_id": row.get("initiated_by_user_id"),
+        "initiated_by_name": _initiated_by_name(row),
+        "initiated_by_username": row.get("initiated_by_username"),
+        "run_after": row.get("run_after"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "started_at": row.get("started_at"),
+        "finished_at": row.get("finished_at"),
+        "error_code": row.get("error_code"),
+        "error_message": _truncate_text(row.get("error_message"), 2000),
+        "failure_category": failure_category,
+        "failure_summary": _failure_summary_text(failure_category, row.get("error_message")),
+        "attempt_count": row.get("attempt_count"),
+        "max_attempts": row.get("max_attempts"),
+        "ignored": ignored,
+        "ignore_reason": metadata_json.get("failure_ignore_reason"),
+        "ignored_at": metadata_json.get("failure_ignored_at"),
+        "archived": archived,
+        "archive_reason": metadata_json.get("archive_reason"),
+        "archived_at": metadata_json.get("archived_at"),
+        "is_test_data": is_test_data,
+        "test_data_label": metadata_json.get("test_data_label"),
+        "can_retry": can_retry,
+        "retry_route": f"/background-jobs/{row['id']}/retry" if can_retry else None,
+        "ignore_route": None if ignored else f"/background-jobs/{row['id']}/ignore",
+        "unignore_route": f"/background-jobs/{row['id']}/unignore" if ignored else None,
+        "debug_ref": _debug_ref("background_job", row["id"]),
+        "related_entity_ref": _debug_ref(entity_type, entity_id) if entity_type and entity_id else None,
+    }
+
+
+def _task_display_name(job_type: Any) -> str:
+    labels = {
+        "business_update_extract_actions": "业务更新解析",
+        "seller_target_parse": "标的解析",
+        "buyer_intent_parse": "买家意向解析",
+        "attachment_ocr_parse": "附件 OCR 解析",
+        "attachment_ocr_poll": "OCR 结果轮询",
+        "seller_search_doc_rebuild": "标的搜索索引重建",
+        "buyer_intent_search_doc_rebuild": "买家意向搜索索引重建",
+        "embedding_generate": "向量生成",
+        "recommendation_report_generate": "推荐报告生成",
+        "recommendation_rerank": "推荐重排",
+        "model_node_test": "模型节点测试",
+    }
+    job_type_text = str(job_type or "unknown")
+    return labels.get(job_type_text, job_type_text)
+
+
+def _related_object_display_name(row: dict[str, Any]) -> str:
+    name = _truncate_text(row.get("related_object_name"), 120)
+    if name:
+        return name
+    entity_type = row.get("entity_type")
+    entity_id = row.get("entity_id")
+    if entity_type and entity_id:
+        return f"{entity_type} / {str(entity_id)[:8]}"
+    return "未关联对象"
+
+
+def _related_object_route(entity_type: Any, entity_id: Any) -> str | None:
+    if not entity_type or not entity_id:
+        return None
+    entity_id_text = str(entity_id)
+    routes = {
+        "seller_target": f"/targets/{entity_id_text}",
+        "buyer_party": f"/buyers/{entity_id_text}",
+        "buyer_intent": f"/buyer-intents/{entity_id_text}",
+        "business_update": f"/updates/{entity_id_text}",
+        "recommendation_session": "/recommendations",
+    }
+    return routes.get(str(entity_type))
+
+
+def _initiated_by_name(row: dict[str, Any]) -> str:
+    if row.get("initiated_by_name"):
+        return str(row["initiated_by_name"])
+    if row.get("initiated_by_user_id"):
+        return "系统/历史"
+    return "未知"
 
 
 def _job_select_columns() -> str:

@@ -65,6 +65,7 @@ import type {
   FailureSummary,
   GlobalSearchResponse,
   QueueSummary,
+  TaskCenterData,
 } from '../../types/api';
 import type { AuthUser, LoginResponse } from '../auth';
 import { apiBlobResponse, apiRequest, buildQuery } from './client';
@@ -348,6 +349,18 @@ export const backgroundJobs = {
     lookback_hours?: number;
   }) =>
     apiRequest<QueueSummary>(`/background-jobs/summary/queues${buildQuery(params || {})}`),
+  taskCenter: (params?: {
+    status_group?: string;
+    initiated_by_user_id?: string;
+    queue_name?: string;
+    job_type?: string;
+    q?: string;
+    lookback_hours?: number;
+    include_test_data?: boolean;
+    limit?: number;
+    offset?: number;
+  }) =>
+    apiRequest<TaskCenterData>(`/background-jobs/task-center${buildQuery(params || {})}`),
 };
 
 export const updateLogs = {

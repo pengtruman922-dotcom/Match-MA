@@ -1,7 +1,6 @@
-import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom';
-import { Bug, ChevronDown, LogOut, Search } from 'lucide-react';
+import { NavLink, Outlet, useNavigate } from 'react-router-dom';
+import { ChevronDown, LogOut, Search } from 'lucide-react';
 import { useState } from 'react';
-import { useDebugMode } from '../lib/debug';
 import { clearAuthSession, getStoredUser, isAdmin as isAdminRole } from '../lib/auth';
 
 const baseNavItems: Array<{ to: string; label: string; end?: boolean }> = [
@@ -13,13 +12,15 @@ const baseNavItems: Array<{ to: string; label: string; end?: boolean }> = [
   { to: '/settings', label: '设置' },
 ];
 
-const adminNavItems: Array<{ to: string; label: string; end?: boolean }> = [{ to: '/users', label: '账号管理' }];
+const adminNavItems: Array<{ to: string; label: string; end?: boolean }> = [
+  { to: '/users', label: '账号管理' },
+  { to: '/tasks', label: '任务中心' },
+];
 
 export default function Layout() {
   const [searchQuery, setSearchQuery] = useState('');
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const navigate = useNavigate();
-  const { isAdmin, debugEnabled, toggleDebug } = useDebugMode();
   const user = getStoredUser();
   const displayName = normalizedDisplayName(user?.display_name || user?.username || '管理员');
   const avatarText = displayName.slice(0, 3);
@@ -83,29 +84,6 @@ export default function Layout() {
                 </div>
               )}
             </div>
-            {isAdmin && (
-              <div className="flex items-center gap-1">
-                <button
-                  onClick={toggleDebug}
-                  className={`inline-flex items-center gap-1 px-2 py-1 text-xs font-medium border transition-colors ${
-                    debugEnabled
-                      ? 'bg-amber-50 text-amber-700 border-amber-200'
-                      : 'bg-gray-50 text-gray-500 border-gray-200 hover:border-amber-200 hover:text-amber-600'
-                  }`}
-                >
-                  <Bug className="w-3 h-3" />
-                  Debug
-                </button>
-                {debugEnabled && (
-                  <Link
-                    to="/debug"
-                    className="px-2 py-1 text-xs font-medium border border-amber-200 bg-white text-amber-700 hover:bg-amber-50"
-                  >
-                    Center
-                  </Link>
-                )}
-              </div>
-            )}
           </div>
         </div>
 
