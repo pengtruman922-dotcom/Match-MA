@@ -12,9 +12,9 @@ import Recommend from './pages/Recommend';
 import Dashboard from './pages/Dashboard';
 import Settings from './pages/Settings';
 import Users from './pages/Users';
+import TaskCenter from './pages/TaskCenter';
 import Login from './pages/Login';
 import SearchResults from './pages/SearchResults';
-import DebugCenter from './pages/DebugCenter';
 import DebugEntityPage from './pages/DebugEntity';
 
 function App() {
@@ -33,11 +33,11 @@ function App() {
             <Route path="buyer-intents/:id" element={<BuyerIntentDetail />} />
             <Route path="recommendations" element={<Recommend />} />
             <Route path="search" element={<SearchResults />} />
-            <Route path="debug" element={<DebugCenter />} />
             <Route path="debug/entities/:entityType/:entityId" element={<DebugEntityPage />} />
             <Route path="updates" element={<Updates />} />
             <Route path="updates/:id" element={<Updates />} />
             <Route path="dashboard" element={<Dashboard />} />
+            <Route path="tasks" element={<TaskCenter />} />
             <Route path="settings" element={<Settings />} />
             <Route path="users" element={<Users />} />
             <Route path="recommend" element={<Navigate to="/recommendations" replace />} />

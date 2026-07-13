@@ -15,8 +15,7 @@ import {
 import { fetchWorkbenchData, type ActionGroup } from '../lib/workbench';
 import type { ExtractedAction, WorkbenchActivity, WorkbenchOverview } from '../types/api';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
-import BackgroundJobFailurePanel from '../components/BackgroundJobFailurePanel';
-import { useDebugMode } from '../lib/debug';
+import { isAdmin } from '../lib/auth';
 
 export default function Home() {
   const [groups, setGroups] = useState<ActionGroup[]>([]);
@@ -25,7 +24,6 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const navigate = useNavigate();
-  const { debugEnabled } = useDebugMode();
 
   function load() {
     setLoading(true);
@@ -42,6 +40,8 @@ export default function Home() {
   useEffect(() => { load(); }, []);
 
   const totalPending = groups.reduce((sum, group) => sum + group.count, 0);
+  const failedJobCount = Number(overview?.failed_job_count || 0);
+  const runningJobCount = Number(overview?.running_job_count || 0);
 
   return (
     <div className="grid grid-cols-12 gap-5">
@@ -135,7 +135,27 @@ export default function Home() {
           </div>
         </div>
 
-        {debugEnabled && <BackgroundJobFailurePanel />}
+        {isAdmin() && (failedJobCount > 0 || runningJobCount > 0) && (
+          <div className="bg-white border border-red-100 p-5">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
+              <div className="min-w-0 flex-1">
+                <h2 className="text-sm font-semibold text-gray-900">系统任务需要关注</h2>
+                <p className="text-xs text-gray-500 mt-1">
+                  {failedJobCount > 0 ? `${failedJobCount} 个失败任务` : '暂无失败任务'}
+                  {runningJobCount > 0 ? `，${runningJobCount} 个运行/排队任务` : ''}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => navigate('/tasks')}
+                  className="mt-3 text-xs font-medium text-brand-700 hover:text-brand-800"
+                >
+                  进入任务中心
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="bg-white border border-gray-200 p-5">
           <h2 className="text-sm font-semibold text-gray-900 mb-3">使用提示</h2>

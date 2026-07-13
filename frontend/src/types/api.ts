@@ -1086,6 +1086,65 @@ export interface BackgroundJobRetryPreview {
   debug_ref: DebugRef;
 }
 
+export interface TaskCenterJob {
+  id: string;
+  job_type: string;
+  task_display_name: string;
+  status: string;
+  priority: number | null;
+  queue_name: string | null;
+  entity_type: string | null;
+  entity_id: string | null;
+  related_object_name: string;
+  related_object_route: string | null;
+  initiated_by_user_id: string | null;
+  initiated_by_name: string;
+  initiated_by_username: string | null;
+  run_after: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  failure_category: string;
+  failure_summary: string;
+  attempt_count: number | null;
+  max_attempts: number | null;
+  ignored: boolean;
+  ignore_reason: string | null;
+  ignored_at: string | null;
+  archived: boolean;
+  archive_reason: string | null;
+  archived_at: string | null;
+  is_test_data: boolean;
+  test_data_label: string | null;
+  can_retry: boolean;
+  retry_route: string | null;
+  ignore_route: string | null;
+  unignore_route: string | null;
+  debug_ref: DebugRef;
+  related_entity_ref: DebugRef | null;
+}
+
+export interface TaskCenterData {
+  generated_at: string;
+  status_group: string;
+  lookback_hours: number;
+  limit: number;
+  offset: number;
+  totals: {
+    total_count: number;
+    needs_attention_count: number;
+    active_count: number;
+    ignored_count: number;
+    archived_count: number;
+    failed_count: number;
+    [key: string]: number;
+  };
+  tasks: TaskCenterJob[];
+}
+
 export interface AiTrace {
   id: string;
   trace_type: string;

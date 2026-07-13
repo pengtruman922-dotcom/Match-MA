@@ -57,9 +57,6 @@ export default function DebugEntityPage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <Link to="/debug" className="px-3 py-1.5 text-sm border border-gray-200 text-gray-700 bg-white hover:border-amber-300 hover:text-amber-700">
-            Debug Center
-          </Link>
           <button
             type="button"
             onClick={load}

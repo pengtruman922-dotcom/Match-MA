@@ -500,7 +500,8 @@ function AttachmentCard({
   const latestJob = item.latest_job || {};
   const latestEvidence = item.latest_evidence || {};
   const relatedUpdate = item.related_business_updates[0] || {};
-  const latestJobDebug = recordValue(latestJob.debug_ref);
+  const latestJobId = stringValue(latestJob.id);
+  const failedTaskRoute = latestJobId ? `/tasks?status=needs_attention&q=${encodeURIComponent(latestJobId)}` : '';
   const evidencePage = stringValue(latestEvidence.page_no);
   const evidenceText = stringValue(latestEvidence.text_excerpt);
   const failedMessage =
@@ -559,8 +560,8 @@ function AttachmentCard({
           <p className="text-xs font-medium text-red-700">解析失败</p>
           <p className="mt-1 text-xs text-red-600 line-clamp-2">{failedMessage}</p>
           <div className="mt-2 flex flex-wrap gap-2">
-            {stringValue(latestJobDebug.route) && (
-              <Link to={stringValue(latestJobDebug.route)} className="inline-flex items-center gap-1 text-xs font-medium text-red-700 underline">
+            {failedTaskRoute && (
+              <Link to={failedTaskRoute} className="inline-flex items-center gap-1 text-xs font-medium text-red-700 underline">
                 <ExternalLink className="w-3 h-3" />
                 查看失败任务
               </Link>
@@ -569,12 +570,6 @@ function AttachmentCard({
               <Link to={stringValue(relatedUpdate.review_route)} className="inline-flex items-center gap-1 text-xs font-medium text-red-700 underline">
                 <ExternalLink className="w-3 h-3" />
                 查看业务更新
-              </Link>
-            )}
-            {item.debug_ref?.route && (
-              <Link to={item.debug_ref.route} className="inline-flex items-center gap-1 text-xs font-medium text-red-700 underline">
-                <ExternalLink className="w-3 h-3" />
-                查看 Debug
               </Link>
             )}
           </div>
@@ -872,10 +867,6 @@ function stringValue(value: unknown): string {
   if (typeof value === 'string') return value;
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   return '';
-}
-
-function recordValue(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
 function firstString(value: unknown): string {

@@ -14,6 +14,8 @@ from backend.app.api.routes.background_jobs import (
     _job_test_data,
     _retry_metadata,
     _test_data_metadata,
+    _task_center_item,
+    _task_display_name,
     _retry_preview_warnings,
     _unarchive_metadata,
     _unignore_metadata,
@@ -211,6 +213,87 @@ def test_compact_failure_job_exposes_ignore_metadata() -> None:
     assert compact["ignore_route"] is None
     assert compact["unignore_route"] == f"/background-jobs/{job_id}/unignore"
     assert "unignore_job" in [item["key"] for item in compact["recommended_actions"]]
+
+
+def test_task_center_item_uses_business_display_fields() -> None:
+    job_id = UUID("00000000-0000-0000-0000-000000000006")
+    entity_id = UUID("00000000-0000-0000-0000-000000000007")
+    user_id = UUID("00000000-0000-0000-0000-000000000008")
+
+    item = _task_center_item(
+        {
+            "id": job_id,
+            "job_type": "buyer_intent_parse",
+            "status": "failed",
+            "priority": 100,
+            "queue_name": "llm",
+            "entity_type": "buyer_intent",
+            "entity_id": entity_id,
+            "related_object_name": "小鹏汽车 / 并购需求（2026-07）",
+            "initiated_by_user_id": user_id,
+            "initiated_by_name": "管理员",
+            "initiated_by_username": "admin",
+            "run_after": None,
+            "created_at": "2026-07-10 10:00:00+00",
+            "updated_at": "2026-07-10 10:01:00+00",
+            "started_at": "2026-07-10 10:00:10+00",
+            "finished_at": "2026-07-10 10:01:00+00",
+            "error_code": "job_failed",
+            "error_message": "LLM HTTP 429: insufficient_quota",
+            "attempt_count": 3,
+            "max_attempts": 3,
+            "metadata_json": {},
+        }
+    )
+
+    assert item["task_display_name"] == "买家意向解析"
+    assert item["related_object_name"] == "小鹏汽车 / 并购需求（2026-07）"
+    assert item["related_object_route"] == f"/buyer-intents/{entity_id}"
+    assert item["initiated_by_name"] == "管理员"
+    assert item["failure_category"] == "provider_or_llm"
+    assert item["can_retry"] is True
+    assert item["ignore_route"] == f"/background-jobs/{job_id}/ignore"
+
+
+def test_task_center_item_supports_ignored_historical_jobs() -> None:
+    job_id = UUID("00000000-0000-0000-0000-000000000009")
+    item = _task_center_item(
+        {
+            "id": job_id,
+            "job_type": "attachment_ocr_parse",
+            "status": "failed",
+            "priority": 100,
+            "queue_name": "ocr",
+            "entity_type": "attachment",
+            "entity_id": UUID("00000000-0000-0000-0000-000000000012"),
+            "related_object_name": None,
+            "initiated_by_user_id": None,
+            "initiated_by_name": None,
+            "initiated_by_username": None,
+            "run_after": None,
+            "created_at": None,
+            "updated_at": None,
+            "started_at": None,
+            "finished_at": None,
+            "error_code": "job_failed",
+            "error_message": "OCR failed",
+            "attempt_count": 1,
+            "max_attempts": 3,
+            "metadata_json": {"failure_ignored": True, "failure_ignore_reason": "历史测试"},
+        }
+    )
+
+    assert item["task_display_name"] == "附件 OCR 解析"
+    assert item["related_object_name"].startswith("attachment / ")
+    assert item["initiated_by_name"] == "未知"
+    assert item["ignored"] is True
+    assert item["ignore_route"] is None
+    assert item["unignore_route"] == f"/background-jobs/{job_id}/unignore"
+
+
+def test_task_center_task_display_name_falls_back_to_job_type() -> None:
+    assert _task_display_name("recommendation_rerank") == "推荐重排"
+    assert _task_display_name("custom_job") == "custom_job"
 
 
 
