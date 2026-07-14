@@ -112,40 +112,35 @@ def rebuild_seller_target_search_doc(db: Session, seller_target_id: UUID) -> dic
 
 def rebuild_buyer_intent_search_doc(db: Session, buyer_intent_id: UUID) -> dict[str, Any]:
     intent = _get_buyer_intent(db, buyer_intent_id)
-    party = _get_buyer_party(db, intent["buyer_party_id"]) if intent.get("buyer_party_id") else None
-
-    party_text = _join_lines(
-        [
-            _kv("买家", party.get("buyer_name") if party else None),
-            _kv("买家类型", party.get("buyer_type") if party else None),
-            _kv("集团", party.get("group_name") if party else None),
-            _kv("买家区域", _buyer_region_text(party) if party else None),
-            _kv("主营业务", party.get("main_business") if party else None),
-        ]
-    )
     requirement_summary = _join_lines(
         [
             f"意向：{intent['intent_name']}",
             intent.get("intent_summary"),
             intent.get("raw_requirement_text"),
-            party_text,
         ]
     )
     industries = intent.get("industries_json")
     industries_text = "、".join(str(item) for item in industries if item) if isinstance(industries, list) else None
+    focus_tags = intent.get("industry_focus_tags_json")
+    focus_tags_text = "、".join(str(item) for item in focus_tags if item) if isinstance(focus_tags, list) else None
     constraint_text = _join_lines(
         [
             _kv("关注行业", industries_text),
+            _kv("细分赛道", focus_tags_text),
             _kv("一级行业", intent.get("industry_primary")),
             _kv("二级行业", intent.get("industry_secondary")),
             _kv("区域", intent.get("region_scope_summary")),
             _money("最低营收", intent.get("min_revenue_yuan")),
             _money("最低净利润", intent.get("min_net_profit_yuan")),
+            _money("最低估值", intent.get("min_valuation_yuan")),
             _money("最高估值", intent.get("max_valuation_yuan")),
             _money("最低市值", intent.get("min_market_cap_yuan")),
             _money("最高市值", intent.get("max_market_cap_yuan")),
             _kv("市值范围", intent.get("market_cap_range_summary")),
             _kv("PE上限", _decimal_text(intent.get("max_pe"))),
+            _kv("PS上限", _decimal_text(intent.get("max_ps"))),
+            _kv("最低净利率", _decimal_text(intent.get("min_net_margin"))),
+            _kv("最低毛利率", _decimal_text(intent.get("min_gross_margin"))),
             _kv("需要控股", intent.get("requires_control")),
             _kv("需要并表", intent.get("requires_consolidation")),
             _kv("接受少数股权", intent.get("accepts_minority_investment")),
@@ -164,11 +159,10 @@ def rebuild_buyer_intent_search_doc(db: Session, buyer_intent_id: UUID) -> dict[
     )
     preference_text = _join_lines([intent.get("preference_summary"), intent.get("priority_summary")])
     negative_text = intent.get("negative_summary")
-    history_text = _get_relation_history_text(db, buyer_intent_id)
-    # negative_text is intentionally NOT part of full_text: the embedding of
-    # "不投风电" would otherwise pull the intent CLOSER to wind-power targets.
-    # Exclusions stay in the negative_text column for display and LLM context.
-    full_text = _join_lines([requirement_summary, constraint_text, preference_text, history_text])
+    history_text = None
+    # This document is now used as direct LLM context rather than an embedding
+    # source, so exclusions must be explicit and buyer-party profile data is omitted.
+    full_text = _join_lines([requirement_summary, constraint_text, preference_text, negative_text])
 
     row = db.execute(
         text(
@@ -454,8 +448,10 @@ def _get_buyer_intent(db: Session, buyer_intent_id: UUID) -> dict[str, Any]:
             """
             select
               id, buyer_party_id, intent_name, raw_requirement_text, intent_summary,
-              industry_primary, industry_secondary, industries_json, region_scope_summary,
-              min_revenue_yuan, min_net_profit_yuan, max_pe, max_valuation_yuan,
+              industry_primary, industry_secondary, industries_json, industry_focus_tags_json,
+              region_scope_summary,
+              min_revenue_yuan, min_net_profit_yuan, max_pe, max_ps,
+              min_net_margin, min_gross_margin, min_valuation_yuan, max_valuation_yuan,
               min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
               requires_control, requires_consolidation, accepts_minority_investment,
               preferred_listed_status, listing_board_requirement_summary,
@@ -482,60 +478,8 @@ def _get_buyer_intent(db: Session, buyer_intent_id: UUID) -> dict[str, Any]:
     return dict(row)
 
 
-def _get_buyer_party(db: Session, buyer_party_id: UUID) -> dict[str, Any] | None:
-    row = db.execute(
-        text(
-            """
-            select
-              id, buyer_name, buyer_type, group_name, listed_status,
-              region_province, region_city, main_business,
-              capital_strength_summary, profile_summary
-            from buyer_party
-            where id = :buyer_party_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
-              and deleted_at is null
-            """
-        ),
-        {
-            "buyer_party_id": buyer_party_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
-    ).mappings().one_or_none()
-    return dict(row) if row else None
-
-
-def _get_relation_history_text(db: Session, buyer_intent_id: UUID) -> str | None:
-    rows = db.execute(
-        text(
-            """
-            select concat_ws('：', event_type, title, content) as text_value
-            from relation_event
-            where buyer_intent_id = :buyer_intent_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
-            order by event_time desc, created_at desc
-            limit 20
-            """
-        ),
-        {
-            "buyer_intent_id": buyer_intent_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
-    ).mappings().all()
-    return _join_lines(row["text_value"] for row in rows if row["text_value"])
-
-
 def _region_text(target: dict[str, Any]) -> str | None:
     parts = [target.get("headquarter_province"), target.get("headquarter_city")]
-    text_value = "".join(str(part) for part in parts if part)
-    return text_value or None
-
-
-def _buyer_region_text(party: dict[str, Any]) -> str | None:
-    parts = [party.get("region_province"), party.get("region_city")]
     text_value = "".join(str(part) for part in parts if part)
     return text_value or None
 

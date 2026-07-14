@@ -121,21 +121,28 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
         """
         select count(*)
         from model_node_config
-        where model_name = 'qwen3.6-plus'
+        where node_name in (
+            'business_update_extractor',
+            'seller_target_parser',
+            'seller_target_update_parser',
+            'buyer_intent_parser',
+            'buyer_intent_update_parser',
+            'recommendation_deep_eval',
+            'recommendation_report_writer'
+          )
           and node_type = 'llm'
           and is_default = true
           and is_active = true
         """,
         enabled=table_checks["model_node_config"],
     )
-    default_rerank_nodes = _count_by_query(
+    default_deep_eval_nodes = _count_by_query(
         db,
         """
         select count(*)
         from model_node_config
-        where node_name = 'recommendation_reranker'
-          and node_type = 'rerank'
-          and model_name = 'qwen3-rerank'
+        where node_name = 'recommendation_deep_eval'
+          and node_type = 'llm'
           and is_default = true
           and is_active = true
         """,
@@ -153,14 +160,16 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
         """,
         enabled=table_checks["model_node_config"],
     )
-    default_embedding_nodes = _count_by_query(
+    active_retired_recommendation_nodes = _count_by_query(
         db,
         """
         select count(*)
         from model_node_config
-        where model_name = 'text-embedding-v4'
-          and embedding_dimension = 1024
-          and is_default = true
+        where node_name in (
+            'embedding_seller_doc',
+            'embedding_buyer_intent',
+            'recommendation_reranker'
+          )
           and is_active = true
         """,
         enabled=table_checks["model_node_config"],
@@ -170,10 +179,14 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
         """
         select count(*)
         from prompt_template
-        where (
-            (node_name = 'business_update_extractor' and version in ('v0.2.0', 'v0.3.0', 'v0.4.0', 'v0.5.0', 'v0.6.0'))
-            or (node_name = 'buyer_intent_parser' and version in ('v0.1.0', 'v0.2.0', 'v0.3.0'))
-            or (node_name = 'seller_target_parser' and version in ('v0.1.0', 'v0.2.0', 'v0.3.0', 'v0.4.0'))
+        where node_name in (
+            'business_update_extractor',
+            'seller_target_parser',
+            'seller_target_update_parser',
+            'buyer_intent_parser',
+            'buyer_intent_update_parser',
+            'recommendation_deep_eval',
+            'recommendation_report_writer'
           )
           and is_default = true
           and is_active = true
@@ -187,7 +200,6 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
           select 1
           from prompt_template
           where node_name = 'business_update_extractor'
-            and version in ('v0.2.0', 'v0.3.0', 'v0.4.0', 'v0.5.0', 'v0.6.0')
             and is_default = true
             and is_active = true
         )
@@ -201,11 +213,11 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
     checks = {
         "tables": table_checks,
         "default_provider": default_provider,
-        "default_llm_nodes": default_llm_nodes >= 3,
-        "default_rerank_nodes": default_rerank_nodes >= 1,
+        "required_llm_nodes": default_llm_nodes >= 7,
+        "default_deep_eval_node": default_deep_eval_nodes >= 1,
         "default_ocr_nodes": default_ocr_nodes >= 1,
-        "default_embedding_nodes": default_embedding_nodes >= 2,
-        "default_prompts": default_prompts >= 3,
+        "retired_recommendation_nodes_inactive": active_retired_recommendation_nodes == 0,
+        "required_prompts": default_prompts >= 7,
         "real_business_update_prompt": real_business_update_prompt,
         "buyer_intent_update_allowed": buyer_intent_update_allowed,
         "buyer_intent_suggestion_removed": not buyer_intent_suggestion_allowed,
@@ -214,11 +226,11 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
     ok = (
         all(table_checks.values())
         and default_provider
-        and default_llm_nodes >= 3
-        and default_rerank_nodes >= 1
+        and default_llm_nodes >= 7
+        and default_deep_eval_nodes >= 1
         and default_ocr_nodes >= 1
-        and default_embedding_nodes >= 2
-        and default_prompts >= 3
+        and active_retired_recommendation_nodes == 0
+        and default_prompts >= 7
         and real_business_update_prompt
         and buyer_intent_update_allowed
         and not buyer_intent_suggestion_allowed
@@ -232,11 +244,11 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
             "active_providers": provider_counts,
             "active_nodes": node_counts,
             "active_prompts": prompt_counts,
-            "default_llm_nodes": default_llm_nodes,
-            "default_rerank_nodes": default_rerank_nodes,
+            "required_llm_nodes": default_llm_nodes,
+            "default_deep_eval_nodes": default_deep_eval_nodes,
             "default_ocr_nodes": default_ocr_nodes,
-            "default_embedding_nodes": default_embedding_nodes,
-            "default_prompts": default_prompts,
+            "active_retired_recommendation_nodes": active_retired_recommendation_nodes,
+            "required_prompts": default_prompts,
         },
         "storage": {
             "attachment_storage_backend": settings.effective_attachment_storage_backend,

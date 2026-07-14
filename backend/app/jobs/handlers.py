@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -25,6 +25,7 @@ from backend.app.ai.rerank_client import RerankCallError, call_dashscope_compati
 from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
 from backend.app.api.routes.extracted_actions import (
+    apply_buyer_intent_follow_up_action,
     apply_buyer_intent_target_exclusion_action,
     apply_buyer_intent_update_action,
     apply_buyer_seller_relation_update_action,
@@ -33,7 +34,6 @@ from backend.app.api.routes.extracted_actions import (
 )
 from backend.app.jobs.queue import JobClaim
 from backend.app.services.search_docs import (
-    create_embedding_job_for_search_doc,
     create_search_doc_rebuild_job,
     rebuild_buyer_intent_search_doc,
     rebuild_seller_target_search_doc,
@@ -62,6 +62,7 @@ ALLOWED_ACTION_TYPES = {
     "seller_fact_update",
     "seller_event",
     "target_follow_up",
+    "buyer_intent_follow_up",
     "buyer_seller_relation_update",
     "buyer_intent_target_exclusion",
     "buyer_intent_update",
@@ -172,11 +173,18 @@ BUYER_INTENT_CHANGE_FIELDS = {
     "intent_summary",
     "industry_primary",
     "industry_secondary",
+    "industries_json",
+    "excluded_industries_json",
+    "industry_focus_tags_json",
     "region_scope_summary",
     "min_revenue_yuan",
     "min_net_profit_yuan",
     "min_total_profit_yuan",
     "max_pe",
+    "max_ps",
+    "min_net_margin",
+    "min_gross_margin",
+    "min_valuation_yuan",
     "max_valuation_yuan",
     "min_market_cap_yuan",
     "max_market_cap_yuan",
@@ -213,7 +221,12 @@ BUYER_INTENT_FIELD_ALIASES = {
     "region": "region_scope_summary",
     "min_profit": "min_net_profit_yuan",
     "profit_min": "min_net_profit_yuan",
+    "min_valuation": "min_valuation_yuan",
     "max_valuation": "max_valuation_yuan",
+    "ps": "max_ps",
+    "ps_multiple": "max_ps",
+    "net_margin": "min_net_margin",
+    "gross_margin": "min_gross_margin",
     "min_market_cap": "min_market_cap_yuan",
     "max_market_cap": "max_market_cap_yuan",
     "market_cap": "market_cap_range_summary",
@@ -416,7 +429,7 @@ def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
         return _handle_embedding_generate(db, job)
     if job.job_type == "recommendation_report_generate":
         return _handle_recommendation_report_generate(db, job)
-    if job.job_type == "recommendation_rerank":
+    if job.job_type in {"recommendation_rerank", "recommendation_deep_eval"}:
         return _handle_recommendation_rerank(db, job)
     if job.job_type == "model_node_test":
         return _handle_model_node_test(db, job)
@@ -1069,7 +1082,11 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
         raise ValueError("business_update_extract_actions job requires a business_update_id.")
 
     business_update = _get_business_update(db, business_update_id)
-    node_config = _get_default_node_config(db, "business_update_extractor")
+    node_name = _business_update_parser_node_name(business_update)
+    try:
+        node_config = _get_default_node_config(db, node_name)
+    except ValueError:
+        node_config = _get_default_node_config(db, "business_update_extractor")
     attachment_context = (
         _build_business_update_attachment_context(
             db,
@@ -1259,13 +1276,6 @@ def _handle_seller_search_doc_rebuild(db: Session, job: JobClaim) -> dict[str, o
         raise ValueError("seller_search_doc_rebuild job requires a seller_target entity_id.")
 
     result = rebuild_seller_target_search_doc(db, seller_target_id)
-    embedding_job_id = create_embedding_job_for_search_doc(
-        db,
-        owner_job_id=job.id,
-        entity_type="seller_target",
-        entity_id=seller_target_id,
-        search_doc_id=result["search_doc_id"],
-    )
     return {
         "handled": True,
         "job_type": job.job_type,
@@ -1273,7 +1283,7 @@ def _handle_seller_search_doc_rebuild(db: Session, job: JobClaim) -> dict[str, o
         "search_doc_id": str(result["search_doc_id"]),
         "source_version": result["source_version"],
         "full_text_length": len(result["full_text"] or ""),
-        "embedding_job_id": str(embedding_job_id),
+        "embedding_job_id": None,
     }
 
 
@@ -1283,13 +1293,6 @@ def _handle_buyer_intent_search_doc_rebuild(db: Session, job: JobClaim) -> dict[
         raise ValueError("buyer_intent_search_doc_rebuild job requires a buyer_intent entity_id.")
 
     result = rebuild_buyer_intent_search_doc(db, buyer_intent_id)
-    embedding_job_id = create_embedding_job_for_search_doc(
-        db,
-        owner_job_id=job.id,
-        entity_type="buyer_intent",
-        entity_id=buyer_intent_id,
-        search_doc_id=result["search_doc_id"],
-    )
     return {
         "handled": True,
         "job_type": job.job_type,
@@ -1297,7 +1300,7 @@ def _handle_buyer_intent_search_doc_rebuild(db: Session, job: JobClaim) -> dict[
         "search_doc_id": str(result["search_doc_id"]),
         "source_version": result["source_version"],
         "full_text_length": len(result["full_text"] or ""),
-        "embedding_job_id": str(embedding_job_id),
+        "embedding_job_id": None,
     }
 
 
@@ -1593,115 +1596,25 @@ def _handle_recommendation_report_generate(db: Session, job: JobClaim) -> dict[s
 def _handle_recommendation_rerank(db: Session, job: JobClaim) -> dict[str, object]:
     session_id = _resolve_entity_id(job, expected_entity_type="recommendation_session")
     if session_id is None:
-        raise ValueError("recommendation_rerank job requires a recommendation_session entity_id.")
+        raise ValueError("Recommendation deep-eval job requires a recommendation_session entity_id.")
 
     mode = str(job.payload_json.get("mode") or "")
     query = str(job.payload_json.get("query") or "").strip()
     candidates = job.payload_json.get("candidates") or []
     if mode not in {"buyer_to_target", "target_to_buyer"}:
-        raise ValueError("recommendation_rerank job requires mode buyer_to_target or target_to_buyer.")
+        raise ValueError("Recommendation deep-eval job requires mode buyer_to_target or target_to_buyer.")
     if not isinstance(candidates, list) or len(candidates) < 2:
-        raise ValueError("recommendation_rerank job requires at least two candidates.")
-
-    try:
-        deep_eval_config = _get_default_node_config(db, "recommendation_deep_eval")
-    except ValueError:
-        deep_eval_config = None
-    if deep_eval_config is not None:
-        return _run_recommendation_deep_eval(
-            db,
-            job,
-            session_id=session_id,
-            mode=mode,
-            query=query,
-            candidates=candidates,
-            node_config=deep_eval_config,
-        )
-
-    node_config = _get_default_rerank_node_config(db, "recommendation_reranker")
-    documents = _build_rerank_documents(db, mode=mode, candidates=candidates)
-    input_json = {
-        "session_id": str(session_id),
-        "mode": mode,
-        "query": query,
-        "candidate_count": len(candidates),
-        "documents": [
-            {
-                "index": index,
-                "candidate_key": document["candidate_key"],
-                "text_preview": document["text"][:1000],
-            }
-            for index, document in enumerate(documents)
-        ],
-    }
-    started = time.perf_counter()
-    try:
-        rerank_result = call_dashscope_compatible_rerank(
-            base_url=node_config["base_url"],
-            api_key_secret_ref=node_config["api_key_secret_ref"],
-            model_name=node_config["model_name"],
-            query=query,
-            documents=[document["text"] for document in documents],
-            top_n=len(documents),
-            instruct="Rerank M&A recommendation candidates by fit with the buyer intent or target profile.",
-            timeout_seconds=node_config["timeout_seconds"] or 90,
-        )
-    except RerankCallError as exc:
-        latency_ms = int((time.perf_counter() - started) * 1000)
-        _insert_rerank_trace(
-            db,
-            job=job,
-            session_id=session_id,
-            node_config=node_config,
-            status="failed",
-            input_json=input_json,
-            parsed_output_json=None,
-            latency_ms=latency_ms,
-            total_tokens=None,
-            error_code="rerank_call_failed",
-            error_message=str(exc),
-        )
-        raise
-
-    reranked_candidates = _apply_rerank_results_to_candidates(
+        raise ValueError("Recommendation deep-eval job requires at least two candidates.")
+    deep_eval_config = _get_default_node_config(db, "recommendation_deep_eval")
+    return _run_recommendation_deep_eval(
+        db,
+        job,
+        session_id=session_id,
+        mode=mode,
+        query=query,
         candidates=candidates,
-        rerank_results=rerank_result.results,
-        model_name=rerank_result.model_name,
+        node_config=deep_eval_config,
     )
-    _insert_rerank_trace(
-        db,
-        job=job,
-        session_id=session_id,
-        node_config=node_config,
-        status="succeeded",
-        input_json=input_json,
-        parsed_output_json={
-            "model": rerank_result.model_name,
-            "results": [
-                {"index": item.index, "relevance_score": item.relevance_score}
-                for item in rerank_result.results
-            ],
-            "reranked_candidates": reranked_candidates,
-        },
-        latency_ms=rerank_result.latency_ms,
-        total_tokens=rerank_result.total_tokens,
-    )
-    _insert_recommendation_rerank_message(
-        db,
-        session_id=session_id,
-        job_id=job.id,
-        reranked_candidates=reranked_candidates,
-        model_name=rerank_result.model_name,
-    )
-    return {
-        "handled": True,
-        "job_type": job.job_type,
-        "session_id": str(session_id),
-        "model_name": rerank_result.model_name,
-        "candidate_count": len(candidates),
-        "reranked_count": len(reranked_candidates),
-        "trace_created": True,
-    }
 
 
 DEEP_EVAL_GRADES = ("A", "B", "C")
@@ -1719,6 +1632,8 @@ def _run_recommendation_deep_eval(
     node_config: dict[str, Any],
 ) -> dict[str, object]:
     anchor = job.payload_json.get("anchor") if isinstance(job.payload_json.get("anchor"), dict) else {}
+    if mode == "buyer_to_target":
+        anchor = {key: value for key, value in anchor.items() if key not in {"buyer_party_id", "buyer_name"}}
     anchor_doc_mode = "target_to_buyer" if mode == "buyer_to_target" else "buyer_to_target"
     anchor_doc_key = "buyer_intent_id" if mode == "buyer_to_target" else "seller_target_id"
     anchor_doc_text = None
@@ -1874,8 +1789,10 @@ def _validate_deep_eval_results(
                 "info_gaps": str(item.get("info_gaps") or "").strip() or None,
             }
         )
-    if not results:
-        raise ValueError("Deep eval output contained no valid results.")
+    if len(results) != candidate_count:
+        raise ValueError(
+            f"Deep eval output must cover every candidate exactly once: expected {candidate_count}, got {len(results)}."
+        )
     return results
 
 
@@ -2319,9 +2236,11 @@ def _get_buyer_intent_for_parse(db: Session, buyer_intent_id: UUID) -> dict[str,
             select
               id, buyer_party_id, intent_name, status, pause_reason, contact_name,
               contact_info_json, raw_requirement_text, intent_summary, parsed_requirement_json,
-              industry_primary, industry_secondary, region_scope_summary,
+              industry_primary, industry_secondary, industries_json,
+              excluded_industries_json, industry_focus_tags_json, region_scope_summary,
               region_constraints_json, min_revenue_yuan, min_net_profit_yuan,
-              min_total_profit_yuan, max_pe, max_valuation_yuan, market_cap_range_summary,
+              min_total_profit_yuan, max_pe, max_ps, min_net_margin, min_gross_margin,
+              min_valuation_yuan, max_valuation_yuan, market_cap_range_summary,
               min_market_cap_yuan, max_market_cap_yuan,
               requires_control, requires_consolidation, accepts_minority_investment,
               desired_equity_ratio_min, desired_equity_ratio_max, equity_ratio_summary,
@@ -3304,13 +3223,27 @@ def _get_candidate_search_doc_text(db: Session, *, mode: str, candidate: dict[st
         row = db.execute(
             text(
                 """
-                select full_text
-                from buyer_intent_search_doc
-                where buyer_intent_id = :buyer_intent_id
+                select
+                  intent_name, raw_requirement_text, intent_summary,
+                  industry_primary, industry_secondary, industries_json,
+                  excluded_industries_json, industry_focus_tags_json,
+                  region_scope_summary, region_constraints_json,
+                  min_revenue_yuan, min_net_profit_yuan, min_total_profit_yuan,
+                  min_valuation_yuan, max_valuation_yuan,
+                  min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
+                  max_pe, max_ps, min_net_margin, min_gross_margin,
+                  requires_control, requires_consolidation, accepts_minority_investment,
+                  desired_equity_ratio_min, desired_equity_ratio_max, equity_ratio_summary,
+                  preferred_listed_status, listing_board_requirement_summary,
+                  financing_stage_requirement_summary, transaction_type, transaction_types_json,
+                  premium_tolerance_summary, max_premium_rate, max_debt_ratio,
+                  debt_ratio_requirement_summary, major_risk_tolerance_summary,
+                  negative_summary, priority_summary, preference_summary, unknown_summary
+                from buyer_intent
+                where id = :buyer_intent_id
                   and team_id = :team_id
                   and workspace_id = :workspace_id
-                order by updated_at desc
-                limit 1
+                  and deleted_at is null
                 """
             ),
             {
@@ -3319,6 +3252,7 @@ def _get_candidate_search_doc_text(db: Session, *, mode: str, candidate: dict[st
                 "workspace_id": DEFAULT_WORKSPACE_ID,
             },
         ).mappings().one_or_none()
+        return json.dumps(dict(row), ensure_ascii=False, default=str) if row else None
     return str(row["full_text"]) if row and row["full_text"] else None
 
 
@@ -3502,6 +3436,7 @@ def _build_business_update_context(db: Session, business_update: dict[str, Any])
         "bound_seller_targets": _fetch_seller_targets(db, seller_target_ids),
         "bound_buyer_parties": _fetch_buyer_parties(db, buyer_party_ids),
         "bound_buyer_intents": _fetch_buyer_intents(db, buyer_intent_ids),
+        "industry_l1_list": industry_l1_prompt_list(db),
         # Reference date for resolving partial follow-up dates such as 0730.
         "update_date": str(business_update.get("created_at") or "")[:10],
         "instructions": {
@@ -3854,8 +3789,10 @@ def _fetch_buyer_intents(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
             select
               id, buyer_party_id, intent_name, status, contact_name,
               raw_requirement_text, intent_summary, industry_primary,
-              industry_secondary, region_scope_summary, min_revenue_yuan,
-              min_net_profit_yuan, max_pe, max_valuation_yuan,
+              industry_secondary, industries_json, excluded_industries_json,
+              industry_focus_tags_json, region_scope_summary, min_revenue_yuan,
+              min_net_profit_yuan, max_pe, max_ps, min_net_margin, min_gross_margin,
+              min_valuation_yuan, max_valuation_yuan,
               min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
               requires_control, requires_consolidation,
               accepts_minority_investment, preferred_listed_status,
@@ -3967,12 +3904,17 @@ BUYER_INTENT_PARSE_FIELDS = {
     "industry_secondary",
     "industries_json",
     "excluded_industries_json",
+    "industry_focus_tags_json",
     "region_scope_summary",
     "region_constraints_json",
     "min_revenue_yuan",
     "min_net_profit_yuan",
     "min_total_profit_yuan",
     "max_pe",
+    "max_ps",
+    "min_net_margin",
+    "min_gross_margin",
+    "min_valuation_yuan",
     "max_valuation_yuan",
     "min_market_cap_yuan",
     "max_market_cap_yuan",
@@ -4121,6 +4063,7 @@ BUYER_INTENT_PARSE_JSON_FIELDS = {
     "transaction_types_json",
     "industries_json",
     "excluded_industries_json",
+    "industry_focus_tags_json",
 }
 
 BUYER_INTENT_PARSE_NUMERIC_FIELDS = {
@@ -4128,6 +4071,10 @@ BUYER_INTENT_PARSE_NUMERIC_FIELDS = {
     "min_net_profit_yuan",
     "min_total_profit_yuan",
     "max_pe",
+    "max_ps",
+    "min_net_margin",
+    "min_gross_margin",
+    "min_valuation_yuan",
     "max_valuation_yuan",
     "min_market_cap_yuan",
     "max_market_cap_yuan",
@@ -4443,7 +4390,16 @@ def _normalize_buyer_intent_parse_changes(
             text_value = text_value[: BUYER_INTENT_TEXT_LIMITS[key]]
         changes[key] = text_value
 
-    changes.setdefault("raw_requirement_text", raw_requirement_text)
+    source_text = raw_requirement_text.lower()
+    mentions_valuation = "估值" in raw_requirement_text or "valuation" in source_text
+    mentions_market_cap = "市值" in raw_requirement_text or "market cap" in source_text
+    if mentions_valuation and not mentions_market_cap:
+        for field in ("min_market_cap_yuan", "max_market_cap_yuan", "market_cap_range_summary"):
+            if field in changes:
+                changes.pop(field, None)
+                notes.append(f"dropped_{field}:source_mentions_valuation_not_market_cap")
+
+    changes["raw_requirement_text"] = raw_requirement_text
     if "parsed_requirement_json" not in changes:
         changes["parsed_requirement_json"] = {
             "source": "buyer_intent_parser",
@@ -4469,6 +4425,18 @@ def _normalize_buyer_intent_industry_changes(db: Session, changes: dict[str, Any
             changes["excluded_industries_json"] = cleaned
         else:
             changes.pop("excluded_industries_json", None)
+    if "industry_focus_tags_json" in changes:
+        raw_tags = changes["industry_focus_tags_json"]
+        tags: list[str] = []
+        if isinstance(raw_tags, list):
+            for value in raw_tags:
+                tag = str(value or "").strip()[:80]
+                if tag and tag not in tags:
+                    tags.append(tag)
+        if tags:
+            changes["industry_focus_tags_json"] = tags
+        else:
+            changes.pop("industry_focus_tags_json", None)
     if "industries_json" not in changes and changes.get("industry_primary"):
         l1_name = resolve_l1(db, changes["industry_primary"])
         if l1_name:
@@ -4903,6 +4871,15 @@ def _normalize_actions(
             action_type,
             proposed_changes,
         )
+        if action_type == "buyer_intent_update":
+            update_notes = _normalize_buyer_intent_action_changes(
+                normalized_changes,
+                evidence_text="\n".join(
+                    str(value or "")
+                    for value in (action.get("raw_evidence_text"), business_update.get("raw_text"))
+                ),
+            )
+            normalization_notes.extend(update_notes)
         money_notes = _normalize_money_fields_from_action_evidence(
             normalized_changes,
             action,
@@ -4957,6 +4934,8 @@ def _normalize_proposed_changes(
             aliases=BUYER_INTENT_FIELD_ALIASES,
             enum_fields=BUYER_INTENT_ENUM_FIELDS,
         )
+    if action_type == "buyer_intent_follow_up":
+        return _normalize_buyer_intent_follow_up_changes(proposed_changes)
     if action_type == "buyer_seller_relation_update":
         return _normalize_change_fields(
             proposed_changes,
@@ -5019,6 +4998,128 @@ def _normalize_target_follow_up_changes(
     if occurred_on:
         changes["occurred_on"] = occurred_on
     return changes, notes
+
+
+def _normalize_buyer_intent_follow_up_changes(
+    proposed_changes: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    allowed = {
+        "occurred_at",
+        "occurred_on",
+        "contact_name",
+        "content",
+        "next_step",
+        "next_follow_up_at",
+        "next_follow_up_on",
+    }
+    notes = [f"ignored_unsupported_field:{key}" for key in proposed_changes if key not in allowed]
+    content = str(proposed_changes.get("content") or "").strip()
+    normalized: dict[str, Any] = {"content": content[:10000]}
+    if len(content) > 10000:
+        notes.append("content_truncated_to_10000")
+    contact_name = str(proposed_changes.get("contact_name") or "").strip()
+    if contact_name:
+        normalized["contact_name"] = contact_name[:200]
+        if len(contact_name) > 200:
+            notes.append("contact_name_truncated_to_200")
+    next_step = str(proposed_changes.get("next_step") or "").strip()
+    if next_step:
+        normalized["next_step"] = next_step[:2000]
+        if len(next_step) > 2000:
+            notes.append("next_step_truncated_to_2000")
+    occurred_at = _normalize_follow_up_datetime(
+        proposed_changes.get("occurred_at") or proposed_changes.get("occurred_on"),
+        field_name="occurred_at",
+        notes=notes,
+    )
+    if occurred_at:
+        normalized["occurred_at"] = occurred_at
+    next_follow_up_at = _normalize_follow_up_datetime(
+        proposed_changes.get("next_follow_up_at") or proposed_changes.get("next_follow_up_on"),
+        field_name="next_follow_up_at",
+        notes=notes,
+    )
+    if next_follow_up_at:
+        normalized["next_follow_up_at"] = next_follow_up_at
+    return normalized, notes
+
+
+def _normalize_buyer_intent_action_changes(changes: dict[str, Any], *, evidence_text: str) -> list[str]:
+    notes: list[str] = []
+    for field in BUYER_INTENT_PARSE_NUMERIC_FIELDS:
+        if field in changes:
+            normalized = _optional_decimal(changes[field])
+            if normalized is None:
+                changes.pop(field, None)
+                notes.append(f"{field}:dropped_invalid_number")
+            else:
+                changes[field] = normalized
+
+    for field in BUYER_INTENT_PARSE_JSON_FIELDS:
+        if field in changes and not isinstance(changes[field], (list, dict)):
+            changes.pop(field, None)
+            notes.append(f"{field}:dropped_invalid_json")
+
+    tags = changes.get("industry_focus_tags_json")
+    if isinstance(tags, list):
+        cleaned_tags: list[str] = []
+        for value in tags:
+            tag = str(value or "").strip()[:80]
+            if tag and tag not in cleaned_tags:
+                cleaned_tags.append(tag)
+        if cleaned_tags:
+            changes["industry_focus_tags_json"] = cleaned_tags
+        else:
+            changes.pop("industry_focus_tags_json", None)
+
+    source = evidence_text.lower()
+    if ("估值" in evidence_text or "valuation" in source) and not (
+        "市值" in evidence_text or "market cap" in source
+    ):
+        for field in ("min_market_cap_yuan", "max_market_cap_yuan", "market_cap_range_summary"):
+            if field in changes:
+                changes.pop(field, None)
+                notes.append(f"dropped_{field}:source_mentions_valuation_not_market_cap")
+    return notes
+
+
+def _normalize_follow_up_datetime(value: Any, *, field_name: str, notes: list[str]) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).isoformat()
+    except ValueError:
+        pass
+
+    today = date.today()
+    patterns = (
+        (r"^(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?$", True),
+        (r"^(\d{1,2})[-/.月](\d{1,2})日?$", False),
+        (r"^(\d{2})(\d{2})$", False),
+    )
+    for pattern, includes_year in patterns:
+        match = re.match(pattern, raw)
+        if not match:
+            continue
+        values = [int(item) for item in match.groups()]
+        year, month, day = values if includes_year else [today.year, *values]
+        try:
+            return date(year, month, day).isoformat()
+        except ValueError:
+            break
+    notes.append(f"{field_name}_unparseable:{raw[:40]}")
+    return None
+
+
+def _business_update_parser_node_name(business_update: dict[str, Any]) -> str:
+    seller_ids = _uuid_list(business_update.get("bound_seller_target_ids_json"))
+    intent_ids = _uuid_list(business_update.get("bound_buyer_intent_ids_json"))
+    if len(intent_ids) == 1 and not seller_ids:
+        return "buyer_intent_update_parser"
+    if len(seller_ids) == 1 and not intent_ids:
+        return "seller_target_update_parser"
+    return "business_update_extractor"
 
 
 def _parse_follow_up_date(raw: str) -> date | None:
@@ -5341,7 +5442,7 @@ def _normalize_action_target(
         if len(bound_ids) == 1:
             return "seller_target", bound_ids[0], ["target_entity_id<-single_bound_seller_target"]
 
-    if action_type == "buyer_intent_update":
+    if action_type in {"buyer_intent_update", "buyer_intent_follow_up"}:
         bound_ids = _uuid_list(business_update["bound_buyer_intent_ids_json"])
         if len(bound_ids) == 1:
             return "buyer_intent", bound_ids[0], ["target_entity_id<-single_bound_buyer_intent"]
@@ -5450,11 +5551,12 @@ def _insert_extracted_actions(
 AUTO_APPLY_ACTION_TYPE_ORDER = {
     "seller_fact_update": 0,
     "buyer_intent_update": 1,
-    "buyer_seller_relation_update": 2,
-    "buyer_intent_target_exclusion": 3,
+    "buyer_intent_follow_up": 2,
+    "buyer_seller_relation_update": 3,
+    "buyer_intent_target_exclusion": 4,
     # Follow-ups apply last: fact updates must run the post-parse status flip
     # while the target is still in 'parsing'.
-    "target_follow_up": 4,
+    "target_follow_up": 5,
 }
 
 
@@ -5503,6 +5605,8 @@ def _apply_auto_action(db: Session, action: dict[str, Any]) -> dict[str, Any] | 
         return apply_seller_fact_update_action(db, action, require_accepted=False)
     if action["action_type"] == "buyer_intent_update":
         return apply_buyer_intent_update_action(db, action, require_accepted=False)
+    if action["action_type"] == "buyer_intent_follow_up":
+        return apply_buyer_intent_follow_up_action(db, action, require_accepted=False)
     if action["action_type"] == "buyer_seller_relation_update":
         return apply_buyer_seller_relation_update_action(db, action, require_accepted=False)
     if action["action_type"] == "buyer_intent_target_exclusion":
@@ -5525,6 +5629,14 @@ def _is_safe_auto_apply_action(action: dict[str, Any]) -> bool:
 
     if action["action_type"] == "buyer_intent_update":
         return action["target_entity_type"] == "buyer_intent" and action["target_entity_id"] is not None
+
+    if action["action_type"] == "buyer_intent_follow_up":
+        changes = action["proposed_changes_json"]
+        return (
+            action["target_entity_type"] == "buyer_intent"
+            and action["target_entity_id"] is not None
+            and bool(str(changes.get("content") or "").strip())
+        )
 
     if action["action_type"] == "buyer_seller_relation_update":
         changes = action["proposed_changes_json"]

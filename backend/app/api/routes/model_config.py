@@ -40,7 +40,7 @@ class ProviderCreate(BaseModel):
     provider_name: str = Field(min_length=1, max_length=120)
     provider_type: str = Field(default="custom")
     base_url: str | None = None
-    api_key_secret_ref: str | None = None
+    api_key_secret_ref: str | None = Field(default=None, pattern=r"^[A-Z_][A-Z0-9_]*$", max_length=160)
     auth_type: str = Field(default="bearer")
     extra_headers_json: dict[str, Any] = Field(default_factory=dict)
     extra_config_json: dict[str, Any] = Field(default_factory=dict)
@@ -53,7 +53,7 @@ class ProviderUpdate(BaseModel):
     provider_name: str | None = Field(default=None, min_length=1, max_length=120)
     provider_type: str | None = None
     base_url: str | None = None
-    api_key_secret_ref: str | None = None
+    api_key_secret_ref: str | None = Field(default=None, pattern=r"^[A-Z_][A-Z0-9_]*$", max_length=160)
     auth_type: str | None = None
     extra_headers_json: dict[str, Any] | None = None
     extra_config_json: dict[str, Any] | None = None

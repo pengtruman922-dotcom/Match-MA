@@ -274,11 +274,18 @@ export interface BuyerIntent {
   intent_summary: string | null;
   industry_primary: string | null;
   industry_secondary: string | null;
+  industries_json?: string[];
+  excluded_industries_json?: string[];
+  industry_focus_tags_json?: string[];
   region_scope_summary: string | null;
   min_revenue_yuan: string | null;
   min_net_profit_yuan: string | null;
   min_total_profit_yuan: string | null;
   max_pe: string | null;
+  max_ps: string | null;
+  min_net_margin: string | null;
+  min_gross_margin: string | null;
+  min_valuation_yuan: string | null;
   max_valuation_yuan: string | null;
   min_market_cap_yuan: string | null;
   max_market_cap_yuan: string | null;
@@ -316,6 +323,100 @@ export interface BuyerIntentListResponse {
   total: number;
   limit: number;
   offset: number;
+}
+
+export interface BuyerIntentFollowUp {
+  id: string;
+  buyer_intent_id: string;
+  occurred_at: string;
+  contact_name: string | null;
+  content: string;
+  next_step: string | null;
+  next_follow_up_at: string | null;
+  business_update_id: string | null;
+  extracted_action_id: string | null;
+  created_by: string | null;
+  created_by_name: string | null;
+  created_at: string;
+}
+
+export interface BuyerIntentFollowUpCreate {
+  occurred_at?: string;
+  contact_name?: string;
+  content: string;
+  next_step?: string;
+  next_follow_up_at?: string;
+}
+
+export interface ModelProviderConfig {
+  id: string;
+  provider_name: string;
+  provider_type: string;
+  base_url: string | null;
+  api_key_secret_ref: string | null;
+  auth_type: string;
+  is_active: boolean;
+  is_default: boolean;
+}
+
+export interface PromptTemplateConfig {
+  id: string;
+  node_name: string;
+  version: string;
+  name: string | null;
+  system_prompt: string | null;
+  user_prompt_template: string | null;
+  output_schema_json: Record<string, unknown>;
+  variables_json: unknown[];
+  is_active: boolean;
+  is_default: boolean;
+  updated_at: string;
+}
+
+export interface ModelNodeConfig {
+  id: string;
+  node_name: string;
+  node_type: string;
+  provider_config_id: string;
+  provider_name: string | null;
+  model_name: string;
+  temperature: number | string | null;
+  top_p: number | string | null;
+  max_tokens: number | null;
+  timeout_seconds: number;
+  response_format: string | null;
+  output_mode: string;
+  embedding_dimension: number | null;
+  is_active: boolean;
+  is_default: boolean;
+  prompt_editable: boolean;
+  default_prompt: PromptTemplateConfig | null;
+  test_summary: {
+    latest_status: string | null;
+    latest_latency_ms: number | null;
+    latest_error_code: string | null;
+    latest_error_message: string | null;
+  };
+}
+
+export interface ModelConfigSettingsPage {
+  providers: ModelProviderConfig[];
+  nodes: ModelNodeConfig[];
+  prompts: PromptTemplateConfig[];
+  overview: Record<string, number>;
+  security_note: string;
+}
+
+export interface IndustryDictionaryTerm {
+  id: string;
+  term: string;
+  level: 'l1' | 'l2' | 'alias';
+  l1_name: string;
+  active: boolean;
+  sort_order: number;
+  usage_count: number;
+  created_at: string;
+  updated_at: string;
 }
 
 export type BuyerIntentSearchField = 'intent_name' | 'buyer_name' | 'raw_requirement_text' | 'intent_summary';
@@ -395,11 +496,16 @@ export interface BuyerIntentCreate {
   contact_name?: string;
   raw_requirement_text?: string;
   industry_primary?: string;
+  industry_focus_tags_json?: string[];
   region_scope_summary?: string;
   min_revenue_yuan?: number;
   min_net_profit_yuan?: number;
   min_total_profit_yuan?: number;
   max_pe?: number;
+  max_ps?: number;
+  min_net_margin?: number;
+  min_gross_margin?: number;
+  min_valuation_yuan?: number;
   max_valuation_yuan?: number;
   min_market_cap_yuan?: number;
   max_market_cap_yuan?: number;
@@ -467,11 +573,16 @@ export interface BuyerIntentUpdate {
   contact_name?: string;
   raw_requirement_text?: string;
   industry_primary?: string;
+  industry_focus_tags_json?: string[];
   region_scope_summary?: string;
   min_revenue_yuan?: number;
   min_net_profit_yuan?: number;
   min_total_profit_yuan?: number;
   max_pe?: number;
+  max_ps?: number;
+  min_net_margin?: number;
+  min_gross_margin?: number;
+  min_valuation_yuan?: number;
   max_valuation_yuan?: number;
   min_market_cap_yuan?: number;
   max_market_cap_yuan?: number;

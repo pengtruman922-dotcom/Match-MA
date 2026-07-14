@@ -7,6 +7,7 @@ from backend.app.api.routes import (
     business_updates,
     buyer_intents,
     buyer_parties,
+    data_dictionaries,
     debug,
     extracted_actions,
     field_sources,
@@ -33,6 +34,7 @@ api_router.include_router(attachments.router)
 api_router.include_router(seller_targets.router)
 api_router.include_router(buyer_parties.router)
 api_router.include_router(buyer_intents.router)
+api_router.include_router(data_dictionaries.router)
 api_router.include_router(recommendations.router)
 api_router.include_router(relations.router)
 api_router.include_router(search_docs.router)

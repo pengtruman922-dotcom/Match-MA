@@ -1472,6 +1472,7 @@ def _task_display_name(job_type: Any) -> str:
         "embedding_generate": "向量生成",
         "recommendation_report_generate": "推荐报告生成",
         "recommendation_rerank": "推荐重排",
+        "recommendation_deep_eval": "推荐深度评估",
         "model_node_test": "模型节点测试",
     }
     job_type_text = str(job_type or "unknown")

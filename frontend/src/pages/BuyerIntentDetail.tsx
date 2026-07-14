@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, Loader2, MessageSquarePlus, Sparkles, UserRound } from 'lucide-react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import BuyerIntentWorkspace, {
@@ -7,16 +7,15 @@ import BuyerIntentWorkspace, {
 } from '../components/BuyerIntentWorkspace';
 import type { BuyerWorkspaceTab } from '../components/BuyerIntentWorkspace';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
-import { buyerIntents, buyerParties, relations, users } from '../lib/api';
+import { businessUpdates, buyerIntents, buyerParties, users } from '../lib/api';
 import { isAdmin } from '../lib/auth';
 import { valueLabel } from '../lib/fieldLabels';
 import type {
   AppUserOption,
   BuyerIntent,
+  BuyerIntentFollowUp,
   BuyerIntentParseStatus,
   BuyerParty,
-  BuyerSellerRelation,
-  RelationEvent,
 } from '../types/api';
 
 export default function BuyerIntentDetail() {
@@ -26,8 +25,7 @@ export default function BuyerIntentDetail() {
   const [intent, setIntent] = useState<BuyerIntent | null>(null);
   const [party, setParty] = useState<BuyerParty | null>(null);
   const [parseStatus, setParseStatus] = useState<BuyerIntentParseStatus | null>(null);
-  const [relationItems, setRelationItems] = useState<BuyerSellerRelation[]>([]);
-  const [relationEvents, setRelationEvents] = useState<RelationEvent[]>([]);
+  const [followUps, setFollowUps] = useState<BuyerIntentFollowUp[]>([]);
   const [activeTab, setActiveTab] = useState<BuyerWorkspaceTab>(() => workspaceTab(searchParams.get('tab')));
   const [loading, setLoading] = useState(true);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -35,32 +33,32 @@ export default function BuyerIntentDetail() {
   const [statusSaving, setStatusSaving] = useState(false);
   const [ownerSaving, setOwnerSaving] = useState(false);
   const [ownerOptions, setOwnerOptions] = useState<AppUserOption[]>([]);
+  const updateWatchRef = useRef(0);
   const admin = isAdmin();
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (silent = false) => {
     if (!id) return;
-    setLoading(true);
+    if (!silent) setLoading(true);
     try {
       const nextIntent = await buyerIntents.get(id);
-      const [nextParty, nextParseStatus, nextRelations, nextEvents] = await Promise.all([
+      const [nextParty, nextParseStatus, nextFollowUps] = await Promise.all([
         nextIntent.buyer_party_id ? buyerParties.get(nextIntent.buyer_party_id).catch(() => null) : Promise.resolve(null),
         buyerIntents.parseStatus(id).catch(() => null),
-        relations.list({ buyer_intent_id: id, limit: 100 }).catch(() => []),
-        relations.listEvents({ buyer_intent_id: id, limit: 100 }).catch(() => []),
+        buyerIntents.followUps(id).catch(() => []),
       ]);
       setIntent(nextIntent);
       setParty(nextParty);
       setParseStatus(nextParseStatus);
-      setRelationItems(nextRelations);
-      setRelationEvents(nextEvents);
+      setFollowUps(nextFollowUps);
     } catch {
       navigate('/buyers');
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [id, navigate]);
 
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => () => { updateWatchRef.current += 1; }, []);
   useEffect(() => {
     if (!admin) return;
     users.options().then(setOwnerOptions).catch(() => {});
@@ -90,6 +88,24 @@ export default function BuyerIntentDetail() {
       setOwnerSaving(false);
     }
   };
+
+  const watchBusinessUpdate = useCallback(async (businessUpdateId: string) => {
+    const watchId = updateWatchRef.current + 1;
+    updateWatchRef.current = watchId;
+    const delays = [0, 2000, 3000, 5000, 10000, 15000, 30000, 60000, 60000];
+    for (const delay of delays) {
+      if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay));
+      if (updateWatchRef.current !== watchId) return;
+      try {
+        const update = await businessUpdates.get(businessUpdateId);
+        await load(true);
+        setHistoryRefreshKey((current) => current + 1);
+        if (['applied', 'partially_applied', 'parsed', 'failed'].includes(update.processing_status)) return;
+      } catch {
+        return;
+      }
+    }
+  }, [load]);
 
   if (loading) return <div className="flex items-center justify-center py-20 text-sm text-gray-400"><Loader2 className="mr-2 h-5 w-5 animate-spin text-brand-600" />正在加载</div>;
   if (!intent) return null;
@@ -126,8 +142,7 @@ export default function BuyerIntentDetail() {
         intent={intent}
         party={party}
         parseStatus={parseStatus}
-        relations={relationItems}
-        events={relationEvents}
+        followUps={followUps}
         activeTab={activeTab}
         onTabChange={setActiveTab}
         historyRefreshKey={historyRefreshKey}
@@ -140,7 +155,7 @@ export default function BuyerIntentDetail() {
         onClose={() => setDrawerOpen(false)}
         defaultIntentId={intent.id}
         defaultIntentName={intent.intent_name}
-        onSuccess={() => { setHistoryRefreshKey((current) => current + 1); void load(); }}
+        onSuccess={(businessUpdateId) => { void watchBusinessUpdate(businessUpdateId); }}
       />
     </div>
   );

@@ -2,11 +2,12 @@ import pytest
 
 from backend.app.jobs.handlers import (
     _apply_deep_eval_results_to_candidates,
+    _get_candidate_search_doc_text,
     _validate_deep_eval_results,
 )
 
 
-def test_validate_deep_eval_results_normalizes_and_filters() -> None:
+def test_validate_deep_eval_results_normalizes_and_filters_invalid_rows() -> None:
     results = _validate_deep_eval_results(
         {
             "results": [
@@ -17,7 +18,7 @@ def test_validate_deep_eval_results_normalizes_and_filters() -> None:
                 "not-a-dict",
             ]
         },
-        candidate_count=3,
+        candidate_count=2,
     )
 
     assert [item["index"] for item in results] == [1, 0]
@@ -34,6 +35,8 @@ def test_validate_deep_eval_results_raises_on_empty() -> None:
         _validate_deep_eval_results(None, candidate_count=2)
     with pytest.raises(ValueError):
         _validate_deep_eval_results({"results": [{"index": 99, "grade": "A"}]}, candidate_count=2)
+    with pytest.raises(ValueError, match="cover every candidate"):
+        _validate_deep_eval_results({"results": [{"index": 0, "grade": "A"}]}, candidate_count=2)
 
 
 def test_apply_deep_eval_results_orders_by_grade_then_result_order() -> None:
@@ -74,3 +77,32 @@ def test_apply_deep_eval_missing_result_falls_to_bottom() -> None:
 
     assert [item["seller_target_name"] for item in ordered] == ["标的乙", "标的甲"]
     assert "deep_eval" not in ordered[1]
+
+
+def test_deep_eval_reads_buyer_intent_fields_without_buyer_party_profile() -> None:
+    class _Result:
+        def mappings(self):
+            return self
+
+        def one_or_none(self):
+            return {"intent_name": "医药并购需求", "industries_json": ["医药与健康"], "max_pe": 15}
+
+    class _Db:
+        statement = ""
+
+        def execute(self, statement, params):
+            self.statement = str(statement)
+            assert params["buyer_intent_id"]
+            return _Result()
+
+    db = _Db()
+    text_value = _get_candidate_search_doc_text(
+        db,
+        mode="target_to_buyer",
+        candidate={"buyer_intent_id": "8ff4bc53-047c-47be-b9b8-a3c465a519a1"},
+    )
+
+    assert '"intent_name": "医药并购需求"' in text_value
+    assert "from buyer_intent" in db.statement
+    assert "buyer_party" not in db.statement
+    assert "capital_strength" not in db.statement

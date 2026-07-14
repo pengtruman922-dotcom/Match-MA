@@ -1,9 +1,15 @@
+from datetime import date
 from uuid import UUID
 
 from backend.app.api.routes.buyer_intents import _compact_parse_trace
+from backend.app.api.routes.extracted_actions import _allowed_buyer_intent_changes
 from backend.app.jobs.handlers import (
     _build_buyer_profile_context,
+    _business_update_parser_node_name,
+    _is_safe_auto_apply_action,
+    _normalize_actions,
     _normalize_buyer_party_parse_changes,
+    _normalize_buyer_intent_industry_changes,
     _normalize_buyer_intent_parse_changes,
     _normalize_equity_requirement_type,
     _normalize_listed_status,
@@ -96,6 +102,148 @@ def test_buyer_intent_parser_enum_helpers_are_tolerant() -> None:
     assert _normalize_listed_status("准备上市") == "preparing_listing"
     assert _normalize_listed_status("pre IPO") == "pre_ipo"
     assert _normalize_equity_requirement_type("参股也可以") == "minority_acceptable"
+
+
+def test_buyer_intent_parse_separates_valuation_from_market_cap_and_keeps_focus_fields() -> None:
+    changes, notes = _normalize_buyer_intent_parse_changes(
+        {
+            "fields": {
+                "min_valuation_yuan": "1500000000",
+                "max_valuation_yuan": "2500000000",
+                "min_market_cap_yuan": "1500000000",
+                "market_cap_range_summary": "15亿至25亿元",
+                "max_ps": "3",
+                "min_net_margin": "8",
+                "min_gross_margin": "35",
+                "industry_focus_tags_json": ["新式茶饮", "精品咖啡", "新式茶饮", ""],
+            }
+        },
+        "关注新式茶饮和精品咖啡，估值15亿至25亿元，PS不高于3倍，净利率不低于8%。",
+    )
+    industry_notes = _normalize_buyer_intent_industry_changes(None, changes)
+
+    assert changes["min_valuation_yuan"] == 1_500_000_000
+    assert changes["max_valuation_yuan"] == 2_500_000_000
+    assert changes["max_ps"] == 3
+    assert changes["min_net_margin"] == 8
+    assert changes["min_gross_margin"] == 35
+    assert changes["industry_focus_tags_json"] == ["新式茶饮", "精品咖啡"]
+    assert "min_market_cap_yuan" not in changes
+    assert "market_cap_range_summary" not in changes
+    assert industry_notes == []
+    assert any(note.startswith("dropped_min_market_cap_yuan") for note in notes)
+
+
+def test_buyer_intent_follow_up_action_binds_to_single_intent_and_normalizes_short_date() -> None:
+    intent_id = UUID("00000000-0000-0000-0000-000000000321")
+    business_update = {
+        "bound_seller_target_ids_json": [],
+        "bound_buyer_intent_ids_json": [str(intent_id)],
+        "bound_buyer_party_ids_json": [],
+        "attachment_evidence_ids": [],
+        "image_evidence_attachment_ids": [],
+    }
+    actions = _normalize_actions(
+        {
+            "actions": [
+                {
+                    "action_type": "buyer_intent_follow_up",
+                    "target_entity_type": "buyer_intent",
+                    "target_entity_id": None,
+                    "proposed_changes_json": {
+                        "occurred_at": "0714",
+                        "contact_name": "杨总",
+                        "content": "推荐了标的A、B、C，下周和A面谈",
+                        "seller_target_ids": ["should-not-bind"],
+                    },
+                }
+            ]
+        },
+        business_update,
+    )
+
+    assert len(actions) == 1
+    action = actions[0]
+    assert action["target_entity_id"] == intent_id
+    assert action["proposed_changes_json"]["occurred_at"] == f"{date.today().year}-07-14"
+    assert action["proposed_changes_json"]["content"] == "推荐了标的A、B、C，下周和A面谈"
+    assert "seller_target_ids" not in action["proposed_changes_json"]
+    assert any(note.startswith("ignored_unsupported_field:seller_target_ids") for note in action["normalization_notes"])
+    assert _is_safe_auto_apply_action(
+        {**action, "applied_at": None, "review_status": "pending_review"}
+    ) is True
+
+
+def test_business_update_uses_entity_specific_parser_nodes() -> None:
+    assert _business_update_parser_node_name(
+        {"bound_seller_target_ids_json": [], "bound_buyer_intent_ids_json": [str(JOB_ID)]}
+    ) == "buyer_intent_update_parser"
+    assert _business_update_parser_node_name(
+        {"bound_seller_target_ids_json": [str(JOB_ID)], "bound_buyer_intent_ids_json": []}
+    ) == "seller_target_update_parser"
+    assert _business_update_parser_node_name(
+        {"bound_seller_target_ids_json": [str(JOB_ID)], "bound_buyer_intent_ids_json": [str(JOB_ID)]}
+    ) == "business_update_extractor"
+
+
+def test_buyer_intent_update_apply_keeps_new_structured_fields() -> None:
+    changes = _allowed_buyer_intent_changes(
+        {
+            "industries_json": ["商贸与消费"],
+            "excluded_industries_json": ["酒类"],
+            "industry_focus_tags_json": ["新式茶饮"],
+            "min_valuation_yuan": 1_500_000_000,
+            "max_ps": 3,
+            "min_net_margin": 8,
+            "min_gross_margin": 35,
+            "unsupported": "drop",
+        }
+    )
+
+    assert changes == {
+        "industries_json": ["商贸与消费"],
+        "excluded_industries_json": ["酒类"],
+        "industry_focus_tags_json": ["新式茶饮"],
+        "min_valuation_yuan": 1_500_000_000,
+        "max_ps": 3,
+        "min_net_margin": 8,
+        "min_gross_margin": 35,
+    }
+
+
+def test_buyer_intent_update_action_normalizes_numbers_and_valuation_semantics() -> None:
+    intent_id = UUID("00000000-0000-0000-0000-000000000322")
+    actions = _normalize_actions(
+        {
+            "actions": [
+                {
+                    "action_type": "buyer_intent_update",
+                    "target_entity_type": "buyer_intent",
+                    "proposed_changes_json": {
+                        "min_valuation_yuan": "1500000000",
+                        "min_market_cap_yuan": "1500000000",
+                        "max_ps": "3",
+                        "industry_focus_tags_json": ["新式茶饮", "新式茶饮"],
+                    },
+                    "raw_evidence_text": "估值15亿元以上，PS不高于3倍，关注新式茶饮",
+                }
+            ]
+        },
+        {
+            "raw_text": "估值15亿元以上",
+            "bound_seller_target_ids_json": [],
+            "bound_buyer_intent_ids_json": [str(intent_id)],
+            "bound_buyer_party_ids_json": [],
+            "attachment_evidence_ids": [],
+            "image_evidence_attachment_ids": [],
+        },
+    )
+
+    changes = actions[0]["proposed_changes_json"]
+    assert changes["min_valuation_yuan"] == 1_500_000_000
+    assert changes["max_ps"] == 3
+    assert changes["industry_focus_tags_json"] == ["新式茶饮"]
+    assert "min_market_cap_yuan" not in changes
 
 
 def test_buyer_party_parse_changes_normalize_model_buyer_type_aliases() -> None:

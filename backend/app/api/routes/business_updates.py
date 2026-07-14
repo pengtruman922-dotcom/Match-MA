@@ -1947,6 +1947,7 @@ ACTION_LABELS = {
     "seller_fact_update": "标的字段更新",
     "seller_event": "标的事件",
     "target_follow_up": "标的跟进记录",
+    "buyer_intent_follow_up": "买家意向跟进记录",
     "buyer_intent_update": "买家意向更新",
     "buyer_seller_relation_update": "关系进展更新",
     "buyer_intent_target_exclusion": "买家排除标的",
@@ -1969,6 +1970,7 @@ APPLY_SUPPORTED_ACTION_TYPES = {
     "buyer_seller_relation_update",
     "buyer_intent_target_exclusion",
     "target_follow_up",
+    "buyer_intent_follow_up",
 }
 
 

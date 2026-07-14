@@ -21,6 +21,8 @@ from backend.app.db import get_db
 
 router = APIRouter(prefix="/recommendations", tags=["recommendations"])
 
+DEEP_EVAL_CANDIDATE_LIMIT = 20
+
 
 class RecommendationCandidateRequest(BaseModel):
     mode: str = Field(pattern="^(buyer_to_target|target_to_buyer)$")
@@ -318,22 +320,17 @@ def generate_recommendation_candidates(
             )
         db.commit()
 
-    embedding_used = _candidates_have_embedding(candidates)
     return {
         "session_id": session_id,
         "mode": payload.mode,
         "candidates": candidates,
         "debug": {
-            "engine": (
-                "rule_v2_embedding_deep_eval"
-                if rerank_job_id
-                else ("rule_v2_embedding" if embedding_used else "rule_v2")
-            ),
+            "engine": "rule_v2_deep_eval" if rerank_job_id else "rule_v2",
             "rerank": bool(rerank_job_id),
             "rerank_job_id": str(rerank_job_id) if rerank_job_id else None,
-            "embedding_similarity": embedding_used,
+            "embedding_similarity": False,
             "notes": [
-                "Returns rule/embedding ranking first; LLM deep eval runs asynchronously and writes a reranked_candidates message with grades and reasons.",
+                "Returns SQL/Python rule ranking first; LLM deep eval runs asynchronously for the top candidates.",
             ],
         },
     }
@@ -620,7 +617,7 @@ def _build_recommendation_session_bundle(
             "reranked_candidate_count": len(reranked_candidates),
             "latest_candidate_count": len(latest_candidates),
             "candidate_source": candidate_source,
-            "engine_hint": "rule_sql_embedding_rerank_v0.3",
+            "engine_hint": "rule_sql_python_deep_eval_v1",
         },
     }
 
@@ -669,7 +666,7 @@ def create_recommendation_rerank_job(
     return {
         "job_id": job_id,
         "job_status": "queued",
-        "queue_name": "rerank",
+        "queue_name": "llm",
         "candidate_count": len(candidates),
         "source": source,
     }
@@ -1178,7 +1175,7 @@ def _list_running_recommendation_session_ids(
             with running_jobs as (
               select
                 case
-                  when job.job_type = 'recommendation_rerank'
+                  when job.job_type in ('recommendation_deep_eval', 'recommendation_rerank')
                     and job.entity_type = 'recommendation_session'
                     then job.entity_id
                   when job.payload_json ? 'session_id'
@@ -1190,7 +1187,7 @@ def _list_running_recommendation_session_ids(
               from background_job job
               where job.team_id = :team_id
                 and job.workspace_id = :workspace_id
-                and job.job_type in ('recommendation_rerank', 'recommendation_report_generate')
+                and job.job_type in ('recommendation_deep_eval', 'recommendation_rerank', 'recommendation_report_generate')
                 and job.status in ('queued', 'running', 'retry_waiting')
             )
             select distinct session_id
@@ -1348,7 +1345,7 @@ def _recommendation_session_polling_hint(
     if rerank_job_id and summary["rerank_status"].get("status") in {"queued", "running", "retry_waiting"}:
         watched_jobs.append(
             {
-                "job_type": "recommendation_rerank",
+                "job_type": "recommendation_deep_eval",
                 "job_id": rerank_job_id,
                 "queue_name": summary["rerank_status"].get("queue_name"),
                 "status": summary["rerank_status"].get("status"),
@@ -1847,8 +1844,6 @@ def _candidate_score_breakdown(candidate: dict[str, Any]) -> dict[str, Any]:
     score_json = evidence_json.get("score") if isinstance(evidence_json.get("score"), dict) else {}
     return {
         "rule_score": score_json.get("rule_score"),
-        "embedding_similarity": score_json.get("embedding_similarity"),
-        "embedding_boost": score_json.get("embedding_boost"),
         "rerank_score": score_json.get("rerank_score"),
         "rerank_boost": score_json.get("rerank_boost"),
         "rerank_model": score_json.get("rerank_model"),
@@ -1865,8 +1860,6 @@ def _candidate_display_meta(candidate: dict[str, Any], score_breakdown: dict[str
         f"score {candidate.get('score')}",
         f"level {candidate.get('recommendation_level')}",
     ]
-    if score_breakdown.get("embedding_similarity") is not None:
-        meta.append(f"embedding {float(score_breakdown['embedding_similarity']):.2f}")
     if score_breakdown.get("rerank_score") is not None:
         meta.append(f"rerank {float(score_breakdown['rerank_score']):.2f}")
     return [item for item in meta if item and not item.endswith("None")]
@@ -1880,8 +1873,6 @@ def _candidate_display_badges(candidate: dict[str, Any], score_breakdown: dict[s
         badges.append("命中排除项")
     elif score_breakdown.get("hard_mismatches"):
         badges.append("硬性条件不符")
-    if score_breakdown.get("embedding_similarity") is not None:
-        badges.append("embedding")
     if score_breakdown.get("rerank_score") is not None:
         badges.append("reranked")
     if candidate.get("selected"):
@@ -1920,7 +1911,7 @@ def _get_latest_recommendation_rerank_job(
             from background_job
             where team_id = :team_id
               and workspace_id = :workspace_id
-              and job_type = 'recommendation_rerank'
+              and job_type in ('recommendation_deep_eval', 'recommendation_rerank')
               and entity_type = 'recommendation_session'
               and entity_id = :session_id
             order by created_at desc
@@ -2235,11 +2226,6 @@ def _candidate_targets_for_intent(
               st.risk_summary,
               st.gap_summary,
               st.business_summary,
-              case
-                when std.embedding is not null and bid.embedding is not null
-                then 1 - (std.embedding <=> bid.embedding)
-                else null
-              end as embedding_similarity,
               exists(
                 select 1
                 from buyer_intent_target_exclusion x
@@ -2249,11 +2235,6 @@ def _candidate_targets_for_intent(
                   and x.canceled_at is null
               ) as is_excluded
             from seller_target st
-            left join seller_target_search_doc std
-              on std.seller_target_id = st.id
-             and std.doc_type = 'profile'
-            left join buyer_intent_search_doc bid
-              on bid.buyer_intent_id = :buyer_intent_id
             where st.team_id = :team_id
               and st.workspace_id = :workspace_id
               and st.deleted_at is null
@@ -2276,7 +2257,7 @@ def _candidate_targets_for_intent(
             "buyer_intent_id": intent["id"],
             "industry_primary": intent.get("industry_primary"),
             "intent_industries": _intent_industry_list(intent) or ["__none__"],
-            "candidate_pool_limit": max(limit * 5, 50),
+            "candidate_pool_limit": max(limit * 10, 200),
         },
     ).mappings().all()
 
@@ -2286,9 +2267,7 @@ def _candidate_targets_for_intent(
         if item.pop("is_excluded"):
             continue
         rule_score, evidence, gaps, meta = _score_target_against_intent(item, intent)
-        embedding_similarity = _optional_float(item.get("embedding_similarity"))
-        score, embedding_boost = _apply_embedding_score(rule_score, evidence, embedding_similarity)
-        score = _apply_score_caps(score, gaps, meta)
+        score = _apply_score_caps(rule_score, gaps, meta)
         if score < 10 and not meta.get("excluded_hit"):
             continue
         candidates.append(
@@ -2311,8 +2290,6 @@ def _candidate_targets_for_intent(
                     "gaps": gaps,
                     "score": {
                         "rule_score": rule_score,
-                        "embedding_similarity": embedding_similarity,
-                        "embedding_boost": embedding_boost,
                         "final_score": score,
                         "hard_mismatches": meta.get("hard_mismatches") or [],
                         "excluded_hit": meta.get("excluded_hit"),
@@ -2349,6 +2326,10 @@ def _candidate_intents_for_target(
               bi.min_revenue_yuan,
               bi.min_net_profit_yuan,
               bi.max_pe,
+              bi.max_ps,
+              bi.min_net_margin,
+              bi.min_gross_margin,
+              bi.min_valuation_yuan,
               bi.max_valuation_yuan,
               bi.min_market_cap_yuan,
               bi.max_market_cap_yuan,
@@ -2361,11 +2342,6 @@ def _candidate_intents_for_target(
               bi.major_risk_tolerance_summary,
               bi.negative_summary,
               bi.preference_summary,
-              case
-                when bid.embedding is not null and std.embedding is not null
-                then 1 - (bid.embedding <=> std.embedding)
-                else null
-              end as embedding_similarity,
               exists(
                 select 1
                 from buyer_intent_target_exclusion x
@@ -2376,11 +2352,6 @@ def _candidate_intents_for_target(
               ) as is_excluded
             from buyer_intent bi
             left join buyer_party bp on bp.id = bi.buyer_party_id
-            left join buyer_intent_search_doc bid
-              on bid.buyer_intent_id = bi.id
-            left join seller_target_search_doc std
-              on std.seller_target_id = :seller_target_id
-             and std.doc_type = 'profile'
             where bi.team_id = :team_id
               and bi.workspace_id = :workspace_id
               and bi.deleted_at is null
@@ -2401,7 +2372,7 @@ def _candidate_intents_for_target(
             "seller_target_id": target["id"],
             "industry_primary": target.get("industry_primary"),
             "target_industry_l1": target.get("industry_l1"),
-            "candidate_pool_limit": max(limit * 5, 50),
+            "candidate_pool_limit": max(limit * 10, 200),
         },
     ).mappings().all()
 
@@ -2411,9 +2382,7 @@ def _candidate_intents_for_target(
         if item.pop("is_excluded"):
             continue
         rule_score, evidence, gaps, meta = _score_target_against_intent(target, item)
-        embedding_similarity = _optional_float(item.get("embedding_similarity"))
-        score, embedding_boost = _apply_embedding_score(rule_score, evidence, embedding_similarity)
-        score = _apply_score_caps(score, gaps, meta)
+        score = _apply_score_caps(rule_score, gaps, meta)
         if score < 10 and not meta.get("excluded_hit"):
             continue
         candidates.append(
@@ -2436,8 +2405,6 @@ def _candidate_intents_for_target(
                     "gaps": gaps,
                     "score": {
                         "rule_score": rule_score,
-                        "embedding_similarity": embedding_similarity,
-                        "embedding_boost": embedding_boost,
                         "final_score": score,
                         "hard_mismatches": meta.get("hard_mismatches") or [],
                         "excluded_hit": meta.get("excluded_hit"),
@@ -2636,8 +2603,9 @@ def _score_target_against_intent(
             add_dimension(12, "mismatch", gap_text="营收低于买家门槛", hard=not softened)
 
     # 价格（预算 vs 报价/估值：付不起是硬约束）
+    min_valuation = _optional_decimal(intent.get("min_valuation_yuan"))
     max_valuation = _optional_decimal(intent.get("max_valuation_yuan"))
-    if max_valuation is not None:
+    if min_valuation is not None or max_valuation is not None:
         target_price = (
             _optional_decimal(target.get("asking_price_yuan"))
             or _optional_decimal(target.get("valuation_yuan"))
@@ -2645,10 +2613,12 @@ def _score_target_against_intent(
         )
         if target_price is None:
             add_dimension(14, "unknown", gap_text="标的报价与估值缺失")
-        elif target_price <= max_valuation:
-            add_dimension(14, "match", match_text="报价/估值在买家预算内")
-        else:
+        elif max_valuation is not None and target_price > max_valuation:
             add_dimension(14, "mismatch", gap_text="报价/估值超出买家预算", hard=True)
+        elif min_valuation is not None and target_price < min_valuation:
+            add_dimension(14, "mismatch", gap_text="报价/估值低于买家偏好区间")
+        else:
+            add_dimension(14, "match", match_text="报价/估值处于买家要求范围")
 
     # PE 上限
     max_pe = _optional_decimal(intent.get("max_pe"))
@@ -2773,9 +2743,11 @@ def _get_buyer_intent_anchor(db: Session, buyer_intent_id: UUID | None) -> dict[
             select
               bi.id, bi.buyer_party_id, bp.buyer_name,
               bi.intent_name, bi.industry_primary, bi.industry_secondary,
-              bi.industries_json, bi.excluded_industries_json,
+              bi.industries_json, bi.excluded_industries_json, bi.industry_focus_tags_json,
               bi.region_scope_summary, bi.min_revenue_yuan, bi.min_net_profit_yuan, bi.max_pe,
-              bi.max_valuation_yuan, bi.min_market_cap_yuan, bi.max_market_cap_yuan,
+              bi.max_ps, bi.min_net_margin, bi.min_gross_margin,
+              bi.min_valuation_yuan, bi.max_valuation_yuan,
+              bi.min_market_cap_yuan, bi.max_market_cap_yuan,
               bi.max_debt_ratio, bi.requires_control, bi.requires_consolidation,
               bi.accepts_minority_investment, bi.desired_equity_ratio_min,
               bi.preferred_listed_status, bi.major_risk_tolerance_summary,
@@ -3305,6 +3277,7 @@ def _enqueue_recommendation_rerank_job(
     idempotency_suffix: str | None = None,
     metadata_json: dict[str, Any] | None = None,
 ) -> UUID:
+    deep_eval_candidates = candidates[:DEEP_EVAL_CANDIDATE_LIMIT]
     payload = _json_loads(
         _json_dumps(
             {
@@ -3312,7 +3285,7 @@ def _enqueue_recommendation_rerank_job(
                 "mode": mode,
                 "query": _build_rerank_query(mode=mode, anchor=anchor),
                 "anchor": anchor,
-                "candidates": candidates,
+                "candidates": deep_eval_candidates,
             }
         )
     )
@@ -3325,7 +3298,7 @@ def _enqueue_recommendation_rerank_job(
               max_attempts, created_by, metadata_json
             )
             values (
-              :team_id, :workspace_id, 'recommendation_rerank', 110, 'rerank',
+              :team_id, :workspace_id, 'recommendation_deep_eval', 110, 'llm',
               'recommendation_session', :session_id, :idempotency_key, :payload_json,
               2, :created_by, :metadata_json
             )
@@ -3340,9 +3313,9 @@ def _enqueue_recommendation_rerank_job(
             "workspace_id": DEFAULT_WORKSPACE_ID,
             "session_id": session_id,
             "idempotency_key": (
-                f"recommendation_rerank:{session_id}:{idempotency_suffix}"
+                f"recommendation_deep_eval:{session_id}:{idempotency_suffix}"
                 if idempotency_suffix
-                else f"recommendation_rerank:{session_id}"
+                else f"recommendation_deep_eval:{session_id}"
             ),
             "payload_json": payload,
             "created_by": DEFAULT_ADMIN_USER_ID,
@@ -3356,7 +3329,6 @@ def _build_rerank_query(*, mode: str, anchor: dict[str, Any]) -> str:
     if mode == "buyer_to_target":
         parts = [
             anchor.get("intent_name"),
-            anchor.get("buyer_name"),
             anchor.get("industry_primary"),
             anchor.get("industry_secondary"),
             anchor.get("region_scope_summary"),
@@ -3604,28 +3576,6 @@ def _summary_text(items: list[str], *, fallback: str | None = None) -> str | Non
     if items:
         return "；".join(items[:4])
     return fallback
-
-
-def _apply_embedding_score(
-    rule_score: float,
-    evidence: list[str],
-    embedding_similarity: float | None,
-) -> tuple[float, float | None]:
-    if embedding_similarity is None:
-        return min(rule_score, 100.0), None
-
-    normalized_similarity = max(0.0, min(float(embedding_similarity), 1.0))
-    boost = round(normalized_similarity * 10, 2)
-    evidence.append(f"语义相似度：{normalized_similarity:.2f}")
-    return min(rule_score + boost, 100.0), boost
-
-
-def _candidates_have_embedding(candidates: list[dict[str, Any]]) -> bool:
-    for candidate in candidates:
-        score_json = candidate.get("evidence_json", {}).get("score", {})
-        if score_json.get("embedding_similarity") is not None:
-            return True
-    return False
 
 
 def _yes_like(value: Any) -> bool:
