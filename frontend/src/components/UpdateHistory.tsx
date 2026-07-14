@@ -157,6 +157,9 @@ export default function UpdateHistory({
                     <span className="font-mono text-xs text-gray-500">{formatDateTime(item.submitted_at)}</span>
                     <span className="text-sm font-medium text-gray-900">{item.operator_name}</span>
                     <BatchStatusBadge status={item.status} />
+                    {item.batch_category === 'management_operation' ? (
+                      <span className="bg-sky-50 px-1.5 py-0.5 text-[11px] text-sky-700">管理操作</span>
+                    ) : null}
                     {item.is_latest_effective_batch ? (
                       <span className="bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500">最近一次有效更新</span>
                     ) : null}
@@ -216,6 +219,16 @@ export default function UpdateHistory({
                       type="button"
                       onClick={() => setRollbackBatch(item)}
                       className="inline-flex items-center gap-1 border border-red-200 px-2.5 py-1 text-xs font-medium text-red-700 hover:bg-red-50"
+                    >
+                      <RotateCcw className="h-3.5 w-3.5" />
+                      撤回本次更新
+                    </button>
+                  ) : item.is_latest_effective_batch && item.batch_category === 'business_update' ? (
+                    <button
+                      type="button"
+                      disabled
+                      title={item.rollback_block_reason || '当前不可撤回'}
+                      className="inline-flex items-center gap-1 border border-gray-200 px-2.5 py-1 text-xs font-medium text-gray-400"
                     >
                       <RotateCcw className="h-3.5 w-3.5" />
                       撤回本次更新

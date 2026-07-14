@@ -1,3 +1,4 @@
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 from uuid import UUID
 
@@ -77,6 +78,7 @@ class UpdateBatchOut(BaseModel):
     entity_type: str
     entity_id: UUID
     source_type: str
+    batch_category: Literal["business_update", "management_operation", "rollback"]
     source_id: UUID | None = None
     input_type: str | None = None
     input_summary: str | None = None
@@ -733,6 +735,7 @@ def _batch_record(
         "entity_type": entity_type,
         "entity_id": entity_id,
         "source_type": source_type,
+        "batch_category": _batch_category(source_type, logs),
         "source_id": source_id,
         "input_type": input_type,
         "input_summary": _truncate_text(raw_input_text, 180),
@@ -761,7 +764,11 @@ def _active_batch_logs(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _latest_effective_batch(batches: list[dict[str, Any]]) -> dict[str, Any] | None:
-    effective = [item for item in batches if item.get("_active_logs")]
+    effective = [
+        item
+        for item in batches
+        if item.get("_active_logs") and item.get("batch_category") == "business_update"
+    ]
     if not effective:
         return None
     return max(effective, key=_batch_effective_value)
@@ -781,6 +788,10 @@ def _batch_rollback_block_reason(
     latest: dict[str, Any] | None,
 ) -> str | None:
     active_logs = batch.get("_active_logs") or []
+    if batch.get("batch_category") == "management_operation":
+        return "管理操作，不参与撤回"
+    if batch.get("batch_category") == "rollback":
+        return "本次更新已撤回"
     if batch.get("status") == "failed":
         return "本次更新未写入字段"
     if batch.get("status") == "parsing":
@@ -795,6 +806,30 @@ def _batch_rollback_block_reason(
     if unsupported:
         return "本次更新包含不可撤回字段"
     return None
+
+
+MANAGEMENT_FIELDS_BY_ENTITY = {
+    "seller_target": {"owner_user_id", "lifecycle_status"},
+    "buyer_party": {"owner_user_id", "status"},
+    "buyer_intent": {"owner_user_id", "status", "pause_reason"},
+}
+
+
+def _batch_category(source_type: str, logs: list[dict[str, Any]]) -> str:
+    if source_type == "rollback":
+        return "rollback"
+    if source_type in {"business_update", "seller_target_parse", "buyer_intent_parse"}:
+        return "business_update"
+    if source_type == "owner_assignment":
+        return "management_operation"
+
+    relevant_logs = [row for row in logs if row.get("source_type") != "rollback"]
+    if relevant_logs and all(
+        row.get("field_path") in MANAGEMENT_FIELDS_BY_ENTITY.get(str(row.get("entity_type")), set())
+        for row in relevant_logs
+    ):
+        return "management_operation"
+    return "business_update"
 
 
 def _public_update_batch(batch: dict[str, Any]) -> dict[str, Any]:
@@ -1291,7 +1326,24 @@ def _enqueue_rebuild_after_rollback(db: Session, *, entity_type: str, entity_id:
 
 
 def _values_match_for_rollback(current_value: Any, logged_new_value: Any) -> bool:
-    return _json_safe(current_value) == _json_safe(logged_new_value)
+    return _rollback_comparable(current_value) == _rollback_comparable(logged_new_value)
+
+
+def _rollback_comparable(value: Any) -> Any:
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _rollback_comparable(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_rollback_comparable(item) for item in value]
+    if isinstance(value, (Decimal, int, float)) and not isinstance(value, bool):
+        try:
+            return Decimal(str(value)).normalize()
+        except InvalidOperation:
+            return value
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
 
 
 def _json_safe(value: Any) -> Any:

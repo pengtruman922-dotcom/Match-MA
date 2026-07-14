@@ -366,7 +366,34 @@ def list_attachments(
     if parse_status:
         where.append("a.parse_status = :parse_status")
         params["parse_status"] = parse_status
-    if entity_type:
+    if entity_type == "buyer_intent" and entity_id:
+        where.append(
+            """
+            exists (
+              select 1
+              from attachment_link al
+              where al.attachment_id = a.id
+                and al.team_id = a.team_id
+                and al.workspace_id = a.workspace_id
+                and (
+                  (al.entity_type = 'buyer_intent' and al.entity_id = :entity_id)
+                  or (
+                    al.entity_type = 'business_update'
+                    and exists (
+                      select 1 from business_update bu
+                      where bu.id = al.entity_id
+                        and bu.team_id = al.team_id
+                        and bu.workspace_id = al.workspace_id
+                        and bu.bound_buyer_intent_ids_json ? :entity_id_text
+                    )
+                  )
+                )
+            )
+            """
+        )
+        params["entity_id"] = entity_id
+        params["entity_id_text"] = str(entity_id)
+    elif entity_type:
         where.append(
             """
             exists (

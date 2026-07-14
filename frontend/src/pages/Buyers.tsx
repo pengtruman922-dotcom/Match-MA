@@ -4,12 +4,9 @@ import { Link, useSearchParams } from 'react-router-dom';
 import {
   AlertCircle,
   Building2,
-  ChevronDown,
-  ChevronUp,
   FileText,
   Image,
   Loader2,
-  MessageSquarePlus,
   Paperclip,
   Plus,
   Search,
@@ -40,7 +37,6 @@ import type {
 } from '../types/api';
 import { valueLabel } from '../lib/fieldLabels';
 
-type Tab = 'intents' | 'parties';
 type BuyerSuggestion = BuyerIntentSuggestion | BuyerPartySuggestion;
 
 const PAGE_SIZE = 20;
@@ -66,7 +62,7 @@ const EMPTY_PARTY_FILTER_OPTIONS: BuyerPartyFilterOptions = {
 
 const INTENT_SEARCH_FIELD_LABELS: Record<BuyerIntentSearchField | 'all', string> = {
   all: '全部字段',
-  intent_name: '意向',
+  intent_name: '需求名称',
   buyer_name: '买家',
   raw_requirement_text: '需求',
   intent_summary: '摘要',
@@ -105,23 +101,15 @@ type BuyerPartyFilters = {
 
 export default function Buyers() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const tab = readTab(searchParams);
   const [showCreateIntent, setShowCreateIntent] = useState(false);
-  const [showCreateParty, setShowCreateParty] = useState(false);
   const [intentRefreshKey, setIntentRefreshKey] = useState(0);
-  const [partyRefreshKey, setPartyRefreshKey] = useState(0);
 
   useEffect(() => {
     const action = searchParams.get('action');
     if (action !== 'new-intent' && action !== 'new-party') return;
     const next = new URLSearchParams(searchParams);
-    if (action === 'new-intent') {
-      next.delete('tab');
-      setShowCreateIntent(true);
-    } else {
-      next.set('tab', 'parties');
-      setShowCreateParty(true);
-    }
+    next.delete('tab');
+    setShowCreateIntent(true);
     next.delete('action');
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
@@ -131,7 +119,7 @@ export default function Buyers() {
       <div className="flex items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold text-gray-900">买家管理</h1>
-          <p className="text-xs text-gray-400 mt-1">一行对应一个买家和当前进行中的并购需求</p>
+          <p className="text-xs text-gray-400 mt-1">管理买家及其当前并购需求</p>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -144,21 +132,12 @@ export default function Buyers() {
         </div>
       </div>
 
-      {tab === 'intents' ? (
-        <IntentsList
-          externalShowCreate={showCreateIntent}
-          onExternalCreateClose={() => setShowCreateIntent(false)}
-          refreshKey={intentRefreshKey}
-          onCreated={() => setIntentRefreshKey((k) => k + 1)}
-        />
-      ) : (
-        <PartiesList
-          externalShowCreate={showCreateParty}
-          onExternalCreateClose={() => setShowCreateParty(false)}
-          refreshKey={partyRefreshKey}
-          onCreated={() => setPartyRefreshKey((k) => k + 1)}
-        />
-      )}
+      <IntentsList
+        externalShowCreate={showCreateIntent}
+        onExternalCreateClose={() => setShowCreateIntent(false)}
+        refreshKey={intentRefreshKey}
+        onCreated={() => setIntentRefreshKey((k) => k + 1)}
+      />
     </div>
   );
 }
@@ -180,7 +159,6 @@ function IntentsList({
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState(filters.q);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
   const [filterOptions, setFilterOptions] = useState<BuyerIntentFilterOptions>(EMPTY_INTENT_FILTER_OPTIONS);
   const [suggestions, setSuggestions] = useState<BuyerIntentSuggestion[]>([]);
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
@@ -368,7 +346,7 @@ function IntentsList({
   const handleBulkDelete = async () => {
     const ids = Array.from(selectedIds);
     if (!ids.length) return;
-    if (!window.confirm(`确认删除已选择的 ${ids.length} 个买家意向？删除后不会出现在列表和推荐候选里。`)) return;
+    if (!window.confirm(`确认删除已选择的 ${ids.length} 条并购需求？删除后不会出现在列表和推荐候选里。`)) return;
     setBulkDeleting(true);
     try {
       await buyerIntents.bulkDelete(ids);
@@ -385,7 +363,7 @@ function IntentsList({
     const ids = Array.from(selectedIds);
     if (!ids.length || !assignOwnerId) return;
     const ownerName = ownerOptions.find((option) => option.id === assignOwnerId)?.name || '所选账号';
-    if (!window.confirm(`将已选择的 ${ids.length} 个买家意向指派给「${ownerName}」？`)) return;
+    if (!window.confirm(`将已选择的 ${ids.length} 条并购需求指派给「${ownerName}」？`)) return;
     setAssigning(true);
     try {
       await buyerIntents.batchAssignOwner(ids, assignOwnerId);
@@ -407,7 +385,7 @@ function IntentsList({
     <>
       <ListToolbar
         searchValue={searchQuery}
-        placeholder="搜索意向、买家、需求或摘要..."
+        placeholder="搜索需求名称、买家或需求内容..."
         suggestions={suggestions}
         suggestionsOpen={showSuggestions && searchQuery.trim().length > 0}
         suggestionsLoading={suggestionsLoading}
@@ -428,13 +406,13 @@ function IntentsList({
         activeFilterCount={activeFilterCount}
         onClear={clearFilters}
         total={total}
-        totalLabel="买家意向"
+        totalLabel="条并购需求"
       />
 
       {selectedCount > 0 && (
         <BulkActionBar
           count={selectedCount}
-          label="买家意向"
+          label="条需求"
           deleting={bulkDeleting}
           onClear={() => setSelectedIds(new Set())}
           onDelete={handleBulkDelete}
@@ -447,15 +425,26 @@ function IntentsList({
       )}
 
       <div className="bg-white border border-gray-200 overflow-x-auto">
-        <table className="w-full text-sm">
+        <table className="w-full min-w-[1160px] table-fixed text-sm">
+          <colgroup>
+            <col className="w-12" />
+            <col className="w-64" />
+            <col className="w-40" />
+            <col className="w-72" />
+            <col className="w-24" />
+            <col className="w-24" />
+            <col className="w-28" />
+            <col className="w-28" />
+            <col className="w-28" />
+          </colgroup>
           <thead>
             <tr className="border-b border-gray-100 bg-gray-50">
               <th className="text-left px-4 py-3 w-12"><input type="checkbox" disabled={visibleIds.length === 0} checked={allVisibleSelected} onChange={toggleSelectAllVisible} aria-label="选择当前页买家意向" className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600" /></th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600 min-w-[180px]">买家</th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600 min-w-[220px]">并购方向</th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600 min-w-[260px]">关键门槛</th>
+              <th className="text-left px-4 py-3 font-medium text-gray-600">需求名称</th>
+              <th className="text-left px-4 py-3 font-medium text-gray-600">买家名称</th>
+              <th className="text-left px-4 py-3 font-medium text-gray-600">关键需求</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">解析状态</th>
-              <th className="text-center px-4 py-3 font-medium text-gray-600">状态</th>
+              <th className="text-center px-4 py-3 font-medium text-gray-600">推荐状态</th>
               <th className="text-left px-4 py-3 font-medium text-gray-600">负责人</th>
               <th className="text-left px-4 py-3 font-medium text-gray-600">最近更新</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">操作</th>
@@ -471,10 +460,8 @@ function IntentsList({
                 key={item.id}
                 item={item}
                 parseStatus={parseStatuses[item.id]}
-                expanded={expandedId === item.id}
                 selected={selectedIds.has(item.id)}
                 onSelectedChange={(checked) => toggleSelected(item.id, checked)}
-                onToggle={() => setExpandedId(expandedId === item.id ? null : item.id)}
               />
             ))}
           </tbody>
@@ -491,50 +478,28 @@ function IntentsList({
 function IntentRow({
   item,
   parseStatus,
-  expanded,
   selected,
   onSelectedChange,
-  onToggle,
 }: {
   item: BuyerIntent;
   parseStatus?: BuyerIntentParseStatus;
-  expanded: boolean;
   selected: boolean;
   onSelectedChange: (checked: boolean) => void;
-  onToggle: () => void;
 }) {
   return (
-    <>
-      <tr className="hover:bg-brand-50/30 transition-colors">
-        <td className="px-4 py-3"><input type="checkbox" checked={selected} onChange={(event) => onSelectedChange(event.target.checked)} aria-label={`选择${item.intent_name}`} className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600" /></td>
-        <td className="px-4 py-3 text-gray-700">
-          {item.buyer_party_id ? (
-            <Link to={`/buyers/${item.buyer_party_id}`} className="font-medium text-gray-900 hover:text-brand-600 transition-colors line-clamp-2" title={item.buyer_name || undefined}>
-              {item.buyer_name || '已关联买家'}
-            </Link>
-          ) : (
-            <span className="text-amber-600">未关联买家</span>
-          )}
-        </td>
-        <td className="px-4 py-3">
-          <div className="flex items-center gap-1">
-            <button onClick={onToggle} className="text-gray-400 hover:text-gray-600" type="button">{expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}</button>
-            <Link to={`/buyer-intents/${item.id}`} className="font-medium text-gray-900 hover:text-brand-600 transition-colors line-clamp-2" title={item.intent_name}>{item.intent_name}</Link>
-          </div>
-        </td>
-        <td className="px-4 py-3 text-gray-600">
-          <p className="line-clamp-2" title={compactRequirementNotes(item)}>{compactRequirementNotes(item) || '-'}</p>
-        </td>
-        <td className="px-4 py-3 text-center"><ParseStatusBadge item={item} parseStatus={parseStatus} /></td>
-        <td className="px-4 py-3 text-center"><IntentStatusBadge status={item.status} /></td>
-        <td className="px-4 py-3 text-gray-600">{item.owner_name || <span className="text-gray-300">未指派</span>}</td>
-        <td className="px-4 py-3 text-gray-500 whitespace-nowrap">{shortDate(item.updated_at)}</td>
-        <td className="px-4 py-3"><div className="flex items-center justify-center gap-1"><Link to={`/recommendations?mode=buyer-to-target&intentId=${item.id}`} className="inline-flex items-center gap-1 px-2 py-1 text-xs text-brand-600 hover:bg-brand-50 transition-colors"><Sparkles className="w-3 h-3" />推荐标的</Link><span className="text-gray-200">|</span><Link to={`/buyer-intents/${item.id}`} className="inline-flex items-center gap-1 px-2 py-1 text-xs text-brand-600 hover:bg-brand-50 transition-colors"><MessageSquarePlus className="w-3 h-3" />更新</Link></div></td>
-      </tr>
-      {expanded && (
-        <tr className="bg-gray-50/50"><td colSpan={9} className="px-8 py-2.5"><div className="space-y-1"><p className="text-xs text-gray-600 line-clamp-2">{item.intent_summary || item.raw_requirement_text || '暂无摘要'}{item.requires_consolidation === 'yes' && <span className="text-gray-500 ml-2">· 需并表</span>}{item.buyer_party_id ? '' : <span className="text-amber-600 ml-2">· 未关联买家主体</span>}</p><p className="text-xs text-gray-500 line-clamp-1">{compactRequirementNotes(item)}</p></div></td></tr>
-      )}
-    </>
+    <tr className="h-[72px] transition-colors hover:bg-brand-50/30">
+      <td className="px-4 py-3 align-middle"><input type="checkbox" checked={selected} onChange={(event) => onSelectedChange(event.target.checked)} aria-label={`选择${item.intent_name}`} className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600" /></td>
+      <td className="px-4 py-3 align-middle">
+        <Link to={`/buyer-intents/${item.id}`} className="line-clamp-2 font-medium leading-5 text-gray-900 transition-colors hover:text-brand-600" title={item.intent_name}>{item.intent_name}</Link>
+      </td>
+      <td className="px-4 py-3 align-middle text-gray-700"><p className="line-clamp-2 leading-5" title={item.buyer_name || '未关联买家'}>{item.buyer_name || <span className="text-amber-600">未关联买家</span>}</p></td>
+      <td className="px-4 py-3 align-middle text-gray-600"><p className="line-clamp-2 leading-5" title={compactRequirementNotes(item)}>{compactRequirementNotes(item) || '-'}</p></td>
+      <td className="px-4 py-3 text-center align-middle"><ParseStatusBadge item={item} parseStatus={parseStatus} /></td>
+      <td className="px-4 py-3 text-center align-middle"><IntentStatusBadge status={item.status} /></td>
+      <td className="px-4 py-3 align-middle text-gray-600"><p className="line-clamp-2" title={item.owner_name || '未指派'}>{item.owner_name || <span className="text-gray-300">未指派</span>}</p></td>
+      <td className="whitespace-nowrap px-4 py-3 align-middle text-gray-500">{shortDate(item.updated_at)}</td>
+      <td className="px-4 py-3 align-middle"><Link to={`/recommendations?mode=buyer-to-target&intentId=${item.id}`} className="mx-auto inline-flex items-center gap-1 px-2 py-1 text-xs text-brand-600 transition-colors hover:bg-brand-50"><Sparkles className="h-3 w-3" />推荐标的</Link></td>
+    </tr>
   );
 }
 
@@ -1117,7 +1082,6 @@ function dedupMatchLabel(value: string): string {
   return value;
 }
 
-function readTab(searchParams: URLSearchParams): Tab { return searchParams.get('tab') === 'parties' ? 'parties' : 'intents'; }
 
 function readIntentFilters(searchParams: URLSearchParams): BuyerIntentFilters {
   const searchFieldParam = searchParams.get('searchField');
@@ -1277,7 +1241,6 @@ function CreateIntentModal({ onClose, onCreated }: { onClose: () => void; onCrea
           formData.set('auto_process', 'true');
           formData.set('process_after_ocr', 'true');
           formData.set('include_attachment_text', 'true');
-          formData.set('bound_buyer_party_ids', JSON.stringify([createdParty.id]));
           formData.set('bound_buyer_intent_ids', JSON.stringify([createdIntent.id]));
           formData.set(
             'metadata_json',
@@ -1308,7 +1271,7 @@ function CreateIntentModal({ onClose, onCreated }: { onClose: () => void; onCrea
         <div className="border border-brand-100 bg-brand-50 px-3 py-2.5 text-xs text-brand-800 flex gap-2">
           <Building2 className="w-4 h-4 mt-0.5 shrink-0" />
           <p className="leading-relaxed">
-            录入一个买家主体及其当前并购需求。结构化字段会由系统从文本和附件中解析回填，买家备注后续在主体详情里手动维护。
+            录入买家和当前并购需求。系统会从文本和附件中解析需求内容，买家资料可在详情页中手工维护。
           </p>
         </div>
 
@@ -1396,8 +1359,8 @@ function CreateIntentModal({ onClose, onCreated }: { onClose: () => void; onCrea
         <div className="flex items-center justify-between gap-3 pt-2">
           <p className="text-xs text-gray-400">
             {selectedFiles.length > 0 || form.raw_requirement_text.trim()
-              ? '创建后会自动进入解析队列，解析结果可在意向详情查看。'
-              : '仅创建买家和基础意向，不触发解析。'}
+              ? '创建后会自动进入解析队列，解析结果可在需求详情查看。'
+              : '仅创建买家和基础需求，不触发解析。'}
           </p>
           <div className="flex justify-end gap-2">
             <button type="button" onClick={onClose} className="px-4 py-2 text-sm border border-gray-200 text-gray-700">取消</button>
@@ -1422,7 +1385,7 @@ function buildBuyerIntakeRawText(buyerName: string, materialText: string): strin
     '【新建买家及并购需求初始输入】',
     `买家名称：${buyerName}`,
     '',
-    '解析要求：请提取买家主体的基本信息（类型、集团、地区、主营业务、资金实力/规模、材料摘要）以及买家意向字段（行业、地区、利润、市值/估值、PE、溢价、负债率、上市偏好、股权比例、交易方式、风险容忍和排除项）。备注字段为人工维护，不要自动生成或覆盖。行业和地区请输出中文，不要臆造材料中没有的信息。',
+    '解析要求：只提取买家意向字段（行业、地区、利润、市值/估值、PE、溢价、负债率、上市偏好、股权比例、交易方式、风险容忍和排除项）。不要生成或修改买家主体资料。行业和地区请输出中文，不要臆造材料中没有的信息。',
   ];
 
   if (materialText) {

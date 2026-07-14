@@ -651,28 +651,14 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
             source_context,
         )
 
-    # Enrich the linked buyer party (acquirer) from the same requirement material.
-    applied_buyer_party_fields: list[str] = []
-    party_changes = _normalize_buyer_party_parse_changes(parsed_output_json)
-    if party_changes and buyer_intent.get("buyer_party_id"):
-        buyer_party = _get_buyer_party(db, UUID(str(buyer_intent["buyer_party_id"])))
-        if buyer_party:
-            applied_buyer_party_fields = _apply_buyer_party_parse_changes(
-                db,
-                buyer_party,
-                party_changes,
-                job.id,
-                source_context,
-            )
-
     return {
         "handled": True,
         "job_type": job.job_type,
         "buyer_intent_id": str(buyer_intent_id),
         "applied_fields": applied_fields,
         "field_count": len(applied_fields),
-        "applied_buyer_party_fields": applied_buyer_party_fields,
-        "buyer_party_field_count": len(applied_buyer_party_fields),
+        "applied_buyer_party_fields": [],
+        "buyer_party_field_count": 0,
         "trace_created": True,
         "model_name": node_config["model_name"],
         "prompt_version": node_config["prompt_version"],

@@ -11,6 +11,7 @@ import type {
   TargetFollowUp,
   TargetFollowUpCreate,
   AttachmentUploadPolicy,
+  AttachmentItem,
   BackgroundJob,
   BackgroundJobRetryPreview,
   BusinessUpdate,
@@ -244,6 +245,13 @@ export const businessUpdates = {
 
 export const attachments = {
   uploadPolicy: () => apiRequest<AttachmentUploadPolicy>('/attachments/upload-policy'),
+  list: (params?: {
+    parse_status?: string;
+    entity_type?: string;
+    entity_id?: string;
+    limit?: number;
+    offset?: number;
+  }) => apiRequest<AttachmentItem[]>(`/attachments${buildQuery(params || {})}`),
   download: (id: string) => apiBlobResponse(`/attachments/${id}/download`),
 };
 

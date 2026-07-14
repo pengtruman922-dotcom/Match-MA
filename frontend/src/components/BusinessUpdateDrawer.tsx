@@ -117,14 +117,15 @@ export default function BusinessUpdateDrawer({
   }
 
   async function handleSubmit() {
-    if (!rawText.trim()) return;
+    if (!rawText.trim() && selectedFiles.length === 0) return;
     setSubmitting(true);
     setError(null);
     try {
+      const submittedText = rawText.trim() || '请根据本次上传的附件提取并应用更新。';
       let businessUpdateId: string;
       if (selectedFiles.length > 0) {
         const formData = new FormData();
-        formData.set('raw_text', rawText.trim());
+        formData.set('raw_text', submittedText);
         formData.set('input_type', 'mixed');
         formData.set('auto_process', 'true');
         formData.set('process_after_ocr', 'true');
@@ -152,7 +153,7 @@ export default function BusinessUpdateDrawer({
         businessUpdateId = result.business_update.id;
       } else {
         const result = await businessUpdates.create({
-          raw_text: rawText.trim(),
+          raw_text: submittedText,
           input_type: 'text',
           bound_seller_target_ids: boundTargetIds.length > 0 ? boundTargetIds : undefined,
           bound_buyer_party_ids: boundBuyerPartyIds.length > 0 ? boundBuyerPartyIds : undefined,
@@ -181,9 +182,9 @@ export default function BusinessUpdateDrawer({
       <div className="fixed right-0 top-0 bottom-0 w-full max-w-[560px] bg-white z-50 shadow-xl flex flex-col">
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <div>
-            <h2 className="text-base font-semibold text-gray-900">录入业务更新</h2>
+            <h2 className="text-base font-semibold text-gray-900">录入更新</h2>
             <p className="mt-0.5 text-xs text-gray-500">
-              提交后自动进入 AI 拆解，附件会按类型进入 OCR 或多模态处理。
+              可以录入需求变化、沟通进展或上传补充材料。
             </p>
           </div>
           <button onClick={onClose} className="p-1 text-gray-400 hover:text-gray-600">
@@ -195,13 +196,9 @@ export default function BusinessUpdateDrawer({
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">上下文</label>
             <div className="space-y-2 border border-gray-100 bg-gray-50 px-3 py-2.5">
-              <ContextRow label="标的" value={defaultTargetName || '未选择'} muted={!defaultTargetName} />
-              <ContextRow
-                label="买方"
-                value={defaultBuyerPartyName || '未选择'}
-                muted={!defaultBuyerPartyName}
-              />
-              <ContextRow label="意向" value={defaultIntentName || '未选择'} muted={!defaultIntentName} />
+              {defaultTargetName ? <ContextRow label="当前标的" value={defaultTargetName} /> : null}
+              {defaultIntentName ? <ContextRow label="当前需求" value={defaultIntentName} /> : null}
+              {!defaultIntentName && defaultBuyerPartyName ? <ContextRow label="当前买家" value={defaultBuyerPartyName} /> : null}
             </div>
           </div>
 
@@ -210,7 +207,7 @@ export default function BusinessUpdateDrawer({
             <textarea
               value={rawText}
               onChange={(event) => setRawText(event.target.value)}
-              placeholder="粘贴聊天记录、会议纪要、截图说明或业务进展。例如：5月28日已推荐给广州，对方希望先看财务资料。"
+              placeholder="粘贴需求变化、聊天记录、会议纪要或业务进展。例如：客户将利润要求调整为3000万元以上；7月13日已推荐A项目，等待反馈。"
               rows={8}
               className="w-full px-3 py-2.5 text-sm border border-gray-200 focus:outline-none focus:border-brand-500 placeholder:text-gray-400 resize-none"
             />
@@ -265,7 +262,7 @@ export default function BusinessUpdateDrawer({
             </button>
             <button
               onClick={handleSubmit}
-              disabled={!rawText.trim() || submitting}
+              disabled={(!rawText.trim() && selectedFiles.length === 0) || submitting}
               className="px-4 py-2 text-sm font-medium bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
               {submitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
