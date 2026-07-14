@@ -497,6 +497,7 @@ export interface BuyerIntentUpdate {
   negative_summary?: string;
   preference_summary?: string;
   pause_reason?: string;
+  owner_user_id?: string | null;
 }
 
 export interface BusinessUpdate {
@@ -696,6 +697,30 @@ export interface UpdateLog {
   rollback_at: string | null;
 }
 
+export interface AttachmentItem {
+  id: string;
+  visibility: string;
+  file_name: string;
+  file_type: string | null;
+  mime_type: string | null;
+  file_size: number | null;
+  storage_path: string;
+  uploaded_by: string | null;
+  uploaded_at: string;
+  parse_status: string;
+  metadata_json: Record<string, unknown>;
+  deleted_at: string | null;
+  links: Array<{
+    id: string;
+    attachment_id: string;
+    entity_type: string;
+    entity_id: string;
+    link_type: string | null;
+    created_at: string;
+    created_by: string | null;
+  }>;
+}
+
 export interface UpdateBatchAttachment {
   id: string;
   file_name: string;
@@ -719,6 +744,7 @@ export interface UpdateBatch {
   entity_type: 'seller_target' | 'buyer_intent';
   entity_id: string;
   source_type: string;
+  batch_category: 'business_update' | 'management_operation' | 'rollback';
   source_id: string | null;
   input_type: string | null;
   input_summary: string | null;

@@ -1,7 +1,9 @@
+from decimal import Decimal
 from uuid import UUID
 
 from backend.app.api.routes.update_logs import (
     _batch_key_for_log,
+    _batch_category,
     _batch_record,
     _batch_rollback_block_reason,
     _latest_effective_batch,
@@ -72,6 +74,14 @@ def test_rollback_value_match_is_json_safe() -> None:
     assert not _values_match_for_rollback("new", "old")
 
 
+def test_rollback_value_match_treats_database_decimals_as_json_numbers() -> None:
+    assert _values_match_for_rollback(Decimal("550000000.00"), 550000000)
+    assert _values_match_for_rollback(Decimal("12.0000"), 12.0)
+    assert _values_match_for_rollback({"ratio": Decimal("0.1200")}, {"ratio": 0.12})
+    assert not _values_match_for_rollback(Decimal("12.0001"), 12)
+    assert not _values_match_for_rollback("12.0000", 12)
+
+
 def _batch_log(*, log_id: str, applied_at: str, source_type: str = "direct_api", rollback_at: str | None = None) -> dict:
     return {
         "id": UUID(log_id),
@@ -133,6 +143,40 @@ def test_latest_effective_batch_is_the_only_rollback_candidate() -> None:
     assert selected is latest
     assert _batch_rollback_block_reason(older, selected) == "仅最近一次有效更新可以撤回"
     assert _batch_rollback_block_reason(latest, selected) is None
+
+
+def test_management_batch_does_not_block_latest_business_update() -> None:
+    business = _batch(
+        "manual-business",
+        _batch_log(
+            log_id="00000000-0000-0000-0000-000000000206",
+            applied_at="2026-07-12T10:00:00+00:00",
+        ),
+    )
+    management_log = _batch_log(
+        log_id="00000000-0000-0000-0000-000000000207",
+        applied_at="2026-07-12T11:00:00+00:00",
+        source_type="owner_assignment",
+    )
+    management_log["field_path"] = "owner_user_id"
+    management = _batch("manual-management", management_log)
+
+    selected = _latest_effective_batch([business, management])
+
+    assert selected is business
+    assert management["batch_category"] == "management_operation"
+    assert _batch_rollback_block_reason(management, selected) == "管理操作，不参与撤回"
+
+
+def test_direct_status_only_batch_is_classified_as_management() -> None:
+    log = _batch_log(
+        log_id="00000000-0000-0000-0000-000000000208",
+        applied_at="2026-07-12T12:00:00+00:00",
+    )
+    log["entity_type"] = "buyer_intent"
+    log["field_path"] = "status"
+
+    assert _batch_category("direct_api", [log]) == "management_operation"
 
 
 def test_failed_or_rolled_back_batch_is_not_effective() -> None:
