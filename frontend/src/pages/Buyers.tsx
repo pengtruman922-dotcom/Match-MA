@@ -4,6 +4,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import {
   AlertCircle,
   Building2,
+  ChevronDown,
   FileText,
   Image,
   Loader2,
@@ -504,7 +505,7 @@ function IntentRow({
 }
 
 
-function PartiesList({
+export function PartiesList({
   externalShowCreate,
   onExternalCreateClose,
   refreshKey,
