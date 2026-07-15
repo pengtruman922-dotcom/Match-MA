@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     auth_jwt_secret: str | None = None
     auth_token_ttl_seconds: int = 7 * 24 * 3600
     owner_scope_enforced: bool = False
+    model_secret_encryption_key: str | None = None
     railway_git_commit_sha: str | None = None
     railway_git_branch: str | None = None
     railway_service_name: str | None = None

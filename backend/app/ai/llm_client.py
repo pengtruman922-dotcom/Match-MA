@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import Any
 from urllib import error, request
 
+from backend.app.services.model_secrets import ModelSecretError, decrypt_model_secret
+
 
 class LlmCallError(RuntimeError):
     pass
@@ -32,9 +34,10 @@ def call_openai_compatible_chat(
     top_p: float | None,
     max_tokens: int | None,
     timeout_seconds: int,
+    api_key_encrypted: str | None = None,
     response_format: str | None = None,
 ) -> ChatCompletionResult:
-    api_key = _get_api_key(api_key_secret_ref)
+    api_key = _get_api_key(api_key_secret_ref, api_key_encrypted)
     endpoint = base_url.rstrip("/") + "/chat/completions"
     payload: dict[str, Any] = {
         "model": model_name,
@@ -92,7 +95,12 @@ def call_openai_compatible_chat(
     )
 
 
-def _get_api_key(api_key_secret_ref: str | None) -> str | None:
+def _get_api_key(api_key_secret_ref: str | None, api_key_encrypted: str | None = None) -> str | None:
+    if api_key_encrypted:
+        try:
+            return decrypt_model_secret(api_key_encrypted)
+        except ModelSecretError as exc:
+            raise LlmCallError(str(exc)) from exc
     if not api_key_secret_ref:
         return None
     api_key = os.getenv(api_key_secret_ref)

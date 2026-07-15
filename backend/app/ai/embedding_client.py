@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import Any
 from urllib import error, request
 
+from backend.app.services.model_secrets import ModelSecretError, decrypt_model_secret
+
 
 class EmbeddingCallError(RuntimeError):
     pass
@@ -29,8 +31,9 @@ def call_openai_compatible_embedding(
     input_text: str,
     dimensions: int | None,
     timeout_seconds: int,
+    api_key_encrypted: str | None = None,
 ) -> EmbeddingResult:
-    api_key = _get_api_key(api_key_secret_ref)
+    api_key = _get_api_key(api_key_secret_ref, api_key_encrypted)
     endpoint = base_url.rstrip("/") + "/embeddings"
     payload: dict[str, Any] = {
         "model": model_name,
@@ -93,7 +96,12 @@ def embedding_to_pgvector_literal(embedding: list[float]) -> str:
     return "[" + ",".join(_format_float(value) for value in embedding) + "]"
 
 
-def _get_api_key(api_key_secret_ref: str | None) -> str | None:
+def _get_api_key(api_key_secret_ref: str | None, api_key_encrypted: str | None = None) -> str | None:
+    if api_key_encrypted:
+        try:
+            return decrypt_model_secret(api_key_encrypted)
+        except ModelSecretError as exc:
+            raise EmbeddingCallError(str(exc)) from exc
     if not api_key_secret_ref:
         return None
     api_key = os.getenv(api_key_secret_ref)

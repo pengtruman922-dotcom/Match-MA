@@ -109,9 +109,12 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
         select exists(
           select 1
           from model_provider_config
-          where provider_name = 'aliyun_dashscope'
-            and api_key_secret_ref = 'ALIYUN_API_KEY'
-            and is_active = true
+          where is_active = true
+            and coalesce(base_url, '') <> ''
+            and (
+              (coalesce(secret_mode, 'env') = 'env' and api_key_secret_ref is not null)
+              or (secret_mode = 'direct' and api_key_encrypted is not null)
+            )
         )
         """,
         enabled=table_checks["model_provider_config"],

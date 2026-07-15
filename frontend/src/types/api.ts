@@ -351,12 +351,33 @@ export interface BuyerIntentFollowUpCreate {
 export interface ModelProviderConfig {
   id: string;
   provider_name: string;
+  model_name: string;
   provider_type: string;
   base_url: string | null;
+  secret_mode: 'env' | 'direct';
   api_key_secret_ref: string | null;
+  secret_configured: boolean;
+  key_display: string;
   auth_type: string;
+  extra_headers_json: Record<string, unknown>;
+  extra_config_json: Record<string, unknown>;
   is_active: boolean;
   is_default: boolean;
+  created_at: string;
+  updated_at: string;
+  metadata_json: Record<string, unknown>;
+}
+
+export interface ModelConnectionTestResult {
+  status: 'succeeded' | 'failed';
+  model_name: string;
+  latency_ms: number | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
+  output_preview: string | null;
+  error_code: string | null;
+  error_message: string | null;
 }
 
 export interface PromptTemplateConfig {
@@ -400,6 +421,10 @@ export interface ModelNodeConfig {
 }
 
 export interface ModelConfigSettingsPage {
+  capabilities: {
+    direct_key_encryption_configured?: boolean;
+    [key: string]: unknown;
+  };
   providers: ModelProviderConfig[];
   nodes: ModelNodeConfig[];
   prompts: PromptTemplateConfig[];
@@ -410,13 +435,37 @@ export interface ModelConfigSettingsPage {
 export interface IndustryDictionaryTerm {
   id: string;
   term: string;
-  level: 'l1' | 'l2' | 'alias';
+  level: 'l1' | 'l2';
   l1_name: string;
+  parent_id: string | null;
+  parent_name: string | null;
+  aliases: Array<{ id: string; term: string; active: boolean }>;
   active: boolean;
   sort_order: number;
   usage_count: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface IndustryDictionaryImportRow {
+  row_number: number;
+  l1: string;
+  l2: string | null;
+  aliases: string[];
+  active: boolean;
+  status: 'ready' | 'error';
+  message: string;
+}
+
+export interface IndustryDictionaryImportResult {
+  dry_run: boolean;
+  total_rows: number;
+  ready_rows: number;
+  error_rows: number;
+  created_l1: number;
+  created_l2: number;
+  created_aliases: number;
+  rows: IndustryDictionaryImportRow[];
 }
 
 export type BuyerIntentSearchField = 'intent_name' | 'buyer_name' | 'raw_requirement_text' | 'intent_summary';

@@ -67,7 +67,9 @@ import type {
   UpdateLog,
   FailureSummary,
   GlobalSearchResponse,
+  IndustryDictionaryImportResult,
   IndustryDictionaryTerm,
+  ModelConnectionTestResult,
   ModelConfigSettingsPage,
   ModelNodeConfig,
   ModelProviderConfig,
@@ -410,6 +412,30 @@ export const globalSearch = {
 
 export const modelConfig = {
   settingsPage: () => apiRequest<ModelConfigSettingsPage>('/model-config/settings-page?include_inactive=true&tests_per_node=1'),
+  createModel: (data: {
+    provider_name: string;
+    model_name: string;
+    base_url: string;
+    secret_mode: 'env' | 'direct';
+    api_key_secret_ref?: string | null;
+    api_key?: string | null;
+  }) => apiRequest<ModelProviderConfig>('/model-config/models', {
+    method: 'POST',
+    body: JSON.stringify({ ...data, provider_type: 'openai_compatible', auth_type: 'bearer' }),
+  }),
+  updateModel: (id: string, data: {
+    provider_name?: string;
+    model_name?: string;
+    base_url?: string;
+    secret_mode?: 'env' | 'direct';
+    api_key_secret_ref?: string | null;
+    api_key?: string | null;
+    is_active?: boolean;
+  }) => apiRequest<ModelProviderConfig>(`/model-config/models/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteModel: (id: string) =>
+    apiRequest<ModelProviderConfig>(`/model-config/models/${id}`, { method: 'DELETE' }),
+  testModel: (id: string) =>
+    apiRequest<ModelConnectionTestResult>(`/model-config/models/${id}/test`, { method: 'POST' }),
   updateProvider: (id: string, data: Partial<ModelProviderConfig>) =>
     apiRequest<ModelProviderConfig>(`/model-config/providers/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   updateNode: (id: string, data: Partial<ModelNodeConfig>) =>
@@ -426,10 +452,32 @@ export const modelConfig = {
 export const dataDictionaries = {
   industry: (params?: { q?: string; level?: string; include_inactive?: boolean }) =>
     apiRequest<IndustryDictionaryTerm[]>(`/data-dictionaries/industry${buildQuery(params || {})}`),
-  createIndustryTerm: (data: Omit<IndustryDictionaryTerm, 'id' | 'usage_count' | 'created_at' | 'updated_at'>) =>
+  createIndustryTerm: (data: {
+    term: string;
+    level: 'l1' | 'l2';
+    parent_id?: string | null;
+    aliases?: string[];
+    active?: boolean;
+    sort_order?: number;
+  }) =>
     apiRequest<IndustryDictionaryTerm>('/data-dictionaries/industry', { method: 'POST', body: JSON.stringify(data) }),
-  updateIndustryTerm: (id: string, data: Partial<IndustryDictionaryTerm>) =>
+  updateIndustryTerm: (id: string, data: {
+    term?: string;
+    parent_id?: string | null;
+    aliases?: string[];
+    active?: boolean;
+    sort_order?: number;
+  }) =>
     apiRequest<IndustryDictionaryTerm>(`/data-dictionaries/industry/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  industryImportTemplate: () => apiBlobResponse('/data-dictionaries/industry/import-template'),
+  importIndustry: (file: File, dryRun: boolean) => {
+    const body = new FormData();
+    body.append('file', file);
+    return apiRequest<IndustryDictionaryImportResult>(`/data-dictionaries/industry/import?dry_run=${dryRun}`, {
+      method: 'POST',
+      body,
+    });
+  },
 };
 
 export const debugApi = {
