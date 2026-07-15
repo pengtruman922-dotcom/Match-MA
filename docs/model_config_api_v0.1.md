@@ -4,8 +4,9 @@ This document records the backend API for the future Settings -> Model and Promp
 
 ## Design rules
 
-- `model_provider_config` stores provider URL and key reference. It stores `api_key_secret_ref`, not the secret value.
-- `model_node_config` stores node-level model settings: node type, provider, model name, timeout, output mode, and activation/default flags.
+- One `model_provider_config` row represents one callable model configuration: display name, API model name, Base URL, and secret settings. The legacy table name is retained for compatibility.
+- A model key can use a Railway environment reference or encrypted database storage. Direct keys are encrypted and are never returned by an API.
+- `model_node_config` stores node-level bindings and optional sampling settings. The model name is synchronized from the selected model configuration.
 - `prompt_template` stores prompt versions only for prompt-capable nodes.
 - Prompt editing is enabled only for `node_type in ('llm', 'parser', 'research')`.
 - Prompt editing is disabled for `embedding`, `rerank`, and `ocr` nodes.
@@ -23,7 +24,7 @@ Returns allowed provider types, auth types, output modes, template engines, and 
 This is the recommended entry for the frontend Settings -> Model and Prompt page. It returns one payload with:
 
 - `capabilities`: provider/node/prompt capability metadata.
-- `providers`: provider configs; includes `api_key_secret_ref`, never raw keys.
+- `providers`: model configs; includes a safe `key_display`, never raw keys or ciphertext.
 - `nodes`: enriched node configs with prompt edit flags, test support, queue name, prompt versions, default prompt, latest test summary, and UI hints.
 - `prompts`: flat prompt list.
 - `prompts_by_node_name`: prompt versions grouped by node name.
@@ -36,7 +37,20 @@ Query parameters:
 - `include_inactive`: default `true`; settings page should show inactive records so admins can reactivate or inspect them.
 - `tests_per_node`: default `3`, max `10`; set to `0` to skip recent test records.
 
-## Provider endpoints
+## Model endpoints
+
+- `GET /api/v1/model-config/models`
+- `POST /api/v1/model-config/models`
+- `GET /api/v1/model-config/models/{model_id}`
+- `PATCH /api/v1/model-config/models/{model_id}`
+- `DELETE /api/v1/model-config/models/{model_id}`
+- `POST /api/v1/model-config/models/{model_id}/test`
+
+The legacy `/providers` paths remain aliases. `DELETE` deactivates the model, rejects models bound to active business nodes, and always keeps at least one active model.
+
+Direct-key mode requires the same valid Fernet `MODEL_SECRET_ENCRYPTION_KEY` on the API and LLM worker services. Environment-reference mode does not require this variable.
+
+## Legacy provider aliases
 
 - `GET /api/v1/model-config/providers`
 - `POST /api/v1/model-config/providers`
@@ -44,7 +58,7 @@ Query parameters:
 - `PATCH /api/v1/model-config/providers/{provider_id}`
 - `DELETE /api/v1/model-config/providers/{provider_id}`
 
-`DELETE` deactivates the provider instead of physically deleting it.
+These endpoints behave the same as `/models` and remain for existing integrations.
 
 ## Node endpoints
 
@@ -61,14 +75,17 @@ Query parameters:
 Each node response includes `prompt_editable` so the frontend can decide whether to show the prompt editor.
 The capability endpoint also includes `test_supported` so the frontend can decide whether to show a "test node" action.
 
-Current important nodes:
+Current important LLM nodes:
 
 - `business_update_extractor`: LLM node, prompt editable.
+- `seller_target_parser`: LLM node, prompt editable.
+- `seller_target_update_parser`: LLM node, prompt editable.
+- `buyer_intent_parser`: LLM node, prompt editable.
+- `buyer_intent_update_parser`: LLM node, prompt editable.
+- `recommendation_deep_eval`: LLM node, prompt editable.
 - `recommendation_report_writer`: LLM node, prompt editable.
-- `recommendation_reranker`: rerank node, prompt not editable, model `qwen3-rerank`.
-- `ocr_attachment_parser`: OCR node, prompt not editable, v0.1 skeleton execution.
-- `embedding_seller_doc`: embedding node, prompt not editable.
-- `embedding_buyer_intent`: embedding node, prompt not editable.
+
+The generic embedding and rerank recommendation nodes are retired. Recommendation now uses SQL filtering, Python scoring, and LLM deep evaluation.
 
 `POST /nodes/{node_id}/test` runs a lightweight synchronous connectivity test in the API service and writes an `ai_trace` row with `metadata_json.source = model_config_node_test`.
 
@@ -83,7 +100,7 @@ Current important nodes:
 - Embedding nodes call the embedding endpoint and return dimension plus a short vector preview.
 - Rerank nodes call the rerank endpoint and return sorted relevance results.
 - OCR node tests route through the `ocr` worker. v0.1 records a skipped trace for direct node tests because real OCR execution is not implemented yet.
-- Raw API keys are never accepted or returned; tests use `api_key_secret_ref` to read server-side environment variables. Because production keys are configured on worker services, frontend should call `test-jobs`, then poll `/api/v1/background-jobs/{job_id}` and `/api/v1/background-jobs/{job_id}/traces`.
+- Raw API keys are accepted only by model create/update requests in direct-key mode. They are encrypted before commit and never returned. Model connectivity tests run through `POST /models/{model_id}/test`; node-level test controls are no longer exposed in the Settings UI.
 
 For Settings UI, prefer these model-config scoped record endpoints:
 
@@ -104,7 +121,7 @@ Creating or updating a prompt for `embedding`, `rerank`, or `ocr` nodes is rejec
 
 ## Security note
 
-The frontend must never collect or display raw provider keys in this version. Users should configure real keys in Railway variables and use `api_key_secret_ref` such as `ALIYUN_API_KEY` in this API.
+The frontend may collect a direct key only in a password input during model create/update. It must never prefill or display that value again. API responses expose only `secret_configured` and `key_display`; they never expose raw keys or encrypted ciphertext.
 
 ## Default prompt versions
 

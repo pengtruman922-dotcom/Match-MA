@@ -1,5 +1,5 @@
 
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -14,6 +14,11 @@ from backend.app.ai.rerank_client import RerankCallError, call_dashscope_compati
 from backend.app.api.authn import CurrentUser, require_admin
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
+from backend.app.services.model_secrets import (
+    ModelSecretError,
+    encrypt_model_secret,
+    model_secret_encryption_configured,
+)
 
 
 def _require_admin_route(current_user: CurrentUser) -> None:
@@ -38,9 +43,12 @@ CHAT_NODE_TYPES = {"llm", "parser", "research"}
 
 class ProviderCreate(BaseModel):
     provider_name: str = Field(min_length=1, max_length=120)
-    provider_type: str = Field(default="custom")
-    base_url: str | None = None
+    model_name: str = Field(min_length=1, max_length=160)
+    base_url: str = Field(min_length=1, max_length=500)
+    secret_mode: Literal["env", "direct"] = "env"
     api_key_secret_ref: str | None = Field(default=None, pattern=r"^[A-Z_][A-Z0-9_]*$", max_length=160)
+    api_key: str | None = Field(default=None, min_length=1, max_length=10000)
+    provider_type: str = Field(default="openai_compatible")
     auth_type: str = Field(default="bearer")
     extra_headers_json: dict[str, Any] = Field(default_factory=dict)
     extra_config_json: dict[str, Any] = Field(default_factory=dict)
@@ -51,9 +59,12 @@ class ProviderCreate(BaseModel):
 
 class ProviderUpdate(BaseModel):
     provider_name: str | None = Field(default=None, min_length=1, max_length=120)
+    model_name: str | None = Field(default=None, min_length=1, max_length=160)
+    secret_mode: Literal["env", "direct"] | None = None
     provider_type: str | None = None
-    base_url: str | None = None
+    base_url: str | None = Field(default=None, min_length=1, max_length=500)
     api_key_secret_ref: str | None = Field(default=None, pattern=r"^[A-Z_][A-Z0-9_]*$", max_length=160)
+    api_key: str | None = Field(default=None, min_length=1, max_length=10000)
     auth_type: str | None = None
     extra_headers_json: dict[str, Any] | None = None
     extra_config_json: dict[str, Any] | None = None
@@ -65,9 +76,13 @@ class ProviderUpdate(BaseModel):
 class ProviderOut(BaseModel):
     id: UUID
     provider_name: str
+    model_name: str
     provider_type: str
     base_url: str | None
+    secret_mode: Literal["env", "direct"]
     api_key_secret_ref: str | None
+    secret_configured: bool
+    key_display: str
     auth_type: str
     extra_headers_json: dict[str, Any]
     extra_config_json: dict[str, Any]
@@ -76,6 +91,18 @@ class ProviderOut(BaseModel):
     created_at: str
     updated_at: str
     metadata_json: dict[str, Any]
+
+
+class ModelConnectionTestOut(BaseModel):
+    status: Literal["succeeded", "failed"]
+    model_name: str
+    latency_ms: int | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    output_preview: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
 
 
 class NodeCreate(BaseModel):
@@ -296,6 +323,7 @@ def get_model_config_capabilities() -> dict[str, Any]:
         "output_modes": sorted(OUTPUT_MODES),
         "template_engines": sorted(TEMPLATE_ENGINES),
         "security_note": "api_key_secret_ref stores the environment variable name, not the secret value.",
+        "direct_key_encryption_configured": model_secret_encryption_configured(),
     }
 
 
@@ -337,10 +365,11 @@ def get_model_config_settings_page(
         "node_test_records": node_test_records,
         "overview": overview,
         "quick_actions": _settings_page_quick_actions(overview),
-        "security_note": "Never store or display raw API keys; configure secrets in Railway and store only api_key_secret_ref.",
+        "security_note": "Environment references are preferred. Direct API keys are encrypted and never returned.",
     }
 
 
+@router.get("/models", response_model=list[ProviderOut])
 @router.get("/providers", response_model=list[ProviderOut])
 def list_providers(
     db: Session = Depends(get_db),
@@ -349,23 +378,27 @@ def list_providers(
     return _list_provider_rows(db, include_inactive=include_inactive)
 
 
+@router.post("/models", response_model=ProviderOut, status_code=status.HTTP_201_CREATED)
 @router.post("/providers", response_model=ProviderOut, status_code=status.HTTP_201_CREATED)
 def create_provider(payload: ProviderCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
     _validate_choice("provider_type", payload.provider_type, PROVIDER_TYPES)
     _validate_choice("auth_type", payload.auth_type, AUTH_TYPES)
+    secret_data = _model_secret_create_data(payload)
     if payload.is_default:
         _clear_default_provider(db)
     row = db.execute(
         _provider_returning_statement(
             """
             insert into model_provider_config (
-              team_id, workspace_id, provider_name, provider_type, base_url,
-              api_key_secret_ref, auth_type, extra_headers_json, extra_config_json,
+              team_id, workspace_id, provider_name, model_name, provider_type, base_url,
+              secret_mode, api_key_secret_ref, api_key_encrypted,
+              auth_type, extra_headers_json, extra_config_json,
               is_active, is_default, created_by, metadata_json
             )
             values (
-              :team_id, :workspace_id, :provider_name, :provider_type, :base_url,
-              :api_key_secret_ref, :auth_type, :extra_headers_json, :extra_config_json,
+              :team_id, :workspace_id, :provider_name, :model_name, :provider_type, :base_url,
+              :secret_mode, :api_key_secret_ref, :api_key_encrypted,
+              :auth_type, :extra_headers_json, :extra_config_json,
               :is_active, :is_default, :created_by, :metadata_json
             )
             """
@@ -377,7 +410,8 @@ def create_provider(payload: ProviderCreate, db: Session = Depends(get_db)) -> d
         {
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
-            **payload.model_dump(),
+            **payload.model_dump(exclude={"api_key", "api_key_secret_ref", "secret_mode"}),
+            **secret_data,
             "created_by": DEFAULT_ADMIN_USER_ID,
         },
     ).mappings().one()
@@ -385,21 +419,27 @@ def create_provider(payload: ProviderCreate, db: Session = Depends(get_db)) -> d
     return dict(row)
 
 
+@router.get("/models/{provider_id}", response_model=ProviderOut)
 @router.get("/providers/{provider_id}", response_model=ProviderOut)
 def get_provider(provider_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
     return _get_provider_or_404(db, provider_id)
 
 
+@router.patch("/models/{provider_id}", response_model=ProviderOut)
 @router.patch("/providers/{provider_id}", response_model=ProviderOut)
 def update_provider(provider_id: UUID, payload: ProviderUpdate, db: Session = Depends(get_db)) -> dict[str, Any]:
-    _get_provider_or_404(db, provider_id)
+    current = _get_provider_internal_or_404(db, provider_id)
     data = payload.model_dump(exclude_unset=True)
+    data.pop("api_key", None)
+    data.update(_model_secret_update_data(payload, current=current))
     if "provider_type" in data:
         _validate_choice("provider_type", data["provider_type"], PROVIDER_TYPES)
     if "auth_type" in data:
         _validate_choice("auth_type", data["auth_type"], AUTH_TYPES)
     if data.get("is_default") is True:
         _clear_default_provider(db)
+    if data.get("is_active") is False and current.get("is_active"):
+        _ensure_model_can_deactivate(db, provider_id)
     row = _update_row(
         db,
         table_name="model_provider_config",
@@ -408,13 +448,34 @@ def update_provider(provider_id: UUID, payload: ProviderUpdate, db: Session = De
         select_columns=_provider_select_columns(),
         json_fields={"extra_headers_json", "extra_config_json", "metadata_json"},
     )
+    if "model_name" in data:
+        db.execute(
+            text(
+                """
+                update model_node_config
+                set model_name = :model_name, updated_at = now()
+                where provider_config_id = :provider_config_id
+                  and team_id = :team_id and workspace_id = :workspace_id
+                """
+            ),
+            {
+                "model_name": data["model_name"],
+                "provider_config_id": provider_id,
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+            },
+        )
     db.commit()
     return row
 
 
+@router.delete("/models/{provider_id}", response_model=ProviderOut)
 @router.delete("/providers/{provider_id}", response_model=ProviderOut)
 def deactivate_provider(provider_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
-    _get_provider_or_404(db, provider_id)
+    current = _get_provider_or_404(db, provider_id)
+    if not current["is_active"]:
+        return current
+    _ensure_model_can_deactivate(db, provider_id)
     row = _update_row(
         db,
         table_name="model_provider_config",
@@ -425,6 +486,44 @@ def deactivate_provider(provider_id: UUID, db: Session = Depends(get_db)) -> dic
     )
     db.commit()
     return row
+
+
+@router.post("/models/{provider_id}/test", response_model=ModelConnectionTestOut)
+def test_model_connection(provider_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+    model = _get_provider_internal_or_404(db, provider_id)
+    if not model.get("is_active"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Inactive models cannot be tested.")
+    try:
+        result = call_openai_compatible_chat(
+            base_url=str(model["base_url"]),
+            api_key_secret_ref=model.get("api_key_secret_ref"),
+            api_key_encrypted=model.get("api_key_encrypted"),
+            model_name=str(model["model_name"]),
+            messages=[
+                {"role": "system", "content": "You are an API connectivity tester."},
+                {"role": "user", "content": "Return exactly: ok"},
+            ],
+            temperature=None,
+            top_p=None,
+            max_tokens=16,
+            timeout_seconds=60,
+        )
+    except LlmCallError as exc:
+        return {
+            "status": "failed",
+            "model_name": model["model_name"],
+            "error_code": "model_connection_failed",
+            "error_message": str(exc),
+        }
+    return {
+        "status": "succeeded",
+        "model_name": model["model_name"],
+        "latency_ms": result.latency_ms,
+        "prompt_tokens": result.prompt_tokens,
+        "completion_tokens": result.completion_tokens,
+        "total_tokens": result.total_tokens,
+        "output_preview": result.raw_output_text[:200],
+    }
 
 
 @router.get("/nodes", response_model=list[NodeOut])
@@ -438,8 +537,12 @@ def list_nodes(
 
 @router.post("/nodes", response_model=NodeOut, status_code=status.HTTP_201_CREATED)
 def create_node(payload: NodeCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
-    _validate_node_payload(payload.model_dump())
-    _get_provider_or_404(db, payload.provider_config_id)
+    node_data = payload.model_dump()
+    model = _get_provider_or_404(db, payload.provider_config_id)
+    if not model["is_active"]:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Selected model is inactive.")
+    node_data["model_name"] = model["model_name"]
+    _validate_node_payload(node_data)
     if payload.is_default:
         _clear_default_node(db, payload.node_name)
     row = db.execute(
@@ -459,7 +562,7 @@ def create_node(payload: NodeCreate, db: Session = Depends(get_db)) -> dict[str,
             )
             """
         ).bindparams(bindparam("metadata_json", type_=JSONB)),
-        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID, **payload.model_dump(), "created_by": DEFAULT_ADMIN_USER_ID},
+        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID, **node_data, "created_by": DEFAULT_ADMIN_USER_ID},
     ).mappings().one()
     db.commit()
     return _with_prompt_capability(row)
@@ -559,9 +662,13 @@ def update_node(node_id: UUID, payload: NodeUpdate, db: Session = Depends(get_db
     current = _get_node_or_404(db, node_id)
     data = payload.model_dump(exclude_unset=True)
     merged = {**current, **data}
-    _validate_node_payload(merged)
     if "provider_config_id" in data:
-        _get_provider_or_404(db, data["provider_config_id"])
+        model = _get_provider_or_404(db, data["provider_config_id"])
+        if not model["is_active"]:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Selected model is inactive.")
+        data["model_name"] = model["model_name"]
+        merged["model_name"] = model["model_name"]
+    _validate_node_payload(merged)
     if data.get("is_default") is True:
         _clear_default_node(db, str(merged["node_name"]))
     row = _update_node_row(db, node_id=node_id, data=data)
@@ -869,6 +976,103 @@ def _validate_choice(field_name: str, value: str | None, allowed: set[str]) -> N
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Invalid {field_name}: {value}")
 
 
+def _model_secret_create_data(payload: ProviderCreate) -> dict[str, Any]:
+    if payload.secret_mode == "env":
+        if not payload.api_key_secret_ref:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Environment variable name is required for env key mode.",
+            )
+        return {
+            "secret_mode": "env",
+            "api_key_secret_ref": payload.api_key_secret_ref,
+            "api_key_encrypted": None,
+        }
+    if not payload.api_key:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="API key is required for direct key mode.",
+        )
+    return {
+        "secret_mode": "direct",
+        "api_key_secret_ref": None,
+        "api_key_encrypted": _encrypt_model_key_or_http_error(payload.api_key),
+    }
+
+
+def _model_secret_update_data(payload: ProviderUpdate, *, current: dict[str, Any]) -> dict[str, Any]:
+    secret_fields = {"secret_mode", "api_key_secret_ref", "api_key"}
+    if not secret_fields.intersection(payload.model_fields_set):
+        return {}
+    mode = payload.secret_mode or str(current.get("secret_mode") or "env")
+    if mode == "env":
+        secret_ref = payload.api_key_secret_ref
+        if secret_ref is None and current.get("secret_mode") == "env":
+            secret_ref = current.get("api_key_secret_ref")
+        if not secret_ref:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Environment variable name is required for env key mode.",
+            )
+        return {"secret_mode": "env", "api_key_secret_ref": secret_ref, "api_key_encrypted": None}
+
+    encrypted = current.get("api_key_encrypted") if current.get("secret_mode") == "direct" else None
+    if payload.api_key:
+        encrypted = _encrypt_model_key_or_http_error(payload.api_key)
+    if not encrypted:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="API key is required when switching to direct key mode.",
+        )
+    return {"secret_mode": "direct", "api_key_secret_ref": None, "api_key_encrypted": encrypted}
+
+
+def _encrypt_model_key_or_http_error(api_key: str) -> str:
+    try:
+        return encrypt_model_secret(api_key)
+    except ModelSecretError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+def _ensure_model_can_deactivate(db: Session, provider_id: UUID) -> None:
+    bound_nodes = int(
+        db.execute(
+            text(
+                """
+                select count(*) from model_node_config
+                where provider_config_id = :provider_config_id and is_active = true
+                """
+            ),
+            {"provider_config_id": provider_id},
+        ).scalar_one()
+        or 0
+    )
+    if bound_nodes:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Model is still used by {bound_nodes} active business node(s). Reassign them first.",
+        )
+    remaining = int(
+        db.execute(
+            text(
+                """
+                select count(*) from model_provider_config
+                where team_id = :team_id and workspace_id = :workspace_id
+                  and is_active = true and id <> :provider_config_id
+                """
+            ),
+            {
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+                "provider_config_id": provider_id,
+            },
+        ).scalar_one()
+        or 0
+    )
+    if remaining < 1:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="At least one active model must remain.")
+
+
 def _validate_node_payload(data: dict[str, Any]) -> None:
     _validate_choice("node_type", data.get("node_type"), NODE_TYPES)
     _validate_choice("output_mode", data.get("output_mode"), OUTPUT_MODES)
@@ -1049,6 +1253,7 @@ def _run_chat_node_test(
     payload: NodeTestCreate,
 ) -> dict[str, Any]:
     trace_type = "llm" if node["node_type"] == "llm" else str(node["node_type"])
+    model = _get_provider_internal_or_404(db, node["provider_config_id"])
     messages = payload.messages or _default_chat_test_messages(node, payload.input_text)
     input_json = {
         "node_id": str(node["id"]),
@@ -1060,6 +1265,7 @@ def _run_chat_node_test(
         result = call_openai_compatible_chat(
             base_url=str(node["base_url"]),
             api_key_secret_ref=node.get("api_key_secret_ref"),
+            api_key_encrypted=model.get("api_key_encrypted"),
             model_name=str(node["model_name"]),
             messages=messages,
             temperature=node.get("temperature"),
@@ -1411,6 +1617,21 @@ def _get_provider_or_404(db: Session, provider_id: UUID) -> dict[str, Any]:
     return dict(row)
 
 
+def _get_provider_internal_or_404(db: Session, provider_id: UUID) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            """
+            select * from model_provider_config
+            where id = :id and team_id = :team_id and workspace_id = :workspace_id
+            """
+        ),
+        {"id": provider_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    ).mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model config not found.")
+    return dict(row)
+
+
 def _get_node_or_404(db: Session, node_id: UUID) -> dict[str, Any]:
     row = db.execute(text(f"select {_node_select_columns()} from model_node_config node left join model_provider_config provider on provider.id = node.provider_config_id where node.id = :id and node.team_id = :team_id and node.workspace_id = :workspace_id"), {"id": node_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID}).mappings().one_or_none()
     if row is None:
@@ -1462,7 +1683,18 @@ def _with_prompt_capability(row: Any) -> dict[str, Any]:
 
 def _provider_select_columns() -> str:
     return """
-      id, provider_name, provider_type, base_url, api_key_secret_ref, auth_type,
+      id, provider_name, model_name, provider_type, base_url, secret_mode,
+      case when secret_mode = 'env' then api_key_secret_ref else null end as api_key_secret_ref,
+      case
+        when secret_mode = 'direct' then api_key_encrypted is not null
+        else api_key_secret_ref is not null
+      end as secret_configured,
+      case
+        when secret_mode = 'direct' and api_key_encrypted is not null then '已加密保存'
+        when secret_mode = 'env' then coalesce(api_key_secret_ref, '未配置')
+        else '未配置'
+      end as key_display,
+      auth_type,
       extra_headers_json, extra_config_json, is_active, is_default,
       created_at::text as created_at, updated_at::text as updated_at, metadata_json
     """

@@ -472,6 +472,7 @@ def _handle_seller_target_parse(db: Session, job: JobClaim) -> dict[str, object]
         llm_result = call_openai_compatible_chat(
             base_url=node_config["base_url"],
             api_key_secret_ref=node_config["api_key_secret_ref"],
+            api_key_encrypted=node_config.get("api_key_encrypted"),
             model_name=node_config["model_name"],
             messages=prompt_messages,
             temperature=node_config["temperature"],
@@ -593,6 +594,7 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
         llm_result = call_openai_compatible_chat(
             base_url=node_config["base_url"],
             api_key_secret_ref=node_config["api_key_secret_ref"],
+            api_key_encrypted=node_config.get("api_key_encrypted"),
             model_name=node_config["model_name"],
             messages=prompt_messages,
             temperature=node_config["temperature"],
@@ -1148,6 +1150,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
         llm_result = call_openai_compatible_chat(
             base_url=node_config["base_url"],
             api_key_secret_ref=node_config["api_key_secret_ref"],
+            api_key_encrypted=node_config.get("api_key_encrypted"),
             model_name=node_config["model_name"],
             messages=prompt_messages,
             temperature=node_config["temperature"],
@@ -1356,6 +1359,7 @@ def _handle_embedding_generate(db: Session, job: JobClaim) -> dict[str, object]:
         embedding_result = call_openai_compatible_embedding(
             base_url=node_config["base_url"],
             api_key_secret_ref=node_config["api_key_secret_ref"],
+            api_key_encrypted=node_config.get("api_key_encrypted"),
             model_name=node_config["model_name"],
             input_text=full_text,
             dimensions=node_config["embedding_dimension"],
@@ -1481,6 +1485,7 @@ def _handle_recommendation_report_generate(db: Session, job: JobClaim) -> dict[s
         llm_result = call_openai_compatible_chat(
             base_url=node_config["base_url"],
             api_key_secret_ref=node_config["api_key_secret_ref"],
+            api_key_encrypted=node_config.get("api_key_encrypted"),
             model_name=node_config["model_name"],
             messages=prompt_messages,
             temperature=node_config["temperature"],
@@ -1690,6 +1695,7 @@ def _run_recommendation_deep_eval(
         llm_result = call_openai_compatible_chat(
             base_url=node_config["base_url"],
             api_key_secret_ref=node_config["api_key_secret_ref"],
+            api_key_encrypted=node_config.get("api_key_encrypted"),
             model_name=node_config["model_name"],
             messages=prompt_messages,
             temperature=node_config["temperature"],
@@ -1886,6 +1892,7 @@ def _handle_model_chat_node_test(
         result = call_openai_compatible_chat(
             base_url=node_config["base_url"],
             api_key_secret_ref=node_config["api_key_secret_ref"],
+            api_key_encrypted=node_config.get("api_key_encrypted"),
             model_name=node_config["model_name"],
             messages=messages,
             temperature=node_config.get("temperature"),
@@ -2971,7 +2978,7 @@ def _get_default_node_config(db: Session, node_name: str) -> dict[str, Any]:
               provider.id as provider_config_id,
               provider.provider_name,
               provider.base_url,
-              provider.api_key_secret_ref,
+              provider.api_key_secret_ref, provider.api_key_encrypted,
               prompt.id as prompt_template_id,
               prompt.version as prompt_version,
               prompt.system_prompt,
@@ -3022,7 +3029,7 @@ def _get_default_embedding_node_config(db: Session, node_name: str) -> dict[str,
               provider.id as provider_config_id,
               provider.provider_name,
               provider.base_url,
-              provider.api_key_secret_ref
+              provider.api_key_secret_ref, provider.api_key_encrypted
             from model_node_config node
             join model_provider_config provider
               on provider.id = node.provider_config_id
@@ -3064,7 +3071,7 @@ def _get_default_rerank_node_config(db: Session, node_name: str) -> dict[str, An
               provider.id as provider_config_id,
               provider.provider_name,
               provider.base_url,
-              provider.api_key_secret_ref
+              provider.api_key_secret_ref, provider.api_key_encrypted
             from model_node_config node
             join model_provider_config provider
               on provider.id = node.provider_config_id
@@ -3104,7 +3111,7 @@ def _get_default_ocr_node_config(db: Session, node_name: str) -> dict[str, Any]:
               provider.id as provider_config_id,
               provider.provider_name,
               provider.base_url,
-              provider.api_key_secret_ref
+              provider.api_key_secret_ref, provider.api_key_encrypted
             from model_node_config node
             join model_provider_config provider
               on provider.id = node.provider_config_id
@@ -3147,7 +3154,7 @@ def _get_model_node_config_by_id(db: Session, node_id: UUID) -> dict[str, Any]:
               provider.id as provider_config_id,
               provider.provider_name,
               provider.base_url,
-              provider.api_key_secret_ref
+              provider.api_key_secret_ref, provider.api_key_encrypted
             from model_node_config node
             join model_provider_config provider
               on provider.id = node.provider_config_id
