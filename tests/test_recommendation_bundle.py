@@ -2,6 +2,7 @@
 
 from backend.app.api.routes.recommendations import (
     _build_recommendation_rerank_status,
+    _enqueue_recommendation_rerank_job,
     _enrich_candidates_with_selection,
     _extract_recommendation_candidate_sets,
     _optional_uuid,
@@ -103,7 +104,7 @@ def test_enrich_candidates_with_active_selection() -> None:
     assert enriched[0]["card_json"]["action_label"] == "add_target_to_recommendation"
 
 
-def test_frontend_candidate_fields_include_score_breakdown() -> None:
+def test_frontend_candidate_fields_include_rule_and_deep_eval_breakdown() -> None:
     candidate = _with_frontend_candidate_fields(
         {
             "mode": "buyer_to_target",
@@ -117,7 +118,6 @@ def test_frontend_candidate_fields_include_score_breakdown() -> None:
             "evidence_json": {
                 "score": {
                     "rule_score": 80,
-                    "embedding_similarity": 0.8,
                     "rerank_score": 0.9,
                     "final_score": 90,
                 }
@@ -129,8 +129,40 @@ def test_frontend_candidate_fields_include_score_breakdown() -> None:
     assert candidate["display_title"] == "浙江医疗器械标的"
     assert candidate["display_subtitle"] == "医药健康并表需求"
     assert candidate["score_breakdown"]["rule_score"] == 80
-    assert "embedding" in candidate["display_badges"]
+    assert "embedding" not in candidate["display_badges"]
     assert "reranked" in candidate["display_badges"]
+
+
+def test_deep_eval_job_uses_llm_queue_and_caps_candidates_at_twenty() -> None:
+    class _Result:
+        def mappings(self):
+            return self
+
+        def one(self):
+            return {"id": UUID("00000000-0000-0000-0000-000000000099")}
+
+    class _Db:
+        statement = ""
+        params = {}
+
+        def execute(self, statement, params):
+            self.statement = str(statement)
+            self.params = params
+            return _Result()
+
+    db = _Db()
+    job_id = _enqueue_recommendation_rerank_job(
+        db,
+        session_id=UUID("00000000-0000-0000-0000-000000000098"),
+        mode="buyer_to_target",
+        anchor={"id": BUYER_INTENT_ID, "intent_name": "测试需求"},
+        candidates=[{"rank": index + 1} for index in range(25)],
+    )
+
+    assert str(job_id).endswith("0099")
+    assert "'recommendation_deep_eval'" in db.statement
+    assert "'llm'" in db.statement
+    assert len(db.params["payload_json"]["candidates"]) == 20
 
 
 def test_score_target_against_intent_uses_expanded_buyer_filters() -> None:

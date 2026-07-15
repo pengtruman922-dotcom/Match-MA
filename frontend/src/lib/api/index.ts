@@ -25,6 +25,8 @@ import type {
   BuyerIntentSuggestion,
   BuyerIntent,
   BuyerIntentCreate,
+  BuyerIntentFollowUp,
+  BuyerIntentFollowUpCreate,
   BuyerIntentTargetExclusion,
   BuyerIntentUpdate,
   BuyerIntentParseJob,
@@ -65,6 +67,11 @@ import type {
   UpdateLog,
   FailureSummary,
   GlobalSearchResponse,
+  IndustryDictionaryTerm,
+  ModelConfigSettingsPage,
+  ModelNodeConfig,
+  ModelProviderConfig,
+  PromptTemplateConfig,
   QueueSummary,
   TaskCenterData,
 } from '../../types/api';
@@ -207,6 +214,14 @@ export const buyerIntents = {
       body: JSON.stringify(data || {}),
     }),
   parseStatus: (id: string) => apiRequest<BuyerIntentParseStatus>(`/buyer-intents/${id}/parse-status`),
+  followUps: (id: string) => apiRequest<BuyerIntentFollowUp[]>(`/buyer-intents/${id}/follow-ups`),
+  createFollowUp: (id: string, data: BuyerIntentFollowUpCreate) =>
+    apiRequest<BuyerIntentFollowUp>(`/buyer-intents/${id}/follow-ups`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  deleteFollowUp: (id: string, followUpId: string) =>
+    apiRequest<void>(`/buyer-intents/${id}/follow-ups/${followUpId}`, { method: 'DELETE' }),
   update: (id: string, data: BuyerIntentUpdate) =>
     apiRequest<BuyerIntent>(`/buyer-intents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   delete: (id: string) => apiRequest<{ status: string }>(`/buyer-intents/${id}`, { method: 'DELETE' }),
@@ -391,6 +406,30 @@ export const updateLogs = {
 export const globalSearch = {
   query: (params: { q: string; limit_per_type?: number }) =>
     apiRequest<GlobalSearchResponse>(`/search${buildQuery(params)}`),
+};
+
+export const modelConfig = {
+  settingsPage: () => apiRequest<ModelConfigSettingsPage>('/model-config/settings-page?include_inactive=true&tests_per_node=1'),
+  updateProvider: (id: string, data: Partial<ModelProviderConfig>) =>
+    apiRequest<ModelProviderConfig>(`/model-config/providers/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  updateNode: (id: string, data: Partial<ModelNodeConfig>) =>
+    apiRequest<ModelNodeConfig>(`/model-config/nodes/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  createPrompt: (data: Record<string, unknown>) =>
+    apiRequest<PromptTemplateConfig>('/model-config/prompts', { method: 'POST', body: JSON.stringify(data) }),
+  testNode: (id: string, input_text: string) =>
+    apiRequest<{ job_id: string; job_status: string }>(`/model-config/nodes/${id}/test-jobs`, {
+      method: 'POST',
+      body: JSON.stringify({ input_text }),
+    }),
+};
+
+export const dataDictionaries = {
+  industry: (params?: { q?: string; level?: string; include_inactive?: boolean }) =>
+    apiRequest<IndustryDictionaryTerm[]>(`/data-dictionaries/industry${buildQuery(params || {})}`),
+  createIndustryTerm: (data: Omit<IndustryDictionaryTerm, 'id' | 'usage_count' | 'created_at' | 'updated_at'>) =>
+    apiRequest<IndustryDictionaryTerm>('/data-dictionaries/industry', { method: 'POST', body: JSON.stringify(data) }),
+  updateIndustryTerm: (id: string, data: Partial<IndustryDictionaryTerm>) =>
+    apiRequest<IndustryDictionaryTerm>(`/data-dictionaries/industry/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
 };
 
 export const debugApi = {

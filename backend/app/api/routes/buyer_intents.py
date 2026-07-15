@@ -1,3 +1,4 @@
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID, uuid4
@@ -39,6 +40,7 @@ class BuyerIntentCreate(BaseModel):
     intent_summary: str | None = None
     industry_primary: str | None = None
     industry_secondary: str | None = None
+    industry_focus_tags_json: list[Any] | None = None
     region_scope_summary: str | None = None
     parsed_requirement_json: dict[str, Any] | None = None
     region_constraints_json: list[Any] | dict[str, Any] | None = None
@@ -46,6 +48,10 @@ class BuyerIntentCreate(BaseModel):
     min_net_profit_yuan: Decimal | None = None
     min_total_profit_yuan: Decimal | None = None
     max_pe: Decimal | None = None
+    max_ps: Decimal | None = None
+    min_net_margin: Decimal | None = None
+    min_gross_margin: Decimal | None = None
+    min_valuation_yuan: Decimal | None = None
     max_valuation_yuan: Decimal | None = None
     min_market_cap_yuan: Decimal | None = None
     max_market_cap_yuan: Decimal | None = None
@@ -88,6 +94,7 @@ class BuyerIntentOut(BaseModel):
     industry_secondary: str | None
     industries_json: list[Any] = []
     excluded_industries_json: list[Any] = []
+    industry_focus_tags_json: list[Any] = []
     region_scope_summary: str | None
     parsed_requirement_json: dict[str, Any]
     region_constraints_json: list[Any] | dict[str, Any]
@@ -95,6 +102,10 @@ class BuyerIntentOut(BaseModel):
     min_net_profit_yuan: Decimal | None
     min_total_profit_yuan: Decimal | None
     max_pe: Decimal | None
+    max_ps: Decimal | None
+    min_net_margin: Decimal | None
+    min_gross_margin: Decimal | None
+    min_valuation_yuan: Decimal | None
     max_valuation_yuan: Decimal | None
     min_market_cap_yuan: Decimal | None
     max_market_cap_yuan: Decimal | None
@@ -146,6 +157,7 @@ class BuyerIntentUpdate(BaseModel):
     industry_secondary: str | None = None
     industries_json: list[Any] | None = None
     excluded_industries_json: list[Any] | None = None
+    industry_focus_tags_json: list[Any] | None = None
     region_scope_summary: str | None = None
     parsed_requirement_json: dict[str, Any] | None = None
     region_constraints_json: list[Any] | dict[str, Any] | None = None
@@ -153,6 +165,10 @@ class BuyerIntentUpdate(BaseModel):
     min_net_profit_yuan: Decimal | None = None
     min_total_profit_yuan: Decimal | None = None
     max_pe: Decimal | None = None
+    max_ps: Decimal | None = None
+    min_net_margin: Decimal | None = None
+    min_gross_margin: Decimal | None = None
+    min_valuation_yuan: Decimal | None = None
     max_valuation_yuan: Decimal | None = None
     min_market_cap_yuan: Decimal | None = None
     max_market_cap_yuan: Decimal | None = None
@@ -204,6 +220,29 @@ class BuyerIntentParseStatusOut(BaseModel):
     debug_ref: dict[str, Any]
 
 
+class BuyerIntentFollowUpCreate(BaseModel):
+    occurred_at: datetime | None = None
+    contact_name: str | None = Field(default=None, max_length=200)
+    content: str = Field(min_length=1, max_length=10000)
+    next_step: str | None = Field(default=None, max_length=2000)
+    next_follow_up_at: datetime | None = None
+
+
+class BuyerIntentFollowUpOut(BaseModel):
+    id: UUID
+    buyer_intent_id: UUID
+    occurred_at: str
+    contact_name: str | None
+    content: str
+    next_step: str | None
+    next_follow_up_at: str | None
+    business_update_id: UUID | None
+    extracted_action_id: UUID | None
+    created_by: UUID | None
+    created_by_name: str | None = None
+    created_at: str
+
+
 class BuyerIntentFilterOptionOut(BaseModel):
     value: str
     label: str
@@ -246,9 +285,12 @@ BUYER_INTENT_OUT_COLUMNS = """
               bi.id, bi.buyer_party_id, bp.buyer_name as buyer_name, bi.intent_name, bi.status, bi.contact_name,
               bi.raw_requirement_text, bi.intent_summary, bi.parsed_requirement_json,
               bi.industry_primary, bi.industry_secondary,
-              bi.industries_json, bi.excluded_industries_json, bi.region_scope_summary,
+              bi.industries_json, bi.excluded_industries_json, bi.industry_focus_tags_json,
+              bi.region_scope_summary,
               bi.region_constraints_json, bi.min_revenue_yuan, bi.min_net_profit_yuan,
-              bi.min_total_profit_yuan, bi.max_pe, bi.max_valuation_yuan,
+              bi.min_total_profit_yuan, bi.max_pe, bi.max_ps,
+              bi.min_net_margin, bi.min_gross_margin,
+              bi.min_valuation_yuan, bi.max_valuation_yuan,
               bi.min_market_cap_yuan, bi.max_market_cap_yuan, bi.market_cap_range_summary,
               bi.requires_control, bi.requires_consolidation,
               bi.accepts_minority_investment, bi.desired_equity_ratio_min,
@@ -287,10 +329,12 @@ def create_buyer_intent(
             insert into buyer_intent (
               team_id, workspace_id, buyer_party_id, owner_user_id,
               intent_name, contact_name, raw_requirement_text, intent_summary,
-              parsed_requirement_json, industry_primary, industry_secondary,
+              parsed_requirement_json, industry_primary, industry_secondary, industry_focus_tags_json,
               region_scope_summary, region_constraints_json,
               min_revenue_yuan, min_net_profit_yuan, min_total_profit_yuan,
-              max_pe, max_valuation_yuan, min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
+              max_pe, max_ps, min_net_margin, min_gross_margin,
+              min_valuation_yuan, max_valuation_yuan,
+              min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
               requires_control, requires_consolidation, accepts_minority_investment,
               desired_equity_ratio_min, desired_equity_ratio_max, equity_ratio_summary,
               equity_requirement_type, acceptable_control_paths_json,
@@ -305,10 +349,12 @@ def create_buyer_intent(
             values (
               :team_id, :workspace_id, :buyer_party_id, :owner_user_id,
               :intent_name, :contact_name, :raw_requirement_text, :intent_summary,
-              :parsed_requirement_json, :industry_primary, :industry_secondary,
+              :parsed_requirement_json, :industry_primary, :industry_secondary, :industry_focus_tags_json,
               :region_scope_summary, :region_constraints_json,
               :min_revenue_yuan, :min_net_profit_yuan, :min_total_profit_yuan,
-              :max_pe, :max_valuation_yuan, :min_market_cap_yuan, :max_market_cap_yuan, :market_cap_range_summary,
+              :max_pe, :max_ps, :min_net_margin, :min_gross_margin,
+              :min_valuation_yuan, :max_valuation_yuan,
+              :min_market_cap_yuan, :max_market_cap_yuan, :market_cap_range_summary,
               :requires_control, :requires_consolidation, :accepts_minority_investment,
               :desired_equity_ratio_min, :desired_equity_ratio_max, :equity_ratio_summary,
               :equity_requirement_type, :acceptable_control_paths_json,
@@ -324,6 +370,7 @@ def create_buyer_intent(
             """
         ).bindparams(
             bindparam("parsed_requirement_json", type_=JSONB),
+            bindparam("industry_focus_tags_json", type_=JSONB),
             bindparam("region_constraints_json", type_=JSONB),
             bindparam("acceptable_control_paths_json", type_=JSONB),
             bindparam("transaction_types_json", type_=JSONB),
@@ -841,6 +888,125 @@ def get_buyer_intent_parse_status(
     }
 
 
+@router.get("/{buyer_intent_id}/follow-ups", response_model=list[BuyerIntentFollowUpOut])
+def list_buyer_intent_follow_ups(
+    buyer_intent_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+    limit: int = Query(default=100, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
+    _get_buyer_intent_or_404(db, buyer_intent_id)
+    ensure_entity_visible(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
+    rows = db.execute(
+        text(
+            """
+            select
+              f.id, f.buyer_intent_id, f.occurred_at::text as occurred_at,
+              f.contact_name, f.content, f.next_step,
+              f.next_follow_up_at::text as next_follow_up_at,
+              f.business_update_id, f.extracted_action_id, f.created_by,
+              au.name as created_by_name, f.created_at::text as created_at
+            from buyer_intent_follow_up f
+            left join app_user au on au.id = f.created_by
+            where f.buyer_intent_id = :buyer_intent_id
+              and f.team_id = :team_id
+              and f.workspace_id = :workspace_id
+              and f.deleted_at is null
+            order by f.occurred_at desc, f.created_at desc
+            limit :limit offset :offset
+            """
+        ),
+        {
+            "buyer_intent_id": buyer_intent_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "limit": limit,
+            "offset": offset,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+@router.post(
+    "/{buyer_intent_id}/follow-ups",
+    response_model=BuyerIntentFollowUpOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_buyer_intent_follow_up(
+    buyer_intent_id: UUID,
+    payload: BuyerIntentFollowUpCreate,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    _get_buyer_intent_or_404(db, buyer_intent_id)
+    ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
+    row = db.execute(
+        text(
+            """
+            insert into buyer_intent_follow_up (
+              team_id, workspace_id, buyer_intent_id, occurred_at,
+              contact_name, content, next_step, next_follow_up_at, created_by
+            )
+            values (
+              :team_id, :workspace_id, :buyer_intent_id, coalesce(:occurred_at, now()),
+              :contact_name, :content, :next_step, :next_follow_up_at, :created_by
+            )
+            returning id
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "buyer_intent_id": buyer_intent_id,
+            "occurred_at": payload.occurred_at,
+            "contact_name": payload.contact_name,
+            "content": payload.content.strip(),
+            "next_step": payload.next_step,
+            "next_follow_up_at": payload.next_follow_up_at,
+            "created_by": current_user.user_id,
+        },
+    ).mappings().one()
+    db.commit()
+    return _get_buyer_intent_follow_up(db, row["id"])
+
+
+@router.delete("/{buyer_intent_id}/follow-ups/{follow_up_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_buyer_intent_follow_up(
+    buyer_intent_id: UUID,
+    follow_up_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> None:
+    _get_buyer_intent_or_404(db, buyer_intent_id)
+    ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
+    changed = db.execute(
+        text(
+            """
+            update buyer_intent_follow_up
+            set deleted_at = now(), deleted_by = :deleted_by
+            where id = :follow_up_id
+              and buyer_intent_id = :buyer_intent_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            returning id
+            """
+        ),
+        {
+            "follow_up_id": follow_up_id,
+            "buyer_intent_id": buyer_intent_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "deleted_by": current_user.user_id,
+        },
+    ).first()
+    if changed is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Buyer intent follow-up not found.")
+    db.commit()
+    return None
+
+
 @router.patch("/{buyer_intent_id}", response_model=BuyerIntentOut)
 def update_buyer_intent(
     buyer_intent_id: UUID,
@@ -888,6 +1054,7 @@ def update_buyer_intent(
         "transaction_types_json",
         "industries_json",
         "excluded_industries_json",
+        "industry_focus_tags_json",
     }
     bind_params = [bindparam(field, type_=JSONB) for field in changes if field in json_fields]
     if bind_params:
@@ -1028,6 +1195,35 @@ def _get_buyer_intent_or_404(db: Session, buyer_intent_id: UUID) -> dict[str, An
     return dict(row)
 
 
+def _get_buyer_intent_follow_up(db: Session, follow_up_id: UUID) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            """
+            select
+              f.id, f.buyer_intent_id, f.occurred_at::text as occurred_at,
+              f.contact_name, f.content, f.next_step,
+              f.next_follow_up_at::text as next_follow_up_at,
+              f.business_update_id, f.extracted_action_id, f.created_by,
+              au.name as created_by_name, f.created_at::text as created_at
+            from buyer_intent_follow_up f
+            left join app_user au on au.id = f.created_by
+            where f.id = :follow_up_id
+              and f.team_id = :team_id
+              and f.workspace_id = :workspace_id
+              and f.deleted_at is null
+            """
+        ),
+        {
+            "follow_up_id": follow_up_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Buyer intent follow-up not found.")
+    return dict(row)
+
+
 def _resolve_intent_owner(payload: BuyerIntentCreate, current_user: AuthContext, db: Session) -> UUID:
     """意向负责人：管理员可指定；否则默认继承所属买家的负责人，兜底为创建人。"""
     if current_user.is_admin and payload.owner_user_id:
@@ -1065,12 +1261,17 @@ def _buyer_intent_params(payload: BuyerIntentCreate, current_user: AuthContext, 
         "parsed_requirement_json": payload.parsed_requirement_json or {},
         "industry_primary": payload.industry_primary,
         "industry_secondary": payload.industry_secondary,
+        "industry_focus_tags_json": payload.industry_focus_tags_json or [],
         "region_scope_summary": payload.region_scope_summary,
         "region_constraints_json": payload.region_constraints_json or [],
         "min_revenue_yuan": payload.min_revenue_yuan,
         "min_net_profit_yuan": payload.min_net_profit_yuan,
         "min_total_profit_yuan": payload.min_total_profit_yuan,
         "max_pe": payload.max_pe,
+        "max_ps": payload.max_ps,
+        "min_net_margin": payload.min_net_margin,
+        "min_gross_margin": payload.min_gross_margin,
+        "min_valuation_yuan": payload.min_valuation_yuan,
         "max_valuation_yuan": payload.max_valuation_yuan,
         "min_market_cap_yuan": payload.min_market_cap_yuan,
         "max_market_cap_yuan": payload.max_market_cap_yuan,

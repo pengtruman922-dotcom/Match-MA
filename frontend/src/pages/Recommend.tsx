@@ -388,7 +388,7 @@ export default function Recommend() {
         <div className="mb-3 bg-amber-50 border border-amber-200 px-4 py-2 flex items-center gap-2">
           <Loader2 className="w-4 h-4 text-amber-600 shrink-0 animate-spin" />
           <span className="text-xs text-amber-700">
-            AI 深度评估进行中（约 1 分钟）……当前列表为规则初排，评估完成后会自动重排并标注 A/B/C 评级与推荐理由。离开本页后可在工作台的推荐会话中查看结果。
+            AI 深度评估进行中（约 1 分钟）……当前列表为规则初排，评估完成后会自动重排并标注 A/B/C 评级与推荐理由。离开本页后可重新打开该推荐记录查看结果。
           </span>
         </div>
       ) : deepEvalStatus === 'done' ? (
@@ -399,7 +399,7 @@ export default function Recommend() {
       ) : deepEvalStatus === 'failed' ? (
         <div className="mb-3 bg-gray-50 border border-gray-200 px-4 py-2 flex items-center gap-2">
           <Info className="w-4 h-4 text-gray-500 shrink-0" />
-          <span className="text-xs text-gray-600">AI 深度评估暂未完成，当前展示规则初排结果；稍后可在工作台的推荐会话中查看。</span>
+          <span className="text-xs text-gray-600">AI 深度评估暂未完成，当前展示规则初排结果；稍后可重新打开该推荐记录查看。</span>
         </div>
       ) : (
         <div className="mb-3 bg-emerald-50 border border-emerald-200 px-4 py-2 flex items-center gap-2">

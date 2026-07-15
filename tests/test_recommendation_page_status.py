@@ -114,7 +114,7 @@ def test_processing_and_page_overview_counts() -> None:
 
 def test_recommendation_session_filter_and_polling_hint() -> None:
     running_summary = {
-        "rerank_status": {"status": "running", "job_id": str(SELLER_TARGET_ID), "queue_name": "rerank"},
+        "rerank_status": {"status": "running", "job_id": str(SELLER_TARGET_ID), "queue_name": "llm"},
         "report_status": {"status": "not_requested", "latest_job": None},
         "selected_status": {"active_count": 0},
     }
@@ -140,7 +140,7 @@ def test_recommendation_session_filter_and_polling_hint() -> None:
 
     assert hint["enabled"] is True
     assert hint["endpoint"] == f"/api/v1/recommendations/sessions/{SESSION_ID}/page-state"
-    assert hint["watched_jobs"][0]["job_type"] == "recommendation_rerank"
+    assert hint["watched_jobs"][0]["job_type"] == "recommendation_deep_eval"
 
 
 def test_selected_item_must_match_session_anchor() -> None:

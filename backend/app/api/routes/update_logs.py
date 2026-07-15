@@ -927,12 +927,17 @@ ROLLBACK_FIELDS_BY_ENTITY = {
         "industry_secondary",
         "industries_json",
         "excluded_industries_json",
+        "industry_focus_tags_json",
         "region_scope_summary",
         "region_constraints_json",
         "min_revenue_yuan",
         "min_net_profit_yuan",
         "min_total_profit_yuan",
         "max_pe",
+        "max_ps",
+        "min_net_margin",
+        "min_gross_margin",
+        "min_valuation_yuan",
         "max_valuation_yuan",
         "min_market_cap_yuan",
         "max_market_cap_yuan",
@@ -960,6 +965,7 @@ ROLLBACK_FIELDS_BY_ENTITY = {
         "priority_summary",
         "preference_summary",
         "unknown_summary",
+        "follow_up_record",
     },
     "buyer_party": {
         "buyer_name",
@@ -994,6 +1000,7 @@ JSONB_ROLLBACK_FIELDS = {
     ("buyer_intent", "transaction_types_json"),
     ("buyer_intent", "industries_json"),
     ("buyer_intent", "excluded_industries_json"),
+    ("buyer_intent", "industry_focus_tags_json"),
     ("buyer_party", "aliases_json"),
 }
 
@@ -1132,6 +1139,19 @@ def _rollbackability(log: dict[str, Any]) -> dict[str, Any]:
 def _get_current_field_value(db: Session, log: dict[str, Any]) -> Any:
     entity_type = log["entity_type"]
     field_path = log["field_path"]
+    if entity_type == "buyer_intent" and field_path == "follow_up_record":
+        follow_up_id = (log.get("metadata_json") or {}).get("follow_up_id")
+        row = db.execute(
+            text(
+                """
+                select id
+                from buyer_intent_follow_up
+                where id = cast(:follow_up_id as uuid) and deleted_at is null
+                """
+            ),
+            {"follow_up_id": follow_up_id},
+        ).mappings().one_or_none()
+        return log.get("new_value_json") if row else None
     table_name = ROLLBACK_TABLE_BY_ENTITY[entity_type]
     row = db.execute(
         text(
@@ -1158,6 +1178,21 @@ def _get_current_field_value(db: Session, log: dict[str, Any]) -> Any:
 def _apply_field_rollback(db: Session, log: dict[str, Any], *, actor_user_id: UUID) -> None:
     entity_type = log["entity_type"]
     field_path = log["field_path"]
+    if entity_type == "buyer_intent" and field_path == "follow_up_record":
+        follow_up_id = (log.get("metadata_json") or {}).get("follow_up_id")
+        result = db.execute(
+            text(
+                """
+                update buyer_intent_follow_up
+                set deleted_at = now(), deleted_by = :deleted_by
+                where id = cast(:follow_up_id as uuid) and deleted_at is null
+                """
+            ),
+            {"follow_up_id": follow_up_id, "deleted_by": actor_user_id},
+        )
+        if result.rowcount != 1:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Follow-up record not found.")
+        return
     table_name = ROLLBACK_TABLE_BY_ENTITY[entity_type]
     statement = text(
         f"""

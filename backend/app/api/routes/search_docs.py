@@ -128,7 +128,7 @@ def rebuild_seller_target_search_doc_now(
     seller_target_id: UUID,
     current_user: CurrentUser,
     db: Session = Depends(get_db),
-    enqueue_embedding: bool = Query(default=True),
+    enqueue_embedding: bool = Query(default=False),
 ) -> dict[str, Any]:
     ensure_entity_writable(db, current_user, entity_type="seller_target", entity_id=seller_target_id)
     result = rebuild_seller_target_search_doc(db, seller_target_id)
@@ -157,7 +157,7 @@ def rebuild_buyer_intent_search_doc_now(
     buyer_intent_id: UUID,
     current_user: CurrentUser,
     db: Session = Depends(get_db),
-    enqueue_embedding: bool = Query(default=True),
+    enqueue_embedding: bool = Query(default=False),
 ) -> dict[str, Any]:
     ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
     result = rebuild_buyer_intent_search_doc(db, buyer_intent_id)

@@ -1,9 +1,13 @@
 ﻿from backend.app.api.routes.model_config import (
+    ProviderUpdate,
     _default_chat_test_messages,
     _node_test_record_from_job,
     _queue_name_for_node_test,
     get_model_config_capabilities,
 )
+
+import pytest
+from pydantic import ValidationError
 
 
 def test_capabilities_expose_prompt_and_test_support() -> None:
@@ -52,3 +56,9 @@ def test_node_test_record_prefers_result_latency_and_output(monkeypatch) -> None
     assert record["latency_ms"] == 100
     assert record["output_json"] == {"ok": True}
     assert record["latest_trace"] == {"latency_ms": 200, "status": "succeeded"}
+
+
+def test_provider_key_field_accepts_only_environment_variable_references() -> None:
+    assert ProviderUpdate(api_key_secret_ref="ALIYUN_API_KEY").api_key_secret_ref == "ALIYUN_API_KEY"
+    with pytest.raises(ValidationError):
+        ProviderUpdate(api_key_secret_ref="not-an-env-reference")

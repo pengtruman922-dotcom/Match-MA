@@ -8,15 +8,14 @@ import {
   RefreshCw,
   Search,
 } from 'lucide-react';
-import { attachments, buyerParties } from '../lib/api';
+import { attachments, buyerIntents, buyerParties } from '../lib/api';
 import type {
   AttachmentItem,
   BuyerIntent,
+  BuyerIntentFollowUp,
   BuyerIntentParseStatus,
   BuyerParty,
   BuyerPartyCreate,
-  BuyerSellerRelation,
-  RelationEvent,
 } from '../types/api';
 import { valueLabel } from '../lib/fieldLabels';
 import UpdateHistory from './UpdateHistory';
@@ -27,8 +26,7 @@ interface Props {
   intent: BuyerIntent;
   party: BuyerParty | null;
   parseStatus: BuyerIntentParseStatus | null;
-  relations: BuyerSellerRelation[];
-  events: RelationEvent[];
+  followUps: BuyerIntentFollowUp[];
   activeTab: BuyerWorkspaceTab;
   onTabChange: (tab: BuyerWorkspaceTab) => void;
   historyRefreshKey?: number;
@@ -48,8 +46,7 @@ export default function BuyerIntentWorkspace({
   intent,
   party,
   parseStatus,
-  relations,
-  events,
+  followUps,
   activeTab,
   onTabChange,
   historyRefreshKey = 0,
@@ -85,7 +82,7 @@ export default function BuyerIntentWorkspace({
           )
         ) : null}
         {activeTab === 'attachments' ? <IntentAttachments intentId={intent.id} /> : null}
-        {activeTab === 'followups' ? <IntentFollowUps relations={relations} events={events} /> : null}
+        {activeTab === 'followups' ? <IntentFollowUps intentId={intent.id} items={followUps} onRefresh={onIntentRefresh} /> : null}
         {activeTab === 'history' ? (
           <UpdateHistory
             entityType="buyer_intent"
@@ -159,6 +156,10 @@ function IntentOverview({ intent, parseStatus }: { intent: BuyerIntent; parseSta
         <Info label="最低营收" value={moneyText(intent.min_revenue_yuan)} />
         <Info label="最低净利润" value={moneyText(intent.min_net_profit_yuan)} />
         <Info label="PE 上限" value={numberText(intent.max_pe)} />
+        <Info label="PS 上限" value={numberText(intent.max_ps)} />
+        <Info label="最低净利率" value={percentText(intent.min_net_margin)} />
+        <Info label="最低毛利率" value={percentText(intent.min_gross_margin)} />
+        <Info label="估值范围" value={valuationRangeLabel(intent)} />
         <Info label="估值上限" value={moneyText(intent.max_valuation_yuan)} />
         <Info label="控股要求" value={valueLabel('yes_no_like', intent.requires_control)} />
         <Info label="并表要求" value={valueLabel('yes_no_like', intent.requires_consolidation)} />
@@ -341,33 +342,34 @@ function IntentAttachments({ intentId }: { intentId: string }) {
   );
 }
 
-function IntentFollowUps({ relations, events }: { relations: BuyerSellerRelation[]; events: RelationEvent[] }) {
-  if (!relations.length && !events.length) return <EmptyState title="暂无跟进记录" description="推荐标的和后续沟通会按当前并购需求沉淀在这里。" />;
+function IntentFollowUps({ intentId, items, onRefresh }: { intentId: string; items: BuyerIntentFollowUp[]; onRefresh?: () => void | Promise<void> }) {
+  const remove = async (followUpId: string) => {
+    if (!window.confirm('确认删除这条跟进记录？')) return;
+    try {
+      await buyerIntents.deleteFollowUp(intentId, followUpId);
+      await onRefresh?.();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : '删除跟进记录失败');
+    }
+  };
+  if (!items.length) return <EmptyState title="暂无跟进记录" description="录入当前需求的沟通、推荐、反馈或下一步后，会自动沉淀在这里。" />;
   return (
-    <div className="space-y-7">
-      {events.length ? (
-        <section>
-          <SectionTitle>跟进时间线</SectionTitle>
-          <div className="mt-3 divide-y divide-gray-100">
-            {events.map((event) => (
-              <div key={event.id} className="flex items-start gap-4 py-3">
-                <span className="w-28 shrink-0 font-mono text-xs text-gray-400">{formatDateTime(event.event_time)}</span>
-                <div className="min-w-0"><p className="text-sm font-medium text-gray-900">{event.seller_target_name || '未命名标的'}</p><p className="mt-0.5 text-xs text-gray-500">{eventTypeLabel(event.event_type)}{event.title ? ` · ${event.title}` : ''}</p>{event.content ? <p className="mt-1 whitespace-pre-wrap text-sm text-gray-700">{event.content}</p> : null}</div>
-              </div>
-            ))}
+    <div className="divide-y divide-gray-100">
+      {items.map((item) => (
+        <article key={item.id} className="flex items-start gap-4 py-4">
+          <span className="w-32 shrink-0 font-mono text-xs text-gray-400">{formatDateTime(item.occurred_at)}</span>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+              {item.contact_name ? <span>联系人：{item.contact_name}</span> : null}
+              <span>录入人：{item.created_by_name || '-'}</span>
+            </div>
+            <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-gray-800">{item.content}</p>
+            {item.next_step ? <p className="mt-2 text-xs text-brand-700">下一步：{item.next_step}</p> : null}
+            {item.next_follow_up_at ? <p className="mt-1 text-xs text-gray-500">下次跟进：{formatDateTime(item.next_follow_up_at)}</p> : null}
           </div>
-        </section>
-      ) : null}
-      {relations.length ? (
-        <section>
-          <SectionTitle>当前推荐关系</SectionTitle>
-          <div className="mt-3 divide-y divide-gray-100 border border-gray-100">
-            {relations.map((relation) => (
-              <div key={relation.id} className="flex items-center justify-between gap-4 px-4 py-3"><div className="min-w-0"><p className="truncate text-sm font-medium text-gray-900">{relation.seller_target_name || '未命名标的'}</p>{relation.last_event_summary ? <p className="mt-1 line-clamp-2 text-xs text-gray-500">{relation.last_event_summary}</p> : null}</div><span className="shrink-0 bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{relationStatusLabel(relation.status)}</span></div>
-            ))}
-          </div>
-        </section>
-      ) : null}
+          <button type="button" onClick={() => void remove(item.id)} className="shrink-0 text-xs text-gray-400 hover:text-red-600">删除</button>
+        </article>
+      ))}
     </div>
   );
 }
@@ -388,7 +390,8 @@ function AttachmentStatus({ status }: { status: string }) {
 function partyDraft(party: BuyerParty): Partial<BuyerPartyCreate> { return { buyer_name: party.buyer_name, legal_name: party.legal_name || '', buyer_type: party.buyer_type || '', group_name: party.group_name || '', listed_status: party.listed_status || 'unknown', region_province: party.region_province || '', region_city: party.region_city || '', main_business: party.main_business || '', capital_strength_summary: party.capital_strength_summary || '', profile_summary: party.profile_summary || '', notes: party.notes || '' }; }
 function nullIfEmpty(value: string | null | undefined): string | null { return value?.trim() || null; }
 function hasStructuredIntentFields(intent: BuyerIntent): boolean { return Boolean(intent.intent_summary || intent.industry_primary || intent.region_scope_summary || intent.min_net_profit_yuan); }
-function listingRequirementLabel(intent: BuyerIntent): string { return [intent.preferred_listed_status ? valueLabel('preferred_listed_status', intent.preferred_listed_status) : null, intent.listing_board_requirement_summary, intent.financing_stage_requirement_summary].filter(Boolean).join(' / ') || '-'; }
+function listingRequirementLabel(intent: BuyerIntent): string { const status = intent.preferred_listed_status && intent.preferred_listed_status !== 'unknown' ? valueLabel('preferred_listed_status', intent.preferred_listed_status) : null; return [status, intent.listing_board_requirement_summary, intent.financing_stage_requirement_summary].filter(Boolean).join(' / ') || '-'; }
+function valuationRangeLabel(intent: BuyerIntent): string { const min = moneyText(intent.min_valuation_yuan); const max = moneyText(intent.max_valuation_yuan); return min && max ? `${min}-${max}` : min ? `≥${min}` : max ? `≤${max}` : '-'; }
 function marketCapRangeLabel(intent: BuyerIntent): string { if (intent.market_cap_range_summary) return intent.market_cap_range_summary; const min = moneyText(intent.min_market_cap_yuan); const max = moneyText(intent.max_market_cap_yuan); return min && max ? `${min}-${max}` : min ? `≥${min}` : max ? `≤${max}` : '-'; }
 function transactionText(intent: BuyerIntent): string | null { if (intent.transaction_type) return intent.transaction_type; return Array.isArray(intent.transaction_types_json) ? intent.transaction_types_json.join('、') : null; }
 function moneyText(value: string | number | null | undefined): string | null { if (value === null || value === undefined || value === '') return null; const number = Number(value); if (!Number.isFinite(number)) return null; if (Math.abs(number) < 10000) return `${number.toFixed(0)}元`; if (Math.abs(number) < 100000000) return `${(number / 10000).toFixed(0)}万`; return `${(number / 100000000).toFixed(1)}亿`; }
@@ -396,5 +399,3 @@ function numberText(value: string | number | null | undefined): string | null { 
 function percentText(value: string | number | null | undefined): string | null { return value === null || value === undefined || value === '' ? null : `${Number(value).toFixed(0)}%`; }
 function formatBytes(value: number | null): string { if (value === null) return '未知大小'; if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`; if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`; return `${value} B`; }
 function formatDateTime(value: string): string { const date = new Date(value); return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); }
-function relationStatusLabel(status: string): string { const labels: Record<string, string> = { recommended: '已推荐', interested: '感兴趣', in_discussion: '沟通中', due_diligence: '尽调中', agreement: '协议阶段', deal_closed: '已成交', not_interested: '不感兴趣', paused: '暂停', lost: '失败' }; return labels[status] || status; }
-function eventTypeLabel(type: string): string { const labels: Record<string, string> = { recommended: '推荐', buyer_interested: '买家感兴趣', buyer_not_interested: '买家不感兴趣', meeting: '会议', call: '电话', material_sent: '发送资料', due_diligence_started: '启动尽调', agreement_discussion: '协议沟通', deal_closed: '成交', paused: '暂停', internal_note: '内部备注', other: '其他' }; return labels[type] || type; }

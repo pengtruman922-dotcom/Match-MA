@@ -268,6 +268,8 @@ def apply_extracted_action(
         result = apply_buyer_intent_target_exclusion_action(db, action, require_accepted=True)
     elif action["action_type"] == "target_follow_up":
         result = apply_target_follow_up_action(db, action, require_accepted=True)
+    elif action["action_type"] == "buyer_intent_follow_up":
+        result = apply_buyer_intent_follow_up_action(db, action, require_accepted=True)
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -394,6 +396,116 @@ def apply_seller_fact_update_action(
 # Only the parse-lifecycle statuses set by this flow; a follow-up note never
 # changes recommendation_status.
 TARGET_FOLLOW_UP_PARSING_STATUSES = ("parsing", "researching")
+
+
+def apply_buyer_intent_follow_up_action(
+    db: Session,
+    action: dict[str, Any],
+    *,
+    require_accepted: bool = True,
+) -> dict[str, Any]:
+    if action["action_type"] != "buyer_intent_follow_up" or action["target_entity_type"] != "buyer_intent":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only buyer_intent_follow_up actions targeting buyer_intent are supported.",
+        )
+    if action["target_entity_id"] is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target_entity_id is required.")
+    if action["applied_at"] is not None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Action has already been applied.")
+    if require_accepted and action["review_status"] not in {"accepted", "auto_accepted"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Action must be accepted before apply.")
+
+    buyer_intent_id = action["target_entity_id"]
+    _get_buyer_intent_snapshot_or_404(db, buyer_intent_id)
+    changes = action["proposed_changes_json"] or {}
+    content = str(changes.get("content") or "").strip()[:10000]
+    if not content:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="buyer_intent_follow_up requires content.")
+
+    follow_up_id = db.execute(
+        text(
+            """
+            insert into buyer_intent_follow_up (
+              team_id, workspace_id, buyer_intent_id, occurred_at,
+              contact_name, content, next_step, next_follow_up_at,
+              business_update_id, extracted_action_id, created_by, metadata_json
+            )
+            values (
+              :team_id, :workspace_id, :buyer_intent_id,
+              coalesce(cast(:occurred_at as timestamptz), now()),
+              :contact_name, :content, :next_step,
+              cast(:next_follow_up_at as timestamptz),
+              :business_update_id, :extracted_action_id, :created_by, :metadata_json
+            )
+            on conflict (extracted_action_id) where extracted_action_id is not null and deleted_at is null
+            do nothing
+            returning id
+            """
+        ).bindparams(bindparam("metadata_json", type_=JSONB)),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "buyer_intent_id": buyer_intent_id,
+            "occurred_at": changes.get("occurred_at") or changes.get("occurred_on"),
+            "contact_name": str(changes.get("contact_name") or "").strip()[:200] or None,
+            "content": content,
+            "next_step": str(changes.get("next_step") or "").strip()[:2000] or None,
+            "next_follow_up_at": changes.get("next_follow_up_at") or changes.get("next_follow_up_on"),
+            "business_update_id": action["business_update_id"],
+            "extracted_action_id": action["id"],
+            "created_by": SYSTEM_USER_ID,
+            "metadata_json": {"source": "extracted_action"},
+        },
+    ).scalar_one_or_none()
+    if follow_up_id is not None:
+        db.execute(
+            text(
+                """
+                insert into action_application_log (
+                  team_id, workspace_id, extracted_action_id, business_update_id,
+                  entity_type, entity_id, field_path, old_value_json, new_value_json,
+                  source_type, source_id, applied_by, can_rollback, metadata_json
+                )
+                values (
+                  :team_id, :workspace_id, :extracted_action_id, :business_update_id,
+                  'buyer_intent', :buyer_intent_id, 'follow_up_record', 'null'::jsonb,
+                  :new_value_json, 'business_update', :business_update_id,
+                  :applied_by, true, :metadata_json
+                )
+                """
+            ).bindparams(
+                bindparam("new_value_json", type_=JSONB),
+                bindparam("metadata_json", type_=JSONB),
+            ),
+            {
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+                "extracted_action_id": action["id"],
+                "business_update_id": action["business_update_id"],
+                "buyer_intent_id": buyer_intent_id,
+                "new_value_json": {
+                    "id": str(follow_up_id),
+                    "occurred_at": changes.get("occurred_at") or changes.get("occurred_on"),
+                    "contact_name": changes.get("contact_name"),
+                    "content": content,
+                    "next_step": changes.get("next_step"),
+                    "next_follow_up_at": changes.get("next_follow_up_at") or changes.get("next_follow_up_on"),
+                },
+                "applied_by": SYSTEM_USER_ID,
+                "metadata_json": {"follow_up_id": str(follow_up_id)},
+            },
+        )
+    _mark_action_applied(db, action["id"], review_status="auto_accepted" if not require_accepted else None)
+    _refresh_business_update_status(db, action["business_update_id"])
+    return {
+        "status": "applied",
+        "extracted_action_id": action["id"],
+        "business_update_id": action["business_update_id"],
+        "entity_type": "buyer_intent",
+        "entity_id": buyer_intent_id,
+        "applied_fields": ["buyer_intent_follow_up"],
+    }
 
 
 def apply_target_follow_up_action(
@@ -633,6 +745,9 @@ def apply_buyer_intent_update_action(
         "region_constraints_json",
         "acceptable_control_paths_json",
         "transaction_types_json",
+        "industries_json",
+        "excluded_industries_json",
+        "industry_focus_tags_json",
     }
     bind_params = [bindparam(field, type_=JSONB) for field in diff if field in json_fields]
     if bind_params:
@@ -1159,9 +1274,11 @@ def _get_buyer_intent_snapshot_or_404(db: Session, buyer_intent_id: UUID) -> dic
             select
               intent_name, status, pause_reason, contact_name, contact_info_json,
               raw_requirement_text, intent_summary, parsed_requirement_json,
-              industry_primary, industry_secondary, region_scope_summary,
+              industry_primary, industry_secondary, industries_json,
+              excluded_industries_json, industry_focus_tags_json, region_scope_summary,
               region_constraints_json, min_revenue_yuan, min_net_profit_yuan,
-              min_total_profit_yuan, max_pe, max_valuation_yuan,
+              min_total_profit_yuan, max_pe, max_ps, min_net_margin, min_gross_margin,
+              min_valuation_yuan, max_valuation_yuan,
               min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
               requires_control, requires_consolidation, accepts_minority_investment,
               desired_equity_ratio_min, desired_equity_ratio_max, equity_ratio_summary,
@@ -1346,12 +1463,19 @@ def _allowed_buyer_intent_changes(changes: dict[str, Any]) -> dict[str, Any]:
         "parsed_requirement_json",
         "industry_primary",
         "industry_secondary",
+        "industries_json",
+        "excluded_industries_json",
+        "industry_focus_tags_json",
         "region_scope_summary",
         "region_constraints_json",
         "min_revenue_yuan",
         "min_net_profit_yuan",
         "min_total_profit_yuan",
         "max_pe",
+        "max_ps",
+        "min_net_margin",
+        "min_gross_margin",
+        "min_valuation_yuan",
         "max_valuation_yuan",
         "min_market_cap_yuan",
         "max_market_cap_yuan",

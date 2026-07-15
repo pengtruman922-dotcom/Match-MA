@@ -115,8 +115,11 @@ def test_buyer_intent_prompt_seed_enriches_buyer_party() -> None:
     assert "Never place target/seller attributes in buyer_party" in sql
 
 
-def test_meta_ai_infra_status_checks_qwen36_plus() -> None:
+def test_meta_ai_infra_status_checks_required_configurable_nodes() -> None:
     source = Path("backend/app/api/routes/meta.py").read_text(encoding="utf-8")
 
-    assert "model_name = 'qwen3.6-plus'" in source
+    assert "seller_target_update_parser" in source
+    assert "buyer_intent_update_parser" in source
+    assert "recommendation_deep_eval" in source
+    assert "retired_recommendation_nodes_inactive" in source
     assert "model_name = 'qwen3.6-flash'" not in source
