@@ -105,6 +105,19 @@ class ModelConnectionTestOut(BaseModel):
     error_message: str | None = None
 
 
+class ModelConnectionDraftTest(BaseModel):
+    provider_config_id: UUID | None = None
+    model_name: str = Field(min_length=1, max_length=160)
+    base_url: str = Field(min_length=1, max_length=500)
+    secret_mode: Literal["env", "direct"]
+    api_key_secret_ref: str | None = Field(
+        default=None,
+        pattern=r"^[A-Z_][A-Z0-9_]*$",
+        max_length=160,
+    )
+    api_key: str | None = Field(default=None, min_length=1, max_length=10000)
+
+
 class NodeCreate(BaseModel):
     node_name: str = Field(min_length=1, max_length=120)
     node_type: str
@@ -383,6 +396,8 @@ def list_providers(
 def create_provider(payload: ProviderCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
     _validate_choice("provider_type", payload.provider_type, PROVIDER_TYPES)
     _validate_choice("auth_type", payload.auth_type, AUTH_TYPES)
+    provider_name = payload.provider_name.strip()
+    _ensure_unique_model_config_name(db, provider_name)
     secret_data = _model_secret_create_data(payload)
     if payload.is_default:
         _clear_default_provider(db)
@@ -411,12 +426,54 @@ def create_provider(payload: ProviderCreate, db: Session = Depends(get_db)) -> d
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
             **payload.model_dump(exclude={"api_key", "api_key_secret_ref", "secret_mode"}),
+            "provider_name": provider_name,
+            "model_name": payload.model_name.strip(),
+            "base_url": payload.base_url.strip().rstrip("/"),
             **secret_data,
             "created_by": DEFAULT_ADMIN_USER_ID,
         },
     ).mappings().one()
     db.commit()
     return dict(row)
+
+
+@router.post("/models/test", response_model=ModelConnectionTestOut)
+def test_model_draft(
+    payload: ModelConnectionDraftTest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    current = (
+        _get_provider_internal_or_404(db, payload.provider_config_id)
+        if payload.provider_config_id
+        else None
+    )
+    api_key_secret_ref: str | None = None
+    api_key_encrypted: str | None = None
+    if payload.secret_mode == "env":
+        api_key_secret_ref = payload.api_key_secret_ref
+        if not api_key_secret_ref and current and current.get("secret_mode") == "env":
+            api_key_secret_ref = current.get("api_key_secret_ref")
+        if not api_key_secret_ref:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Environment variable name is required for env key mode.",
+            )
+    else:
+        if payload.api_key:
+            api_key_encrypted = _encrypt_model_key_or_http_error(payload.api_key)
+        elif current and current.get("secret_mode") == "direct":
+            api_key_encrypted = current.get("api_key_encrypted")
+        if not api_key_encrypted:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="API key is required for direct key mode.",
+            )
+    return _run_model_connection_test(
+        base_url=payload.base_url.strip().rstrip("/"),
+        model_name=payload.model_name.strip(),
+        api_key_secret_ref=api_key_secret_ref,
+        api_key_encrypted=api_key_encrypted,
+    )
 
 
 @router.get("/models/{provider_id}", response_model=ProviderOut)
@@ -432,6 +489,13 @@ def update_provider(provider_id: UUID, payload: ProviderUpdate, db: Session = De
     data = payload.model_dump(exclude_unset=True)
     data.pop("api_key", None)
     data.update(_model_secret_update_data(payload, current=current))
+    if "provider_name" in data:
+        data["provider_name"] = data["provider_name"].strip()
+        _ensure_unique_model_config_name(db, data["provider_name"], exclude_id=provider_id)
+    if "model_name" in data:
+        data["model_name"] = data["model_name"].strip()
+    if "base_url" in data:
+        data["base_url"] = data["base_url"].strip().rstrip("/")
     if "provider_type" in data:
         _validate_choice("provider_type", data["provider_type"], PROVIDER_TYPES)
     if "auth_type" in data:
@@ -493,12 +557,27 @@ def test_model_connection(provider_id: UUID, db: Session = Depends(get_db)) -> d
     model = _get_provider_internal_or_404(db, provider_id)
     if not model.get("is_active"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Inactive models cannot be tested.")
+    return _run_model_connection_test(
+        base_url=str(model["base_url"]),
+        model_name=str(model["model_name"]),
+        api_key_secret_ref=model.get("api_key_secret_ref"),
+        api_key_encrypted=model.get("api_key_encrypted"),
+    )
+
+
+def _run_model_connection_test(
+    *,
+    base_url: str,
+    model_name: str,
+    api_key_secret_ref: str | None,
+    api_key_encrypted: str | None,
+) -> dict[str, Any]:
     try:
         result = call_openai_compatible_chat(
-            base_url=str(model["base_url"]),
-            api_key_secret_ref=model.get("api_key_secret_ref"),
-            api_key_encrypted=model.get("api_key_encrypted"),
-            model_name=str(model["model_name"]),
+            base_url=base_url,
+            api_key_secret_ref=api_key_secret_ref,
+            api_key_encrypted=api_key_encrypted,
+            model_name=model_name,
             messages=[
                 {"role": "system", "content": "You are an API connectivity tester."},
                 {"role": "user", "content": "Return exactly: ok"},
@@ -511,13 +590,13 @@ def test_model_connection(provider_id: UUID, db: Session = Depends(get_db)) -> d
     except LlmCallError as exc:
         return {
             "status": "failed",
-            "model_name": model["model_name"],
+            "model_name": model_name,
             "error_code": "model_connection_failed",
             "error_message": str(exc),
         }
     return {
         "status": "succeeded",
-        "model_name": model["model_name"],
+        "model_name": model_name,
         "latency_ms": result.latency_ms,
         "prompt_tokens": result.prompt_tokens,
         "completion_tokens": result.completion_tokens,
@@ -1032,6 +1111,41 @@ def _encrypt_model_key_or_http_error(api_key: str) -> str:
         return encrypt_model_secret(api_key)
     except ModelSecretError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+def _ensure_unique_model_config_name(
+    db: Session,
+    provider_name: str,
+    *,
+    exclude_id: UUID | None = None,
+) -> None:
+    params: dict[str, Any] = {
+        "team_id": DEFAULT_TEAM_ID,
+        "workspace_id": DEFAULT_WORKSPACE_ID,
+        "provider_name": provider_name,
+    }
+    exclude_clause = ""
+    if exclude_id is not None:
+        params["exclude_id"] = exclude_id
+        exclude_clause = "and id <> :exclude_id"
+    exists = db.execute(
+        text(
+            f"""
+            select exists(
+              select 1 from model_provider_config
+              where team_id = :team_id and workspace_id = :workspace_id
+                and lower(provider_name) = lower(:provider_name)
+                {exclude_clause}
+            )
+            """
+        ),
+        params,
+    ).scalar_one()
+    if exists:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="模型配置名称已存在，请使用其他名称。",
+        )
 
 
 def _ensure_model_can_deactivate(db: Session, provider_id: UUID) -> None:

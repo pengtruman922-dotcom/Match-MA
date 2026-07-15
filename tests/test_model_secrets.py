@@ -6,10 +6,13 @@ from fastapi import HTTPException
 
 from backend.app.ai.llm_client import _get_api_key
 from backend.app.api.routes.model_config import (
+    ModelConnectionDraftTest,
     ProviderOut,
     ProviderUpdate,
     _ensure_model_can_deactivate,
+    _ensure_unique_model_config_name,
     _model_secret_update_data,
+    test_model_draft as run_model_draft_test,
 )
 from backend.app.config import get_settings
 from backend.app.services.model_secrets import decrypt_model_secret, encrypt_model_secret
@@ -124,3 +127,47 @@ def test_unbound_model_can_be_deleted_when_another_model_remains() -> None:
         _ModelConstraintDb([0, 1]),
         MODEL_ID,
     )
+
+
+def test_duplicate_model_config_name_returns_conflict() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        _ensure_unique_model_config_name(_ModelConstraintDb([1]), "千问")
+
+    assert exc_info.value.status_code == 409
+    assert "名称已存在" in exc_info.value.detail
+
+
+def test_unsaved_direct_model_can_be_tested_without_database_write(monkeypatch) -> None:
+    captured = {}
+
+    monkeypatch.setattr(
+        "backend.app.api.routes.model_config._encrypt_model_key_or_http_error",
+        lambda value: f"encrypted:{value}",
+    )
+
+    def fake_run_model_connection_test(**kwargs):
+        captured.update(kwargs)
+        return {"status": "succeeded", "model_name": kwargs["model_name"]}
+
+    monkeypatch.setattr(
+        "backend.app.api.routes.model_config._run_model_connection_test",
+        fake_run_model_connection_test,
+    )
+
+    result = run_model_draft_test(
+        ModelConnectionDraftTest(
+            model_name="gpt-5.5",
+            base_url="https://api.openai.com/v1/",
+            secret_mode="direct",
+            api_key="temporary-key",
+        ),
+        db=None,
+    )
+
+    assert result["status"] == "succeeded"
+    assert captured == {
+        "base_url": "https://api.openai.com/v1",
+        "model_name": "gpt-5.5",
+        "api_key_secret_ref": None,
+        "api_key_encrypted": "encrypted:temporary-key",
+    }

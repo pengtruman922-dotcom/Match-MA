@@ -434,6 +434,17 @@ export const modelConfig = {
   }) => apiRequest<ModelProviderConfig>(`/model-config/models/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteModel: (id: string) =>
     apiRequest<ModelProviderConfig>(`/model-config/models/${id}`, { method: 'DELETE' }),
+  testModelDraft: (data: {
+    provider_config_id?: string | null;
+    model_name: string;
+    base_url: string;
+    secret_mode: 'env' | 'direct';
+    api_key_secret_ref?: string | null;
+    api_key?: string | null;
+  }) => apiRequest<ModelConnectionTestResult>('/model-config/models/test', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
   testModel: (id: string) =>
     apiRequest<ModelConnectionTestResult>(`/model-config/models/${id}/test`, { method: 'POST' }),
   updateProvider: (id: string, data: Partial<ModelProviderConfig>) =>

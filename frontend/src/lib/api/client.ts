@@ -20,14 +20,20 @@ export function buildQuery(params: Record<string, string | number | boolean | un
 
 export async function apiRequest<T>(path: string, options?: RequestInit): Promise<T> {
   const isFormData = typeof FormData !== 'undefined' && options?.body instanceof FormData;
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    headers: {
-      ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
-      ...authHeaders(),
-      ...options?.headers,
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...options,
+      headers: {
+        ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
+        ...authHeaders(),
+        ...options?.headers,
+      },
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : 'unknown network error';
+    throw new Error(`无法连接后端服务（${reason}）。请检查 Railway 部署状态后重试。`);
+  }
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -59,7 +65,14 @@ export async function apiBlobResponse(path: string, options?: RequestInit): Prom
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`API ${response.status}: ${errorText}`);
+    let detail = errorText;
+    try {
+      const payload = JSON.parse(errorText) as { detail?: string };
+      detail = payload.detail || errorText;
+    } catch {
+      // Keep the original response text when the API did not return JSON.
+    }
+    throw new Error(`API ${response.status}: ${detail}`);
   }
 
   return response;
