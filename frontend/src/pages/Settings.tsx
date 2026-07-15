@@ -205,6 +205,21 @@ function ModelEditor({ model, directKeyAvailable, onClose, onSaved }: { model: M
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<ModelConnectionTestResult | null>(null);
+  const [connectionTestPassed, setConnectionTestPassed] = useState(false);
+
+  const updateConnectionDraft = (patch: Partial<ModelDraft>) => {
+    setDraft((current) => ({ ...current, ...patch }));
+    setConnectionTestPassed(false);
+    setTestResult(null);
+  };
+
+  const hasConnectionFields = Boolean(
+    draft.modelName.trim()
+    && draft.baseUrl.trim()
+    && (draft.secretMode === 'env'
+      ? draft.keyReference.trim()
+      : draft.apiKey.trim() || (model?.secret_mode === 'direct' && model.secret_configured)),
+  );
 
   const save = async () => {
     if (!draft.providerName.trim() || !draft.modelName.trim() || !draft.baseUrl.trim()) {
@@ -221,6 +236,10 @@ function ModelEditor({ model, directKeyAvailable, onClose, onSaved }: { model: M
     }
     if (draft.secretMode === 'direct' && !directKeyAvailable) {
       alert('请先在 Railway API 和 LLM Worker 服务中配置 MODEL_SECRET_ENCRYPTION_KEY。');
+      return;
+    }
+    if (!connectionTestPassed) {
+      alert('请先测试当前模型配置，连接成功后才能保存。');
       return;
     }
     setSaving(true);
@@ -244,14 +263,31 @@ function ModelEditor({ model, directKeyAvailable, onClose, onSaved }: { model: M
   };
 
   const test = async () => {
-    if (!model) return;
+    if (!hasConnectionFields) {
+      alert('请先填写模型名称、Base URL 和 Key 配置。');
+      return;
+    }
+    if (draft.secretMode === 'direct' && !directKeyAvailable) {
+      alert('请先在 Railway API 和 LLM Worker 服务中配置 MODEL_SECRET_ENCRYPTION_KEY。');
+      return;
+    }
     setTesting(true);
     setTestResult(null);
+    setConnectionTestPassed(false);
     try {
-      setTestResult(await modelConfig.testModel(model.id));
+      const result = await modelConfig.testModelDraft({
+        provider_config_id: model?.id || null,
+        model_name: draft.modelName.trim(),
+        base_url: draft.baseUrl.trim().replace(/\/$/, ''),
+        secret_mode: draft.secretMode,
+        api_key_secret_ref: draft.secretMode === 'env' ? draft.keyReference.trim() : null,
+        ...(draft.secretMode === 'direct' && draft.apiKey.trim() ? { api_key: draft.apiKey.trim() } : {}),
+      });
+      setTestResult(result);
+      setConnectionTestPassed(result.status === 'succeeded');
     } catch (testError) {
       setTestResult({
-        status: 'failed', model_name: model.model_name, latency_ms: null, prompt_tokens: null,
+        status: 'failed', model_name: draft.modelName.trim(), latency_ms: null, prompt_tokens: null,
         completion_tokens: null, total_tokens: null, output_preview: null,
         error_code: 'request_failed', error_message: testError instanceof Error ? testError.message : '测试失败',
       });
@@ -266,34 +302,34 @@ function ModelEditor({ model, directKeyAvailable, onClose, onSaved }: { model: M
       onClose={onClose}
       footer={(
         <div className="flex items-center gap-2">
-          <button type="button" onClick={() => void test()} disabled={!model || testing} className="inline-flex items-center gap-1.5 border border-gray-300 px-4 py-2 text-sm text-gray-700 disabled:opacity-40">
+          <button type="button" onClick={() => void test()} disabled={!hasConnectionFields || testing} className="inline-flex items-center gap-1.5 border border-gray-300 px-4 py-2 text-sm text-gray-700 disabled:opacity-40">
             {testing ? <Loader2 className="h-4 w-4 animate-spin" /> : <TestTube2 className="h-4 w-4" />}测试连接
           </button>
-          <SaveButton saving={saving} onClick={save} />
+          <SaveButton saving={saving} onClick={save} disabled={!connectionTestPassed} />
         </div>
       )}
     >
       <Grid>
         <Field label="配置名称"><input className="input" placeholder="例如：通义千问主模型" value={draft.providerName} onChange={(event) => setDraft({ ...draft, providerName: event.target.value })} /></Field>
-        <Field label="模型名称"><input className="input font-mono" placeholder="例如：qwen-plus" value={draft.modelName} onChange={(event) => setDraft({ ...draft, modelName: event.target.value })} /></Field>
+        <Field label="模型名称"><input className="input font-mono" placeholder="例如：qwen-plus" value={draft.modelName} onChange={(event) => updateConnectionDraft({ modelName: event.target.value })} /></Field>
       </Grid>
-      <Field label="Base URL"><input className="input font-mono" placeholder="https://example.com/v1" value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} /></Field>
+      <Field label="Base URL"><input className="input font-mono" placeholder="https://example.com/v1" value={draft.baseUrl} onChange={(event) => updateConnectionDraft({ baseUrl: event.target.value })} /></Field>
       <Field label="Key 保存方式">
         <div className="inline-flex border border-gray-300 p-0.5">
-          <SegmentButton active={draft.secretMode === 'env'} onClick={() => setDraft({ ...draft, secretMode: 'env' })}>Railway 环境变量</SegmentButton>
-          <SegmentButton active={draft.secretMode === 'direct'} onClick={() => setDraft({ ...draft, secretMode: 'direct' })}>直接录入</SegmentButton>
+          <SegmentButton active={draft.secretMode === 'env'} onClick={() => updateConnectionDraft({ secretMode: 'env' })}>Railway 环境变量</SegmentButton>
+          <SegmentButton active={draft.secretMode === 'direct'} onClick={() => updateConnectionDraft({ secretMode: 'direct' })}>直接录入</SegmentButton>
         </div>
       </Field>
       {draft.secretMode === 'env' ? (
-        <Field label="Key 环境变量名"><input className="input font-mono" placeholder="例如：ALIYUN_API_KEY" value={draft.keyReference} onChange={(event) => setDraft({ ...draft, keyReference: event.target.value.toUpperCase() })} /></Field>
+        <Field label="Key 环境变量名"><input className="input font-mono" placeholder="例如：ALIYUN_API_KEY" value={draft.keyReference} onChange={(event) => updateConnectionDraft({ keyReference: event.target.value.toUpperCase() })} /></Field>
       ) : (
         <Field label={model?.secret_configured ? 'API Key（留空则不修改）' : 'API Key'}>
-          <input className="input font-mono" type="password" autoComplete="new-password" placeholder={model?.secret_configured ? '已加密保存，输入新值可替换' : '输入 API Key'} value={draft.apiKey} onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })} />
+          <input className="input font-mono" type="password" autoComplete="new-password" placeholder={model?.secret_configured ? '已加密保存，输入新值可替换' : '输入 API Key'} value={draft.apiKey} onChange={(event) => updateConnectionDraft({ apiKey: event.target.value })} />
           <p className="mt-1 text-xs text-gray-400">保存后仅保留加密密文，页面和接口均不回显原始 Key。</p>
           {!directKeyAvailable ? <p className="mt-1 text-xs text-amber-700">Railway 尚未配置 MODEL_SECRET_ENCRYPTION_KEY，直接录入模式暂不可保存。</p> : null}
         </Field>
       )}
-      {!model ? <p className="text-xs text-gray-400">新模型保存后可重新打开并测试连接。</p> : null}
+      <p className="text-xs text-gray-400">请先测试连接；测试成功后才可保存。修改连接参数后需要重新测试。</p>
       {testResult ? <ModelTestResult result={testResult} /> : null}
     </Editor>
   );
