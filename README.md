@@ -1,103 +1,83 @@
-﻿# Match-MA
+# Match-MA
 
-Match-MA 是面向内部咨询公司的并购标的与买家需求撮合管理平台草案项目。
+Match-MA 是面向内部咨询公司的并购标的与买家需求撮合管理平台：管理卖方标的、买家及其并购意向，通过 AI 解析统一业务更新（文字/截图/附件），并提供双向智能推荐（为买家找标的、为标的找买家）。
 
+## 技术栈
 
-## 当前文档
+- 后端：FastAPI + PostgreSQL（raw SQL，含 pgvector），Alembic 执行 `database/migrations/*.sql` 迁移
+- 前端：React 18 + TypeScript + Vite + Tailwind CSS
+- 后台任务：PostgreSQL 表队列（`FOR UPDATE SKIP LOCKED`），独立 worker 进程消费
+- AI：可配置模型节点（LLM / OCR / embedding / rerank），prompt 版本化存库，Doc2X PDF OCR，多模态图片识别
 
-- `docs/domain_model_and_user_scenarios_v0.1.md`：领域模型与用户场景初稿。
-- `docs/technical_research_v0.1.md`：候选池、检索、LLM 推荐、连续对话和部署架构调研。
-- `docs/confirmed_product_and_tech_plan_v0.1.md`：截至当前已确认的产品与技术方案，包括新建标的、统一业务更新、买家管理和智能推荐流程。
-- `docs/data_model_v0.1.md`：核心数据库表结构草案，包括标的、买家意向、买家-标的关系、推荐会话、附件证据和业务更新。
-- `docs/phase1_field_scope_v0.1.md`：一期字段收敛草案，区分 `seller_target` / `buyer_intent` 的 P0/P1/P2 字段、constraint 规则和轻量证据策略。
-- `docs/buyer_intent_constraint_whitelist_v0.1.md`：买家意向 constraint 白名单，定义一期允许的 field/operator/value_json/unknown_policy 和解析示例。
-- `docs/risk_taxonomy_v0.1.md`：风险枚举与负面清单草案，定义 `risk_type`、`risk_status`、`severity`、风险写入和推荐过滤规则。
-- `docs/postgres_schema_v0.1.md`：PostgreSQL schema 草案，包含核心表 DDL、约束、索引、pgvector search_doc 和迁移注意事项。
-- `docs/backend_skeleton_v0.1.md`：后端工程骨架说明，包含 FastAPI / SQLAlchemy / Alembic / 健康检查 / 本地运行方式。
-- `docs/deployment_railway_v0.1.md`：Railway 测试部署记录，包含服务结构、环境变量、端口配置和健康检查。
-- `docs/api_phase1_minimal_v0.1.md`：一期最小业务 API，包含标的和买家意向的新建、列表、详情接口。
-- `docs/api_test_commands_v0.1.md`：PowerShell API 测试命令，包含中文 UTF-8 请求和响应排查方式。
-
-## 数据库草案
-
-- `database/migrations/001_initial_schema.sql`：一期 PostgreSQL 初始化 schema SQL，按当前讨论稿拆出，可作为后续 Alembic/ORM 迁移的基线。
-- `database/migrations/002_seed_defaults.sql`：一期默认 seed，包含默认团队、默认数据空间、管理员用户和最小 fallback 标签。
-- `database/migrations/003_seed_reference_config.sql`：一期参考配置 seed，包含非穷尽一级行业、交易路径、支付方式、控制路径、P0 风险字典和区域别名展开配置。
-
-## 后端骨架
-
-当前已创建 FastAPI 后端基线：
+## 仓库结构
 
 ```text
-backend/app/main.py
-backend/app/config.py
-backend/app/db.py
-backend/app/api/routes/health.py
-alembic/
-railway.toml
+backend/app/          FastAPI 应用
+  api/routes/         API 路由（/api/v1/...）
+  jobs/               后台任务队列与 handler
+  services/           业务服务（附件存储、行业字典、搜索文档等）
+  ai/                 模型客户端（LLM / OCR / embedding / rerank / Doc2X）
+  worker.py           worker 入口（--queue llm|ocr|default）
+database/migrations/  SQL 迁移（编号递增，经 backend/app/migration_sql.py 切分后由 Alembic 执行）
+alembic/versions/     与 SQL 迁移一一对应的 Alembic 壳
+frontend/             React 前端
+tests/                pytest 测试（不依赖真实数据库）
+scripts/              部署与 API 验证脚本
+docs/                 产品与技术设计文档（v0.1 系列）
 ```
 
-本地运行参考：
+## 本地开发
+
+后端（Python 3.11+）：
 
 ```powershell
-cd C:\Users\MP\search-toolkit\Match-MA
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -e .
-Copy-Item .env.example .env
-alembic upgrade head
-uvicorn backend.app.main:app --reload
+python -m pip install -e ".[dev]"
+python -m pytest -q          # 全量测试，无需数据库
 ```
 
-健康检查：
+前端（Node 20）：
 
-```text
-GET /api/v1/health
-GET /api/v1/health/db
-GET /api/v1/meta/seed-status
-POST /api/v1/seller-targets
-GET /api/v1/seller-targets
-GET /api/v1/seller-targets/{id}
-PATCH /api/v1/seller-targets/{id}
-DELETE /api/v1/seller-targets/{id}
-GET /api/v1/seller-targets/{id}/follow-ups
-POST /api/v1/seller-targets/{id}/follow-ups
-DELETE /api/v1/seller-targets/{id}/follow-ups/{follow_up_id}
-POST /api/v1/buyer-parties
-GET /api/v1/buyer-parties
-GET /api/v1/buyer-parties/{id}
-GET /api/v1/buyer-parties/{id}/intents
-PATCH /api/v1/buyer-parties/{id}
-DELETE /api/v1/buyer-parties/{id}
-POST /api/v1/buyer-intents
-GET /api/v1/buyer-intents
-GET /api/v1/buyer-intents?buyer_party_id={id}
-GET /api/v1/buyer-intents/{id}
-PATCH /api/v1/buyer-intents/{id}
-DELETE /api/v1/buyer-intents/{id}
-GET /api/v1/update-logs?entity_type=seller_target&entity_id={id}
-GET /api/v1/update-logs?entity_type=buyer_intent&entity_id={id}
-POST /api/v1/business-updates
-GET /api/v1/business-updates
-GET /api/v1/business-updates/{id}
-POST /api/v1/business-updates/{id}/extracted-actions
-GET /api/v1/extracted-actions
-GET /api/v1/extracted-actions/{id}
-PATCH /api/v1/extracted-actions/{id}
-POST /api/v1/extracted-actions/{id}/apply
+```powershell
+cd frontend
+npm ci
+npm run dev                  # 开发服务器
+npm run typecheck            # 类型检查
+npm run build                # 生产构建
 ```
 
-Railway 部署说明：
+## 部署（Railway）
 
-- `railway.toml` 已配置 `preDeployCommand = "alembic upgrade head"`，部署前会先跑数据库迁移。
-- `startCommand` 使用 `$PORT` 启动 Uvicorn。
-- Railway 注入的 `postgresql://...` 形式 `DATABASE_URL` 会在应用内自动转换为 SQLAlchemy/psycopg 可用的 `postgresql+psycopg://...`。
+生产 API：`https://match-ma-production.up.railway.app/api/v1`
 
-## 当前已确认方向
+| 服务 | 配置 | 说明 |
+| --- | --- | --- |
+| API | `railway.toml` | preDeploy 跑迁移（`scripts/railway_predeploy.py`），迁移失败会阻断部署 |
+| 前端 | `frontend/railway.toml` + Caddy | 静态托管 |
+| worker-llm | `railway.worker-llm.toml` | 消费 `llm` 队列（解析、推荐深评、报告生成） |
+| worker-ocr | `railway.worker-ocr.toml` | 消费 `ocr` 队列（附件 OCR） |
 
-- 主检索底座一期采用 PostgreSQL + pgvector。
-- LLM 意向解析采用 filter DSL，由服务端转参数化 SQL。
-- 推荐支持双向模式：为买家找标的、为标的找买家。
-- 统一业务更新入口支持混合文字、截图、附件，由 AI 拆分后默认待复核。
-- 字典采用轻量归一化策略：不要求一期全覆盖，LLM 先抽取原文，服务端召回小候选集后归一化；低置信度进入待归一化/待复核。
+部署后先轮询 `/api/v1/health` 确认返回的 commit hash 已切换，再验证业务行为；hash 长时间不变通常是 preDeploy 迁移失败。
 
+## 迁移注意事项
+
+- 新增迁移 = `database/migrations/NNN_*.sql` + 对应 `alembic/versions/` 壳文件。
+- 新增迁移后必须跑 `tests/test_migration_sql.py`（对所有迁移做 load + split 回归，防止自制 splitter 切分错误）。
+- 其余硬规则见 [CLAUDE.md](CLAUDE.md)。
+
+## CI
+
+GitHub Actions（`.github/workflows/ci.yml`）在每次推送 main 和 PR 时自动跑：后端 pytest（Python 3.11）、前端 typecheck + build（Node 20）。
+
+## 文档
+
+`docs/` 下为 v0.1 系列设计文档，入口：
+
+- `docs/prd_v0.1.md`：产品需求
+- `docs/confirmed_product_and_tech_plan_v0.1.md`：已确认的产品与技术方案（最全）
+- `docs/data_model_v0.1.md` / `docs/postgres_schema_v0.1.md`：数据模型与 schema
+- `docs/ai_task_architecture_v0.1.md`：AI 后台任务架构
+- 其余按文件名对应各功能域（推荐、附件 OCR、后台任务、模型配置等）
+
+API 端点以代码为准（`backend/app/api/routes/`），或启动服务后查看 `/docs`（FastAPI 自动文档）。

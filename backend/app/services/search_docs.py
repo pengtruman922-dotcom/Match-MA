@@ -213,7 +213,9 @@ def create_embedding_job_for_search_doc(
     entity_type: str,
     entity_id: UUID,
     search_doc_id: UUID,
-    queue_name: str = "embedding",
+    # The dedicated embedding worker was retired with recommendation v3; route
+    # manual embedding jobs to the llm queue so they still get consumed.
+    queue_name: str = "llm",
 ) -> UUID:
     job_type = "embedding_generate"
     idempotency_key = f"{job_type}:{entity_type}:{entity_id}:{search_doc_id}"
