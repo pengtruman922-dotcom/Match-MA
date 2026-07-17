@@ -11,5 +11,6 @@
 - 新增迁移文件后必须跑 `tests/test_migration_sql.py` —— 其中的参数化用例会对所有迁移文件做 load + split 回归，防止 splitter 切分错误（历史事故：注释里的分号导致语句被切坏、部署失败）。
 
 ## 同步约束
-- 新增 extracted_action 的 action_type 必须同步三处：`handlers.py` 的 `ALLOWED_ACTION_TYPES`、DB check 约束 `chk_extracted_action_type`（需迁移重建）、`extracted_actions.py` 的 apply 分支。
+- 新增 extracted_action 的 action_type 必须同步三处：`backend/app/jobs/handlers/common.py` 的 `ALLOWED_ACTION_TYPES`（经包 `backend.app.jobs.handlers` re-export）、DB check 约束 `chk_extracted_action_type`（需迁移重建）、`extracted_actions.py` 的 apply 分支。
+- `backend/app/jobs/handlers/` 是按任务域拆分的包，`__init__.py` re-export 全部名字；新增 handler 放对应域模块并在 `dispatch.py` 注册，跨域共享的 helper 放 `common.py`（模块依赖必须保持无环）。
 - `prompt_template.few_shot_examples_json` 是死存储，不会注入 LLM 消息 —— few-shot 示例必须写进 `user_prompt_template` 正文；新版本 prompt 通过迁移 seed，并把同 node 旧版本的 `is_default` 置 false。
