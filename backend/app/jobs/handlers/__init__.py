@@ -5,6 +5,8 @@ This package re-exports every name from its submodules so that
 routes, and tests.
 """
 
+# ruff: noqa: F401
+
 from backend.app.jobs.handlers.common import (
     ALLOWED_ACTION_TYPES,
     ALLOWED_TARGET_ENTITY_TYPES,
