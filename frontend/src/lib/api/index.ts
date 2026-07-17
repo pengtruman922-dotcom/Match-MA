@@ -453,6 +453,10 @@ export const modelConfig = {
     apiRequest<ModelNodeConfig>(`/model-config/nodes/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   createPrompt: (data: Record<string, unknown>) =>
     apiRequest<PromptTemplateConfig>('/model-config/prompts', { method: 'POST', body: JSON.stringify(data) }),
+  listPrompts: (nodeName: string) =>
+    apiRequest<PromptTemplateConfig[]>(`/model-config/prompts?node_name=${encodeURIComponent(nodeName)}&include_inactive=true`),
+  updatePrompt: (id: string, data: Partial<PromptTemplateConfig>) =>
+    apiRequest<PromptTemplateConfig>(`/model-config/prompts/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   testNode: (id: string, input_text: string) =>
     apiRequest<{ job_id: string; job_status: string }>(`/model-config/nodes/${id}/test-jobs`, {
       method: 'POST',

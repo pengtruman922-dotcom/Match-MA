@@ -26,6 +26,7 @@ import type {
   ModelConnectionTestResult,
   ModelNodeConfig,
   ModelProviderConfig,
+  PromptTemplateConfig,
 } from '../types/api';
 
 type SettingsTab = 'ai' | 'dictionary';
@@ -401,6 +402,22 @@ function PromptEditor({ node, onClose, onSaved }: { node: ModelNodeConfig; onClo
   const [userPrompt, setUserPrompt] = useState(current?.user_prompt_template || '');
   const [schema, setSchema] = useState(JSON.stringify(current?.output_schema_json || {}, null, 2));
   const [saving, setSaving] = useState(false);
+  const [history, setHistory] = useState<PromptTemplateConfig[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [rollingBackId, setRollingBackId] = useState<string | null>(null);
+
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      setHistory(await modelConfig.listPrompts(node.node_name));
+    } catch {
+      setHistory([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [node.node_name]);
+  useEffect(() => { void loadHistory(); }, [loadHistory]);
+
   const save = async () => {
     let outputSchema: Record<string, unknown>;
     try { outputSchema = JSON.parse(schema) as Record<string, unknown>; } catch { alert('输出 Schema 不是合法 JSON'); return; }
@@ -414,8 +431,59 @@ function PromptEditor({ node, onClose, onSaved }: { node: ModelNodeConfig; onClo
       setSaving(false);
     }
   };
+
+  const loadIntoEditor = (item: PromptTemplateConfig) => {
+    setSystemPrompt(item.system_prompt || '');
+    setUserPrompt(item.user_prompt_template || '');
+    setSchema(JSON.stringify(item.output_schema_json || {}, null, 2));
+  };
+
+  const rollbackTo = async (item: PromptTemplateConfig) => {
+    if (!window.confirm(`将「${item.version}」设为当前版本？之后的解析任务会立即使用该版本。`)) return;
+    setRollingBackId(item.id);
+    try {
+      await modelConfig.updatePrompt(item.id, { is_default: true, is_active: true });
+      await loadHistory();
+      await onSaved();
+    } catch (rollbackError) {
+      alert(rollbackError instanceof Error ? rollbackError.message : '切换版本失败');
+    } finally {
+      setRollingBackId(null);
+    }
+  };
+
   return (
-    <Editor title="新建 Prompt 版本" onClose={onClose} footer={<SaveButton saving={saving} onClick={save} label="保存并设为当前版本" />}>
+    <Editor title="Prompt 版本管理" onClose={onClose} footer={<SaveButton saving={saving} onClick={save} label="保存为新版本并设为当前" />}>
+      <div>
+        <span className="mb-1 block text-xs font-medium text-gray-600">历史版本</span>
+        {historyLoading ? (
+          <p className="py-2 text-xs text-gray-400">正在加载版本历史...</p>
+        ) : history.length === 0 ? (
+          <p className="py-2 text-xs text-gray-400">暂无历史版本</p>
+        ) : (
+          <div className="max-h-40 overflow-y-auto border border-gray-200 divide-y divide-gray-100">
+            {history.map((item) => (
+              <div key={item.id} className="flex items-center justify-between gap-2 px-3 py-2 text-xs">
+                <div className="min-w-0">
+                  <span className="font-medium text-gray-800">{item.version}</span>
+                  {item.is_default ? <span className="ml-2 bg-emerald-50 px-1.5 py-0.5 text-emerald-700">当前版本</span> : null}
+                  {!item.is_active ? <span className="ml-2 bg-gray-100 px-1.5 py-0.5 text-gray-500">已停用</span> : null}
+                  <span className="ml-2 text-gray-400">{item.updated_at?.slice(0, 16).replace('T', ' ')}</span>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <button type="button" onClick={() => loadIntoEditor(item)} className="text-brand-700 hover:underline">载入编辑</button>
+                  {!item.is_default ? (
+                    <button type="button" disabled={rollingBackId === item.id} onClick={() => void rollbackTo(item)} className="text-gray-600 hover:underline disabled:opacity-50">
+                      {rollingBackId === item.id ? '切换中...' : '设为当前版本'}
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        <p className="mt-1 text-[11px] text-gray-400">「载入编辑」把历史版本内容填入下方编辑器（保存时生成新版本）；「设为当前版本」直接回滚，立即生效。</p>
+      </div>
       <Field label="版本号"><input className="input" value={version} onChange={(event) => setVersion(event.target.value)} /></Field>
       <Field label="System Prompt"><textarea className="input min-h-28 resize-y font-mono text-xs" value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} /></Field>
       <Field label="User Prompt Template"><textarea className="input min-h-56 resize-y font-mono text-xs" value={userPrompt} onChange={(event) => setUserPrompt(event.target.value)} /></Field>
