@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+import time
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
@@ -13,6 +14,45 @@ from backend.app.db import engine_is_configured, get_session_factory
 from backend.app.security import create_access_token, verify_password
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# In-memory failed-login throttle (single API instance). After
+# FAILED_LOGIN_LIMIT failures for the same username within the window, the
+# username is locked out for LOCKOUT_SECONDS.
+FAILED_LOGIN_LIMIT = 5
+FAILED_LOGIN_WINDOW_SECONDS = 300
+LOCKOUT_SECONDS = 300
+_failed_logins: dict[str, list[float]] = {}
+_lockouts: dict[str, float] = {}
+
+
+def _throttle_key(username: str) -> str:
+    return username.strip().lower()
+
+
+def _check_login_throttle(username: str) -> None:
+    if _lockouts.get(_throttle_key(username), 0.0) > time.time():
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed login attempts; try again later.",
+        )
+
+
+def _record_login_failure(username: str) -> None:
+    key = _throttle_key(username)
+    now = time.time()
+    attempts = [t for t in _failed_logins.get(key, []) if now - t < FAILED_LOGIN_WINDOW_SECONDS]
+    attempts.append(now)
+    if len(attempts) >= FAILED_LOGIN_LIMIT:
+        _lockouts[key] = now + LOCKOUT_SECONDS
+        _failed_logins.pop(key, None)
+    else:
+        _failed_logins[key] = attempts
+
+
+def _clear_login_failures(username: str) -> None:
+    key = _throttle_key(username)
+    _failed_logins.pop(key, None)
+    _lockouts.pop(key, None)
 
 
 class LoginRequest(BaseModel):
@@ -37,6 +77,7 @@ class LoginResponse(BaseModel):
 @router.post("/login", response_model=LoginResponse)
 def login(payload: LoginRequest) -> dict[str, object]:
     settings = get_settings()
+    _check_login_throttle(payload.username)
 
     # Legacy shared admin credentials stay valid and map to the seed admin
     # account; this doubles as the recovery path if account passwords break.
@@ -44,6 +85,7 @@ def login(payload: LoginRequest) -> dict[str, object]:
     if secrets.compare_digest(payload.username, settings.admin_username) and secrets.compare_digest(
         payload.password, settings.admin_password
     ):
+        _clear_login_failures(payload.username)
         return {
             "access_token": settings.effective_admin_token,
             "token_type": "bearer",
@@ -51,6 +93,7 @@ def login(payload: LoginRequest) -> dict[str, object]:
         }
 
     if not engine_is_configured():
+        _record_login_failure(payload.username)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password.")
 
     with get_session_factory()() as db:
@@ -74,8 +117,10 @@ def login(payload: LoginRequest) -> dict[str, object]:
         or not row["password_hash"]
         or not verify_password(payload.password, row["password_hash"])
     ):
+        _record_login_failure(payload.username)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password.")
 
+    _clear_login_failures(payload.username)
     token = create_access_token(
         secret=settings.effective_auth_jwt_secret,
         user_id=str(row["id"]),

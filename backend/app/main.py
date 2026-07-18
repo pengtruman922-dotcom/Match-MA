@@ -54,8 +54,26 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
         return JSONResponse({"detail": "Not authenticated."}, status_code=401)
 
 
+def enforce_startup_auth_security(settings) -> None:
+    """Log auth misconfigurations; refuse to start when strict mode is on.
+
+    Strict mode is opt-in (AUTH_STRICT=true) or implied by APP_ENV=production,
+    so existing deployments keep booting and see the warnings in logs first.
+    """
+    warnings = settings.auth_security_warnings
+    if not warnings:
+        return
+    if settings.auth_strict_effective:
+        raise RuntimeError(
+            "Refusing to start with insecure auth configuration:\n- " + "\n- ".join(warnings)
+        )
+    for warning in warnings:
+        print(f"[auth-warning] {warning}", flush=True)
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
+    enforce_startup_auth_security(settings)
 
     app = FastAPI(
         title=settings.app_name,

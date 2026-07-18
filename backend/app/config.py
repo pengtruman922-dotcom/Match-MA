@@ -5,6 +5,9 @@ from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+_DEFAULT_ADMIN_PASSWORD = "match-ma-admin"
+
+
 class Settings(BaseSettings):
     app_name: str = "Match-MA API"
     app_env: str = "development"
@@ -12,8 +15,9 @@ class Settings(BaseSettings):
     database_url: str | None = None
     cors_origins: str = "*"
     auth_enabled: bool = False
+    auth_strict: bool = False
     admin_username: str = "admin"
-    admin_password: str = "match-ma-admin"
+    admin_password: str = _DEFAULT_ADMIN_PASSWORD
     admin_token: str | None = None
     auth_jwt_secret: str | None = None
     auth_token_ttl_seconds: int = 7 * 24 * 3600
@@ -183,6 +187,36 @@ class Settings(BaseSettings):
         # production should always set the env var.
         seed = f"jwt-signing:{self.effective_admin_token}:{self.app_name}"
         return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+    @property
+    def auth_security_warnings(self) -> list[str]:
+        warnings: list[str] = []
+        if not self.auth_enabled:
+            warnings.append(
+                "AUTH_ENABLED is false: every request runs as admin without authentication."
+            )
+        if self.admin_password == _DEFAULT_ADMIN_PASSWORD:
+            warnings.append(
+                "ADMIN_PASSWORD is the built-in default from the public repo; set a real password."
+            )
+        if not _normalize_secret_text(
+            self.admin_token or _first_env("MATCH_MA_ADMIN_TOKEN", "MATCH_MA_ACCESS_TOKEN", "ADMIN_TOKEN")
+        ):
+            warnings.append(
+                "ADMIN_TOKEN is not set: the legacy admin token is derived from"
+                " username/password and is predictable while those are defaults."
+            )
+        if not _normalize_secret_text(
+            self.auth_jwt_secret or _first_env("AUTH_JWT_SECRET", "MATCH_MA_AUTH_JWT_SECRET")
+        ):
+            warnings.append(
+                "AUTH_JWT_SECRET is not set: the JWT signing secret is derived from the admin token."
+            )
+        return warnings
+
+    @property
+    def auth_strict_effective(self) -> bool:
+        return self.auth_strict or self.app_env.strip().lower() == "production"
 
 
 def _first_env(*names: str) -> str | None:
