@@ -10,10 +10,12 @@ from sqlalchemy.orm import Session
 
 from backend.app.ai.embedding_client import EmbeddingCallError, call_openai_compatible_embedding
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
+from backend.app.ai.prompting import extract_template_variables, render_template
 from backend.app.ai.rerank_client import RerankCallError, call_dashscope_compatible_rerank
 from backend.app.api.authn import CurrentUser, require_admin
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
+from backend.app.services.industry_taxonomy import industry_l1_prompt_list
 from backend.app.services.model_secrets import (
     ModelSecretError,
     encrypt_model_secret,
@@ -761,6 +763,43 @@ def deactivate_node(node_id: UUID, db: Session = Depends(get_db)) -> dict[str, A
     row = _update_node_row(db, node_id=node_id, data={"is_active": False, "is_default": False})
     db.commit()
     return row
+
+
+class PromptRenderPreviewIn(BaseModel):
+    system_prompt: str | None = None
+    user_prompt_template: str | None = None
+
+
+class PromptRenderPreviewOut(BaseModel):
+    variables: list[str]
+    resolved_variables: dict[str, str]
+    rendered_system_prompt: str
+    rendered_user_prompt: str
+
+
+@router.post("/prompts/render-preview", response_model=PromptRenderPreviewOut)
+def render_prompt_preview(payload: PromptRenderPreviewIn, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """Render a prompt draft with sample data so editors can see what the model receives.
+
+    `industry_l1_list` resolves to the real dictionary content; other variables
+    get a visible sample placeholder.
+    """
+    variables = extract_template_variables(payload.system_prompt, payload.user_prompt_template)
+    resolved: dict[str, str] = {}
+    for name in variables:
+        if name == "industry_l1_list":
+            try:
+                resolved[name] = industry_l1_prompt_list(db)
+            except Exception:  # noqa: BLE001 - preview must not fail on dictionary errors
+                resolved[name] = "（行业字典读取失败，渲染时会注入当前启用的一级行业列表）"
+        else:
+            resolved[name] = f"【示例数据: {name}】"
+    return {
+        "variables": variables,
+        "resolved_variables": resolved,
+        "rendered_system_prompt": render_template(payload.system_prompt, resolved),
+        "rendered_user_prompt": render_template(payload.user_prompt_template, resolved),
+    }
 
 
 @router.get("/prompts", response_model=list[PromptOut])

@@ -8,6 +8,19 @@ from typing import Any
 _VARIABLE_PATTERN = re.compile(r"{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}")
 
 
+def extract_template_variables(*templates: str | None) -> list[str]:
+    """Return the unique `{{ var }}` names across templates in first-seen order."""
+    seen: list[str] = []
+    for template in templates:
+        if not template:
+            continue
+        for match in _VARIABLE_PATTERN.finditer(template):
+            name = match.group(1)
+            if name not in seen:
+                seen.append(name)
+    return seen
+
+
 def render_template(template: str | None, variables: dict[str, Any]) -> str:
     if not template:
         return ""

@@ -457,6 +457,13 @@ export const modelConfig = {
     apiRequest<PromptTemplateConfig>('/model-config/prompts', { method: 'POST', body: JSON.stringify(data) }),
   listPrompts: (nodeName: string) =>
     apiRequest<PromptTemplateConfig[]>(`/model-config/prompts?node_name=${encodeURIComponent(nodeName)}&include_inactive=true`),
+  renderPromptPreview: (data: { system_prompt?: string | null; user_prompt_template?: string | null }) =>
+    apiRequest<{
+      variables: string[];
+      resolved_variables: Record<string, string>;
+      rendered_system_prompt: string;
+      rendered_user_prompt: string;
+    }>('/model-config/prompts/render-preview', { method: 'POST', body: JSON.stringify(data) }),
   updatePrompt: (id: string, data: Partial<PromptTemplateConfig>) =>
     apiRequest<PromptTemplateConfig>(`/model-config/prompts/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   testNode: (id: string, input_text: string) =>

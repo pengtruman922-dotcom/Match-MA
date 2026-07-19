@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
@@ -395,6 +395,21 @@ function NodeEditor({ node, models, onClose, onSaved }: { node: ModelNodeConfig;
   );
 }
 
+const PROMPT_VARIABLE_DESCRIPTIONS: Record<string, string> = {
+  raw_requirement_text: '买家需求原文',
+  buyer_profile_json: '买家画像 JSON',
+  raw_target_text: '标的材料原文',
+  target_context_json: '标的上下文 JSON',
+  raw_text: '用户录入原文（含附件文本）',
+  context_json: '业务更新上下文 JSON',
+  industry_l1_list: '一级行业字典（渲染时自动注入当前启用清单）',
+  mode: '推荐方向（buyer_to_target / target_to_buyer）',
+  anchor_context: '推荐对象条件与画像文本',
+  candidates_json: '候选清单 JSON',
+  report_context_json: '报告上下文 JSON',
+  selected_items_json: '已选推荐项 JSON',
+};
+
 function PromptEditor({ node, onClose, onSaved }: { node: ModelNodeConfig; onClose: () => void; onSaved: () => Promise<void> }) {
   const current = node.default_prompt;
   const [version, setVersion] = useState(nextVersion(current?.version));
@@ -405,6 +420,55 @@ function PromptEditor({ node, onClose, onSaved }: { node: ModelNodeConfig; onClo
   const [history, setHistory] = useState<PromptTemplateConfig[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [rollingBackId, setRollingBackId] = useState<string | null>(null);
+  const [industryTerms, setIndustryTerms] = useState<IndustryDictionaryTerm[]>([]);
+  const [preview, setPreview] = useState<{ system: string; user: string } | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const userPromptRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const declaredVariables = Array.isArray(current?.variables_json)
+    ? (current?.variables_json as unknown[]).filter((item): item is string => typeof item === 'string')
+    : [];
+  const templateVariables = Array.from(new Set([
+    ...declaredVariables,
+    ...extractVariableNames(systemPrompt),
+    ...extractVariableNames(userPrompt),
+  ]));
+
+  useEffect(() => {
+    dataDictionaries.industry({ level: 'l1' }).then(setIndustryTerms).catch(() => setIndustryTerms([]));
+  }, []);
+
+  const insertVariable = (name: string) => {
+    const token = `{{ ${name} }}`;
+    const textarea = userPromptRef.current;
+    if (!textarea) {
+      setUserPrompt((prev) => prev + token);
+      return;
+    }
+    const start = textarea.selectionStart ?? userPrompt.length;
+    const end = textarea.selectionEnd ?? userPrompt.length;
+    const next = userPrompt.slice(0, start) + token + userPrompt.slice(end);
+    setUserPrompt(next);
+    window.setTimeout(() => {
+      textarea.focus();
+      textarea.setSelectionRange(start + token.length, start + token.length);
+    }, 0);
+  };
+
+  const runPreview = async () => {
+    setPreviewLoading(true);
+    try {
+      const result = await modelConfig.renderPromptPreview({
+        system_prompt: systemPrompt,
+        user_prompt_template: userPrompt,
+      });
+      setPreview({ system: result.rendered_system_prompt, user: result.rendered_user_prompt });
+    } catch (previewError) {
+      alert(previewError instanceof Error ? previewError.message : '渲染预览失败');
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
 
   const loadHistory = useCallback(async () => {
     setHistoryLoading(true);
@@ -453,7 +517,7 @@ function PromptEditor({ node, onClose, onSaved }: { node: ModelNodeConfig; onClo
   };
 
   return (
-    <Editor title="Prompt 版本管理" onClose={onClose} footer={<SaveButton saving={saving} onClick={save} label="保存为新版本并设为当前" />}>
+    <Editor title="Prompt 版本管理" onClose={onClose} wide footer={<SaveButton saving={saving} onClick={save} label="保存为新版本并设为当前" />}>
       <div>
         <span className="mb-1 block text-xs font-medium text-gray-600">历史版本</span>
         {historyLoading ? (
@@ -484,12 +548,101 @@ function PromptEditor({ node, onClose, onSaved }: { node: ModelNodeConfig; onClo
         )}
         <p className="mt-1 text-[11px] text-gray-400">「载入编辑」把历史版本内容填入下方编辑器（保存时生成新版本）；「设为当前版本」直接回滚，立即生效。</p>
       </div>
-      <Field label="版本号"><input className="input" value={version} onChange={(event) => setVersion(event.target.value)} /></Field>
-      <Field label="System Prompt"><textarea className="input min-h-28 resize-y font-mono text-xs" value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} /></Field>
-      <Field label="User Prompt Template"><textarea className="input min-h-56 resize-y font-mono text-xs" value={userPrompt} onChange={(event) => setUserPrompt(event.target.value)} /></Field>
-      <Field label="输出 Schema"><textarea className="input min-h-40 resize-y font-mono text-xs" value={schema} onChange={(event) => setSchema(event.target.value)} /></Field>
+
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_300px]">
+        <div className="space-y-4">
+          <Field label="版本号"><input className="input" value={version} onChange={(event) => setVersion(event.target.value)} /></Field>
+          <Field label="System Prompt"><textarea className="input min-h-28 resize-y font-mono text-xs" value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} /></Field>
+          <Field label="User Prompt Template">
+            <textarea ref={userPromptRef} className="input min-h-56 resize-y font-mono text-xs" value={userPrompt} onChange={(event) => setUserPrompt(event.target.value)} />
+          </Field>
+          <Field label="输出 Schema"><textarea className="input min-h-40 resize-y font-mono text-xs" value={schema} onChange={(event) => setSchema(event.target.value)} /></Field>
+        </div>
+
+        <div className="space-y-4">
+          <div className="border border-gray-200 p-3">
+            <p className="mb-2 text-xs font-medium text-gray-700">可用变量（点击插入到 User Prompt 光标处）</p>
+            {templateVariables.length === 0 ? (
+              <p className="text-[11px] text-gray-400">该节点暂无声明变量</p>
+            ) : (
+              <div className="space-y-1.5">
+                {templateVariables.map((name) => (
+                  <button
+                    key={name}
+                    type="button"
+                    onClick={() => insertVariable(name)}
+                    className="block w-full text-left text-[11px] leading-relaxed hover:bg-brand-50"
+                  >
+                    <code className="text-brand-700">{'{{ '}{name}{' }}'}</code>
+                    <span className="ml-1 text-gray-500">{PROMPT_VARIABLE_DESCRIPTIONS[name] || ''}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="border border-gray-200 p-3">
+            <p className="mb-2 text-xs font-medium text-gray-700">行业字典当前内容（{industryTerms.length} 项一级行业）</p>
+            <div className="flex flex-wrap gap-1">
+              {industryTerms.length === 0 ? (
+                <p className="text-[11px] text-gray-400">暂无可用一级行业</p>
+              ) : (
+                industryTerms.map((item) => (
+                  <span key={item.id} className="bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-600">{item.term}</span>
+                ))
+              )}
+            </div>
+            <p className="mt-2 text-[11px] text-gray-400">
+              提示词里的 <code>{'{{ industry_l1_list }}'}</code> 渲染时会自动注入上述启用中的清单，改字典即时生效、无需改提示词。
+            </p>
+          </div>
+
+          <div className="border border-amber-200 bg-amber-50 p-3 text-[11px] leading-relaxed text-amber-800">
+            ⚠ few-shot 示例请直接写进左侧 User Prompt 正文；few_shot_examples_json 字段是历史遗留存储，<b>不会</b>注入给模型。
+          </div>
+
+          <button
+            type="button"
+            onClick={() => void runPreview()}
+            disabled={previewLoading}
+            className="inline-flex w-full items-center justify-center gap-1.5 border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:border-brand-500 hover:text-brand-600 disabled:opacity-50"
+          >
+            {previewLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            渲染预览（查看模型实际收到的内容）
+          </button>
+        </div>
+      </div>
+
+      {preview ? (
+        <div className="border border-gray-200">
+          <div className="flex items-center justify-between border-b border-gray-100 bg-gray-50 px-3 py-2">
+            <p className="text-xs font-medium text-gray-700">渲染预览（变量已代入；行业字典为真实内容，其余为示例占位）</p>
+            <button type="button" onClick={() => setPreview(null)} className="text-xs text-gray-400 hover:text-gray-600">收起</button>
+          </div>
+          <div className="max-h-80 overflow-y-auto p-3 text-xs">
+            {preview.system && (
+              <>
+                <p className="mb-1 font-medium text-gray-500">System:</p>
+                <pre className="mb-3 whitespace-pre-wrap break-words font-mono text-[11px] text-gray-700">{preview.system}</pre>
+              </>
+            )}
+            <p className="mb-1 font-medium text-gray-500">User:</p>
+            <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-gray-700">{preview.user}</pre>
+          </div>
+        </div>
+      ) : null}
     </Editor>
   );
+}
+
+function extractVariableNames(template: string): string[] {
+  const names: string[] = [];
+  const pattern = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(template)) !== null) {
+    if (!names.includes(match[1])) names.push(match[1]);
+  }
+  return names;
 }
 
 function IndustryDictionary() {
@@ -670,8 +823,8 @@ function IndustryImportEditor({ onClose, onImported }: { onClose: () => void; on
   );
 }
 
-function Editor({ title, onClose, footer, children }: { title: string; onClose: () => void; footer: React.ReactNode; children: React.ReactNode }) {
-  return <div className="fixed inset-0 z-50 flex justify-end bg-black/20"><div className="flex h-full w-full max-w-2xl flex-col bg-white shadow-xl"><div className="flex items-center justify-between border-b border-gray-200 px-5 py-4"><h2 className="text-base font-semibold text-gray-900">{title}</h2><button type="button" onClick={onClose} className="icon-button" title="关闭"><X className="h-4 w-4" /></button></div><div className="flex-1 space-y-4 overflow-y-auto p-5">{children}</div><div className="flex justify-end border-t border-gray-200 px-5 py-4">{footer}</div></div></div>;
+function Editor({ title, onClose, footer, children, wide = false }: { title: string; onClose: () => void; footer: React.ReactNode; children: React.ReactNode; wide?: boolean }) {
+  return <div className="fixed inset-0 z-50 flex justify-end bg-black/20"><div className={`flex h-full w-full ${wide ? 'max-w-5xl' : 'max-w-2xl'} flex-col bg-white shadow-xl`}><div className="flex items-center justify-between border-b border-gray-200 px-5 py-4"><h2 className="text-base font-semibold text-gray-900">{title}</h2><button type="button" onClick={onClose} className="icon-button" title="关闭"><X className="h-4 w-4" /></button></div><div className="flex-1 space-y-4 overflow-y-auto p-5">{children}</div><div className="flex justify-end border-t border-gray-200 px-5 py-4">{footer}</div></div></div>;
 }
 
 function TabButton({ active, onClick, icon, children }: { active: boolean; onClick: () => void; icon: React.ReactNode; children: React.ReactNode }) { return <button type="button" onClick={onClick} className={`inline-flex items-center gap-2 border-b-2 px-4 py-3 text-sm font-medium ${active ? 'border-brand-600 text-brand-700' : 'border-transparent text-gray-500'}`}>{icon}{children}</button>; }
