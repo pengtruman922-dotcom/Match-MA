@@ -1470,6 +1470,39 @@ export interface RecommendationCandidateRequest {
   create_session?: boolean;
   enable_rerank?: boolean;
   user_message?: string;
+  session_id?: string;
+}
+
+export interface RecommendationSessionSummary {
+  session: { id: string; mode: 'buyer_to_target' | 'target_to_buyer'; updated_at?: string; [key: string]: unknown };
+  display: {
+    title: string | null;
+    subtitle: string | null;
+    mode_label: string;
+    [key: string]: unknown;
+  };
+  candidate_counts: { initial: number; reranked: number; latest: number };
+  candidate_source: string;
+  rerank_status: { status?: string; [key: string]: unknown };
+  report_status: { status?: string; report_count?: number; [key: string]: unknown };
+  selected_status: { active_count?: number; [key: string]: unknown };
+  activity: { last_activity_at?: string | null; [key: string]: unknown };
+}
+
+export interface RecommendationPage {
+  recent_sessions: RecommendationSessionSummary[];
+  running_sessions: RecommendationSessionSummary[];
+  overview: Record<string, unknown>;
+  quick_actions: Array<Record<string, unknown>>;
+  polling_hint: Record<string, unknown>;
+}
+
+export interface RecommendationRerankJob {
+  job_id: string;
+  job_status: string;
+  queue_name: string;
+  candidate_count: number;
+  source: string;
 }
 
 export interface RecommendationCandidateResponse {

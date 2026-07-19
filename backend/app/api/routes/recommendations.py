@@ -126,6 +126,9 @@ class RecommendationCandidateRequest(BaseModel):
     create_session: bool = True
     enable_rerank: bool = True
     user_message: str | None = None
+    # Continue an existing session (multi-round chat): append the user message
+    # and a new candidate round instead of creating a new session.
+    session_id: UUID | None = None
 
     @model_validator(mode="after")
     def validate_anchor(self) -> "RecommendationCandidateRequest":
@@ -380,7 +383,59 @@ def generate_recommendation_candidates(
 
     session_id = None
     rerank_job_id = None
-    if payload.create_session:
+    if payload.session_id is not None:
+        existing_session = _get_recommendation_session_or_404(db, payload.session_id)
+        if existing_session["mode"] != payload.mode:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Session mode does not match the request mode.",
+            )
+        session_anchor_matches = (
+            str(existing_session.get("buyer_intent_id") or "") == str(payload.buyer_intent_id or "")
+            and str(existing_session.get("seller_target_id") or "") == str(payload.seller_target_id or "")
+        )
+        if not session_anchor_matches:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Session anchor does not match the requested intent/target.",
+            )
+        session_id = payload.session_id
+        if payload.user_message:
+            _insert_recommendation_message(
+                db,
+                session_id=session_id,
+                role="user",
+                content_type="text",
+                content=payload.user_message,
+                created_by=current_user.user_id,
+            )
+        _insert_recommendation_message(
+            db,
+            session_id=session_id,
+            role="tool",
+            content_type="json",
+            content={
+                "message_type": "initial_candidates",
+                "mode": payload.mode,
+                "candidate_count": len(candidates),
+                "candidates": candidates,
+            },
+            metadata_json={"message_type": "initial_candidates"},
+            created_by=current_user.user_id,
+        )
+        if payload.enable_rerank and len(candidates) > 1:
+            rerank_job_id = _enqueue_recommendation_rerank_job(
+                db,
+                session_id=session_id,
+                mode=payload.mode,
+                anchor=anchor,
+                candidates=candidates,
+                idempotency_suffix=uuid4().hex[:12],
+                metadata_json={"source": "recommendation_candidate_api_round"},
+            )
+        _touch_recommendation_session(db, session_id)
+        db.commit()
+    elif payload.create_session:
         session_id = _create_recommendation_session(
             db,
             mode=payload.mode,

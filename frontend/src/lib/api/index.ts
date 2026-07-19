@@ -49,9 +49,11 @@ import type {
   RecommendationCandidateResponse,
   RecommendationMessage,
   RecommendationMessageCreate,
+  RecommendationPage,
   RecommendationReport,
   RecommendationReportCreate,
   RecommendationReportJob,
+  RecommendationRerankJob,
   RecommendationSelectedItem,
   RecommendationSelectedItemCreate,
   RecommendationSessionDebugBundle,
@@ -566,4 +568,10 @@ export const recommendations = {
   reports: (sessionId: string, params?: { limit?: number; offset?: number }) =>
     apiRequest<RecommendationReport[]>(`/recommendations/sessions/${sessionId}/reports${buildQuery(params || {})}`),
   getReport: (reportId: string) => apiRequest<RecommendationReport>(`/recommendations/reports/${reportId}`),
+  page: () => apiRequest<RecommendationPage>('/recommendations/page'),
+  createRerankJob: (sessionId: string) =>
+    apiRequest<RecommendationRerankJob>(`/recommendations/sessions/${sessionId}/rerank-jobs`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
 };
