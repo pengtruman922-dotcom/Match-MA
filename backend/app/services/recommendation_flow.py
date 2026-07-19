@@ -2212,14 +2212,19 @@ def _enqueue_recommendation_rerank_job(
     candidates: list[dict[str, Any]],
     idempotency_suffix: str | None = None,
     metadata_json: dict[str, Any] | None = None,
+    extra_query_lines: list[str] | None = None,
 ) -> UUID:
     deep_eval_candidates = candidates[:DEEP_EVAL_CANDIDATE_LIMIT]
+    query = _build_rerank_query(mode=mode, anchor=anchor)
+    if extra_query_lines:
+        # Session semantic preferences and the latest user message steer deep eval.
+        query = "\n".join([query, "用户会话补充要求：", *extra_query_lines]).strip()
     payload = _json_loads(
         _json_dumps(
             {
                 "session_id": session_id,
                 "mode": mode,
-                "query": _build_rerank_query(mode=mode, anchor=anchor),
+                "query": query,
                 "anchor": anchor,
                 "candidates": deep_eval_candidates,
             }
@@ -2350,6 +2355,7 @@ def _session_select_columns() -> str:
       id, mode, buyer_intent_id, buyer_party_id, seller_target_id, status,
       selected_count, report_count, anonymous_input_snapshot,
       initial_condition_snapshot_json, latest_condition_snapshot_json,
+      condition_overrides_json,
       created_at::text as created_at, updated_at::text as updated_at, metadata_json
     """
 
@@ -2359,6 +2365,7 @@ def _session_overview_select_columns() -> str:
       rs.id, rs.mode, rs.buyer_intent_id, rs.buyer_party_id, rs.seller_target_id, rs.status,
       rs.selected_count, rs.report_count, rs.anonymous_input_snapshot,
       rs.initial_condition_snapshot_json, rs.latest_condition_snapshot_json,
+      rs.condition_overrides_json,
       rs.created_at::text as created_at, rs.updated_at::text as updated_at, rs.metadata_json,
       bi.intent_name as buyer_intent_name,
       bp.buyer_name,

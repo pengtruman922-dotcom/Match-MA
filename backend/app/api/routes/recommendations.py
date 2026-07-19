@@ -18,6 +18,16 @@ from backend.app.api.routes.utils import (
 )
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
+from backend.app.services.recommendation_conditions import (
+    apply_condition_actions,
+    apply_overrides_to_anchor,
+    conditions_snapshot,
+    derive_route,
+    describe_condition_ops,
+    merge_condition_overrides,
+    parse_recommendation_message,
+    persist_session_overrides,
+)
 from backend.app.services.recommendation_flow import (  # noqa: F401 - re-exported for compatibility
     DEEP_EVAL_CANDIDATE_LIMIT,
     EXCLUDED_HIT_CAP,
@@ -129,6 +139,10 @@ class RecommendationCandidateRequest(BaseModel):
     # Continue an existing session (multi-round chat): append the user message
     # and a new candidate round instead of creating a new session.
     session_id: UUID | None = None
+    # Deterministic condition-panel actions (chip removal / clear-all); applied
+    # without the LLM parser: [{"op": "remove_field", "field": ...},
+    # {"op": "remove_preference", "value": ...}, {"op": "clear_all"}]
+    condition_actions: list[dict[str, Any]] | None = None
 
     @model_validator(mode="after")
     def validate_anchor(self) -> "RecommendationCandidateRequest":
@@ -200,6 +214,7 @@ class RecommendationSessionOut(BaseModel):
     anonymous_input_snapshot: str | None
     initial_condition_snapshot_json: dict[str, Any]
     latest_condition_snapshot_json: dict[str, Any]
+    condition_overrides_json: dict[str, Any] = Field(default_factory=dict)
     created_at: str
     updated_at: str
     metadata_json: dict[str, Any]
@@ -364,7 +379,6 @@ def generate_recommendation_candidates(
     if payload.mode == "buyer_to_target":
         ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=payload.buyer_intent_id)
         anchor = _get_buyer_intent_anchor(db, payload.buyer_intent_id)
-        candidates = _candidate_targets_for_intent(db, anchor, payload.limit)
         session_anchor = {
             "buyer_intent_id": payload.buyer_intent_id,
             "buyer_party_id": anchor.get("buyer_party_id"),
@@ -373,16 +387,14 @@ def generate_recommendation_candidates(
     else:
         ensure_entity_writable(db, current_user, entity_type="seller_target", entity_id=payload.seller_target_id)
         anchor = _get_seller_target_anchor(db, payload.seller_target_id)
-        candidates = _candidate_intents_for_target(db, anchor, payload.limit)
         session_anchor = {
             "buyer_intent_id": None,
             "buyer_party_id": None,
             "seller_target_id": payload.seller_target_id,
         }
-    candidates = _enrich_candidates_for_frontend(candidates)
 
-    session_id = None
-    rerank_job_id = None
+    existing_session = None
+    overrides: dict[str, Any] = {}
     if payload.session_id is not None:
         existing_session = _get_recommendation_session_or_404(db, payload.session_id)
         if existing_session["mode"] != payload.mode:
@@ -399,40 +411,139 @@ def generate_recommendation_candidates(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Session anchor does not match the requested intent/target.",
             )
+        overrides = existing_session.get("condition_overrides_json") or {}
+
+    # Condition-panel actions bypass the LLM parser entirely.
+    panel_summary = None
+    if payload.condition_actions and existing_session is not None:
+        overrides, panel_summary = apply_condition_actions(overrides, payload.condition_actions)
+
+    # Chat message -> structured extraction; routing is derived in code.
+    parse_result = None
+    user_message = (payload.user_message or "").strip()
+    if user_message:
+        parse_result = parse_recommendation_message(
+            db,
+            mode=payload.mode,
+            user_message=user_message,
+            current_conditions=conditions_snapshot(anchor, overrides) if payload.mode == "buyer_to_target" else {},
+        )
+        if payload.mode == "target_to_buyer" and parse_result["condition_ops"]:
+            # v1 only supports structured overrides on the buyer_to_target flow;
+            # keep the intent as a semantic preference so deep eval still sees it.
+            described = describe_condition_ops(parse_result["condition_ops"])
+            if described and described not in parse_result["semantic_preferences"]:
+                parse_result["semantic_preferences"].append(described)
+            parse_result["condition_ops"] = []
+        overrides = merge_condition_overrides(overrides, parse_result)
+
+    route = derive_route(parse_result)
+    if panel_summary is not None:
+        route = "refilter"  # panel actions always re-run the filter
+    if existing_session is None:
+        route = "refilter"  # first round always generates candidates
+
+    effective_anchor = (
+        apply_overrides_to_anchor(anchor, overrides) if payload.mode == "buyer_to_target" else anchor
+    )
+    semantic_preferences = list(overrides.get("semantic_preferences") or [])
+    extra_query_lines = [line for line in [*semantic_preferences, user_message or None] if line]
+
+    candidates: list[dict[str, Any]] = []
+    new_round = route in {"refilter", "re_evaluate"}
+    if route == "refilter":
+        if payload.mode == "buyer_to_target":
+            candidates = _candidate_targets_for_intent(db, effective_anchor, payload.limit)
+        else:
+            candidates = _candidate_intents_for_target(db, effective_anchor, payload.limit)
+    elif route == "re_evaluate" and existing_session is not None:
+        messages = _list_recommendation_messages(db, session_id=payload.session_id, limit=500, offset=0)
+        candidates = _extract_recommendation_candidate_sets(messages)["initial_candidates"]
+        if not candidates:
+            if payload.mode == "buyer_to_target":
+                candidates = _candidate_targets_for_intent(db, effective_anchor, payload.limit)
+            else:
+                candidates = _candidate_intents_for_target(db, effective_anchor, payload.limit)
+    elif existing_session is not None:
+        # display / question / noop keep the current round; return it for context.
+        messages = _list_recommendation_messages(db, session_id=payload.session_id, limit=500, offset=0)
+        sets = _extract_recommendation_candidate_sets(messages)
+        candidates = sets["reranked_candidates"] or sets["initial_candidates"]
+    candidates = _enrich_candidates_for_frontend(candidates)
+
+    rerank_planned = new_round and payload.enable_rerank and len(candidates) > 1
+    conversation = _build_conversation_payload(
+        route=route,
+        parse_result=parse_result,
+        overrides=overrides,
+        anchor=anchor,
+        mode=payload.mode,
+        candidate_count=len(candidates),
+        rerank_requested=rerank_planned,
+        panel_summary=panel_summary,
+    )
+
+    session_id = None
+    rerank_job_id = None
+    message_metadata = {"message_type": "initial_candidates"}
+    if parse_result is not None:
+        message_metadata["conversation"] = {
+            "route": route,
+            "parsed_ops": parse_result["condition_ops"],
+            "semantic_preferences": parse_result["semantic_preferences"],
+            "parser_status": parse_result["parser_status"],
+        }
+
+    if existing_session is not None:
         session_id = payload.session_id
-        if payload.user_message:
+        if user_message:
             _insert_recommendation_message(
                 db,
                 session_id=session_id,
                 role="user",
                 content_type="text",
-                content=payload.user_message,
+                content=user_message,
+                metadata_json=message_metadata.get("conversation") or {},
                 created_by=current_user.user_id,
             )
-        _insert_recommendation_message(
-            db,
-            session_id=session_id,
-            role="tool",
-            content_type="json",
-            content={
-                "message_type": "initial_candidates",
-                "mode": payload.mode,
-                "candidate_count": len(candidates),
-                "candidates": candidates,
-            },
-            metadata_json={"message_type": "initial_candidates"},
-            created_by=current_user.user_id,
-        )
-        if payload.enable_rerank and len(candidates) > 1:
-            rerank_job_id = _enqueue_recommendation_rerank_job(
+        if new_round:
+            _insert_recommendation_message(
                 db,
                 session_id=session_id,
-                mode=payload.mode,
-                anchor=anchor,
-                candidates=candidates,
-                idempotency_suffix=uuid4().hex[:12],
-                metadata_json={"source": "recommendation_candidate_api_round"},
+                role="tool",
+                content_type="json",
+                content={
+                    "message_type": "initial_candidates",
+                    "mode": payload.mode,
+                    "candidate_count": len(candidates),
+                    "candidates": candidates,
+                },
+                metadata_json=message_metadata,
+                created_by=current_user.user_id,
             )
+            if payload.enable_rerank and len(candidates) > 1:
+                rerank_job_id = _enqueue_recommendation_rerank_job(
+                    db,
+                    session_id=session_id,
+                    mode=payload.mode,
+                    anchor=effective_anchor,
+                    candidates=candidates,
+                    idempotency_suffix=uuid4().hex[:12],
+                    metadata_json={"source": "recommendation_candidate_api_round"},
+                    extra_query_lines=extra_query_lines,
+                )
+        if parse_result is not None or panel_summary is not None:
+            # Persist the reply so restoring the session replays the whole chat.
+            _insert_recommendation_message(
+                db,
+                session_id=session_id,
+                role="assistant",
+                content_type="text",
+                content=conversation["system_reply"],
+                metadata_json={"message_type": "system_reply", "route": route},
+                created_by=current_user.user_id,
+            )
+        persist_session_overrides(db, session_id, overrides)
         _touch_recommendation_session(db, session_id)
         db.commit()
     elif payload.create_session:
@@ -456,7 +567,7 @@ def generate_recommendation_candidates(
                 "candidate_count": len(candidates),
                 "candidates": candidates,
             },
-            metadata_json={"message_type": "initial_candidates"},
+            metadata_json=message_metadata,
             created_by=current_user.user_id,
         )
         if payload.enable_rerank and len(candidates) > 1:
@@ -464,24 +575,92 @@ def generate_recommendation_candidates(
                 db,
                 session_id=session_id,
                 mode=payload.mode,
-                anchor=anchor,
+                anchor=effective_anchor,
                 candidates=candidates,
+                extra_query_lines=extra_query_lines,
             )
+        if parse_result is not None:
+            _insert_recommendation_message(
+                db,
+                session_id=session_id,
+                role="assistant",
+                content_type="text",
+                content=conversation["system_reply"],
+                metadata_json={"message_type": "system_reply", "route": route},
+                created_by=current_user.user_id,
+            )
+        if overrides != {} and any(overrides.get(key) for key in ("fields", "removed_fields", "extra_excluded_industries", "semantic_preferences")):
+            persist_session_overrides(db, session_id, overrides)
         db.commit()
 
     return {
         "session_id": session_id,
         "mode": payload.mode,
         "candidates": candidates,
+        "conversation": conversation,
         "debug": {
             "engine": "rule_v2_deep_eval" if rerank_job_id else "rule_v2",
             "rerank": bool(rerank_job_id),
             "rerank_job_id": str(rerank_job_id) if rerank_job_id else None,
+            "route": route,
             "embedding_similarity": False,
             "notes": [
                 "Returns SQL/Python rule ranking first; LLM deep eval runs asynchronously for the top candidates.",
             ],
         },
+    }
+
+
+def _build_conversation_payload(
+    *,
+    route: str,
+    parse_result: dict[str, Any] | None,
+    overrides: dict[str, Any],
+    anchor: dict[str, Any],
+    mode: str,
+    candidate_count: int,
+    rerank_requested: bool,
+    panel_summary: str | None = None,
+) -> dict[str, Any]:
+    parsed_ops = parse_result["condition_ops"] if parse_result else []
+    new_preferences = parse_result["semantic_preferences"] if parse_result else []
+    display_ops = parse_result["display_ops"] if parse_result else []
+
+    if route == "refilter":
+        parts = []
+        if panel_summary:
+            parts.append(f"已{panel_summary}。")
+        if parsed_ops:
+            parts.append(f"已更新条件：{describe_condition_ops(parsed_ops)}。")
+        if new_preferences:
+            parts.append(f"已记录偏好：{'；'.join(new_preferences)}。")
+        parts.append(f"筛出 {candidate_count} 个候选。")
+        if rerank_requested:
+            parts.append("AI 深度评估进行中，完成后自动重排并标注评级。")
+        system_reply = "".join(parts)
+    elif route == "re_evaluate":
+        system_reply = (
+            f"已记录偏好：{'；'.join(new_preferences) or '（无新增）'}。候选保持不变，"
+            + ("AI 正按新偏好重新评级。" if rerank_requested else "候选不足，未触发重新评级。")
+        )
+    elif route == "display":
+        system_reply = "已按要求调整当前展示。"
+    elif route == "question":
+        system_reply = "候选对比问答暂未上线：请结合卡片上的评级、AI 理由与详情链接查看；也可以继续补充筛选条件。"
+    else:
+        system_reply = "这句话里没有识别出可执行的筛选条件，已原样记录；可以说明行业、地区、利润等具体要求。"
+
+    return {
+        "route": route,
+        "parsed_ops": parsed_ops,
+        "new_semantic_preferences": new_preferences,
+        "display_ops": display_ops,
+        "question": parse_result.get("question") if parse_result else None,
+        "parser_status": parse_result.get("parser_status") if parse_result else None,
+        "applied_conditions": conditions_snapshot(anchor, overrides) if mode == "buyer_to_target" else {
+            "semantic_preferences": list(overrides.get("semantic_preferences") or []),
+        },
+        "system_reply": system_reply,
     }
 
 
