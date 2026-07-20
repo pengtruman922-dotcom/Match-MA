@@ -45,7 +45,7 @@ insert into prompt_template (
   is_active, is_default, created_by, metadata_json
 )
 values (
-  '00000000-0000-0000-0000-000000004240',
+  '00000000-0000-0000-0000-000000004241',
   '00000000-0000-0000-0000-000000000001',
   '00000000-0000-0000-0000-000000000101',
   'recommendation_query_parser',
