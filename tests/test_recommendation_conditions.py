@@ -139,6 +139,38 @@ def test_fallback_records_message_as_preference() -> None:
     assert derive_route(result) == "re_evaluate"
 
 
+def test_apply_condition_actions_panel_operations() -> None:
+    from backend.app.services.recommendation_conditions import apply_condition_actions
+
+    overrides = {
+        "fields": {"region_scope_summary": "浙江"},
+        "removed_fields": [],
+        "extra_excluded_industries": ["风电", "光伏"],
+        "semantic_preferences": ["有出海业务"],
+    }
+
+    result, summary = apply_condition_actions(overrides, [{"op": "remove_field", "field": "region_scope_summary"}])
+    assert result["fields"] == {}
+    assert "移除地区" in summary
+
+    result, summary = apply_condition_actions(overrides, [{"op": "disable_field", "field": "max_pe"}])
+    assert result["removed_fields"] == ["max_pe"]
+    assert "临时停用PE上限" in summary
+
+    result, _ = apply_condition_actions(result, [{"op": "remove_field", "field": "max_pe"}])
+    assert result["removed_fields"] == []
+
+    result, summary = apply_condition_actions(overrides, [{"op": "remove_exclusion", "value": "风电"}])
+    assert result["extra_excluded_industries"] == ["光伏"]
+
+    result, summary = apply_condition_actions(overrides, [{"op": "remove_preference", "value": "有出海业务"}])
+    assert result["semantic_preferences"] == []
+
+    result, summary = apply_condition_actions(overrides, [{"op": "clear_all"}])
+    assert result == {"fields": {}, "removed_fields": [], "extra_excluded_industries": [], "semantic_preferences": []}
+    assert summary == "恢复默认条件"
+
+
 def test_describe_condition_ops_readable() -> None:
     text = describe_condition_ops(
         [

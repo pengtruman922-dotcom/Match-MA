@@ -2,7 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { ArrowRightLeft, Loader2, Send, Sparkles } from 'lucide-react';
 import { buyerIntents, recommendations, sellerTargets } from '../lib/api';
-import type { BuyerIntent, RecommendationSelectedItem, SellerTarget } from '../types/api';
+import type {
+  BuyerIntent,
+  RecommendationConditionAction,
+  RecommendationSelectedItem,
+  SellerTarget,
+} from '../types/api';
 import ConditionChips, { intentConditionChips, targetConditionChips } from '../features/recommend/ConditionChips';
 import ObjectSelect, { type ObjectOption } from '../features/recommend/ObjectSelect';
 import RoundGroup from '../features/recommend/RoundGroup';
@@ -35,6 +40,8 @@ export default function Recommend() {
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reportOpen, setReportOpen] = useState(false);
+  const [overrides, setOverrides] = useState<unknown>({});
+  const [displayFilter, setDisplayFilter] = useState<{ type: string; value: string | number } | null>(null);
 
   const pollRef = useRef<number | null>(null);
   const bootstrappedRef = useRef(false);
@@ -81,6 +88,7 @@ export default function Recommend() {
     const bundle = await recommendations.bundle(activeSessionId);
     setTimeline(buildTimeline(bundle));
     setSelectedItems((bundle.selected_items || []).filter((item) => !item.canceled_at));
+    setOverrides(bundle.session?.condition_overrides_json || {});
     const status = String(bundle.rerank_status?.status || '');
     if ((bundle.reranked_candidates || []).length > 0 && !['queued', 'running', 'retry_waiting'].includes(status)) return 'done';
     if (status === 'failed') return 'failed';
@@ -143,6 +151,7 @@ export default function Recommend() {
       }
       setTimeline(buildTimeline(bundle));
       setSelectedItems((bundle.selected_items || []).filter((item) => !item.canceled_at));
+      setOverrides(bundle.session?.condition_overrides_json || {});
       const status = String(bundle.rerank_status?.status || '');
       if (['queued', 'running', 'retry_waiting'].includes(status)) {
         startDeepEvalPolling(restoreId);
@@ -176,6 +185,8 @@ export default function Recommend() {
     setSessionId(null);
     setTimeline([]);
     setSelectedItems([]);
+    setOverrides({});
+    setDisplayFilter(null);
     setError(null);
     const next = new URLSearchParams(searchParams);
     next.delete('session');
@@ -203,7 +214,7 @@ export default function Recommend() {
     }
   };
 
-  const runRound = async (userMessage?: string) => {
+  const runRound = async (userMessage?: string, conditionActions?: RecommendationConditionAction[]) => {
     if (!anchorReady) {
       setError(mode === 'buyer_to_target' ? '请先选择买家意向' : '请先选择标的');
       return;
@@ -223,6 +234,7 @@ export default function Recommend() {
         create_session: true,
         session_id: sessionId || undefined,
         user_message: userMessage,
+        condition_actions: conditionActions,
       });
       const activeSessionId = response.session_id;
       if (!activeSessionId) {
@@ -234,6 +246,13 @@ export default function Recommend() {
         const next = new URLSearchParams(searchParams);
         next.set('session', activeSessionId);
         setSearchParams(next, { replace: true });
+      }
+      const route = response.conversation?.route;
+      if (route === 'display') {
+        const op = response.conversation?.display_ops?.[0];
+        if (op) setDisplayFilter({ type: op.type, value: op.value });
+      } else if (route === 'refilter' || route === 're_evaluate') {
+        setDisplayFilter(null);
       }
       const state = await refreshFromServer(activeSessionId);
       const deepEvalRequested = Boolean((response.debug as Record<string, unknown>)?.rerank);
@@ -386,7 +405,23 @@ export default function Recommend() {
         </button>
       </div>
 
-      {chips.length > 0 && <div className="mb-2"><ConditionChips chips={chips} /></div>}
+      <div className="mb-2">
+        <ConditionChips
+          baseChips={chips}
+          overrides={overrides}
+          interactive={Boolean(sessionId)}
+          busy={generating}
+          onAction={(actions) => void runRound(undefined, actions)}
+        />
+      </div>
+      {displayFilter && (
+        <div className="mb-2 flex items-center gap-2 border border-blue-200 bg-blue-50 px-4 py-1.5 text-xs text-blue-700">
+          <span>
+            当前展示筛选：{displayFilter.type === 'only_grade' ? `仅 ${displayFilter.value} 档` : `前 ${displayFilter.value} 项`}
+          </span>
+          <button type="button" onClick={() => setDisplayFilter(null)} className="text-blue-500 hover:underline">清除</button>
+        </div>
+      )}
       {error && <div className="mb-2 border border-red-200 bg-red-50 px-4 py-2 text-xs text-red-700">{error}</div>}
 
       <div className="flex min-h-0 flex-1 flex-col border border-gray-200 bg-gray-50/60">
@@ -427,12 +462,20 @@ export default function Recommend() {
               );
             }
             roundCounter += 1;
+            const isLatestRound = latest?.id === entry.id;
+            let roundForDisplay = entry.round;
+            if (isLatestRound && displayFilter) {
+              const filtered = displayFilter.type === 'only_grade'
+                ? entry.round.candidates.filter((candidate) => candidate.deepEvalGrade === displayFilter.value)
+                : entry.round.candidates.slice(0, Number(displayFilter.value));
+              roundForDisplay = { ...entry.round, candidates: filtered };
+            }
             return (
               <RoundGroup
                 key={entry.id}
-                round={entry.round}
+                round={roundForDisplay}
                 roundNumber={roundCounter}
-                isLatest={latest?.id === entry.id}
+                isLatest={isLatestRound}
                 onToggleSelect={(candidate) => void toggleSelect(candidate)}
                 onRetryDeepEval={() => void retryDeepEval()}
               />

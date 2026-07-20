@@ -379,6 +379,20 @@ def apply_condition_actions(overrides: Any, actions: list[dict[str, Any]]) -> tu
             if field == "excluded_industries_json":
                 merged["extra_excluded_industries"] = []
             parts.append(f"移除{FIELD_LABELS.get(field, field)}")
+        elif op == "disable_field":
+            # Suppress a base (intent-level) condition for this session only.
+            field = str(action.get("field") or "").strip()
+            if field not in OVERRIDE_FIELD_KINDS:
+                continue
+            merged["fields"].pop(field, None)
+            if field not in merged["removed_fields"]:
+                merged["removed_fields"].append(field)
+            parts.append(f"临时停用{FIELD_LABELS.get(field, field)}")
+        elif op == "remove_exclusion":
+            value = str(action.get("value") or "").strip()
+            if value in merged["extra_excluded_industries"]:
+                merged["extra_excluded_industries"].remove(value)
+                parts.append(f"移除排除项{value}")
         elif op == "remove_preference":
             value = str(action.get("value") or "").strip()
             if value in merged["semantic_preferences"]:

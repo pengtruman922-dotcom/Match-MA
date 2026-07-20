@@ -1462,6 +1462,30 @@ export interface RecommendationCandidate {
   } | null;
 }
 
+export interface RecommendationConditionAction {
+  op: 'remove_field' | 'disable_field' | 'remove_exclusion' | 'remove_preference' | 'clear_all';
+  field?: string;
+  value?: string;
+}
+
+export interface RecommendationConditionOverrides {
+  fields: Record<string, unknown>;
+  removed_fields: string[];
+  extra_excluded_industries: string[];
+  semantic_preferences: string[];
+}
+
+export interface RecommendationConversation {
+  route: 'refilter' | 're_evaluate' | 'display' | 'question' | 'noop';
+  parsed_ops: Array<{ op: string; field: string; value: unknown }>;
+  new_semantic_preferences: string[];
+  display_ops: Array<{ type: 'only_grade' | 'top_n'; value: string | number }>;
+  question: string | null;
+  parser_status: 'ok' | 'fallback' | null;
+  applied_conditions: Record<string, unknown>;
+  system_reply: string;
+}
+
 export interface RecommendationCandidateRequest {
   mode: 'buyer_to_target' | 'target_to_buyer';
   buyer_intent_id?: string;
@@ -1471,6 +1495,7 @@ export interface RecommendationCandidateRequest {
   enable_rerank?: boolean;
   user_message?: string;
   session_id?: string;
+  condition_actions?: RecommendationConditionAction[];
 }
 
 export interface RecommendationSessionSummary {
@@ -1509,6 +1534,7 @@ export interface RecommendationCandidateResponse {
   session_id: string | null;
   mode: 'buyer_to_target' | 'target_to_buyer';
   candidates: RecommendationCandidate[];
+  conversation?: RecommendationConversation;
   debug: Record<string, unknown>;
 }
 
@@ -1524,6 +1550,7 @@ export interface RecommendationSession {
   anonymous_input_snapshot: string | null;
   initial_condition_snapshot_json: Record<string, unknown>;
   latest_condition_snapshot_json: Record<string, unknown>;
+  condition_overrides_json?: RecommendationConditionOverrides | Record<string, never>;
   created_at: string;
   updated_at: string;
   metadata_json: Record<string, unknown>;

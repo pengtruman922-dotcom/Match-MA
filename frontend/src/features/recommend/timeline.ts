@@ -126,6 +126,10 @@ export function buildTimeline(bundle: RecommendationSessionBundle): TimelineEntr
       entries.push({ kind: 'user', id: message.id, text: message.content });
       continue;
     }
+    if (message.role === 'assistant' && message.content_type === 'text') {
+      entries.push({ kind: 'system', id: message.id, text: message.content });
+      continue;
+    }
     if (message.content_type === 'json') {
       const content = parseJsonContent(message);
       const type = messageType(message, content);
