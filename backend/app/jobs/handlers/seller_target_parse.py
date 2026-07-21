@@ -16,6 +16,8 @@ from backend.app.services.search_docs import (
 )
 from backend.app.services.industry_taxonomy import (
     industry_l1_prompt_list,
+    industry_l2_prompt_list,
+    normalize_l2_values,
     resolve_l1,
 )
 
@@ -63,6 +65,7 @@ def _handle_seller_target_parse(db: Session, job: JobClaim) -> dict[str, object]
             "raw_target_text": raw_target_text,
             "target_context_json": target_context_json,
             "industry_l1_list": industry_l1_prompt_list(db),
+            "industry_l2_list": industry_l2_prompt_list(db),
         },
     )
     input_json = {
@@ -172,7 +175,7 @@ def _get_seller_target_for_parse(db: Session, seller_target_id: UUID) -> dict[st
             """
             select
               id, target_name, target_type, target_subject_name, recommendation_status, information_status,
-              industry_primary, industry_secondary, registered_country,
+              industry_primary, industry_secondary, industry_l2, registered_country,
               registered_province, registered_city, headquarter_province,
               headquarter_city, raw_region_text, region_granularity, listed_status,
               market_cap_yuan, current_revenue_yuan, current_net_profit_yuan,
@@ -232,6 +235,7 @@ SELLER_TARGET_PARSE_FIELDS = {
     "target_type",
     "target_subject_name",
     "industry_l1",
+    "industry_l2",
     "industry_primary",
     "industry_secondary",
     "registered_province",
@@ -510,7 +514,13 @@ def _write_seller_target_parse_logs(
         )
 
 def _normalize_seller_target_industry_changes(db: Session, changes: dict[str, Any]) -> list[str]:
-    """Validate industry_l1 against the dictionary, deriving it from industry_primary as fallback."""
+    """Validate industry_l1/l2 against the dictionary.
+
+    L1 falls back to whatever industry_primary resolves to. L2 is the screening
+    layer, so it is derived from the descriptive industry fields when the parser
+    did not name a dictionary segment outright, and dropped when nothing maps —
+    an invented segment would filter the target out of buyers who want it.
+    """
     notes: list[str] = []
     value = changes.get("industry_l1")
     l1_name = resolve_l1(db, value) if value else None
@@ -522,6 +532,26 @@ def _normalize_seller_target_industry_changes(db: Session, changes: dict[str, An
         changes["industry_l1"] = l1_name
     else:
         changes.pop("industry_l1", None)
+
+    l2_candidates = [
+        changes.get("industry_l2"),
+        changes.get("industry_secondary"),
+        changes.get("industry_primary"),
+    ]
+    l2_name = None
+    for candidate in l2_candidates:
+        if not candidate:
+            continue
+        resolved, _ = normalize_l2_values(db, [candidate])
+        if resolved:
+            l2_name = resolved[0]
+            break
+    if l2_name:
+        changes["industry_l2"] = l2_name
+    else:
+        if changes.get("industry_l2"):
+            notes.append(f"industry_l2_unmapped:{str(changes['industry_l2'])[:50]}")
+        changes.pop("industry_l2", None)
     return notes
 
 def _mark_seller_target_parse_failed_if_final_attempt(

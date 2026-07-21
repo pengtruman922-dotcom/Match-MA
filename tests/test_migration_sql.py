@@ -108,3 +108,38 @@ def test_every_migration_splits_into_valid_statements(migration_name: str) -> No
             f"{migration_name}[{position}]: statement starts with {first_word!r}, "
             f"likely a mis-split fragment: {body[:120]!r}"
         )
+
+
+def test_splitter_keeps_dollar_quoted_bodies_intact() -> None:
+    """do $$ ... $$ blocks carry their own semicolons; splitting inside one
+    yields fragments like 'end if' that fail at deploy time."""
+    sql = """
+alter table t add column a text;
+do $do$
+begin
+  if not exists (select 1 from pg_constraint where conname = 'c') then
+    alter table t add constraint c check (a in ('x', 'y'));
+  end if;
+end
+$do$;
+create index i on t (a);
+"""
+
+    statements = split_sql_statements(sql)
+
+    assert len(statements) == 3
+    assert statements[0].startswith("alter table")
+    assert statements[1].startswith("do $do$")
+    assert statements[1].endswith("$do$")
+    assert "end if;" in statements[1]
+    assert statements[2].startswith("create index")
+
+
+def test_splitter_handles_anonymous_and_nested_looking_dollar_tags() -> None:
+    sql = "do $$ begin perform 1; end $$;\nselect $tag$ ; not a split $tag$;"
+
+    statements = split_sql_statements(sql)
+
+    assert len(statements) == 2
+    assert statements[0] == "do $$ begin perform 1; end $$"
+    assert statements[1] == "select $tag$ ; not a split $tag$"

@@ -16,6 +16,7 @@ from backend.app.api.routes.utils import (
     recommendation_session_visible_sql,
 )
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+from backend.app.services.industry_taxonomy import classify_terms, load_term_levels
 
 DEEP_EVAL_CANDIDATE_LIMIT = 20
 
@@ -1157,7 +1158,15 @@ def _candidate_targets_for_intent(
               st.can_control,
               st.can_consolidate,
               st.transfer_ratio_max,
+              st.transfer_ratio_min,
               st.listed_status,
+              st.industry_l2,
+              st.listing_market_region,
+              st.current_total_profit_yuan,
+              st.profitability_status,
+              st.accepts_relocation,
+              st.accepts_return_investment,
+              st.management_retention_possible,
               st.risk_summary,
               st.gap_summary,
               st.business_summary,
@@ -1197,6 +1206,7 @@ def _candidate_targets_for_intent(
         },
     ).mappings().all()
 
+    intent = _with_resolved_exclusions(db, intent)
     candidates: list[dict[str, Any]] = []
     excluded_count = 0
     conflict_count = 0
@@ -1252,10 +1262,12 @@ def _candidate_intents_for_target(
               bi.industry_primary,
               bi.industry_secondary,
               bi.industries_json,
+              bi.industry_l2_json,
               bi.excluded_industries_json,
               bi.region_scope_summary,
               bi.min_revenue_yuan,
               bi.min_net_profit_yuan,
+              bi.min_total_profit_yuan,
               bi.max_pe,
               bi.max_ps,
               bi.min_net_margin,
@@ -1269,7 +1281,14 @@ def _candidate_intents_for_target(
               bi.requires_consolidation,
               bi.accepts_minority_investment,
               bi.desired_equity_ratio_min,
+              bi.desired_equity_ratio_max,
               bi.preferred_listed_status,
+              bi.listing_market_region,
+              bi.acceptable_cash_flow_status_json,
+              bi.acceptable_profitability_status_json,
+              bi.requires_relocation,
+              bi.requires_return_investment,
+              bi.requires_team_retention,
               bi.major_risk_tolerance_summary,
               bi.negative_summary,
               bi.preference_summary,
@@ -1297,6 +1316,7 @@ def _candidate_intents_for_target(
         },
     ).mappings().all()
 
+    term_levels = load_term_levels(db)
     candidates: list[dict[str, Any]] = []
     excluded_count = 0
     conflict_count = 0
@@ -1305,6 +1325,7 @@ def _candidate_intents_for_target(
         if item.pop("is_excluded"):
             excluded_count += 1
             continue
+        item["excluded_terms_resolved"] = classify_terms(item.get("excluded_industries_json"), term_levels)
         rule_score, evidence, gaps, meta = _score_target_against_intent(target, item)
         if meta["state"] == CANDIDATE_STATE_CONFLICT:
             conflict_count += 1
@@ -1328,6 +1349,22 @@ def _candidate_intents_for_target(
         )
 
     return _rank_and_report(candidates, limit=limit, scan_count=len(rows), excluded_count=excluded_count, conflict_count=conflict_count)
+
+
+def _with_resolved_exclusions(db: Session, intent: dict[str, Any]) -> dict[str, Any]:
+    """Attach dictionary-resolved exclusion levels once per request.
+
+    The scorer runs per candidate and has no session, so the L1/L2 split of the
+    buyer's exclusion terms is computed here and carried on the intent dict.
+    """
+    if intent.get("excluded_terms_resolved") is not None:
+        return intent
+    values = intent.get("excluded_industries_json")
+    if not isinstance(values, list) or not values:
+        return intent
+    resolved = dict(intent)
+    resolved["excluded_terms_resolved"] = classify_terms(values, load_term_levels(db))
+    return resolved
 
 
 def _build_candidate_row(
@@ -1443,6 +1480,28 @@ CANDIDATE_STATE_CONFLICT = "conflict"
 CRITICAL_RISK_PENALTY = 0.8
 
 
+# 规则一：要求 × 意愿。买家侧写"要求强度"，标的侧写"能力/意愿"，两侧枚举不同名
+# 不同值，靠这张矩阵配对。新增一个同形态维度 = 在 CAPABILITY_DIMENSIONS 加一行。
+REQUIREMENT_CAPABILITY_MATRIX: dict[tuple[str, str], str] = {
+    ("required", "yes"): "match",
+    ("required", "likely"): "unknown",
+    ("required", "no"): "conflict",
+    ("required", "unknown"): "unknown",
+    ("preferred", "yes"): "match",
+    ("preferred", "likely"): "match",
+    ("preferred", "no"): "mismatch",
+    ("preferred", "unknown"): "unknown",
+}
+
+
+CAPABILITY_DIMENSIONS: tuple[tuple[str, str, float, str], ...] = (
+    # (买家要求字段, 标的能力字段, 权重, 维度名)
+    ("requires_relocation", "accepts_relocation", 8.0, "迁址"),
+    ("requires_return_investment", "accepts_return_investment", 6.0, "返投"),
+    ("requires_team_retention", "management_retention_possible", 6.0, "团队留任"),
+)
+
+
 def _strip_region_suffix(value: Any) -> str:
     text_value = str(value or "").strip()
     for suffix in ("维吾尔自治区", "壮族自治区", "回族自治区", "自治区", "特别行政区", "省", "市"):
@@ -1474,25 +1533,43 @@ def _intent_industry_list(intent: dict[str, Any]) -> list[str]:
     return []
 
 
+DESCRIPTIVE_EXCLUSION_MIN_LENGTH = 2
+
+
 def _excluded_industry_hit(target: dict[str, Any], intent: dict[str, Any]) -> str | None:
+    """Match exclusions at the granularity the buyer wrote them.
+
+    ``excluded_terms_resolved`` is precomputed per request against the industry
+    dictionary (see ``classify_terms``): L1 terms compare against the target's
+    industry_l1 and L2 terms against industry_l2, both exactly. Terms the
+    dictionary does not know fall back to substring search over the descriptive
+    fields, which is why very short terms are skipped there — "电" would
+    otherwise exclude every 电子/电力 target.
+    """
     values = intent.get("excluded_industries_json")
-    if not isinstance(values, list):
+    if not isinstance(values, list) or not values:
         return None
-    industry_l1 = str(target.get("industry_l1") or "")
+    resolved = intent.get("excluded_terms_resolved")
+    if not isinstance(resolved, dict):
+        resolved = {"l1": [], "l2": [], "unresolved": [str(value).strip() for value in values if value]}
+
+    industry_l1 = str(target.get("industry_l1") or "").strip()
+    industry_l2 = str(target.get("industry_l2") or "").strip()
+    for term in resolved.get("l1") or []:
+        if term and term == industry_l1:
+            return term
+    for term in resolved.get("l2") or []:
+        if term and term == industry_l2:
+            return term
+
     descriptive = "／".join(
         str(target.get(key) or "")
         for key in ("industry_primary", "industry_secondary", "business_summary")
     )
-    for value in values:
-        term = str(value or "").strip()
-        if not term:
+    for term in resolved.get("unresolved") or []:
+        if len(term) < DESCRIPTIVE_EXCLUSION_MIN_LENGTH:
             continue
-        if term == industry_l1:
-            return term
-        if term in descriptive:
-            return term
-        industry_primary = str(target.get("industry_primary") or "")
-        if industry_primary and industry_primary in term:
+        if term == industry_l1 or term == industry_l2 or term in descriptive:
             return term
     return None
 
@@ -1572,6 +1649,22 @@ def _score_target_against_intent(
             add_dimension(30, "match", dimension="行业", match_text=f"一级行业匹配：{intent['industry_primary']}")
         else:
             add_dimension(30, "mismatch", dimension="行业", gap_text="一级行业不完全匹配")
+
+    # 行业 L2（聚焦方向）：买家列的是关注赛道，通常不是穷举白名单，因此不 gate；
+    # 真正的硬规则走排除项（见 _excluded_industry_hit）。
+    intent_l2 = [
+        str(item).strip()
+        for item in (intent.get("industry_l2_json") or [])
+        if item is not None and str(item).strip()
+    ]
+    if intent_l2:
+        target_l2 = str(target.get("industry_l2") or "").strip()
+        if not target_l2:
+            add_dimension(15, "unknown", dimension="细分赛道", gap_text="标的细分赛道待归类")
+        elif target_l2 in intent_l2:
+            add_dimension(15, "match", dimension="细分赛道", match_text=f"细分赛道命中：{target_l2}")
+        else:
+            add_dimension(15, "mismatch", dimension="细分赛道", gap_text="细分赛道不在买家关注方向")
 
     # 区域（含区域组展开；偏好性，不沉底）
     region_scope = str(intent.get("region_scope_summary") or "").strip()
@@ -1662,18 +1755,64 @@ def _score_target_against_intent(
         else:
             add_dimension(6, "match", dimension="市值", match_text="市值处于买家要求范围")
 
-    # 股比/控股/并表：取买家提出的最强要求；标的明确说“不行”才算硬不符
+    # 利润总额（与净利润是两个口径，买家分别提；软性，避免与净利润叠加沉底）
+    min_total_profit = _optional_decimal(intent.get("min_total_profit_yuan"))
+    if min_total_profit is not None:
+        target_total_profit = _optional_decimal(target.get("current_total_profit_yuan"))
+        if target_total_profit is None:
+            add_dimension(6, "unknown", dimension="利润总额", gap_text="标的利润总额缺失")
+        elif target_total_profit >= min_total_profit:
+            add_dimension(6, "match", dimension="利润总额", match_text="利润总额达到门槛")
+        else:
+            add_dimension(6, "mismatch", dimension="利润总额", gap_text="利润总额低于买家门槛")
+
+    # 净利率 / PS：标的侧不单独存，由营收与利润、市值派生（C4）
+    min_net_margin = _optional_decimal(intent.get("min_net_margin"))
+    if min_net_margin is not None:
+        if target_revenue and target_revenue > 0 and target_profit is not None:
+            target_margin = target_profit / target_revenue * 100
+            if target_margin >= min_net_margin:
+                add_dimension(6, "match", dimension="净利率", match_text="净利率达到门槛")
+            else:
+                add_dimension(6, "mismatch", dimension="净利率", gap_text="净利率低于买家门槛")
+        else:
+            add_dimension(6, "unknown", dimension="净利率", gap_text="标的净利率无法计算（缺营收或利润）")
+
+    max_ps = _optional_decimal(intent.get("max_ps"))
+    if max_ps is not None:
+        ps_base = _optional_decimal(target.get("market_cap_yuan")) or _optional_decimal(
+            target.get("valuation_yuan")
+        )
+        if ps_base is not None and target_revenue and target_revenue > 0:
+            if ps_base / target_revenue <= max_ps:
+                add_dimension(6, "match", dimension="PS", match_text="PS 未超过上限")
+            else:
+                add_dimension(6, "mismatch", dimension="PS", gap_text="PS 超过买家上限")
+        else:
+            add_dimension(6, "unknown", dimension="PS", gap_text="标的 PS 无法计算（缺估值或营收）")
+
+    # 股比/控股/并表：取买家提出的最强要求；标的明确说“不行”才算硬不符。
+    # 买家自己接受少数股权时不再沉底——这是先参股后控股的常见路径。
     requires_control = _yes_like(intent.get("requires_control"))
     requires_consolidation = _yes_like(intent.get("requires_consolidation"))
     desired_min_ratio = _optional_decimal(intent.get("desired_equity_ratio_min"))
+    desired_max_ratio = _optional_decimal(intent.get("desired_equity_ratio_max"))
+    buyer_accepts_minority = _yes_like(intent.get("accepts_minority_investment"))
     if requires_control or requires_consolidation:
         requirement_label = "控股" if requires_control else "并表"
         capability = target.get("can_control") if requires_control else target.get("can_consolidate")
         if _yes_like(capability):
             add_dimension(12, "match", dimension=requirement_label, match_text=f"满足{requirement_label}要求")
         elif str(capability or "").lower() == "no":
+            gap_text = f"标的明确不可{requirement_label}"
+            if buyer_accepts_minority:
+                gap_text += "（买家接受少数股权，未沉底）"
             add_dimension(
-                12, "mismatch", dimension=requirement_label, gap_text=f"标的明确不可{requirement_label}", gate=True
+                12,
+                "mismatch",
+                dimension=requirement_label,
+                gap_text=gap_text,
+                gate=not buyer_accepts_minority,
             )
         else:
             add_dimension(12, "unknown", dimension=requirement_label, gap_text=f"{requirement_label}能力待确认")
@@ -1686,6 +1825,67 @@ def _score_target_against_intent(
             add_dimension(12, "match", dimension="可转让股比", match_text="可转让股比满足买家要求")
         else:
             add_dimension(12, "mismatch", dimension="可转让股比", gap_text="可转让股比低于买家要求", gate=True)
+
+    # 股比上限：买家封顶（如北大健康 ≤29.9%）而标的最少要卖 51% 时是真冲突。
+    if desired_max_ratio is not None:
+        transfer_min = _optional_decimal(target.get("transfer_ratio_min"))
+        if transfer_min is None:
+            add_dimension(6, "unknown", dimension="最低转让股比", gap_text="标的最低转让股比未知")
+        elif transfer_min <= desired_max_ratio:
+            add_dimension(6, "match", dimension="最低转让股比", match_text="标的可接受买家的股比上限")
+        else:
+            add_dimension(
+                6, "mismatch", dimension="最低转让股比", gap_text="标的最低转让股比高于买家股比上限", gate=True
+            )
+
+    # 规则一：要求 × 意愿（迁址 / 返投 / 团队留任）
+    for buyer_field, target_field, weight, label in CAPABILITY_DIMENSIONS:
+        strength = str(intent.get(buyer_field) or "unknown").strip().lower()
+        if strength not in {"required", "preferred"}:
+            continue
+        capability = str(target.get(target_field) or "unknown").strip().lower()
+        if capability not in {"yes", "likely", "no"}:
+            capability = "unknown"
+        outcome = REQUIREMENT_CAPABILITY_MATRIX.get((strength, capability), "unknown")
+        if outcome == "match":
+            add_dimension(weight, "match", dimension=label, match_text=f"满足{label}要求")
+        elif outcome == "conflict":
+            add_dimension(weight, "mismatch", dimension=label, gap_text=f"标的明确不接受{label}", gate=True)
+        elif outcome == "mismatch":
+            add_dimension(weight, "mismatch", dimension=label, gap_text=f"标的不接受{label}（买家为偏好项）")
+        else:
+            add_dimension(weight, "unknown", dimension=label, gap_text=f"{label}意愿待确认")
+
+    # 经营状态要求（现金流 / 盈利状态）：复用标的侧闭集，偏好性不沉底
+    for buyer_field, target_field, weight, label in (
+        ("acceptable_cash_flow_status_json", "cash_flow_status", 10.0, "现金流状态"),
+        ("acceptable_profitability_status_json", "profitability_status", 8.0, "盈利状态"),
+    ):
+        acceptable = [
+            str(item).strip()
+            for item in (intent.get(buyer_field) or [])
+            if item is not None and str(item).strip()
+        ]
+        if not acceptable:
+            continue
+        target_status = str(target.get(target_field) or "").strip()
+        if not target_status or target_status == "unknown":
+            add_dimension(weight, "unknown", dimension=label, gap_text=f"标的{label}缺失")
+        elif target_status in acceptable:
+            add_dimension(weight, "match", dimension=label, match_text=f"{label}符合买家要求")
+        else:
+            add_dimension(weight, "mismatch", dimension=label, gap_text=f"{label}不符合买家要求")
+
+    # 上市地（境内/境外）：买家写"只投境内"是明确排除，沉底
+    required_market_region = str(intent.get("listing_market_region") or "").strip()
+    if required_market_region and required_market_region != "unknown":
+        target_market_region = str(target.get("listing_market_region") or "").strip()
+        if not target_market_region or target_market_region == "unknown":
+            add_dimension(6, "unknown", dimension="上市地", gap_text="标的上市地未知")
+        elif target_market_region == required_market_region:
+            add_dimension(6, "match", dimension="上市地", match_text="上市地符合买家要求")
+        else:
+            add_dimension(6, "mismatch", dimension="上市地", gap_text="上市地不符合买家要求", gate=True)
 
     # 上市状态偏好（不沉底）
     preferred_listed_status = intent.get("preferred_listed_status")
@@ -1764,14 +1964,23 @@ def _get_buyer_intent_anchor(db: Session, buyer_intent_id: UUID | None) -> dict[
             select
               bi.id, bi.buyer_party_id, bp.buyer_name,
               bi.intent_name, bi.industry_primary, bi.industry_secondary,
-              bi.industries_json, bi.excluded_industries_json, bi.industry_focus_tags_json,
-              bi.region_scope_summary, bi.min_revenue_yuan, bi.min_net_profit_yuan, bi.max_pe,
+              bi.industries_json, bi.industry_l2_json,
+              bi.excluded_industries_json, bi.industry_focus_tags_json,
+              bi.region_scope_summary, bi.min_revenue_yuan, bi.min_net_profit_yuan,
+              bi.min_total_profit_yuan, bi.max_pe,
               bi.max_ps, bi.min_net_margin, bi.min_gross_margin,
               bi.min_valuation_yuan, bi.max_valuation_yuan,
               bi.min_market_cap_yuan, bi.max_market_cap_yuan,
+              bi.budget_min_yuan, bi.budget_max_yuan,
               bi.max_debt_ratio, bi.requires_control, bi.requires_consolidation,
-              bi.accepts_minority_investment, bi.desired_equity_ratio_min,
-              bi.preferred_listed_status, bi.major_risk_tolerance_summary,
+              bi.accepts_minority_investment,
+              bi.desired_equity_ratio_min, bi.desired_equity_ratio_max,
+              bi.preferred_listed_status, bi.listing_market_region,
+              bi.acceptable_cash_flow_status_json, bi.acceptable_profitability_status_json,
+              bi.requires_relocation, bi.relocation_target_regions_json,
+              bi.requires_return_investment, bi.return_investment_multiple,
+              bi.requires_team_retention, bi.earnout_requirement,
+              bi.major_risk_tolerance_summary,
               bi.negative_summary, bi.preference_summary
             from buyer_intent bi
             left join buyer_party bp on bp.id = bi.buyer_party_id
@@ -1797,12 +2006,15 @@ def _get_seller_target_anchor(db: Session, seller_target_id: UUID | None) -> dic
         text(
             """
             select
-              id, target_name, industry_l1, industry_primary, industry_secondary,
+              id, target_name, industry_l1, industry_l2, industry_primary, industry_secondary,
               headquarter_province, headquarter_city,
-              current_revenue_yuan, current_net_profit_yuan,
+              current_revenue_yuan, current_net_profit_yuan, current_total_profit_yuan,
               pe_ratio, valuation_yuan, asking_price_yuan, market_cap_yuan, current_debt_ratio,
-              cash_flow_status, can_control, can_consolidate, transfer_ratio_max,
-              listed_status, risk_summary, gap_summary, business_summary
+              cash_flow_status, profitability_status,
+              can_control, can_consolidate, transfer_ratio_max, transfer_ratio_min,
+              accepts_relocation, accepts_return_investment, management_retention_possible,
+              listed_status, listing_market_region,
+              risk_summary, gap_summary, business_summary
             from seller_target
             where id = :seller_target_id
               and team_id = :team_id

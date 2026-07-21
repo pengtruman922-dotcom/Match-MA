@@ -900,6 +900,83 @@ def _diff_json_safe(original: dict[str, Any], changes: dict[str, Any]) -> dict[s
             diff[key] = (old_value, new_value)
     return diff
 
+REQUIREMENT_STRENGTH_FIELDS = {
+    "requires_relocation",
+    "requires_return_investment",
+    "requires_team_retention",
+    "earnout_requirement",
+}
+
+
+REQUIREMENT_STRENGTH_ALIASES = {
+    "required": "required",
+    "require": "required",
+    "must": "required",
+    "yes": "required",
+    "true": "required",
+    "必须": "required",
+    "要求": "required",
+    "preferred": "preferred",
+    "prefer": "preferred",
+    "optional": "preferred",
+    "nice_to_have": "preferred",
+    "优先": "preferred",
+    "加分": "preferred",
+    "not_required": "not_required",
+    "not required": "not_required",
+    "no": "not_required",
+    "false": "not_required",
+    "none": "not_required",
+    "不要求": "not_required",
+    "不强制": "not_required",
+}
+
+
+def _normalize_requirement_strength(value: Any) -> str:
+    """Coerce parser output onto the required/preferred/not_required enum.
+
+    The columns carry a CHECK constraint, so an unmapped value would fail the
+    whole parse job; unknown is the safe landing spot because the screening
+    matrix treats it as "no requirement stated".
+    """
+    if value is None:
+        return "unknown"
+    if isinstance(value, bool):
+        return "required" if value else "not_required"
+    text_value = str(value).strip().lower()
+    if not text_value:
+        return "unknown"
+    return REQUIREMENT_STRENGTH_ALIASES.get(text_value, "unknown")
+
+
+CLOSED_LIST_FIELD_VALUES = {
+    "acceptable_cash_flow_status_json": {"stable_positive", "positive", "negative", "unstable", "unknown"},
+    "acceptable_profitability_status_json": {"profitable", "loss_making", "break_even", "unknown"},
+}
+
+
+def _normalize_closed_list_values(field: str, value: Any) -> list[str]:
+    """Drop anything outside the target-side enum this requirement mirrors."""
+    allowed = CLOSED_LIST_FIELD_VALUES.get(field, set())
+    if not isinstance(value, list):
+        return []
+    normalized: list[str] = []
+    for item in value:
+        text_value = str(item).strip().lower() if item is not None else ""
+        if text_value in allowed and text_value not in normalized:
+            normalized.append(text_value)
+    return normalized
+
+
+def _normalize_listing_market_region(value: Any) -> str:
+    text_value = str(value or "").strip().lower()
+    if text_value in {"domestic", "境内", "a股", "境内上市", "cn"}:
+        return "domestic"
+    if text_value in {"overseas", "境外", "海外", "港股", "美股", "境外上市"}:
+        return "overseas"
+    return "unknown"
+
+
 def _normalize_yes_no_like(value: Any) -> str:
     normalized = str(value or "").strip().lower()
     if normalized in {"yes", "true", "1", "是", "需要", "要求", "必须", "可以", "可接受", "接受", "likely"}:

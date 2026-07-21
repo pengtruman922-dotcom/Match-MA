@@ -80,6 +80,106 @@ def normalize_l1_values(db: Session, values: Any) -> tuple[list[str], list[str]]
     return normalized, notes
 
 
+def list_l2_terms(db: Session) -> list[str]:
+    rows = db.execute(
+        text(
+            """
+            select term
+            from industry_taxonomy
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and level = 'l2'
+              and active = true
+            order by l1_name, sort_order, term
+            """
+        ),
+        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    ).scalars().all()
+    return list(rows)
+
+
+def industry_l2_prompt_list(db: Session) -> str:
+    terms = list_l2_terms(db)
+    return "、".join(terms)
+
+
+def normalize_l2_values(db: Session, values: Any) -> tuple[list[str], list[str]]:
+    """Keep only terms that exist as L2 segments in the dictionary.
+
+    Unlike L1 there is no fallback bucket: a term the dictionary does not carry
+    as a segment (产品级说法如 醋酸下游 / 偏光膜) is dropped from the screening
+    field and reported, so it stays a semantic matter for deep eval instead of
+    silently narrowing SQL.
+    """
+    if not isinstance(values, list):
+        return [], []
+    known = {term.lower(): term for term in list_l2_terms(db)}
+    normalized: list[str] = []
+    notes: list[str] = []
+    for value in values:
+        text_value = str(value).strip() if value is not None else ""
+        if not text_value:
+            continue
+        canonical = known.get(text_value.lower())
+        if canonical is None:
+            notes.append(f"industry_l2_unmapped:{text_value[:50]}")
+            continue
+        if canonical not in normalized:
+            normalized.append(canonical)
+    return normalized, notes
+
+
+def load_term_levels(db: Session) -> dict[str, tuple[str, str]]:
+    """Map every dictionary term to ``(level, l1_name)`` in one query.
+
+    Screening compares hundreds of candidates per request, so per-term lookups
+    are loaded once and resolved in memory.
+    """
+    rows = db.execute(
+        text(
+            """
+            select term, level, l1_name
+            from industry_taxonomy
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and active = true
+            """
+        ),
+        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    ).mappings().all()
+    return {str(row["term"]).strip().lower(): (str(row["level"]), str(row["l1_name"])) for row in rows}
+
+
+def classify_terms(values: Any, term_levels: dict[str, tuple[str, str]]) -> dict[str, list[str]]:
+    """Split free-form industry terms into L1 / L2 / unresolved buckets.
+
+    Exclusions are stored at whatever granularity the buyer wrote them, so the
+    level has to be recovered here: an L1 term is compared against the target's
+    ``industry_l1`` and an L2 term against ``industry_l2``. Anything the
+    dictionary does not know falls through to descriptive text matching.
+    """
+    buckets: dict[str, list[str]] = {"l1": [], "l2": [], "unresolved": []}
+    if not isinstance(values, list):
+        return buckets
+    for value in values:
+        term = str(value).strip() if value is not None else ""
+        if not term:
+            continue
+        entry = term_levels.get(term.lower())
+        if entry is None:
+            bucket = "unresolved"
+        elif entry[0] == "l1":
+            bucket = "l1"
+        else:
+            # L2 terms and aliases both screen at the segment level; an alias
+            # pointing at an L1 still only tells us the L1 name, so treat the
+            # written term as the segment and let exact matching decide.
+            bucket = "l2" if entry[0] == "l2" else "unresolved"
+        if term not in buckets[bucket]:
+            buckets[bucket].append(term)
+    return buckets
+
+
 def normalize_excluded_terms(values: Any) -> list[str]:
     """Clean excluded-industry terms.
 

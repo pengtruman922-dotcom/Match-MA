@@ -16,19 +16,26 @@ from backend.app.services.search_docs import (
 )
 from backend.app.services.industry_taxonomy import (
     industry_l1_prompt_list,
+    industry_l2_prompt_list,
     normalize_excluded_terms,
+    normalize_l2_values,
     normalize_l1_values,
     resolve_l1,
 )
 
 from backend.app.jobs.handlers.common import (
+    CLOSED_LIST_FIELD_VALUES,
+    REQUIREMENT_STRENGTH_FIELDS,
     YES_NO_LIKE_FIELDS,
     _diff_json_safe,
     _get_default_node_config,
     _json_safe_dict,
     _json_safe_value,
+    _normalize_closed_list_values,
     _normalize_equity_requirement_type,
     _normalize_listed_status,
+    _normalize_listing_market_region,
+    _normalize_requirement_strength,
     _normalize_yes_no_like,
     _optional_decimal,
     _parse_source_context,
@@ -59,6 +66,7 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
             "raw_requirement_text": raw_requirement_text,
             "buyer_profile_json": buyer_profile_json,
             "industry_l1_list": industry_l1_prompt_list(db),
+            "industry_l2_list": industry_l2_prompt_list(db),
         },
     )
     input_json = {
@@ -166,15 +174,20 @@ def _get_buyer_intent_for_parse(db: Session, buyer_intent_id: UUID) -> dict[str,
               id, buyer_party_id, intent_name, status, pause_reason, contact_name,
               contact_info_json, raw_requirement_text, intent_summary, parsed_requirement_json,
               industry_primary, industry_secondary, industries_json,
-              excluded_industries_json, industry_focus_tags_json, region_scope_summary,
+              excluded_industries_json, industry_l2_json, industry_focus_tags_json,
+              region_scope_summary,
               region_constraints_json, min_revenue_yuan, min_net_profit_yuan,
               min_total_profit_yuan, max_pe, max_ps, min_net_margin, min_gross_margin,
               min_valuation_yuan, max_valuation_yuan, market_cap_range_summary,
-              min_market_cap_yuan, max_market_cap_yuan,
+              min_market_cap_yuan, max_market_cap_yuan, budget_min_yuan, budget_max_yuan,
               requires_control, requires_consolidation, accepts_minority_investment,
               desired_equity_ratio_min, desired_equity_ratio_max, equity_ratio_summary,
               equity_requirement_type, acceptable_control_paths_json,
-              preferred_listed_status, listing_board_requirement_summary,
+              preferred_listed_status, listing_board_requirement_summary, listing_market_region,
+              acceptable_cash_flow_status_json, acceptable_profitability_status_json,
+              requires_relocation, relocation_target_regions_json,
+              requires_return_investment, return_investment_multiple,
+              requires_team_retention, earnout_requirement,
               financing_stage_requirement_summary, transaction_type, transaction_types_json,
               premium_tolerance_summary, max_premium_rate, max_debt_ratio,
               debt_ratio_requirement_summary, major_risk_tolerance_summary,
@@ -242,6 +255,7 @@ BUYER_INTENT_PARSE_FIELDS = {
     "industry_primary",
     "industry_secondary",
     "industries_json",
+    "industry_l2_json",
     "excluded_industries_json",
     "industry_focus_tags_json",
     "region_scope_summary",
@@ -258,6 +272,17 @@ BUYER_INTENT_PARSE_FIELDS = {
     "min_market_cap_yuan",
     "max_market_cap_yuan",
     "market_cap_range_summary",
+    "budget_min_yuan",
+    "budget_max_yuan",
+    "acceptable_cash_flow_status_json",
+    "acceptable_profitability_status_json",
+    "requires_relocation",
+    "relocation_target_regions_json",
+    "requires_return_investment",
+    "return_investment_multiple",
+    "requires_team_retention",
+    "earnout_requirement",
+    "listing_market_region",
     "requires_control",
     "requires_consolidation",
     "accepts_minority_investment",
@@ -289,8 +314,12 @@ BUYER_INTENT_PARSE_JSON_FIELDS = {
     "acceptable_control_paths_json",
     "transaction_types_json",
     "industries_json",
+    "industry_l2_json",
     "excluded_industries_json",
     "industry_focus_tags_json",
+    "acceptable_cash_flow_status_json",
+    "acceptable_profitability_status_json",
+    "relocation_target_regions_json",
 }
 
 BUYER_INTENT_PARSE_NUMERIC_FIELDS = {
@@ -309,6 +338,9 @@ BUYER_INTENT_PARSE_NUMERIC_FIELDS = {
     "max_debt_ratio",
     "desired_equity_ratio_min",
     "desired_equity_ratio_max",
+    "budget_min_yuan",
+    "budget_max_yuan",
+    "return_investment_multiple",
 }
 
 BUYER_INTENT_TEXT_LIMITS = {
@@ -422,6 +454,19 @@ def _normalize_buyer_intent_parse_changes(
         if key == "equity_requirement_type":
             changes[key] = _normalize_equity_requirement_type(value)
             continue
+        if key in REQUIREMENT_STRENGTH_FIELDS:
+            changes[key] = _normalize_requirement_strength(value)
+            continue
+        if key == "listing_market_region":
+            changes[key] = _normalize_listing_market_region(value)
+            continue
+        if key in CLOSED_LIST_FIELD_VALUES:
+            normalized_values = _normalize_closed_list_values(key, value)
+            if normalized_values:
+                changes[key] = normalized_values
+            else:
+                notes.append(f"dropped_{key}:no_recognised_values")
+            continue
         if key in BUYER_INTENT_PARSE_JSON_FIELDS:
             changes[key] = value if isinstance(value, (list, dict)) else []
             continue
@@ -458,6 +503,15 @@ def _normalize_buyer_intent_industry_changes(db: Session, changes: dict[str, Any
             changes["industries_json"] = normalized
         else:
             changes.pop("industries_json", None)
+    if "industry_l2_json" in changes:
+        # L2 是筛选字段，只保留字典里真实存在的赛道；写不进字典的细分方向
+        # （醋酸下游、偏光膜这类产品级说法）留给深评，不污染 SQL。
+        normalized_l2, l2_notes = normalize_l2_values(db, changes["industry_l2_json"])
+        notes.extend(l2_notes)
+        if normalized_l2:
+            changes["industry_l2_json"] = normalized_l2
+        else:
+            changes.pop("industry_l2_json", None)
     if "excluded_industries_json" in changes:
         cleaned = normalize_excluded_terms(changes["excluded_industries_json"])
         if cleaned:

@@ -456,3 +456,114 @@ def test_candidate_pool_downweights_critical_risk_without_dropping_it() -> None:
     assert len(by_name) == 2
     assert by_name["重大风险"]["score"] < by_name["干净"]["score"]
     assert "存在重大风险记录（critical），需人工核对" in by_name["重大风险"]["evidence_json"]["gaps"]
+
+
+def test_industry_l2_focus_narrows_score_without_dropping_the_candidate() -> None:
+    """L2 是买家列的关注方向，通常不是穷举白名单，因此不沉底；硬规则走排除项。"""
+    hit_score, _, _, hit_meta = _score_target_against_intent(
+        {"industry_l1": "信息技术与通信", "industry_l2": "集成电路"},
+        {"industries_json": ["信息技术与通信"], "industry_l2_json": ["集成电路", "北斗"]},
+    )
+    miss_score, _, _, miss_meta = _score_target_against_intent(
+        {"industry_l1": "信息技术与通信", "industry_l2": "电商"},
+        {"industries_json": ["信息技术与通信"], "industry_l2_json": ["集成电路", "北斗"]},
+    )
+
+    assert hit_meta["state"] == "compatible"
+    assert miss_meta["state"] != "conflict"
+    assert miss_score < hit_score
+
+
+def test_exclusions_match_l2_exactly_instead_of_scanning_free_text() -> None:
+    resolved = {"l1": [], "l2": ["风电"], "unresolved": []}
+    excluded_target = {"industry_l1": "能源", "industry_l2": "风电"}
+    kept_target = {"industry_l1": "能源", "industry_l2": "光伏"}
+    intent = {
+        "industries_json": ["能源"],
+        "excluded_industries_json": ["风电"],
+        "excluded_terms_resolved": resolved,
+    }
+
+    _, _, _, excluded_meta = _score_target_against_intent(excluded_target, intent)
+    _, _, _, kept_meta = _score_target_against_intent(kept_target, intent)
+
+    assert excluded_meta["excluded_hit"] == "风电"
+    assert excluded_meta["state"] == "conflict"
+    # 同属能源 L1 的其他赛道不受影响——排除风电不等于排除整个能源行业。
+    assert kept_meta["excluded_hit"] is None
+    assert kept_meta["state"] != "conflict"
+
+
+def test_buyer_accepting_minority_softens_the_control_conflict() -> None:
+    """先参股后控股是常见路径，买家自己接受少数股权时不该把标的沉底。"""
+    target = {"industry_l1": "制造与工业", "can_control": "no"}
+    strict = {"industries_json": ["制造与工业"], "requires_control": "yes"}
+    flexible = {**strict, "accepts_minority_investment": "yes"}
+
+    _, _, _, strict_meta = _score_target_against_intent(target, strict)
+    _, _, _, flexible_meta = _score_target_against_intent(target, flexible)
+
+    assert strict_meta["state"] == "conflict"
+    assert flexible_meta["state"] != "conflict"
+
+
+def test_equity_cap_conflicts_when_target_must_sell_more() -> None:
+    _, _, _, meta = _score_target_against_intent(
+        {"industry_l1": "医药与健康", "transfer_ratio_min": 51},
+        {"industries_json": ["医药与健康"], "desired_equity_ratio_max": 29.9},
+    )
+
+    assert "标的最低转让股比高于买家股比上限" in meta["conflicts"]
+    assert meta["state"] == "conflict"
+
+
+def test_requirement_capability_matrix_drives_relocation_and_retention() -> None:
+    intent = {
+        "industries_json": ["制造与工业"],
+        "requires_relocation": "required",
+        "requires_team_retention": "preferred",
+    }
+    refuses = {
+        "industry_l1": "制造与工业",
+        "accepts_relocation": "no",
+        "management_retention_possible": "no",
+    }
+    accepts = {
+        "industry_l1": "制造与工业",
+        "accepts_relocation": "yes",
+        "management_retention_possible": "yes",
+    }
+
+    _, _, refuse_gaps, refuse_meta = _score_target_against_intent(refuses, intent)
+    _, _, _, accept_meta = _score_target_against_intent(accepts, intent)
+
+    # required × no => 冲突出局；preferred × no => 只扣分
+    assert "标的明确不接受迁址" in refuse_meta["conflicts"]
+    assert "标的不接受团队留任（买家为偏好项）" in refuse_gaps
+    assert "标的不接受团队留任（买家为偏好项）" not in refuse_meta["conflicts"]
+    assert accept_meta["state"] == "compatible"
+
+
+def test_domestic_listing_requirement_excludes_overseas_targets() -> None:
+    _, _, _, meta = _score_target_against_intent(
+        {"industry_l1": "信息技术与通信", "listing_market_region": "overseas"},
+        {"industries_json": ["信息技术与通信"], "listing_market_region": "domestic"},
+    )
+
+    assert "上市地不符合买家要求" in meta["conflicts"]
+
+
+def test_net_margin_and_ps_are_derived_from_revenue_and_valuation() -> None:
+    _, evidence, _, meta = _score_target_against_intent(
+        {
+            "industry_l1": "制造与工业",
+            "current_revenue_yuan": 1_000_000_000,
+            "current_net_profit_yuan": 150_000_000,
+            "market_cap_yuan": 3_000_000_000,
+        },
+        {"industries_json": ["制造与工业"], "min_net_margin": 10, "max_ps": 5},
+    )
+
+    assert "净利率达到门槛" in evidence
+    assert "PS 未超过上限" in evidence
+    assert meta["state"] == "compatible"
