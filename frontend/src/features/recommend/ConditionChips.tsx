@@ -91,6 +91,7 @@ export function normalizeOverrides(raw: unknown): {
   removedFields: string[];
   extraExcluded: string[];
   preferences: string[];
+  disabledScenarios: string[];
 } {
   const data = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
   return {

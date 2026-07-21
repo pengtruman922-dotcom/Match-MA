@@ -29,6 +29,7 @@ def _insert_llm_trace(
     error_code: str | None = None,
     error_message: str | None = None,
 ) -> None:
+    node_name = str(node_config.get("node_name") or "business_update_extractor")
     db.execute(
         text(
             """
@@ -44,7 +45,7 @@ def _insert_llm_trace(
               metadata_json
             )
             values (
-              :team_id, :workspace_id, 'llm', 'business_update_extractor',
+              :team_id, :workspace_id, 'llm', :node_name,
               :job_id, :correlation_id, 'business_update', :business_update_id,
               :provider_config_id, :node_config_id, :prompt_template_id,
               :provider_name, :model_name, :prompt_version, :status,
@@ -66,6 +67,7 @@ def _insert_llm_trace(
         {
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
+            "node_name": node_name,
             "job_id": job.id,
             "correlation_id": job.correlation_id,
             "business_update_id": business_update_id,
@@ -89,7 +91,7 @@ def _insert_llm_trace(
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
             "created_by": SYSTEM_USER_ID,
-            "metadata_json": {"source": "business_update_extractor"},
+            "metadata_json": {"source": node_name},
         },
     )
 

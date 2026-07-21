@@ -82,7 +82,7 @@ export default function ProfileSectionsPanel({
         {data && (
           <span className="text-xs text-gray-400">
             已填 {data.coverage.filled_sections.length}/{data.section_catalog.length}
-            {data.coverage.missing_sections.length > 0 && `　待补：${data.coverage.missing_sections.join('、')}`}
+            {data.coverage.missing_sections.length > 0 && ` 待补：${data.coverage.missing_sections.join('、')}`}
           </span>
         )}
       </div>

@@ -19,10 +19,13 @@ from backend.app.jobs.handlers import (
     _build_business_update_image_context,
     _business_update_action_evidence_id,
     _business_update_raw_text_with_attachments,
+    _insert_llm_trace,
+    _mark_bound_seller_targets_complete_after_business_update_parse,
     _mark_business_update_failed_if_final_attempt,
     _normalize_actions,
     _parse_requested_entity_types,
     _parse_source_context,
+    _validate_extractor_output,
 )
 from backend.app.jobs.queue import JobClaim
 from backend.app.services.attachment_storage import decode_text_bytes, is_text_upload, safe_upload_filename
@@ -34,6 +37,8 @@ BUSINESS_UPDATE_ID = UUID("00000000-0000-0000-0000-000000000004")
 
 
 class _SqlCaptureResult:
+    rowcount = 1
+
     def mappings(self):
         return self
 
@@ -499,6 +504,124 @@ def test_business_update_final_attempt_marks_failed() -> None:
 
     assert "set processing_status = 'failed'" in db.sql_text
     assert db.params["metadata_patch"]["last_processing_result"] == "failed"
+
+
+def test_business_update_accepts_unambiguous_action_shape_aliases() -> None:
+    parsed_output = {
+        "actions": [
+            {
+                "action": "seller_fact_update",
+                "target": "seller_target",
+                "target_id": str(SELLER_TARGET_ID),
+                "proposed_changes_json": {
+                    "target_subject_name": "测试主体有限公司",
+                    "listed_status": "listed",
+                    "industry_primary": "制造与工业",
+                },
+            }
+        ]
+    }
+
+    validation = _validate_extractor_output(parsed_output)
+    actions = _normalize_actions(
+        parsed_output,
+        {
+            "raw_text": "正式材料确认主体与上市状态",
+            "bound_seller_target_ids_json": [str(SELLER_TARGET_ID)],
+            "bound_buyer_party_ids_json": [],
+            "bound_buyer_intent_ids_json": [],
+            "attachment_evidence_ids": [],
+            "image_evidence_attachment_ids": [],
+        },
+    )
+
+    assert validation["valid"] is True
+    assert validation["accepted_aliases"] == {
+        "0": [
+            "action_type<-action",
+            "target_entity_type<-target",
+            "target_entity_id<-target_id",
+        ]
+    }
+    assert len(actions) == 1
+    assert actions[0]["action_type"] == "seller_fact_update"
+    assert actions[0]["target_entity_type"] == "seller_target"
+    assert actions[0]["target_entity_id"] == SELLER_TARGET_ID
+    assert actions[0]["proposed_changes_json"]["listed_status"] == "listed"
+    assert actions[0]["normalization_notes"][:3] == validation["accepted_aliases"]["0"]
+
+
+def test_business_update_rejects_empty_actions_instead_of_reporting_success() -> None:
+    validation = _validate_extractor_output({"actions": []})
+
+    assert validation == {
+        "valid": False,
+        "error": "LLM output actions array must not be empty.",
+    }
+
+
+def test_business_update_unapplied_target_action_moves_target_to_pending_review() -> None:
+    db = _SqlCaptureDb()
+
+    changed = _mark_bound_seller_targets_complete_after_business_update_parse(
+        db,
+        {"bound_seller_target_ids_json": [str(SELLER_TARGET_ID)]},
+        [],
+        JOB_ID,
+        pending_review=True,
+    )
+
+    assert changed == 1
+    assert "set information_status = :information_status" in db.sql_text
+    assert db.params["information_status"] == "pending_review"
+    assert (
+        db.params["metadata_patch"]["last_parse_completed_reason"]
+        == "business_update_requires_review"
+    )
+
+
+def test_business_update_trace_uses_the_actual_specialized_node_name() -> None:
+    db = _SqlCaptureDb()
+    job = JobClaim(
+        id=JOB_ID,
+        job_type="business_update_extract_actions",
+        queue_name="llm",
+        entity_type="business_update",
+        entity_id=BUSINESS_UPDATE_ID,
+        correlation_id=BUSINESS_UPDATE_ID,
+        payload_json={},
+        attempt_count=1,
+        max_attempts=3,
+    )
+
+    _insert_llm_trace(
+        db,
+        job=job,
+        business_update_id=BUSINESS_UPDATE_ID,
+        node_config={
+            "node_name": "seller_target_update_parser",
+            "provider_config_id": JOB_ID,
+            "node_config_id": JOB_ID,
+            "prompt_template_id": JOB_ID,
+            "provider_name": "test",
+            "model_name": "test-model",
+            "prompt_version": "v-test",
+            "output_schema_json": {},
+        },
+        status="failed",
+        input_json={},
+        prompt_messages_json=[],
+        raw_output_text="{}",
+        parsed_output_json={},
+        schema_validation_json={"valid": False},
+        latency_ms=1,
+        error_code="schema_validation_failed",
+        error_message="invalid",
+    )
+
+    assert ":node_name" in db.sql_text
+    assert db.params["node_name"] == "seller_target_update_parser"
+    assert db.params["metadata_json"]["source"] == "seller_target_update_parser"
 
 
 def test_business_update_money_unit_normalization_corrects_100_yi_off_by_ten() -> None:

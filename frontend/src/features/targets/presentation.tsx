@@ -4,8 +4,8 @@ import type { SellerTarget } from '../../types/api';
 import { isParsingTarget } from './filters';
 
 export function RecommendationStatusBadge({ item }: { item: SellerTarget }) {
-  let label = '—';
-  let color = 'text-gray-300';
+  let label = '暂不可推荐';
+  let color = 'bg-gray-100 text-gray-600';
   if (item.lifecycle_status === 'sold') {
     label = '已售出';
     color = 'bg-violet-50 text-violet-700';
@@ -26,19 +26,33 @@ export function RecommendationStatusBadge({ item }: { item: SellerTarget }) {
 export function TargetParseStatusBadge({ item }: { item: SellerTarget }) {
   const parsing = isParsingTarget(item);
   const failed = item.information_status === 'parse_failed';
-  const label = parsing ? '解析中' : failed ? '解析失败' : '已解析';
+  const pendingReview = item.information_status === 'pending_review';
+  const parsed = item.recommendation_status === 'recommendable';
+  const label = parsing
+    ? '解析中'
+    : failed
+      ? '解析失败'
+      : pendingReview
+        ? '待复核'
+        : parsed
+          ? '已解析'
+          : '未解析';
   const color = parsing
     ? 'bg-blue-50 text-blue-700'
     : failed
       ? 'bg-red-50 text-red-700'
-      : 'bg-emerald-50 text-emerald-700';
+      : pendingReview
+        ? 'bg-amber-50 text-amber-700'
+        : parsed
+          ? 'bg-emerald-50 text-emerald-700'
+          : 'bg-gray-100 text-gray-600';
   const content = (
     <span className={`inline-flex items-center justify-center gap-1 whitespace-nowrap px-2 py-0.5 text-xs font-medium ${color}`}>
       {parsing ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
       {label}
     </span>
   );
-  return failed ? <Link to={`/targets/${item.id}?tab=history`}>{content}</Link> : content;
+  return failed || pendingReview ? <Link to={`/targets/${item.id}?tab=history`}>{content}</Link> : content;
 }
 
 export function YesNoBadge({ value }: { value: string | null }) {

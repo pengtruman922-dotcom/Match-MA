@@ -182,15 +182,17 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
     parsed_output_json = llm_result.parsed_output_json
     schema_validation_json = _validate_extractor_output(parsed_output_json)
     actions = _normalize_actions(parsed_output_json, business_update_for_normalization)
-    if not actions:
-        actions = [_build_unresolved_action(parsed_output_json, llm_result.raw_output_text)]
     actions = _attach_image_evidence_to_actions(db, job, actions, image_context["summaries"])
+    schema_error = (
+        schema_validation_json.get("error")
+        or "Business update extractor output is invalid."
+    )
     _insert_llm_trace(
         db,
         job=job,
         business_update_id=business_update_id,
         node_config=node_config,
-        status="succeeded",
+        status="succeeded" if schema_validation_json["valid"] else "failed",
         input_json=input_json,
         prompt_messages_json=_safe_prompt_messages_for_trace(prompt_messages),
         raw_output_text=llm_result.raw_output_text,
@@ -200,17 +202,41 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
         prompt_tokens=llm_result.prompt_tokens,
         completion_tokens=llm_result.completion_tokens,
         total_tokens=llm_result.total_tokens,
+        error_code=None if schema_validation_json["valid"] else "schema_validation_failed",
+        error_message=None if schema_validation_json["valid"] else schema_error,
     )
+    if not schema_validation_json["valid"]:
+        _mark_business_update_failed_if_final_attempt(db, job, business_update_id, schema_error)
+        _mark_bound_seller_targets_parse_failed_if_final_attempt(
+            db,
+            job,
+            business_update,
+            schema_error,
+        )
+        db.commit()
+        raise ValueError(schema_error)
     db.commit()
 
     try:
         created_actions = _insert_extracted_actions(db, business_update_id, actions, job.id)
         auto_apply_results = _auto_apply_safe_actions(db, created_actions)
+        applied_action_ids = {
+            _optional_uuid(result.get("extracted_action_id")) for result in auto_apply_results
+        }
+        has_pending_bound_action = any(
+            created_action_id not in applied_action_ids
+            and (
+                action.get("action_type") == "unresolved_item"
+                or action.get("target_entity_type") == "seller_target"
+            )
+            for action, created_action_id in zip(actions, created_actions, strict=True)
+        )
         completed_target_count = _mark_bound_seller_targets_complete_after_business_update_parse(
             db,
             business_update,
             auto_apply_results,
             job.id,
+            pending_review=has_pending_bound_action,
         )
 
         db.execute(
@@ -550,22 +576,55 @@ def _validate_extractor_output(parsed_output_json: dict[str, Any] | None) -> dic
     actions = parsed_output_json.get("actions")
     if not isinstance(actions, list):
         return {"valid": False, "error": "LLM output must contain actions array."}
+    if not actions:
+        return {"valid": False, "error": "LLM output actions array must not be empty."}
     invalid_indexes: list[int] = []
+    accepted_aliases: dict[str, list[str]] = {}
     for index, action in enumerate(actions):
         if not isinstance(action, dict):
             invalid_indexes.append(index)
             continue
-        if action.get("action_type") not in ALLOWED_ACTION_TYPES:
+        canonical_action, alias_notes = _canonicalize_extractor_action(action)
+        if alias_notes:
+            accepted_aliases[str(index)] = alias_notes
+        if canonical_action.get("action_type") not in ALLOWED_ACTION_TYPES:
             invalid_indexes.append(index)
             continue
-        if not isinstance(action.get("proposed_changes_json"), dict):
+        if not isinstance(canonical_action.get("proposed_changes_json"), dict):
             invalid_indexes.append(index)
     return {
         "valid": len(invalid_indexes) == 0,
         "action_count": len(actions),
         "invalid_indexes": invalid_indexes,
+        "accepted_aliases": accepted_aliases,
         "error": "Some actions are invalid." if invalid_indexes else None,
     }
+
+
+EXTRACTOR_ACTION_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "action_type": ("action",),
+    "target_entity_type": ("target",),
+    "target_entity_id": ("target_id",),
+    "proposed_changes_json": ("proposed_changes", "changes"),
+}
+
+
+def _canonicalize_extractor_action(action: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Accept unambiguous legacy/model aliases without weakening action validation."""
+
+    canonical = dict(action)
+    notes: list[str] = []
+    for canonical_key, aliases in EXTRACTOR_ACTION_FIELD_ALIASES.items():
+        if canonical_key in canonical:
+            continue
+        for alias in aliases:
+            if alias not in action:
+                continue
+            canonical[canonical_key] = action[alias]
+            notes.append(f"{canonical_key}<-{alias}")
+            break
+    return canonical, notes
+
 
 def _normalize_actions(
     parsed_output_json: dict[str, Any] | None,
@@ -575,9 +634,10 @@ def _normalize_actions(
         return []
 
     normalized: list[dict[str, Any]] = []
-    for action in parsed_output_json["actions"]:
-        if not isinstance(action, dict):
+    for raw_action in parsed_output_json["actions"]:
+        if not isinstance(raw_action, dict):
             continue
+        action, shape_notes = _canonicalize_extractor_action(raw_action)
         action_type = action.get("action_type")
         if action_type not in ALLOWED_ACTION_TYPES:
             continue
@@ -592,6 +652,7 @@ def _normalize_actions(
             action_type,
             proposed_changes,
         )
+        normalization_notes = [*shape_notes, *normalization_notes]
         if action_type == "buyer_intent_update":
             update_notes = _normalize_buyer_intent_action_changes(
                 normalized_changes,
@@ -629,7 +690,7 @@ def _normalize_actions(
                 "evidence_id": _business_update_action_evidence_id(action, business_update),
                 "confidence": _optional_decimal(action.get("confidence")),
                 "reason": action.get("reason"),
-                "raw_action": action,
+                "raw_action": raw_action,
                 "normalization_notes": normalization_notes,
             }
         )

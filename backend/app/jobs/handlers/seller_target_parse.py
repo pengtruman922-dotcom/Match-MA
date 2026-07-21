@@ -589,6 +589,8 @@ def _mark_bound_seller_targets_complete_after_business_update_parse(
     business_update: dict[str, Any],
     auto_apply_results: list[dict[str, Any]],
     job_id: UUID,
+    *,
+    pending_review: bool = False,
 ) -> int:
     seller_target_ids = set(_uuid_list(business_update.get("bound_seller_target_ids_json")))
     if not seller_target_ids:
@@ -601,11 +603,17 @@ def _mark_bound_seller_targets_complete_after_business_update_parse(
     remaining_ids = [item for item in seller_target_ids if item not in auto_applied_target_ids]
     if not remaining_ids:
         return 0
+    information_status = "pending_review" if pending_review else "normal"
+    completion_reason = (
+        "business_update_requires_review"
+        if pending_review
+        else "business_update_parsed_without_field_changes"
+    )
     result = db.execute(
         text(
             """
             update seller_target
-            set information_status = 'normal',
+            set information_status = :information_status,
                 updated_at = now(),
                 updated_by = :updated_by,
                 metadata_json = metadata_json || :metadata_patch
@@ -620,10 +628,11 @@ def _mark_bound_seller_targets_complete_after_business_update_parse(
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
             "seller_target_ids": remaining_ids,
+            "information_status": information_status,
             "updated_by": SYSTEM_USER_ID,
             "metadata_patch": {
                 "last_parse_completed_job_id": str(job_id),
-                "last_parse_completed_reason": "business_update_parsed_without_field_changes",
+                "last_parse_completed_reason": completion_reason,
             },
         },
     )
