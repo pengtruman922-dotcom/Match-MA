@@ -1813,3 +1813,32 @@ export interface ProfileSectionWrite {
   source_url?: string | null;
   as_of_date?: string | null;
 }
+
+export interface SearchProviderConfig {
+  id: string;
+  provider_name: string;
+  adapter: string;
+  base_url: string | null;
+  secret_mode: 'env' | 'direct';
+  api_key_secret_ref: string | null;
+  secret_configured: boolean;
+  key_display: string;
+  extra_config_json: Record<string, unknown>;
+  is_active: boolean;
+  is_default: boolean;
+  updated_at: string;
+}
+
+export interface SearchConfigOverview {
+  providers: SearchProviderConfig[];
+  available_adapters: string[];
+  direct_key_encryption_configured: boolean;
+  security_note: string;
+}
+
+export interface SearchProviderTestResult {
+  status: 'succeeded' | 'failed';
+  error_message: string | null;
+  result_count: number;
+  sample_titles: string[];
+}

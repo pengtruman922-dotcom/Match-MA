@@ -16,6 +16,7 @@ from backend.app.api.routes import (
     meta,
     model_config,
     profile_sections,
+    search_config,
     recommendations,
     relations,
     search_docs,
@@ -37,6 +38,7 @@ api_router.include_router(buyer_parties.router)
 api_router.include_router(buyer_intents.router)
 api_router.include_router(data_dictionaries.router)
 api_router.include_router(profile_sections.router)
+api_router.include_router(search_config.router)
 api_router.include_router(recommendations.router)
 api_router.include_router(relations.router)
 api_router.include_router(search_docs.router)

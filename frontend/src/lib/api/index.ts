@@ -1,4 +1,6 @@
 import type {
+  SearchConfigOverview,
+  SearchProviderTestResult,
   ProfileSection,
   ProfileSectionsResponse,
   ProfileSectionWrite,
@@ -423,6 +425,51 @@ export const profileSections = {
 export const globalSearch = {
   query: (params: { q: string; limit_per_type?: number }) =>
     apiRequest<GlobalSearchResponse>(`/search${buildQuery(params)}`),
+};
+
+export const searchConfig = {
+  overview: () => apiRequest<SearchConfigOverview>('/search-config/overview'),
+  test: (data: { provider_id?: string | null; query?: string; api_key?: string | null }) =>
+    apiRequest<SearchProviderTestResult>('/search-config/test', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  create: (data: {
+    provider_name: string;
+    adapter: string;
+    base_url: string;
+    secret_mode: 'env' | 'direct';
+    api_key_secret_ref?: string | null;
+    api_key?: string | null;
+    extra_config_json?: Record<string, unknown>;
+  }) => apiRequest<ModelProviderConfig>('/model-config/providers', {
+    method: 'POST',
+    body: JSON.stringify({
+      provider_name: data.provider_name,
+      model_name: data.adapter,
+      base_url: data.base_url,
+      secret_mode: data.secret_mode,
+      api_key_secret_ref: data.api_key_secret_ref,
+      api_key: data.api_key,
+      provider_type: 'search',
+      auth_type: 'bearer',
+      is_default: true,
+      extra_config_json: { adapter: data.adapter, ...(data.extra_config_json || {}) },
+    }),
+  }),
+  update: (id: string, data: {
+    provider_name?: string;
+    base_url?: string;
+    secret_mode?: 'env' | 'direct';
+    api_key_secret_ref?: string | null;
+    api_key?: string | null;
+    is_active?: boolean;
+  }) => apiRequest<ModelProviderConfig>(`/model-config/providers/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  }),
+  remove: (id: string) =>
+    apiRequest<ModelProviderConfig>(`/model-config/providers/${id}`, { method: 'DELETE' }),
 };
 
 export const modelConfig = {

@@ -17,6 +17,7 @@ import {
   Upload,
   X,
 } from 'lucide-react';
+import SearchProviderSection from '../features/settings/SearchProviderSection';
 import { dataDictionaries, modelConfig } from '../lib/api';
 import { isAdmin } from '../lib/auth';
 import type {
@@ -103,7 +104,7 @@ function AiSettings() {
   if (error || !data) return <ErrorState message={error || '读取 AI 设置失败'} onRetry={load} />;
 
   const nodes = data.nodes.filter((node) => !HIDDEN_RETIRED_NODES.has(node.node_name) && ['llm', 'parser', 'research'].includes(node.node_type));
-  const models = data.providers.filter((model) => model.is_active && !isRetiredModel(model));
+  const models = data.providers.filter((model) => model.is_active && model.provider_type !== 'search' && !isRetiredModel(model));
   return (
     <div className="space-y-7">
       <section>
@@ -170,6 +171,8 @@ function AiSettings() {
           </table>
         </div>
       </section>
+
+      <SearchProviderSection />
 
       {editingModel ? (
         <ModelEditor
