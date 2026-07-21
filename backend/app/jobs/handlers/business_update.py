@@ -1314,7 +1314,7 @@ def _document_profile_sections_for_action(action: dict[str, Any]) -> list[dict[s
     business_summary = str(
         (action.get("proposed_changes_json") or {}).get("business_summary") or ""
     ).strip()
-    if not business_summary:
+    if not _business_summary_profile_worthy(business_summary):
         return sections
     current = next(
         (item for item in sections if item.get("section_code") == "business_product"),
@@ -1334,6 +1334,22 @@ def _document_profile_sections_for_action(action: dict[str, Any]) -> list[dict[s
     else:
         current["content_text"] = business_summary[:2000]
     return sections
+
+
+def _business_summary_profile_worthy(summary: str) -> bool:
+    """Reject generic placeholders before they become semantic evidence."""
+    text_value = str(summary or "").strip()
+    if len(text_value) < 16:
+        return False
+    if any(
+        phrase in text_value
+        for phrase in ("未详", "不详", "未知", "未提供", "无法判断", "无法确认", "信息不足")
+    ):
+        return False
+    return any(
+        term in text_value
+        for term in ("产品", "服务", "设备", "材料", "软件", "解决方案", "生产", "研发", "销售", "运营", "提供")
+    )
 
 
 def _verified_document_excerpt(

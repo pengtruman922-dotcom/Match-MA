@@ -28,6 +28,7 @@ from backend.app.jobs.handlers import (
     _validate_extractor_output,
 )
 from backend.app.jobs.handlers.business_update import (
+    _business_summary_profile_worthy,
     _document_profile_sections_for_action,
     _verified_document_excerpt,
 )
@@ -698,6 +699,25 @@ def test_document_business_profile_prefers_constrained_business_summary() -> Non
 
     assert sections[0]["content_text"] == "为生命科学实验室提供自动化设备及成套解决方案。"
     assert sections[1]["content_text"] == "国内第一。"
+
+
+def test_document_business_profile_rejects_low_information_placeholder() -> None:
+    assert _business_summary_profile_worthy(
+        "苏州中析生物信息有限公司主营生物信息相关业务，具体产品与客户信息未详。"
+    ) is False
+    assert _business_summary_profile_worthy(
+        "公司为生命科学实验室提供自动化设备及成套解决方案，覆盖生物制药和临床诊断客户。"
+    ) is True
+
+    sections = _document_profile_sections_for_action(
+        {
+            "proposed_changes_json": {
+                "business_summary": "苏州中析生物信息有限公司主营生物信息相关业务，具体产品未详。"
+            },
+            "profile_sections": [],
+        }
+    )
+    assert sections == []
 
 
 def test_business_update_rejects_empty_actions_instead_of_reporting_success() -> None:
