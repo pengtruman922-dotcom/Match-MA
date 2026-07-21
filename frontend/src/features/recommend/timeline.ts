@@ -1,5 +1,6 @@
 import type {
   RecommendationCandidate,
+  RecommendationFunnel,
   RecommendationMessage,
   RecommendationSelectedItem,
   RecommendationSessionBundle,
@@ -19,6 +20,8 @@ export interface CandidateView {
   gapSummary: string;
   riskSummary: string | null;
   evidence: Record<string, unknown>;
+  matchState: string | null;
+  missingDimensions: string[];
   deepEvalGrade: string | null;
   deepEvalReason: string | null;
   deepEvalRisks: string | null;
@@ -32,6 +35,7 @@ export interface Round {
   id: string;
   candidates: CandidateView[];
   deepEval: DeepEvalState;
+  funnel: RecommendationFunnel | null;
 }
 
 export type TimelineEntry =
@@ -78,6 +82,8 @@ export function mapCandidate(candidate: RecommendationCandidate): CandidateView 
     gapSummary: candidate.gap_summary || '',
     riskSummary: candidate.risk_summary,
     evidence: candidate.evidence_json,
+    matchState: candidate.match_state || null,
+    missingDimensions: candidate.missing_dimensions || [],
     deepEvalGrade: candidate.deep_eval?.grade || null,
     deepEvalReason: candidate.deep_eval?.reason || null,
     deepEvalRisks: candidate.deep_eval?.risks || null,
@@ -142,7 +148,12 @@ export function buildTimeline(bundle: RecommendationSessionBundle): TimelineEntr
           lastRound.round = { ...lastRound.round, candidates, deepEval: 'done' };
         }
       } else if (type === 'initial_candidates') {
-        entries.push({ kind: 'round', id: message.id, round: { id: message.id, candidates, deepEval: 'none' } });
+        const funnel = (content?.funnel as RecommendationFunnel | undefined) || null;
+        entries.push({
+          kind: 'round',
+          id: message.id,
+          round: { id: message.id, candidates, deepEval: 'none', funnel },
+        });
       }
       continue;
     }

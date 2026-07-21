@@ -29,12 +29,12 @@ from backend.app.services.recommendation_conditions import (
     persist_session_overrides,
 )
 from backend.app.services.recommendation_flow import (  # noqa: F401 - re-exported for compatibility
+    CANDIDATE_STATE_COMPATIBLE,
+    CANDIDATE_STATE_CONFLICT,
+    CANDIDATE_STATE_POSSIBLE,
+    CRITICAL_RISK_PENALTY,
     DEEP_EVAL_CANDIDATE_LIMIT,
-    EXCLUDED_HIT_CAP,
-    HARD_MISMATCH_CAP_BASE,
     REGION_GROUPS,
-    UNKNOWN_DIMENSION_CREDIT,
-    _apply_score_caps,
     _build_recommendation_activity,
     _build_recommendation_report_markdown,
     _build_recommendation_report_status,
@@ -449,21 +449,24 @@ def generate_recommendation_candidates(
     semantic_preferences = list(overrides.get("semantic_preferences") or [])
     extra_query_lines = [line for line in [*semantic_preferences, user_message or None] if line]
 
+    def run_filter() -> tuple[list[dict[str, Any]], dict[str, int]]:
+        result = (
+            _candidate_targets_for_intent(db, effective_anchor, payload.limit)
+            if payload.mode == "buyer_to_target"
+            else _candidate_intents_for_target(db, effective_anchor, payload.limit)
+        )
+        return result["candidates"], result["funnel"]
+
     candidates: list[dict[str, Any]] = []
+    funnel: dict[str, int] | None = None
     new_round = route in {"refilter", "re_evaluate"}
     if route == "refilter":
-        if payload.mode == "buyer_to_target":
-            candidates = _candidate_targets_for_intent(db, effective_anchor, payload.limit)
-        else:
-            candidates = _candidate_intents_for_target(db, effective_anchor, payload.limit)
+        candidates, funnel = run_filter()
     elif route == "re_evaluate" and existing_session is not None:
         messages = _list_recommendation_messages(db, session_id=payload.session_id, limit=500, offset=0)
         candidates = _extract_recommendation_candidate_sets(messages)["initial_candidates"]
         if not candidates:
-            if payload.mode == "buyer_to_target":
-                candidates = _candidate_targets_for_intent(db, effective_anchor, payload.limit)
-            else:
-                candidates = _candidate_intents_for_target(db, effective_anchor, payload.limit)
+            candidates, funnel = run_filter()
     elif existing_session is not None:
         # display / question / noop keep the current round; return it for context.
         messages = _list_recommendation_messages(db, session_id=payload.session_id, limit=500, offset=0)
@@ -481,6 +484,7 @@ def generate_recommendation_candidates(
         candidate_count=len(candidates),
         rerank_requested=rerank_planned,
         panel_summary=panel_summary,
+        funnel=funnel,
     )
 
     session_id = None
@@ -517,6 +521,7 @@ def generate_recommendation_candidates(
                     "mode": payload.mode,
                     "candidate_count": len(candidates),
                     "candidates": candidates,
+                    "funnel": funnel,
                 },
                 metadata_json=message_metadata,
                 created_by=current_user.user_id,
@@ -566,6 +571,7 @@ def generate_recommendation_candidates(
                 "mode": payload.mode,
                 "candidate_count": len(candidates),
                 "candidates": candidates,
+                "funnel": funnel,
             },
             metadata_json=message_metadata,
             created_by=current_user.user_id,
@@ -598,17 +604,32 @@ def generate_recommendation_candidates(
         "mode": payload.mode,
         "candidates": candidates,
         "conversation": conversation,
+        "funnel": funnel,
         "debug": {
-            "engine": "rule_v2_deep_eval" if rerank_job_id else "rule_v2",
+            "engine": "rule_v3_deep_eval" if rerank_job_id else "rule_v3",
             "rerank": bool(rerank_job_id),
             "rerank_job_id": str(rerank_job_id) if rerank_job_id else None,
             "route": route,
             "embedding_similarity": False,
+            "funnel": funnel,
             "notes": [
-                "Returns SQL/Python rule ranking first; LLM deep eval runs asynchronously for the top candidates.",
+                "Full-library scan with three-state screening; conflicts drop out, missing data never does.",
+                "LLM deep eval runs asynchronously over the head of the optimistic ranking.",
             ],
         },
     }
+
+
+def _describe_funnel(funnel: dict[str, int] | None, candidate_count: int) -> str:
+    """Never let the deep-eval budget truncate silently: say what was left out."""
+    if not funnel:
+        return f"筛出 {candidate_count} 个候选。"
+    eligible = funnel.get("eligible_count", candidate_count)
+    deep_eval = funnel.get("deep_eval_count", candidate_count)
+    text_value = f"全库扫描 {funnel.get('scan_count', 0)} 个，符合基础条件 {eligible} 个。"
+    if eligible > deep_eval:
+        text_value += f"本轮仅对前 {deep_eval} 个做 AI 深度评估，建议补充结构化条件以缩小范围。"
+    return text_value
 
 
 def _build_conversation_payload(
@@ -621,6 +642,7 @@ def _build_conversation_payload(
     candidate_count: int,
     rerank_requested: bool,
     panel_summary: str | None = None,
+    funnel: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     parsed_ops = parse_result["condition_ops"] if parse_result else []
     new_preferences = parse_result["semantic_preferences"] if parse_result else []
@@ -634,7 +656,7 @@ def _build_conversation_payload(
             parts.append(f"已更新条件：{describe_condition_ops(parsed_ops)}。")
         if new_preferences:
             parts.append(f"已记录偏好：{'；'.join(new_preferences)}。")
-        parts.append(f"筛出 {candidate_count} 个候选。")
+        parts.append(_describe_funnel(funnel, candidate_count))
         if rerank_requested:
             parts.append("AI 深度评估进行中，完成后自动重排并标注评级。")
         system_reply = "".join(parts)

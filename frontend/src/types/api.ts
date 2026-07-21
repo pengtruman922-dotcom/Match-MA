@@ -1453,6 +1453,11 @@ export interface RecommendationCandidate {
   gap_summary: string | null;
   risk_summary: string | null;
   evidence_json: Record<string, unknown>;
+  /** 三态：compatible / possible / conflict（conflict 不会出现在结果里） */
+  match_state?: string | null;
+  known_count?: number;
+  /** 本次意向引用的维度里，该候选尚缺的部分——调研任务的输入 */
+  missing_dimensions?: string[];
   deep_eval?: {
     grade: string;
     reason?: string | null;
@@ -1530,11 +1535,21 @@ export interface RecommendationRerankJob {
   source: string;
 }
 
+export interface RecommendationFunnel {
+  scan_count: number;
+  excluded_count: number;
+  conflict_count: number;
+  eligible_count: number;
+  deep_eval_count: number;
+  display_count: number;
+}
+
 export interface RecommendationCandidateResponse {
   session_id: string | null;
   mode: 'buyer_to_target' | 'target_to_buyer';
   candidates: RecommendationCandidate[];
   conversation?: RecommendationConversation;
+  funnel?: RecommendationFunnel | null;
   debug: Record<string, unknown>;
 }
 

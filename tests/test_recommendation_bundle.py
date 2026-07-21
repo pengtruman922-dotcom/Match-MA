@@ -2,6 +2,7 @@
 
 from backend.app.api.routes.recommendations import (
     _build_recommendation_rerank_status,
+    _candidate_targets_for_intent,
     _enqueue_recommendation_rerank_job,
     _enrich_candidates_with_selection,
     _extract_recommendation_candidate_sets,
@@ -200,36 +201,71 @@ def test_score_target_against_intent_uses_expanded_buyer_filters() -> None:
     assert "负债率未超过买家上限" in evidence
     assert "上市状态符合偏好" in evidence
     assert gaps == []
-    assert meta["hard_mismatches"] == []
+    assert meta["conflicts"] == []
     assert meta["excluded_hit"] is None
+    assert meta["state"] == "compatible"
+    assert meta["unknown_dimensions"] == []
 
 
-def test_score_hard_mismatch_is_reported_and_capped() -> None:
-    from backend.app.api.routes.recommendations import _apply_score_caps
-
+def test_score_gate_mismatch_becomes_conflict() -> None:
     score, evidence, gaps, meta = _score_target_against_intent(
         {
             "industry_l1": "能源",
             "current_net_profit_yuan": 5_000_000,
-            "asking_price_yuan": 2_000_000_000,
         },
         {
             "industries_json": ["能源"],
             "min_net_profit_yuan": 100_000_000,
+        },
+    )
+
+    assert "净利润低于买家门槛" in meta["conflicts"]
+    assert meta["state"] == "conflict"
+
+
+def test_asking_price_never_gates_the_enterprise_value_axis() -> None:
+    """Regression: a 10亿 budget for 25% of a 40亿 target is not a conflict.
+
+    报价（交易对价）与买家的估值区间（整体价值）口径不同，混用会把
+    "大标的 + 小比例" 这类国资买家最典型的诉求整片判成硬冲突。
+    """
+    _, _, _, meta = _score_target_against_intent(
+        {
+            "industry_l1": "能源",
+            "listed_status": "unlisted",
+            "asking_price_yuan": 2_000_000_000,
+        },
+        {
+            "industries_json": ["能源"],
             "max_valuation_yuan": 1_500_000_000,
         },
     )
 
-    assert "净利润低于买家门槛" in meta["hard_mismatches"]
-    assert "报价/估值超出买家预算" in meta["hard_mismatches"]
-    capped = _apply_score_caps(score, gaps, meta)
-    assert capped <= 40
+    assert meta["state"] != "conflict"
+    assert meta["conflicts"] == []
+    assert "整体估值" in meta["unknown_dimensions"]
 
 
-def test_score_excluded_industry_sinks_candidate() -> None:
-    from backend.app.api.routes.recommendations import _apply_score_caps
+def test_enterprise_value_axis_uses_market_cap_for_listed_targets() -> None:
+    _, _, _, meta = _score_target_against_intent(
+        {
+            "industry_l1": "能源",
+            "listed_status": "listed",
+            "market_cap_yuan": 9_000_000_000,
+            "asking_price_yuan": 500_000_000,
+        },
+        {
+            "industries_json": ["能源"],
+            "max_valuation_yuan": 5_000_000_000,
+        },
+    )
 
-    score, evidence, gaps, meta = _score_target_against_intent(
+    assert "整体估值超出买家上限" in meta["conflicts"]
+    assert meta["state"] == "conflict"
+
+
+def test_score_excluded_industry_is_a_conflict() -> None:
+    _, _, gaps, meta = _score_target_against_intent(
         {
             "industry_l1": "能源",
             "industry_primary": "风电",
@@ -243,9 +279,38 @@ def test_score_excluded_industry_sinks_candidate() -> None:
     )
 
     assert meta["excluded_hit"] == "风电"
-    capped = _apply_score_caps(score, gaps, meta)
-    assert capped <= 15
+    assert meta["state"] == "conflict"
     assert gaps[0] == "命中排除项：风电"
+
+
+def test_unknown_dimensions_score_optimistically_but_are_tracked() -> None:
+    """信息缺失不再打折沉底：乐观分给满分，缺口只记录，用于二级排序与调研。"""
+    known_score, _, _, known_meta = _score_target_against_intent(
+        {
+            "industry_l1": "制造与工业",
+            "current_net_profit_yuan": 300_000_000,
+            "current_debt_ratio": 40,
+        },
+        {
+            "industries_json": ["制造与工业"],
+            "min_net_profit_yuan": 100_000_000,
+            "max_debt_ratio": 60,
+        },
+    )
+    blank_score, _, _, blank_meta = _score_target_against_intent(
+        {"industry_l1": "制造与工业"},
+        {
+            "industries_json": ["制造与工业"],
+            "min_net_profit_yuan": 100_000_000,
+            "max_debt_ratio": 60,
+        },
+    )
+
+    # 缺数据的标的不出局、不掉分，只是"已知条件数"更少，同分时排在后面。
+    assert blank_meta["state"] == "possible"
+    assert blank_score == known_score
+    assert blank_meta["known_count"] < known_meta["known_count"]
+    assert set(blank_meta["unknown_dimensions"]) == {"净利润", "负债率"}
 
 
 def test_score_multi_industry_secondary_track_and_region_group() -> None:
@@ -263,7 +328,7 @@ def test_score_multi_industry_secondary_track_and_region_group() -> None:
 
     assert "行业命中：信息技术与通信" in evidence
     assert "区域匹配：江苏省苏州市" in evidence
-    assert meta["hard_mismatches"] == []
+    assert meta["conflicts"] == []
     # 次赛道命中 25.5/30 + 区域 12/12 => (25.5+12)/42
     assert 85 <= score <= 95
 
@@ -282,9 +347,10 @@ def test_score_financial_or_semantics_softens_single_miss() -> None:
         },
     )
 
-    # 营收达标、净利润未达标：记 gap 但不算硬不符（买家常用或条件）
+    # 营收达标、净利润未达标：记 gap 但不算冲突（买家常用或条件）
     assert "净利润低于买家门槛" in gaps
-    assert meta["hard_mismatches"] == []
+    assert meta["conflicts"] == []
+    assert meta["state"] != "conflict"
 
 
 def test_rerank_status_without_job_is_not_requested() -> None:
@@ -305,3 +371,88 @@ def test_optional_uuid_accepts_uuid_and_string() -> None:
     assert _optional_uuid(value) == value
     assert _optional_uuid(SELLER_TARGET_ID) == value
     assert _optional_uuid("not-a-uuid") is None
+
+
+def _pool_db(rows: list[dict]) -> object:
+    class _Result:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return rows
+
+    class _Db:
+        statement = ""
+
+        def execute(self, statement, params):
+            self.statement = str(statement)
+            return _Result()
+
+    return _Db()
+
+
+def _target_row(**overrides) -> dict:
+    row = {
+        "seller_target_id": SELLER_TARGET_ID,
+        "seller_target_name": "标的",
+        "industry_l1": "制造与工业",
+        "listed_status": "unlisted",
+        "current_net_profit_yuan": 300_000_000,
+        "risk_summary": None,
+        "gap_summary": None,
+        "is_excluded": False,
+        "max_risk_level": 0,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_candidate_pool_scans_everything_and_reports_the_funnel() -> None:
+    rows = [
+        _target_row(seller_target_name="达标", current_net_profit_yuan=300_000_000),
+        _target_row(seller_target_name="利润不足", current_net_profit_yuan=1_000_000),
+        _target_row(seller_target_name="利润未知", current_net_profit_yuan=None),
+        _target_row(seller_target_name="手工排除", is_excluded=True),
+    ]
+    result = _candidate_targets_for_intent(
+        _pool_db(rows),
+        {
+            "id": BUYER_INTENT_ID,
+            "intent_name": "测试需求",
+            "industries_json": ["制造与工业"],
+            "min_net_profit_yuan": 100_000_000,
+        },
+        20,
+    )
+
+    funnel = result["funnel"]
+    assert funnel["scan_count"] == 4
+    assert funnel["excluded_count"] == 1
+    assert funnel["conflict_count"] == 1  # 利润不足 = 明确冲突，出局
+    assert funnel["eligible_count"] == 2  # 达标 + 利润未知（缺失不出局）
+    names = [candidate["seller_target_name"] for candidate in result["candidates"]]
+    assert names == ["达标", "利润未知"]  # 同为满分，已知条件多的排前面
+    assert result["candidates"][1]["match_state"] == "possible"
+    assert result["candidates"][1]["missing_dimensions"] == ["净利润"]
+
+
+def test_candidate_pool_downweights_critical_risk_without_dropping_it() -> None:
+    rows = [
+        _target_row(seller_target_name="干净"),
+        _target_row(seller_target_name="重大风险", max_risk_level=4),
+    ]
+    result = _candidate_targets_for_intent(
+        _pool_db(rows),
+        {
+            "id": BUYER_INTENT_ID,
+            "intent_name": "测试需求",
+            "industries_json": ["制造与工业"],
+            "min_net_profit_yuan": 100_000_000,
+        },
+        20,
+    )
+
+    by_name = {candidate["seller_target_name"]: candidate for candidate in result["candidates"]}
+    assert len(by_name) == 2
+    assert by_name["重大风险"]["score"] < by_name["干净"]["score"]
+    assert "存在重大风险记录（critical），需人工核对" in by_name["重大风险"]["evidence_json"]["gaps"]

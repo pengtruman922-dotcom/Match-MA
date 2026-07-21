@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { CheckCircle2, ChevronDown, ChevronRight, ExternalLink, Loader2, Plus, RefreshCw } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, ExternalLink, Loader2, Plus, RefreshCw } from 'lucide-react';
 import type { CandidateView, Round } from './timeline';
 
 const PREVIEW_COUNT = 5;
@@ -50,6 +50,7 @@ export default function RoundGroup({
         </div>
         <DeepEvalBadge state={round.deepEval} onRetry={isLatest ? onRetryDeepEval : undefined} />
       </div>
+      <FunnelBar funnel={round.funnel} />
       <div className="divide-y divide-gray-100">
         {visible.map((candidate, index) => (
           <CandidateRow
@@ -69,6 +70,32 @@ export default function RoundGroup({
         >
           {showAll ? '收起' : `展开其余 ${round.candidates.length - PREVIEW_COUNT} 项`}
         </button>
+      )}
+    </div>
+  );
+}
+
+/** 漏斗四数不是调试信息：eligible 远大于深评预算就是"该收紧条件了"的业务信号。 */
+function FunnelBar({ funnel }: { funnel: Round['funnel'] }) {
+  if (!funnel) return null;
+  const overflow = funnel.eligible_count > funnel.deep_eval_count;
+  return (
+    <div
+      className={`flex flex-wrap items-center gap-x-3 gap-y-1 border-b px-4 py-1.5 text-xs ${
+        overflow ? 'border-amber-100 bg-amber-50/60 text-amber-800' : 'border-gray-100 bg-gray-50/60 text-gray-500'
+      }`}
+    >
+      <span>全库扫描 {funnel.scan_count}</span>
+      <span className="text-gray-300">›</span>
+      <span>符合基础条件 {funnel.eligible_count}</span>
+      {funnel.conflict_count > 0 && <span className="text-gray-400">（{funnel.conflict_count} 个条件冲突已排除）</span>}
+      <span className="text-gray-300">›</span>
+      <span>AI 深评 {funnel.deep_eval_count}</span>
+      {overflow && (
+        <span className="inline-flex items-center gap-1 font-medium">
+          <AlertTriangle className="h-3 w-3" />
+          还有 {funnel.eligible_count - funnel.deep_eval_count} 个未做深评，建议补充结构化条件
+        </span>
       )}
     </div>
   );
@@ -160,6 +187,9 @@ function CandidateRow({
         {candidate.gapSummary && <p className="text-amber-700">缺口: {candidate.gapSummary}</p>}
         {candidate.deepEvalRisks && candidate.deepEvalRisks !== '暂无' && (
           <p className="text-amber-600">AI 风险: {candidate.deepEvalRisks}</p>
+        )}
+        {candidate.missingDimensions.length > 0 && (
+          <p className="text-gray-500">待确认: {candidate.missingDimensions.join('、')}</p>
         )}
         {candidate.riskSummary && <p className="text-gray-400">风险: {candidate.riskSummary}</p>}
       </div>
