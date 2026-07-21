@@ -142,3 +142,22 @@ def test_profile_parser_rejects_unknown_duplicate_and_invalid_date_rows() -> Non
     assert any("duplicate_section" in note for note in notes)
     assert any("unknown_section" in note for note in notes)
     assert any("invalid_as_of_date" in note for note in notes)
+
+
+def test_profile_parser_removes_cross_layer_deal_and_team_noise() -> None:
+    sections, notes = normalize_profile_section_items(
+        [
+            {
+                "section_code": "deal_terms",
+                "content_text": "融资阶段为A++轮，融资规模5000万，产能落地可谈，接受迁址",
+            },
+            {
+                "section_code": "tech_team",
+                "content_text": "移液技术100%自研；团队来自中航；股东包括某投资机构",
+            },
+        ]
+    )
+
+    assert sections[0]["content_text"] == "产能落地可谈；接受迁址"
+    assert sections[1]["content_text"] == "移液技术100%自研；团队来自中航"
+    assert len([note for note in notes if "removed_cross_layer_noise" in note]) == 2

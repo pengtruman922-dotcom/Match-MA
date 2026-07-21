@@ -27,6 +27,7 @@ from backend.app.jobs.handlers import (
     _parse_source_context,
     _validate_extractor_output,
 )
+from backend.app.jobs.handlers.business_update import _verified_document_excerpt
 from backend.app.jobs.queue import JobClaim
 from backend.app.services.attachment_storage import decode_text_bytes, is_text_upload, safe_upload_filename
 
@@ -656,6 +657,24 @@ def test_business_update_extracts_profile_sections_outside_seller_columns() -> N
         "business_product",
         "tech_team",
     ]
+
+
+def test_attachment_profile_excerpt_tolerates_ocr_whitespace_only() -> None:
+    excerpt = _verified_document_excerpt(
+        "移液技术 100%自研，产品出货量 6000 台国内第一",
+        attachment_evidence="其中移液技术 100% 自研。产品出货量 6000 台国内第一。",
+        fallback_excerpt="fallback",
+    )
+
+    # Punctuation still differs, so this is not accepted as a verbatim-like quote.
+    assert excerpt == "fallback"
+
+    excerpt = _verified_document_excerpt(
+        "移液技术 100%自研",
+        attachment_evidence="其中移液技术 100% 自研，团队稳定",
+        fallback_excerpt="fallback",
+    )
+    assert excerpt == "移液技术 100%自研"
 
 
 def test_business_update_rejects_empty_actions_instead_of_reporting_success() -> None:

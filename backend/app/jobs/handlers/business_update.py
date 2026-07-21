@@ -1278,10 +1278,10 @@ def _persist_document_profile_sections(
             if confidence is None and action_confidence is not None:
                 confidence = float(action_confidence)
             proposed_excerpt = str(section.get("source_excerpt") or "").strip()
-            source_excerpt = (
-                proposed_excerpt[:2000]
-                if proposed_excerpt and proposed_excerpt in attachment_evidence
-                else fallback_excerpt
+            source_excerpt = _verified_document_excerpt(
+                proposed_excerpt,
+                attachment_evidence=attachment_evidence,
+                fallback_excerpt=fallback_excerpt,
             )
             upsert_profile_section(
                 db,
@@ -1300,6 +1300,24 @@ def _persist_document_profile_sections(
             )
             written += 1
     return written
+
+
+def _verified_document_excerpt(
+    proposed_excerpt: str,
+    *,
+    attachment_evidence: str,
+    fallback_excerpt: str | None,
+) -> str | None:
+    """Accept an attachment quote when it differs only in OCR whitespace."""
+    if not proposed_excerpt:
+        return fallback_excerpt
+    if proposed_excerpt in attachment_evidence:
+        return proposed_excerpt[:2000]
+    compact_proposed = re.sub(r"\s+", "", proposed_excerpt)
+    compact_evidence = re.sub(r"\s+", "", attachment_evidence)
+    if compact_proposed and compact_proposed in compact_evidence:
+        return proposed_excerpt[:2000]
+    return fallback_excerpt
 
 AUTO_APPLY_ACTION_TYPE_ORDER = {
     "seller_fact_update": 0,

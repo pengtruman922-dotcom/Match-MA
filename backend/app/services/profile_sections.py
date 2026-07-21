@@ -10,6 +10,7 @@ sliced off the front of one long document.
 from __future__ import annotations
 
 from datetime import date
+import re
 from typing import Any
 from uuid import UUID
 
@@ -37,6 +38,9 @@ PROFILE_SECTION_LABELS = {code: label for code, label, _ in PROFILE_SECTIONS}
 PROFILE_SECTION_BUDGETS = {code: budget for code, _, budget in PROFILE_SECTIONS}
 
 PROFILE_TOTAL_BUDGET = sum(PROFILE_SECTION_BUDGETS.values())
+
+PROFILE_CLAUSE_SPLIT_PATTERN = re.compile(r"[，,；;。\n]+")
+DEAL_TERMS_NOISE_TERMS = ("融资阶段", "融资规模", "融资金额", "估值", "营业收入", "营收", "净利润")
 
 INFO_STATUS_LABELS = {
     "not_found": "（暂无信息）",
@@ -72,6 +76,12 @@ def normalize_profile_section_items(values: Any) -> tuple[list[dict[str, Any]], 
         if not content_text:
             notes.append(f"profile_sections[{index}]:empty_content:{section_code}")
             continue
+        cleaned_content = _clean_profile_content(section_code, content_text)
+        if cleaned_content != content_text:
+            notes.append(f"profile_sections[{index}]:removed_cross_layer_noise:{section_code}")
+        if not cleaned_content:
+            notes.append(f"profile_sections[{index}]:empty_after_cleaning:{section_code}")
+            continue
         confidence_value = value.get("confidence")
         try:
             confidence = max(0.0, min(float(confidence_value), 1.0))
@@ -89,7 +99,7 @@ def normalize_profile_section_items(values: Any) -> tuple[list[dict[str, Any]], 
         normalized.append(
             {
                 "section_code": section_code,
-                "content_text": content_text[:2000],
+                "content_text": cleaned_content[:2000],
                 "source_excerpt": str(value.get("source_excerpt") or "").strip()[:2000] or None,
                 "as_of_date": as_of_date,
                 "confidence": confidence,
@@ -97,6 +107,31 @@ def normalize_profile_section_items(values: Any) -> tuple[list[dict[str, Any]], 
         )
         seen.add(section_code)
     return normalized, notes
+
+
+def _clean_profile_content(section_code: str, content_text: str) -> str:
+    """Keep profile sections qualitative and dimension-specific.
+
+    The model occasionally repeats financing/valuation facts in deal_terms or
+    treats financial investors as members of the operating team. Those facts
+    remain in the canonical/document layer and should not pollute semantic
+    matching dimensions.
+    """
+    if section_code not in {"deal_terms", "tech_team"}:
+        return content_text
+    kept: list[str] = []
+    for clause in PROFILE_CLAUSE_SPLIT_PATTERN.split(content_text):
+        clause = clause.strip()
+        if not clause:
+            continue
+        if section_code == "deal_terms" and any(term in clause for term in DEAL_TERMS_NOISE_TERMS):
+            continue
+        if section_code == "tech_team" and "股东" in clause and not any(
+            term in clause for term in ("团队", "创始人", "高管", "管理层")
+        ):
+            continue
+        kept.append(clause)
+    return "；".join(kept)
 
 
 def load_profile_sections(
