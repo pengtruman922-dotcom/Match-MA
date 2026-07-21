@@ -1,6 +1,7 @@
 ﻿from uuid import UUID
 
 from backend.app.api.routes.recommendations import (
+    DEEP_EVAL_CANDIDATE_LIMIT,
     _build_recommendation_rerank_status,
     _candidate_targets_for_intent,
     _enqueue_recommendation_rerank_job,
@@ -134,7 +135,7 @@ def test_frontend_candidate_fields_include_rule_and_deep_eval_breakdown() -> Non
     assert "reranked" in candidate["display_badges"]
 
 
-def test_deep_eval_job_uses_llm_queue_and_caps_candidates_at_twenty() -> None:
+def test_deep_eval_job_uses_llm_queue_and_caps_candidates_at_the_budget() -> None:
     class _Result:
         def mappings(self):
             return self
@@ -157,13 +158,13 @@ def test_deep_eval_job_uses_llm_queue_and_caps_candidates_at_twenty() -> None:
         session_id=UUID("00000000-0000-0000-0000-000000000098"),
         mode="buyer_to_target",
         anchor={"id": BUYER_INTENT_ID, "intent_name": "测试需求"},
-        candidates=[{"rank": index + 1} for index in range(25)],
+        candidates=[{"rank": index + 1} for index in range(80)],
     )
 
     assert str(job_id).endswith("0099")
     assert "'recommendation_deep_eval'" in db.statement
     assert "'llm'" in db.statement
-    assert len(db.params["payload_json"]["candidates"]) == 20
+    assert len(db.params["payload_json"]["candidates"]) == DEEP_EVAL_CANDIDATE_LIMIT
 
 
 def test_score_target_against_intent_uses_expanded_buyer_filters() -> None:

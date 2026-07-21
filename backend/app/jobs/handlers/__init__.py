@@ -198,6 +198,8 @@ from backend.app.jobs.handlers.recommendation import (
     DEEP_EVAL_GRADES,
     DEEP_EVAL_PROFILE_CHARS,
     _apply_deep_eval_results_to_candidates,
+    _get_deep_eval_node_config,
+    _interleave_shards,
     _apply_rerank_results_to_candidates,
     _build_fallback_recommendation_report_markdown,
     _build_recommendation_report_context,

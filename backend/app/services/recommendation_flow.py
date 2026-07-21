@@ -18,7 +18,8 @@ from backend.app.api.routes.utils import (
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.services.industry_taxonomy import classify_terms, load_term_levels
 
-DEEP_EVAL_CANDIDATE_LIMIT = 20
+# 分片并发后单请求不再承担全部候选，预算可以放宽到三片（见 handlers/recommendation.py）。
+DEEP_EVAL_CANDIDATE_LIMIT = 45
 
 
 def _build_recommendation_session_bundle(

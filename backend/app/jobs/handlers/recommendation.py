@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from uuid import UUID
 
@@ -219,7 +220,7 @@ def _handle_recommendation_rerank(db: Session, job: JobClaim) -> dict[str, objec
         raise ValueError("Recommendation deep-eval job requires mode buyer_to_target or target_to_buyer.")
     if not isinstance(candidates, list) or len(candidates) < 2:
         raise ValueError("Recommendation deep-eval job requires at least two candidates.")
-    deep_eval_config = _get_default_node_config(db, "recommendation_deep_eval")
+    deep_eval_config = _get_deep_eval_node_config(db, mode)
     return _run_recommendation_deep_eval(
         db,
         job,
@@ -233,6 +234,49 @@ def _handle_recommendation_rerank(db: Session, job: JobClaim) -> dict[str, objec
 DEEP_EVAL_GRADES = ("A", "B", "C")
 
 DEEP_EVAL_PROFILE_CHARS = 1200
+
+# 单次评估、一套绝对标准；分片只切候选清单，不切上下文与评级标准。
+# 交错分片（round-robin）保证片间若出现标准漂移，漂移方向与候选质量无关。
+DEEP_EVAL_SHARD_SIZE = 15
+
+DEEP_EVAL_MAX_WORKERS = 4
+
+# 方向专属 prompt 节点；未在设置页建号时回落到共用节点，行为与改造前一致。
+DEEP_EVAL_NODE_BY_MODE = {
+    "buyer_to_target": "recommendation_deep_eval_to_target",
+    "target_to_buyer": "recommendation_deep_eval_to_buyer",
+}
+
+DEEP_EVAL_FALLBACK_NODE = "recommendation_deep_eval"
+
+
+def _get_deep_eval_node_config(db: Session, mode: str) -> dict[str, Any]:
+    node_name = DEEP_EVAL_NODE_BY_MODE.get(mode)
+    if node_name:
+        try:
+            return _get_default_node_config(db, node_name)
+        except ValueError:
+            # 方向节点未配置：回落共用节点，两个方向共享同一套提示词。
+            pass
+    return _get_default_node_config(db, DEEP_EVAL_FALLBACK_NODE)
+
+
+def _deep_eval_candidate_id(candidate: dict[str, Any], mode: str) -> str | None:
+    """The entity the deep eval is judging, used to write results back."""
+    key = "seller_target_id" if mode == "buyer_to_target" else "buyer_intent_id"
+    value = candidate.get(key)
+    return str(value) if value else None
+
+
+def _interleave_shards(items: list[Any], shard_size: int) -> list[list[Any]]:
+    """Split by round-robin so每片的候选质量分布一致（不按分数切段）。"""
+    if len(items) <= shard_size:
+        return [items] if items else []
+    shard_count = (len(items) + shard_size - 1) // shard_size
+    shards: list[list[Any]] = [[] for _ in range(shard_count)]
+    for position, item in enumerate(items):
+        shards[position % shard_count].append(item)
+    return [shard for shard in shards if shard]
 
 def _run_recommendation_deep_eval(
     db: Session,
@@ -269,48 +313,55 @@ def _run_recommendation_deep_eval(
     for index, candidate in enumerate(candidates):
         if not isinstance(candidate, dict):
             continue
+        candidate_id = _deep_eval_candidate_id(candidate, mode)
+        if not candidate_id:
+            continue
         evidence_json = candidate.get("evidence_json") if isinstance(candidate.get("evidence_json"), dict) else {}
         candidate_items.append(
             {
+                "candidate_id": candidate_id,
+                # index 仅为兼容尚未改用 candidate_id 的历史提示词而保留，
+                # 校验时优先认 candidate_id；提示词更新后这个字段就没人读了。
                 "index": index,
                 "name": candidate.get("seller_target_name") if mode == "buyer_to_target" else candidate.get("buyer_intent_name"),
                 "rule_score": candidate.get("score"),
                 "recommendation_level": candidate.get("recommendation_level"),
+                "match_state": candidate.get("match_state"),
+                "matched_scenarios": candidate.get("matched_scenarios") or [],
                 "matches": evidence_json.get("matches") or [],
                 "gaps": evidence_json.get("gaps") or [],
+                "missing_dimensions": candidate.get("missing_dimensions") or [],
                 "profile": (documents[index]["text"] if index < len(documents) else "")[:DEEP_EVAL_PROFILE_CHARS],
             }
         )
+    if not candidate_items:
+        raise ValueError("Deep eval requires candidates carrying an entity id.")
 
-    prompt_messages = _render_prompt_messages(
-        node_config,
-        {
-            "mode": mode,
-            "anchor_context": anchor_context,
-            "candidates_json": json.dumps(candidate_items, ensure_ascii=False, default=str),
-        },
-    )
+    shards = _interleave_shards(candidate_items, DEEP_EVAL_SHARD_SIZE)
+    # 快照：意向/画像/prompt/模型/输入 ID 集合，供日后解释"当时为何这样推荐"
     input_json = {
         "session_id": str(session_id),
         "mode": mode,
         "engine": "llm_deep_eval",
-        "candidate_count": len(candidates),
+        "candidate_count": len(candidate_items),
+        "shard_count": len(shards),
         "anchor_context_preview": anchor_context[:1000],
+        "snapshot": {
+            "node_name": node_config.get("node_name"),
+            "prompt_version": node_config.get("prompt_version"),
+            "model_name": str(node_config["model_name"]),
+            "candidate_ids": [item["candidate_id"] for item in candidate_items],
+            "profile_chars": DEEP_EVAL_PROFILE_CHARS,
+        },
     }
 
     started = time.perf_counter()
     try:
-        llm_result = call_openai_compatible_chat(
-            base_url=node_config["base_url"],
-            api_key_secret_ref=node_config["api_key_secret_ref"],
-            api_key_encrypted=node_config.get("api_key_encrypted"),
-            model_name=node_config["model_name"],
-            messages=prompt_messages,
-            temperature=node_config["temperature"],
-            top_p=node_config["top_p"],
-            max_tokens=node_config["max_tokens"],
-            timeout_seconds=node_config["timeout_seconds"] or 180,
-            response_format=node_config["response_format"],
+        shard_outcomes = _run_deep_eval_shards(
+            node_config=node_config,
+            mode=mode,
+            anchor_context=anchor_context,
+            shards=shards,
         )
     except LlmCallError as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
@@ -329,10 +380,22 @@ def _run_recommendation_deep_eval(
         )
         raise
 
-    results = _validate_deep_eval_results(llm_result.parsed_output_json, len(candidates))
+    results: list[dict[str, Any]] = []
+    total_tokens = 0
+    for outcome in shard_outcomes:
+        results.extend(outcome["results"])
+        total_tokens += outcome["total_tokens"] or 0
+    latency_ms = int((time.perf_counter() - started) * 1000)
+
+    valid_ids = {item["candidate_id"] for item in candidate_items}
+    covered_ids = {result["candidate_id"] for result in results}
+    if not covered_ids:
+        raise ValueError("Deep eval returned no usable result for any candidate.")
+
     reranked_candidates = _apply_deep_eval_results_to_candidates(
         candidates=candidates,
         results=results,
+        mode=mode,
         model_name=str(node_config["model_name"]),
     )
     _insert_rerank_trace(
@@ -345,11 +408,20 @@ def _run_recommendation_deep_eval(
         parsed_output_json={
             "engine": "llm_deep_eval",
             "model": str(node_config["model_name"]),
+            "shards": [
+                {
+                    "candidate_ids": outcome["candidate_ids"],
+                    "retried": outcome["retried"],
+                    "grade_counts": outcome["grade_counts"],
+                }
+                for outcome in shard_outcomes
+            ],
+            "uncovered_candidate_ids": sorted(valid_ids - covered_ids),
             "results": results,
             "reranked_candidates": reranked_candidates,
         },
-        latency_ms=llm_result.latency_ms,
-        total_tokens=llm_result.total_tokens,
+        latency_ms=latency_ms,
+        total_tokens=total_tokens or None,
     )
     _insert_recommendation_rerank_message(
         db,
@@ -364,59 +436,192 @@ def _run_recommendation_deep_eval(
         "session_id": str(session_id),
         "engine": "llm_deep_eval",
         "model_name": str(node_config["model_name"]),
-        "candidate_count": len(candidates),
+        "candidate_count": len(candidate_items),
+        "shard_count": len(shards),
+        "evaluated_count": len(covered_ids),
+        "uncovered_count": len(valid_ids - covered_ids),
         "reranked_count": len(reranked_candidates),
         "trace_created": True,
     }
 
+def _run_deep_eval_shards(
+    *,
+    node_config: dict[str, Any],
+    mode: str,
+    anchor_context: str,
+    shards: list[list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Evaluate every shard against the same prompt and grading standard.
+
+    Shards run concurrently and never touch the database — the session is not
+    thread safe, so all reads happen before this call and all writes after it.
+    """
+    if len(shards) == 1:
+        return [_run_single_deep_eval_shard(node_config, mode, anchor_context, shards[0])]
+    with ThreadPoolExecutor(max_workers=min(DEEP_EVAL_MAX_WORKERS, len(shards))) as executor:
+        futures = [
+            executor.submit(_run_single_deep_eval_shard, node_config, mode, anchor_context, shard)
+            for shard in shards
+        ]
+        return [future.result() for future in futures]
+
+def _run_single_deep_eval_shard(
+    node_config: dict[str, Any],
+    mode: str,
+    anchor_context: str,
+    shard: list[dict[str, Any]],
+) -> dict[str, Any]:
+    expected_ids = [item["candidate_id"] for item in shard]
+    results, problems, total_tokens = _call_deep_eval(node_config, mode, anchor_context, shard)
+
+    retried = False
+    covered = {result["candidate_id"] for result in results}
+    missing = [item for item in shard if item["candidate_id"] not in covered]
+    if missing:
+        # 定向重发：只补没拿到合法结果的候选，不整批重来。
+        retried = True
+        retry_results, _, retry_tokens = _call_deep_eval(
+            node_config,
+            mode,
+            anchor_context,
+            missing,
+            correction_notes=problems,
+        )
+        total_tokens += retry_tokens
+        results.extend(result for result in retry_results if result["candidate_id"] not in covered)
+
+    grade_counts: dict[str, int] = {}
+    for result in results:
+        grade_counts[result["grade"]] = grade_counts.get(result["grade"], 0) + 1
+    return {
+        "candidate_ids": expected_ids,
+        "results": results,
+        "retried": retried,
+        "total_tokens": total_tokens,
+        "grade_counts": grade_counts,
+    }
+
+def _call_deep_eval(
+    node_config: dict[str, Any],
+    mode: str,
+    anchor_context: str,
+    items: list[dict[str, Any]],
+    *,
+    correction_notes: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], list[str], int]:
+    variables = {
+        "mode": mode,
+        "anchor_context": anchor_context,
+        "candidates_json": json.dumps(items, ensure_ascii=False, default=str),
+    }
+    prompt_messages = _render_prompt_messages(node_config, variables)
+    if correction_notes:
+        prompt_messages = [
+            *prompt_messages,
+            {
+                "role": "user",
+                "content": (
+                    "上一次输出存在以下问题，请只针对本次给出的候选重新输出，"
+                    "candidate_id 必须原样引用：\n" + "\n".join(correction_notes[:10])
+                ),
+            },
+        ]
+    llm_result = call_openai_compatible_chat(
+        base_url=node_config["base_url"],
+        api_key_secret_ref=node_config["api_key_secret_ref"],
+        api_key_encrypted=node_config.get("api_key_encrypted"),
+        model_name=node_config["model_name"],
+        messages=prompt_messages,
+        temperature=node_config["temperature"],
+        top_p=node_config["top_p"],
+        max_tokens=node_config["max_tokens"],
+        timeout_seconds=node_config["timeout_seconds"] or 180,
+        response_format=node_config["response_format"],
+    )
+    results, problems = _validate_deep_eval_results(
+        llm_result.parsed_output_json,
+        {item["candidate_id"] for item in items},
+        index_fallback={
+            item["index"]: item["candidate_id"] for item in items if item.get("index") is not None
+        },
+    )
+    return results, problems, llm_result.total_tokens or 0
+
 def _validate_deep_eval_results(
     parsed_output_json: dict[str, Any] | None,
-    candidate_count: int,
-) -> list[dict[str, Any]]:
+    expected_ids: set[str],
+    *,
+    index_fallback: dict[int, str] | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Keep only results that name a candidate from this shard, exactly once.
+
+    Validation is done in code rather than via json_schema: the LLM client only
+    supports response_format=json_object, and OpenAI-compatible endpoints vary
+    in whether they honour a schema at all.
+    """
+    problems: list[str] = []
     if not isinstance(parsed_output_json, dict):
-        raise ValueError("Deep eval output is not a JSON object.")
+        return [], ["输出不是 JSON 对象"]
     raw_results = parsed_output_json.get("results")
     if not isinstance(raw_results, list) or not raw_results:
-        raise ValueError("Deep eval output has no results array.")
+        return [], ["输出缺少 results 数组"]
+
     results: list[dict[str, Any]] = []
-    seen: set[int] = set()
+    seen: set[str] = set()
     for item in raw_results:
         if not isinstance(item, dict):
+            problems.append("results 中存在非对象元素")
             continue
-        try:
-            index = int(item.get("index"))
-        except (TypeError, ValueError):
+        candidate_id = str(item.get("candidate_id") or "").strip()
+        if candidate_id not in expected_ids and index_fallback:
+            # 历史提示词只回 index；按本片的 index→id 映射补上，避免旧提示词全军覆没。
+            try:
+                candidate_id = index_fallback.get(int(item.get("index")), "")
+            except (TypeError, ValueError):
+                candidate_id = ""
+        if candidate_id not in expected_ids:
+            problems.append(f"candidate_id 不属于本次候选集合：{str(item.get('candidate_id'))[:60] or '(空)'}")
             continue
-        if index < 0 or index >= candidate_count or index in seen:
+        if candidate_id in seen:
+            problems.append(f"candidate_id 重复：{candidate_id}")
             continue
         grade = str(item.get("grade") or "").strip().upper()
         if grade not in DEEP_EVAL_GRADES:
+            problems.append(f"{candidate_id} 的 grade 非法：{item.get('grade')!r}")
             grade = "C"
-        seen.add(index)
+        seen.add(candidate_id)
+        scenarios = item.get("matched_scenarios")
         results.append(
             {
-                "index": index,
+                "candidate_id": candidate_id,
                 "grade": grade,
+                "matched_scenarios": [str(value) for value in scenarios] if isinstance(scenarios, list) else [],
                 "reason": str(item.get("reason") or "").strip() or None,
                 "risks": str(item.get("risks") or "").strip() or None,
                 "info_gaps": str(item.get("info_gaps") or "").strip() or None,
             }
         )
-    if len(results) != candidate_count:
-        raise ValueError(
-            f"Deep eval output must cover every candidate exactly once: expected {candidate_count}, got {len(results)}."
-        )
-    return results
+    for missing_id in sorted(expected_ids - seen):
+        problems.append(f"缺少 candidate_id 的评估结果：{missing_id}")
+    return results, problems
 
 def _apply_deep_eval_results_to_candidates(
     *,
     candidates: list[Any],
     results: list[dict[str, Any]],
+    mode: str,
     model_name: str,
 ) -> list[dict[str, Any]]:
     normalized = [dict(candidate) for candidate in candidates if isinstance(candidate, dict)]
-    result_by_index = {item["index"]: item for item in results}
-    order_by_index = {item["index"]: position for position, item in enumerate(results)}
+    result_by_id = {item["candidate_id"]: item for item in results}
+    order_by_id = {item["candidate_id"]: position for position, item in enumerate(results)}
+    result_by_index: dict[int, dict[str, Any]] = {}
+    order_by_index: dict[int, int] = {}
+    for index, candidate in enumerate(normalized):
+        candidate_id = _deep_eval_candidate_id(candidate, mode)
+        if candidate_id and candidate_id in result_by_id:
+            result_by_index[index] = result_by_id[candidate_id]
+            order_by_index[index] = order_by_id[candidate_id]
 
     for index, candidate in enumerate(normalized):
         result = result_by_index.get(index)
@@ -427,6 +632,7 @@ def _apply_deep_eval_results_to_candidates(
             "reason": result.get("reason"),
             "risks": result.get("risks"),
             "info_gaps": result.get("info_gaps"),
+            "matched_scenarios": result.get("matched_scenarios") or [],
             "model": model_name,
         }
         evidence_json = candidate.get("evidence_json") if isinstance(candidate.get("evidence_json"), dict) else {}
@@ -440,6 +646,7 @@ def _apply_deep_eval_results_to_candidates(
             },
         }
 
+    # 评级是绝对标准，跨片无需归一化：先按档、再按片内顺序、最后按规则分。
     grade_rank = {"A": 0, "B": 1, "C": 2}
     decorated = []
     for index, candidate in enumerate(normalized):
