@@ -1,4 +1,7 @@
 import type {
+  ProfileSection,
+  ProfileSectionsResponse,
+  ProfileSectionWrite,
   SellerTarget,
   SellerTargetBulkDeleteResponse,
   SellerTargetCreate,
@@ -405,6 +408,16 @@ export const updateLogs = {
     method: 'POST',
     body: JSON.stringify(data),
   }),
+};
+
+export const profileSections = {
+  list: (entityType: 'seller_target' | 'buyer_intent', entityId: string) =>
+    apiRequest<ProfileSectionsResponse>(`/profile-sections/${entityType}/${entityId}`),
+  write: (entityType: 'seller_target' | 'buyer_intent', entityId: string, data: ProfileSectionWrite) =>
+    apiRequest<ProfileSection>(`/profile-sections/${entityType}/${entityId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
 };
 
 export const globalSearch = {

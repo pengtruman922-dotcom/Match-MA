@@ -14,6 +14,15 @@ from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
 from backend.app.jobs.queue import JobClaim
 
+from backend.app.services.profile_sections import (
+    PROFILE_SECTIONS,
+    PROFILE_TOTAL_BUDGET,
+    buyer_party_fact_block,
+    load_profile_sections,
+    profile_coverage,
+    render_profile_text,
+)
+
 from backend.app.jobs.handlers.common import (
     _get_default_node_config,
     _json_dumps,
@@ -261,6 +270,32 @@ def _get_deep_eval_node_config(db: Session, mode: str) -> dict[str, Any]:
     return _get_default_node_config(db, DEEP_EVAL_FALLBACK_NODE)
 
 
+def _candidate_profile_fields(
+    sections: dict[str, dict[str, Any]] | None,
+    fallback_document: str,
+) -> dict[str, Any]:
+    """Prefer the section profile; fall back to the search doc when empty.
+
+    The section text is qualitative by construction, so it gets the larger
+    per-section budget. The search-doc fallback keeps the old cap: it is mostly
+    a restatement of structured fields the candidate payload already carries,
+    and widening it would buy noise rather than new information.
+    """
+    profile_text = render_profile_text(sections)
+    if profile_text:
+        coverage = profile_coverage(sections)
+        return {
+            "profile": profile_text[:PROFILE_TOTAL_BUDGET],
+            "profile_source": "profile_sections",
+            "profile_missing_sections": coverage["missing_sections"],
+        }
+    return {
+        "profile": fallback_document[:DEEP_EVAL_PROFILE_CHARS],
+        "profile_source": "search_doc",
+        "profile_missing_sections": [label for _, label, _ in PROFILE_SECTIONS],
+    }
+
+
 def _deep_eval_candidate_id(candidate: dict[str, Any], mode: str) -> str | None:
     """The entity the deep eval is judging, used to write results back."""
     key = "seller_target_id" if mode == "buyer_to_target" else "buyer_intent_id"
@@ -288,8 +323,10 @@ def _run_recommendation_deep_eval(
     candidates: list[Any],
     node_config: dict[str, Any],
 ) -> dict[str, object]:
-    anchor = job.payload_json.get("anchor") if isinstance(job.payload_json.get("anchor"), dict) else {}
+    raw_anchor = job.payload_json.get("anchor") if isinstance(job.payload_json.get("anchor"), dict) else {}
+    anchor = raw_anchor
     if mode == "buyer_to_target":
+        # 买家身份不进提示词正文；party_id 仅用于取"买方自身情况"事实块。
         anchor = {key: value for key, value in anchor.items() if key not in {"buyer_party_id", "buyer_name"}}
     anchor_doc_mode = "target_to_buyer" if mode == "buyer_to_target" else "buyer_to_target"
     anchor_doc_key = "buyer_intent_id" if mode == "buyer_to_target" else "seller_target_id"
@@ -298,17 +335,42 @@ def _run_recommendation_deep_eval(
         anchor_doc_text = _get_candidate_search_doc_text(
             db, mode=anchor_doc_mode, candidate={anchor_doc_key: anchor.get("id")}
         )
+    # 协同性类诉求（"与现有业务有关联性""强链补链"）判不了，除非知道买家自己在做什么。
+    # 只在买家为锚点的方向注入，反向的候选买家仍保持匿名。
+    party_facts = ""
+    anchor_profile_text = ""
+    if mode == "buyer_to_target":
+        party_facts = buyer_party_fact_block(db, raw_anchor.get("buyer_party_id"))
+    else:
+        anchor_sections = load_profile_sections(
+            db, entity_type="seller_target", entity_ids=[anchor.get("id")] if anchor.get("id") else []
+        ).get(str(anchor.get("id") or ""))
+        anchor_profile_text = render_profile_text(anchor_sections)
+
     anchor_context = "\n\n".join(
         part
         for part in (
             query or None,
             json.dumps(anchor, ensure_ascii=False, default=str) if anchor else None,
+            anchor_profile_text or None,
             anchor_doc_text,
+            party_facts or None,
         )
         if part
     )
 
     documents = _build_rerank_documents(db, mode=mode, candidates=candidates)
+    candidate_entity_type = "seller_target" if mode == "buyer_to_target" else "buyer_intent"
+    candidate_ids = [
+        _deep_eval_candidate_id(candidate, mode)
+        for candidate in candidates
+        if isinstance(candidate, dict)
+    ]
+    profiles_by_entity = load_profile_sections(
+        db,
+        entity_type=candidate_entity_type,
+        entity_ids=[value for value in candidate_ids if value],
+    )
     candidate_items: list[dict[str, Any]] = []
     for index, candidate in enumerate(candidates):
         if not isinstance(candidate, dict):
@@ -331,7 +393,10 @@ def _run_recommendation_deep_eval(
                 "matches": evidence_json.get("matches") or [],
                 "gaps": evidence_json.get("gaps") or [],
                 "missing_dimensions": candidate.get("missing_dimensions") or [],
-                "profile": (documents[index]["text"] if index < len(documents) else "")[:DEEP_EVAL_PROFILE_CHARS],
+                **_candidate_profile_fields(
+                    profiles_by_entity.get(candidate_id),
+                    documents[index]["text"] if index < len(documents) else "",
+                ),
             }
         )
     if not candidate_items:

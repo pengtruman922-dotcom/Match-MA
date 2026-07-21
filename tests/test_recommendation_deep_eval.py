@@ -234,3 +234,29 @@ def test_shard_does_not_retry_when_every_candidate_is_covered(monkeypatch) -> No
 
     assert len(calls) == 1
     assert outcome["retried"] is False
+
+
+def test_candidate_profile_prefers_sections_over_the_search_doc() -> None:
+    from backend.app.jobs.handlers.recommendation import _candidate_profile_fields
+
+    sections = {
+        "chain_position": {"section_code": "chain_position", "info_status": "filled", "content_text": "细分领域前三，链主地位"},
+    }
+
+    fields = _candidate_profile_fields(sections, "结构化摘要 / 财务 / 交易 / 风险……")
+
+    assert fields["profile_source"] == "profile_sections"
+    assert "链主地位" in fields["profile"]
+    assert "结构化摘要" not in fields["profile"]
+    # 未填的栏目直接成为调研任务清单
+    assert "业务与产品" in fields["profile_missing_sections"]
+
+
+def test_candidate_profile_falls_back_to_the_search_doc_when_no_profile_exists() -> None:
+    from backend.app.jobs.handlers.recommendation import _candidate_profile_fields
+
+    fields = _candidate_profile_fields(None, "标的：某某\n行业大类：能源")
+
+    assert fields["profile_source"] == "search_doc"
+    assert "行业大类：能源" in fields["profile"]
+    assert len(fields["profile_missing_sections"]) == 6

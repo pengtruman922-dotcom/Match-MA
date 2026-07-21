@@ -1773,3 +1773,43 @@ export interface GlobalSearchResponse {
   groups: GlobalSearchGroup[];
   total_count: number;
 }
+
+export interface ProfileSection {
+  id: string;
+  entity_type: 'seller_target' | 'buyer_intent';
+  entity_id: string;
+  section_code: string;
+  section_label: string;
+  info_status: 'filled' | 'not_found' | 'not_applicable';
+  content_text: string | null;
+  source_type: string | null;
+  source_url: string | null;
+  source_title: string | null;
+  source_excerpt: string | null;
+  as_of_date: string | null;
+  confidence: number | null;
+  review_status: string;
+  updated_at: string;
+}
+
+export interface ProfileSectionCatalogEntry {
+  code: string;
+  label: string;
+}
+
+export interface ProfileSectionsResponse {
+  entity_type: string;
+  entity_id: string;
+  sections: ProfileSection[];
+  coverage: { filled_sections: string[]; missing_sections: string[] };
+  section_catalog: ProfileSectionCatalogEntry[];
+}
+
+export interface ProfileSectionWrite {
+  section_code: string;
+  info_status?: 'filled' | 'not_found' | 'not_applicable';
+  content_text?: string | null;
+  source_type?: string | null;
+  source_url?: string | null;
+  as_of_date?: string | null;
+}

@@ -25,6 +25,7 @@ import type {
 } from '../types/api';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
 import UpdateHistory from '../components/UpdateHistory';
+import ProfileSectionsPanel from '../features/targets/ProfileSectionsPanel';
 import {
   sellerTargetDisplayStatus,
   sellerTargetDisplayStatusClass,
@@ -34,7 +35,7 @@ import {
 } from '../lib/sellerTargetStatus';
 import { valueLabel } from '../lib/fieldLabels';
 
-type Tab = 'info' | 'attachments' | 'relations' | 'history';
+type Tab = 'info' | 'profile' | 'attachments' | 'relations' | 'history';
 
 export default function TargetDetail() {
   const { id } = useParams<{ id: string }>();
@@ -42,7 +43,7 @@ export default function TargetDetail() {
   const [searchParams] = useSearchParams();
   const [target, setTarget] = useState<SellerTarget | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<Tab>(() => searchParams.get('tab') === 'history' ? 'history' : 'info');
+  const [activeTab, setActiveTab] = useState<Tab>(() => (['history', 'profile'] as const).find((tab) => tab === searchParams.get('tab')) || 'info');
   const [relationItems, setRelationItems] = useState<BuyerSellerRelation[]>([]);
   const [relationEvents, setRelationEvents] = useState<RelationEvent[]>([]);
   const [followUps, setFollowUps] = useState<TargetFollowUp[]>([]);
@@ -140,6 +141,7 @@ export default function TargetDetail() {
 
   const tabs: { key: Tab; label: string }[] = [
     { key: 'info', label: '基本信息' },
+    { key: 'profile', label: '匹配画像' },
     { key: 'attachments', label: '附件与证据' },
     { key: 'relations', label: '跟进记录' },
     { key: 'history', label: '更新记录' },
@@ -238,6 +240,7 @@ export default function TargetDetail() {
             </div>
             <div className="p-5">
               {activeTab === 'info' && <InfoTab target={target} />}
+              {activeTab === 'profile' && <ProfileSectionsPanel entityType="seller_target" entityId={target.id} />}
               {activeTab === 'attachments' && <AttachmentsTab targetId={target.id} />}
               {activeTab === 'relations' && (
                 <FollowUpsTab
