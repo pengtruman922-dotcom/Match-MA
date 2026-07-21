@@ -71,6 +71,7 @@ from backend.app.jobs.handlers.common import (
 from backend.app.jobs.handlers.seller_target_parse import (
     _mark_bound_seller_targets_complete_after_business_update_parse,
     _mark_bound_seller_targets_parse_failed_if_final_attempt,
+    _normalize_seller_target_industry_changes,
 )
 from backend.app.jobs.handlers.traces import (
     _insert_llm_trace,
@@ -181,7 +182,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
 
     parsed_output_json = llm_result.parsed_output_json
     schema_validation_json = _validate_extractor_output(parsed_output_json)
-    actions = _normalize_actions(parsed_output_json, business_update_for_normalization)
+    actions = _normalize_actions(parsed_output_json, business_update_for_normalization, db=db)
     actions = _attach_image_evidence_to_actions(db, job, actions, image_context["summaries"])
     schema_error = (
         schema_validation_json.get("error")
@@ -629,6 +630,8 @@ def _canonicalize_extractor_action(action: dict[str, Any]) -> tuple[dict[str, An
 def _normalize_actions(
     parsed_output_json: dict[str, Any] | None,
     business_update: dict[str, Any],
+    *,
+    db: Session | None = None,
 ) -> list[dict[str, Any]]:
     if not parsed_output_json or not isinstance(parsed_output_json.get("actions"), list):
         return []
@@ -653,6 +656,10 @@ def _normalize_actions(
             proposed_changes,
         )
         normalization_notes = [*shape_notes, *normalization_notes]
+        if action_type == "seller_fact_update" and db is not None:
+            normalization_notes.extend(
+                _normalize_seller_target_industry_changes(db, normalized_changes)
+            )
         if action_type == "buyer_intent_update":
             update_notes = _normalize_buyer_intent_action_changes(
                 normalized_changes,

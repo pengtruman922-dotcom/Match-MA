@@ -764,10 +764,12 @@ def _get_seller_target_snapshot_or_404(db: Session, seller_target_id: UUID) -> d
         text(
             """
             select
-              target_name, industry_primary, industry_secondary,
+              target_name, target_subject_name,
+              industry_l1, industry_l2, industry_primary, industry_secondary,
               headquarter_province, headquarter_city, listed_status,
               current_revenue_yuan, current_net_profit_yuan, valuation_yuan,
-              current_total_profit_yuan, asking_price_yuan, pe_ratio,
+              current_total_profit_yuan, financial_period_label,
+              valuation_date, asking_price_yuan, asking_price_date, pe_ratio,
               is_for_sale, can_control, can_consolidate, accepts_minority_investment,
               transfer_ratio_min, transfer_ratio_max, transfer_ratio_text,
               transfer_flexibility_type,
@@ -918,6 +920,8 @@ def _allowed_seller_target_changes(changes: dict[str, Any]) -> dict[str, Any]:
     allowed_fields = {
         "target_name",
         "target_subject_name",
+        "industry_l1",
+        "industry_l2",
         "industry_primary",
         "industry_secondary",
         "headquarter_province",

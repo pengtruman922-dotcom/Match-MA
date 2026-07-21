@@ -9,6 +9,24 @@ from sqlalchemy.orm import Session
 
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 
+DEFAULT_L1_TERMS = (
+    "能源",
+    "金融",
+    "信息技术与通信",
+    "房地产与建筑",
+    "交通与物流",
+    "文化与传媒",
+    "制造与工业",
+    "商贸与消费",
+    "医药与健康",
+    "教育与科研",
+    "环保与公用事业",
+    "农林牧渔",
+    "军工",
+    "商务与专业服务",
+    "其他",
+)
+
 FALLBACK_L1 = "其他"
 
 
@@ -32,7 +50,10 @@ def list_l1_terms(db: Session) -> list[str]:
 
 def industry_l1_prompt_list(db: Session) -> str:
     terms = list_l1_terms(db)
-    return "、".join(terms) if terms else FALLBACK_L1
+    # A missing seed must not silently collapse the model's closed taxonomy to
+    # only "其他". Keep the canonical 15-way taxonomy available to parsers;
+    # normal write-time resolution still validates values against the database.
+    return "、".join(terms or DEFAULT_L1_TERMS)
 
 
 def resolve_l1(db: Session, term: Any) -> str | None:

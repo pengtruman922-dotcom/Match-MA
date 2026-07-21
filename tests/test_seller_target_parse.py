@@ -86,6 +86,25 @@ def test_seller_target_parse_supports_rollback_fields() -> None:
     assert SELLER_TARGET_PARSE_FIELDS <= ROLLBACK_FIELDS_BY_ENTITY["seller_target"]
 
 
+def test_extracted_action_keeps_normalized_industry_fields() -> None:
+    changes, notes = _normalize_change_fields(
+        {
+            "industry_l1": "医药与健康",
+            "industry_l2": "医疗器械",
+            "industry_primary": "医药健康",
+        },
+        allowed_fields=SELLER_TARGET_CHANGE_FIELDS,
+        aliases=SELLER_TARGET_FIELD_ALIASES,
+        enum_fields=SELLER_TARGET_ENUM_FIELDS,
+    )
+
+    assert changes == {
+        "industry_l1": "医药与健康",
+        "industry_l2": "医疗器械",
+        "industry_primary": "医药健康",
+    }
+    assert notes == []
+
 
 def test_seller_target_parse_success_promotes_parsing_target_status() -> None:
     changes = _seller_target_changes_with_post_parse_status(

@@ -1,5 +1,8 @@
-from backend.app.services.industry_taxonomy import classify_terms
-
+from backend.app.services.industry_taxonomy import (
+    DEFAULT_L1_TERMS,
+    classify_terms,
+    industry_l1_prompt_list,
+)
 
 TERM_LEVELS = {
     "能源": ("l1", "能源"),
@@ -39,3 +42,20 @@ def test_classify_terms_deduplicates_and_ignores_blanks() -> None:
 
 def test_classify_terms_tolerates_non_list_input() -> None:
     assert classify_terms(None, TERM_LEVELS) == {"l1": [], "l2": [], "unresolved": []}
+
+
+class _EmptyScalars:
+    def scalars(self):
+        return self
+
+    def all(self) -> list[str]:
+        return []
+
+
+class _EmptyIndustryDb:
+    def execute(self, _statement, _params):
+        return _EmptyScalars()
+
+
+def test_prompt_list_uses_full_canonical_fallback_when_dictionary_is_empty() -> None:
+    assert industry_l1_prompt_list(_EmptyIndustryDb()) == "、".join(DEFAULT_L1_TERMS)

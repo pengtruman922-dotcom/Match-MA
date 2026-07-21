@@ -74,6 +74,8 @@ MONEY_UNIT_PATTERN = re.compile(
 SELLER_TARGET_CHANGE_FIELDS = {
     "target_name",
     "target_subject_name",
+    "industry_l1",
+    "industry_l2",
     "industry_primary",
     "industry_secondary",
     "headquarter_province",

@@ -57,6 +57,36 @@ class _SqlCaptureDb:
         return _SqlCaptureResult()
 
 
+class _IndustryLookupResult:
+    def __init__(self, value=None, values=None) -> None:
+        self.value = value
+        self.values = values or []
+
+    def scalar_one_or_none(self):
+        return self.value
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self.values
+
+
+class _IndustryLookupDb:
+    TERM_TO_L1 = {
+        "医药与健康": "医药与健康",
+        "医疗器械": "医药与健康",
+    }
+
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        if "select l1_name" in sql:
+            return _IndustryLookupResult(self.TERM_TO_L1.get((params or {}).get("term")))
+        if "and level = 'l2'" in sql:
+            return _IndustryLookupResult(values=["医疗器械"])
+        raise AssertionError(f"Unexpected industry query: {sql}")
+
+
 def test_attachment_mock_text_prefers_job_payload() -> None:
     job = JobClaim(
         id=JOB_ID,
@@ -549,6 +579,39 @@ def test_business_update_accepts_unambiguous_action_shape_aliases() -> None:
     assert actions[0]["target_entity_id"] == SELLER_TARGET_ID
     assert actions[0]["proposed_changes_json"]["listed_status"] == "listed"
     assert actions[0]["normalization_notes"][:3] == validation["accepted_aliases"]["0"]
+
+
+def test_business_update_derives_and_keeps_seller_industry_dimensions() -> None:
+    actions = _normalize_actions(
+        {
+            "actions": [
+                {
+                    "action_type": "seller_fact_update",
+                    "target_entity_type": "seller_target",
+                    "target_entity_id": str(SELLER_TARGET_ID),
+                    "proposed_changes_json": {
+                        "industry_primary": "医药与健康",
+                        "industry_secondary": "医疗器械",
+                    },
+                }
+            ]
+        },
+        {
+            "bound_seller_target_ids_json": [str(SELLER_TARGET_ID)],
+            "bound_buyer_party_ids_json": [],
+            "bound_buyer_intent_ids_json": [],
+            "attachment_evidence_ids": [],
+            "image_evidence_attachment_ids": [],
+        },
+        db=_IndustryLookupDb(),
+    )
+
+    assert actions[0]["proposed_changes_json"] == {
+        "industry_l1": "医药与健康",
+        "industry_l2": "医疗器械",
+        "industry_primary": "医药与健康",
+        "industry_secondary": "医疗器械",
+    }
 
 
 def test_business_update_rejects_empty_actions_instead_of_reporting_success() -> None:
