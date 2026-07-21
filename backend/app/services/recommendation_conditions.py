@@ -247,7 +247,41 @@ def _normalized_overrides(overrides: Any) -> dict[str, Any]:
         "removed_fields": list(data.get("removed_fields") or []),
         "extra_excluded_industries": list(data.get("extra_excluded_industries") or []),
         "semantic_preferences": list(data.get("semantic_preferences") or []),
+        # 方案停用只作用于本次会话，不改买家需求本身
+        "disabled_scenarios": [str(value) for value in (data.get("disabled_scenarios") or [])],
     }
+
+
+def normalize_scenario_fields(raw: Any) -> dict[str, Any]:
+    """Coerce a scenario's own condition values through the shared whitelist.
+
+    Scenarios reuse the override field vocabulary so a value written by the
+    intake parser, by the chat parser or by hand all land in the same shape.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    fields: dict[str, Any] = {}
+    for field, value in raw.items():
+        kind = OVERRIDE_FIELD_KINDS.get(field)
+        if kind is None:
+            continue
+        coerced = _coerce_value(kind, value)
+        if coerced is not None:
+            fields[field] = coerced
+    return fields
+
+
+def merge_scenario_into_anchor(anchor: dict[str, Any], scenario_fields: Any) -> dict[str, Any]:
+    """Global intent conditions AND the scenario's own conditions.
+
+    Scenarios are self-contained rather than inheriting from each other, but
+    they always combine with the intent-level fields, so editing a global
+    exclusion cannot drift between scenarios.
+    """
+    merged = dict(anchor)
+    for field, value in (scenario_fields or {}).items():
+        merged[field] = value
+    return merged
 
 
 def merge_condition_overrides(existing: Any, parse_result: dict[str, Any]) -> dict[str, Any]:
@@ -398,6 +432,19 @@ def apply_condition_actions(overrides: Any, actions: list[dict[str, Any]]) -> tu
             if value in merged["semantic_preferences"]:
                 merged["semantic_preferences"].remove(value)
                 parts.append("移除偏好")
+        elif op in {"disable_scenario", "enable_scenario"}:
+            # 方案级操作走同一套 condition_actions 词汇，不另开机制。
+            scenario_id = str(action.get("scenario_id") or action.get("value") or "").strip()
+            if not scenario_id:
+                continue
+            label = str(action.get("label") or "").strip() or "方案"
+            if op == "disable_scenario":
+                if scenario_id not in merged["disabled_scenarios"]:
+                    merged["disabled_scenarios"].append(scenario_id)
+                    parts.append(f"停用{label}")
+            elif scenario_id in merged["disabled_scenarios"]:
+                merged["disabled_scenarios"].remove(scenario_id)
+                parts.append(f"恢复{label}")
     return merged, "、".join(parts)
 
 

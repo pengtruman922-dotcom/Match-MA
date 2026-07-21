@@ -374,20 +374,29 @@ def test_optional_uuid_accepts_uuid_and_string() -> None:
     assert _optional_uuid("not-a-uuid") is None
 
 
-def _pool_db(rows: list[dict]) -> object:
+def _pool_db(rows: list[dict], scenarios: list[dict] | None = None) -> object:
+    """Stub that answers by query shape: candidate pool vs scenario lookup."""
+
     class _Result:
+        def __init__(self, payload):
+            self._payload = payload
+
         def mappings(self):
             return self
 
         def all(self):
-            return rows
+            return self._payload
 
     class _Db:
         statement = ""
 
-        def execute(self, statement, params):
+        def execute(self, statement, params=None):
             self.statement = str(statement)
-            return _Result()
+            if "buyer_intent_scenario" in self.statement:
+                return _Result(scenarios or [])
+            if "industry_taxonomy" in self.statement:
+                return _Result([])
+            return _Result(rows)
 
     return _Db()
 
@@ -568,3 +577,103 @@ def test_net_margin_and_ps_are_derived_from_revenue_and_valuation() -> None:
     assert "净利率达到门槛" in evidence
     assert "PS 未超过上限" in evidence
     assert meta["state"] == "compatible"
+
+
+def _scenario_row(scenario_id: str, label: str, **fields) -> dict:
+    return {"id": scenario_id, "label": label, "sort_order": 0, "fields_json": fields}
+
+
+SCENARIO_LISTED = "aaaaaaaa-0000-0000-0000-000000000001"
+SCENARIO_UNLISTED = "aaaaaaaa-0000-0000-0000-000000000002"
+
+
+def test_scenarios_are_or_ed_so_one_branch_is_enough() -> None:
+    """荆州式或条件：低 PE 走一套，高 PE 但可控股走另一套，命中任一即可。"""
+    rows = [
+        _target_row(seller_target_name="低PE", pe_ratio=8),
+        _target_row(seller_target_name="高PE但可控股", pe_ratio=25, can_control="yes"),
+        _target_row(seller_target_name="两套都不满足", pe_ratio=50, can_control="yes"),
+    ]
+    scenarios = [
+        _scenario_row(SCENARIO_LISTED, "低估值方案", max_pe=10),
+        _scenario_row(SCENARIO_UNLISTED, "控股方案", max_pe=30, requires_control="yes"),
+    ]
+
+    result = _candidate_targets_for_intent(
+        _pool_db(rows, scenarios),
+        {"id": BUYER_INTENT_ID, "intent_name": "医药并购", "industries_json": ["制造与工业"]},
+        20,
+    )
+
+    names = [candidate["seller_target_name"] for candidate in result["candidates"]]
+    assert "低PE" in names
+    assert "高PE但可控股" in names
+    # PE 是 gate 维度，两套方案都明确不满足 => 出局
+    assert "两套都不满足" not in names
+    assert result["funnel"]["scenario_count"] == 2
+    assert result["funnel"]["conflict_count"] == 1
+
+
+def test_candidate_records_its_best_and_additional_scenarios() -> None:
+    rows = [
+        _target_row(
+            seller_target_name="两套都满足",
+            pe_ratio=8,
+            can_control="yes",
+            current_net_profit_yuan=50_000_000,
+        )
+    ]
+    scenarios = [
+        _scenario_row(SCENARIO_LISTED, "宽方案", max_pe=30),
+        _scenario_row(SCENARIO_UNLISTED, "窄方案", max_pe=10, requires_control="yes"),
+    ]
+
+    result = _candidate_targets_for_intent(
+        _pool_db(rows, scenarios),
+        {"id": BUYER_INTENT_ID, "intent_name": "需求", "industries_json": ["制造与工业"]},
+        20,
+    )
+
+    candidate = result["candidates"][0]
+    assert sorted(candidate["matched_scenarios"]) == sorted([SCENARIO_LISTED, SCENARIO_UNLISTED])
+    assert set(candidate["matched_scenario_labels"]) == {"宽方案", "窄方案"}
+    assert candidate["best_scenario_label"] in {"宽方案", "窄方案"}
+
+
+def test_intent_without_scenarios_keeps_the_single_pass_behaviour() -> None:
+    """存量意向零方案行：与多方案上线前逐字节一致。"""
+    rows = [_target_row(seller_target_name="达标")]
+
+    result = _candidate_targets_for_intent(
+        _pool_db(rows, scenarios=[]),
+        {
+            "id": BUYER_INTENT_ID,
+            "intent_name": "需求",
+            "industries_json": ["制造与工业"],
+            "min_net_profit_yuan": 100_000_000,
+        },
+        20,
+    )
+
+    assert result["scenarios"] == []
+    assert "scenario_count" not in result["funnel"]
+    assert result["candidates"][0]["matched_scenarios"] == []
+
+
+def test_disabled_scenario_is_skipped_for_this_session_only() -> None:
+    rows = [_target_row(seller_target_name="仅命中控股方案", pe_ratio=25, can_control="yes")]
+    scenarios = [
+        _scenario_row(SCENARIO_LISTED, "低估值方案", max_pe=10),
+        _scenario_row(SCENARIO_UNLISTED, "控股方案", max_pe=30, requires_control="yes"),
+    ]
+    intent = {"id": BUYER_INTENT_ID, "intent_name": "需求", "industries_json": ["制造与工业"]}
+
+    kept = _candidate_targets_for_intent(_pool_db(rows, scenarios), intent, 20)
+    dropped = _candidate_targets_for_intent(
+        _pool_db(rows, scenarios), intent, 20, {SCENARIO_UNLISTED}
+    )
+
+    assert [c["seller_target_name"] for c in kept["candidates"]] == ["仅命中控股方案"]
+    # 停用控股方案后只剩低估值方案，该标的 PE 超限 => 本轮出局；买家需求本身不受影响
+    assert dropped["candidates"] == []
+    assert dropped["funnel"]["scenario_count"] == 1

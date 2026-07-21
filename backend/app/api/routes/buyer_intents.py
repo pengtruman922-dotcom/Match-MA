@@ -26,6 +26,7 @@ from backend.app.api.routes.utils import (
     write_action_logs_for_diff,
 )
 from backend.app.db import get_db
+from backend.app.services.recommendation_conditions import normalize_scenario_fields
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 
 router = APIRouter(prefix="/buyer-intents", tags=["buyer-intents"])
@@ -1473,3 +1474,181 @@ def _truncate_text(value: Any, max_length: int) -> str | None:
     if len(text_value) <= max_length:
         return text_value
     return text_value[: max_length - 1] + "…"
+
+
+class BuyerIntentScenarioOut(BaseModel):
+    id: UUID
+    buyer_intent_id: UUID
+    label: str
+    sort_order: int
+    active: bool
+    fields_json: dict[str, Any]
+    source: str
+    created_at: str
+    updated_at: str
+
+
+class BuyerIntentScenarioWrite(BaseModel):
+    label: str = Field(min_length=1, max_length=120)
+    sort_order: int = 0
+    active: bool = True
+    # 只接受条件白名单里的字段；越权字段在 normalize_scenario_fields 中被丢弃。
+    fields_json: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.get("/{buyer_intent_id}/scenarios", response_model=list[BuyerIntentScenarioOut])
+def list_buyer_intent_scenarios(
+    buyer_intent_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    _get_buyer_intent_or_404(db, buyer_intent_id)
+    ensure_entity_visible(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
+    rows = db.execute(
+        text(
+            """
+            select
+              id, buyer_intent_id, label, sort_order, active, fields_json, source,
+              created_at::text as created_at, updated_at::text as updated_at
+            from buyer_intent_scenario
+            where buyer_intent_id = :buyer_intent_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            order by sort_order, created_at
+            """
+        ),
+        {
+            "buyer_intent_id": buyer_intent_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+@router.post(
+    "/{buyer_intent_id}/scenarios",
+    response_model=BuyerIntentScenarioOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_buyer_intent_scenario(
+    buyer_intent_id: UUID,
+    payload: BuyerIntentScenarioWrite,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    _get_buyer_intent_or_404(db, buyer_intent_id)
+    ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
+    row = db.execute(
+        text(
+            """
+            insert into buyer_intent_scenario (
+              team_id, workspace_id, buyer_intent_id, label, sort_order, active,
+              fields_json, source, created_by, updated_by
+            )
+            values (
+              :team_id, :workspace_id, :buyer_intent_id, :label, :sort_order, :active,
+              :fields_json, 'manual', :user_id, :user_id
+            )
+            returning
+              id, buyer_intent_id, label, sort_order, active, fields_json, source,
+              created_at::text as created_at, updated_at::text as updated_at
+            """
+        ).bindparams(bindparam("fields_json", type_=JSONB)),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "buyer_intent_id": buyer_intent_id,
+            "label": payload.label,
+            "sort_order": payload.sort_order,
+            "active": payload.active,
+            "fields_json": normalize_scenario_fields(payload.fields_json),
+            "user_id": current_user.user_id,
+        },
+    ).mappings().one()
+    db.commit()
+    return dict(row)
+
+
+@router.patch("/{buyer_intent_id}/scenarios/{scenario_id}", response_model=BuyerIntentScenarioOut)
+def update_buyer_intent_scenario(
+    buyer_intent_id: UUID,
+    scenario_id: UUID,
+    payload: BuyerIntentScenarioWrite,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    _get_buyer_intent_or_404(db, buyer_intent_id)
+    ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
+    row = db.execute(
+        text(
+            """
+            update buyer_intent_scenario
+            set label = :label,
+                sort_order = :sort_order,
+                active = :active,
+                fields_json = :fields_json,
+                updated_at = now(),
+                updated_by = :user_id
+            where id = :scenario_id
+              and buyer_intent_id = :buyer_intent_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            returning
+              id, buyer_intent_id, label, sort_order, active, fields_json, source,
+              created_at::text as created_at, updated_at::text as updated_at
+            """
+        ).bindparams(bindparam("fields_json", type_=JSONB)),
+        {
+            "scenario_id": scenario_id,
+            "buyer_intent_id": buyer_intent_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "label": payload.label,
+            "sort_order": payload.sort_order,
+            "active": payload.active,
+            "fields_json": normalize_scenario_fields(payload.fields_json),
+            "user_id": current_user.user_id,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scenario not found.")
+    db.commit()
+    return dict(row)
+
+
+@router.delete(
+    "/{buyer_intent_id}/scenarios/{scenario_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_buyer_intent_scenario(
+    buyer_intent_id: UUID,
+    scenario_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> None:
+    _get_buyer_intent_or_404(db, buyer_intent_id)
+    ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
+    db.execute(
+        text(
+            """
+            update buyer_intent_scenario
+            set deleted_at = now(), updated_by = :user_id
+            where id = :scenario_id
+              and buyer_intent_id = :buyer_intent_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ),
+        {
+            "scenario_id": scenario_id,
+            "buyer_intent_id": buyer_intent_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "user_id": current_user.user_id,
+        },
+    )
+    db.commit()

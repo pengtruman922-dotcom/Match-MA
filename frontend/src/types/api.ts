@@ -1494,6 +1494,10 @@ export interface RecommendationCandidate {
   known_count?: number;
   /** 本次意向引用的维度里，该候选尚缺的部分——调研任务的输入 */
   missing_dimensions?: string[];
+  best_scenario_id?: string | null;
+  best_scenario_label?: string | null;
+  matched_scenarios?: string[];
+  matched_scenario_labels?: string[];
   deep_eval?: {
     grade: string;
     reason?: string | null;
@@ -1504,9 +1508,18 @@ export interface RecommendationCandidate {
 }
 
 export interface RecommendationConditionAction {
-  op: 'remove_field' | 'disable_field' | 'remove_exclusion' | 'remove_preference' | 'clear_all';
+  op:
+    | 'remove_field'
+    | 'disable_field'
+    | 'remove_exclusion'
+    | 'remove_preference'
+    | 'clear_all'
+    | 'disable_scenario'
+    | 'enable_scenario';
   field?: string;
   value?: string;
+  scenario_id?: string;
+  label?: string;
 }
 
 export interface RecommendationConditionOverrides {
@@ -1514,6 +1527,7 @@ export interface RecommendationConditionOverrides {
   removed_fields: string[];
   extra_excluded_industries: string[];
   semantic_preferences: string[];
+  disabled_scenarios?: string[];
 }
 
 export interface RecommendationConversation {
@@ -1572,6 +1586,8 @@ export interface RecommendationRerankJob {
 }
 
 export interface RecommendationFunnel {
+  scenario_count?: number;
+  eligible_by_scenario?: Record<string, number>;
   scan_count: number;
   excluded_count: number;
   conflict_count: number;
@@ -1580,12 +1596,30 @@ export interface RecommendationFunnel {
   display_count: number;
 }
 
+export interface RecommendationScenarioRef {
+  id: string;
+  label: string;
+}
+
+export interface BuyerIntentScenario {
+  id: string;
+  buyer_intent_id: string;
+  label: string;
+  sort_order: number;
+  active: boolean;
+  fields_json: Record<string, unknown>;
+  source: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface RecommendationCandidateResponse {
   session_id: string | null;
   mode: 'buyer_to_target' | 'target_to_buyer';
   candidates: RecommendationCandidate[];
   conversation?: RecommendationConversation;
   funnel?: RecommendationFunnel | null;
+  scenarios?: RecommendationScenarioRef[];
   debug: Record<string, unknown>;
 }
 

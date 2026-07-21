@@ -17,6 +17,10 @@ from backend.app.api.routes.utils import (
 )
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.services.industry_taxonomy import classify_terms, load_term_levels
+from backend.app.services.recommendation_conditions import (
+    merge_scenario_into_anchor,
+    normalize_scenario_fields,
+)
 
 # 分片并发后单请求不再承担全部候选，预算可以放宽到三片（见 handlers/recommendation.py）。
 DEEP_EVAL_CANDIDATE_LIMIT = 45
@@ -1136,7 +1140,8 @@ def _candidate_targets_for_intent(
     db: Session,
     intent: dict[str, Any],
     limit: int,
-) -> list[dict[str, Any]]:
+    disabled_scenario_ids: set[str] | None = None,
+) -> dict[str, Any]:
     rows = db.execute(
         text(
             """
@@ -1208,6 +1213,8 @@ def _candidate_targets_for_intent(
     ).mappings().all()
 
     intent = _with_resolved_exclusions(db, intent)
+    scenarios = _effective_scenarios(db, intent, disabled_scenario_ids)
+    scenario_ids = [scenario["id"] for scenario in scenarios if scenario["id"]]
     candidates: list[dict[str, Any]] = []
     excluded_count = 0
     conflict_count = 0
@@ -1217,7 +1224,7 @@ def _candidate_targets_for_intent(
         if item.pop("is_excluded"):
             excluded_count += 1
             continue
-        rule_score, evidence, gaps, meta = _score_target_against_intent(item, intent)
+        rule_score, evidence, gaps, meta = _score_against_scenarios(item, intent, scenarios)
         if meta["state"] == CANDIDATE_STATE_CONFLICT:
             conflict_count += 1
             continue
@@ -1244,7 +1251,15 @@ def _candidate_targets_for_intent(
             )
         )
 
-    return _rank_and_report(candidates, limit=limit, scan_count=len(rows), excluded_count=excluded_count, conflict_count=conflict_count)
+    return _rank_and_report(
+        candidates,
+        limit=limit,
+        scan_count=len(rows),
+        excluded_count=excluded_count,
+        conflict_count=conflict_count,
+        scenario_ids=scenario_ids,
+        scenarios=scenarios,
+    )
 
 
 def _candidate_intents_for_target(
@@ -1352,6 +1367,123 @@ def _candidate_intents_for_target(
     return _rank_and_report(candidates, limit=limit, scan_count=len(rows), excluded_count=excluded_count, conflict_count=conflict_count)
 
 
+# 每个方案的保底名额：宽方案不得把用户亲口写的窄方案整条挤出深评队列。
+SCENARIO_MIN_QUOTA = 5
+
+
+def _load_intent_scenarios(db: Session, buyer_intent_id: Any) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select id, label, sort_order, fields_json
+            from buyer_intent_scenario
+            where buyer_intent_id = :buyer_intent_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+              and active = true
+            order by sort_order, created_at
+            """
+        ),
+        {
+            "buyer_intent_id": buyer_intent_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [
+        {
+            "id": str(row["id"]),
+            "label": row["label"],
+            "fields": normalize_scenario_fields(row["fields_json"]),
+        }
+        for row in rows
+    ]
+
+
+def _effective_scenarios(
+    db: Session,
+    intent: dict[str, Any],
+    disabled_scenario_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Scenarios to screen against, or a single implicit one.
+
+    An intent with no scenario rows keeps exactly the old behaviour: one pass
+    over its own fields. That is what makes the multi-scenario rollout additive
+    for every intent already in the library.
+    """
+    intent_id = intent.get("id")
+    scenarios = _load_intent_scenarios(db, intent_id) if intent_id else []
+    if disabled_scenario_ids:
+        scenarios = [item for item in scenarios if item["id"] not in disabled_scenario_ids]
+    if not scenarios:
+        return [{"id": None, "label": None, "fields": {}}]
+    return scenarios
+
+
+def _score_against_scenarios(
+    target: dict[str, Any],
+    intent: dict[str, Any],
+    scenarios: list[dict[str, Any]],
+) -> tuple[float, list[str], list[str], dict[str, Any]]:
+    """Score a candidate against every scenario and keep its best outcome.
+
+    A candidate stays in the pool when at least one scenario does not conflict;
+    the score reported is the best one, and every non-conflicting scenario is
+    recorded so the card can show "最佳命中 / 同时满足".
+    """
+    best: tuple[float, list[str], list[str], dict[str, Any]] | None = None
+    matched: list[str] = []
+    matched_labels: list[str] = []
+    for scenario in scenarios:
+        merged_intent = (
+            merge_scenario_into_anchor(intent, scenario["fields"]) if scenario["fields"] else intent
+        )
+        score, evidence, gaps, meta = _score_target_against_intent(target, merged_intent)
+        meta = {**meta, "scenario_id": scenario["id"], "scenario_label": scenario["label"]}
+        if meta["state"] != CANDIDATE_STATE_CONFLICT and scenario["id"]:
+            matched.append(scenario["id"])
+            if scenario["label"]:
+                matched_labels.append(scenario["label"])
+        if best is None:
+            best = (score, evidence, gaps, meta)
+            continue
+        best_is_conflict = best[3]["state"] == CANDIDATE_STATE_CONFLICT
+        this_is_conflict = meta["state"] == CANDIDATE_STATE_CONFLICT
+        if best_is_conflict and not this_is_conflict:
+            best = (score, evidence, gaps, meta)
+        elif best_is_conflict == this_is_conflict and score > best[0]:
+            best = (score, evidence, gaps, meta)
+
+    score, evidence, gaps, meta = best  # type: ignore[misc]
+    meta = {**meta, "matched_scenarios": matched, "matched_scenario_labels": matched_labels}
+    return score, evidence, gaps, meta
+
+
+def _select_with_scenario_quota(
+    candidates: list[dict[str, Any]],
+    scenario_ids: list[str],
+    keep: int,
+) -> list[dict[str, Any]]:
+    """Reserve a floor for every scenario before filling by global rank."""
+    if len(candidates) <= keep or len(scenario_ids) <= 1:
+        return candidates[:keep]
+    chosen: dict[int, dict[str, Any]] = {}
+    for scenario_id in scenario_ids:
+        taken = 0
+        for index, candidate in enumerate(candidates):
+            if taken >= SCENARIO_MIN_QUOTA:
+                break
+            if scenario_id in (candidate.get("matched_scenarios") or []):
+                chosen[index] = candidate
+                taken += 1
+    for index, candidate in enumerate(candidates):
+        if len(chosen) >= keep:
+            break
+        chosen.setdefault(index, candidate)
+    return [candidates[index] for index in sorted(chosen)[:keep]]
+
+
 def _with_resolved_exclusions(db: Session, intent: dict[str, Any]) -> dict[str, Any]:
     """Attach dictionary-resolved exclusion levels once per request.
 
@@ -1398,6 +1530,10 @@ def _build_candidate_row(
         "match_state": meta["state"],
         "known_count": meta["known_count"],
         "missing_dimensions": meta["unknown_dimensions"],
+        "best_scenario_id": meta.get("scenario_id"),
+        "best_scenario_label": meta.get("scenario_label"),
+        "matched_scenarios": meta.get("matched_scenarios") or [],
+        "matched_scenario_labels": meta.get("matched_scenario_labels") or [],
         "match_summary": _summary_text(evidence, fallback="具备初步匹配基础"),
         "gap_summary": _summary_text(gaps) if gaps else None,
         "risk_summary": risk_summary,
@@ -1425,28 +1561,45 @@ def _rank_and_report(
     scan_count: int,
     excluded_count: int,
     conflict_count: int,
+    scenario_ids: list[str] | None = None,
+    scenarios: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Order the eligible pool and report the funnel so nothing truncates silently.
 
     Primary key is the optimistic score; ties break on how many dimensions were
     actually known, so a fully-verified target outranks a blank one that only
-    scored well because unknowns were assumed to match.
+    scored well because unknowns were assumed to match. When the buyer wrote
+    several scenarios, each one keeps a floor of the deep-eval budget.
     """
     candidates.sort(key=lambda candidate: (candidate["score"], candidate["known_count"]), reverse=True)
     keep = max(limit, DEEP_EVAL_CANDIDATE_LIMIT)
-    selected = candidates[:keep]
+    selected = _select_with_scenario_quota(candidates, scenario_ids or [], keep)
     for index, candidate in enumerate(selected, start=1):
         candidate["rank"] = index
+    funnel = {
+        "scan_count": scan_count,
+        "excluded_count": excluded_count,
+        "conflict_count": conflict_count,
+        "eligible_count": len(candidates),
+        "deep_eval_count": min(len(selected), DEEP_EVAL_CANDIDATE_LIMIT),
+        "display_count": len(selected),
+    }
+    if scenario_ids:
+        funnel["scenario_count"] = len(scenario_ids)
+        funnel["eligible_by_scenario"] = {
+            scenario_id: sum(
+                1 for candidate in candidates if scenario_id in (candidate.get("matched_scenarios") or [])
+            )
+            for scenario_id in scenario_ids
+        }
     return {
         "candidates": selected,
-        "funnel": {
-            "scan_count": scan_count,
-            "excluded_count": excluded_count,
-            "conflict_count": conflict_count,
-            "eligible_count": len(candidates),
-            "deep_eval_count": min(len(selected), DEEP_EVAL_CANDIDATE_LIMIT),
-            "display_count": len(selected),
-        },
+        "funnel": funnel,
+        "scenarios": [
+            {"id": scenario["id"], "label": scenario["label"]}
+            for scenario in (scenarios or [])
+            if scenario.get("id")
+        ],
     }
 
 

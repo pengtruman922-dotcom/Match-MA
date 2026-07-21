@@ -411,6 +411,7 @@ export default function Recommend() {
           overrides={overrides}
           interactive={Boolean(sessionId)}
           busy={generating}
+          scenarios={latestRoundEntry(timeline)?.round.scenarios || []}
           onAction={(actions) => void runRound(undefined, actions)}
         />
       </div>

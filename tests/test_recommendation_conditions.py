@@ -167,7 +167,13 @@ def test_apply_condition_actions_panel_operations() -> None:
     assert result["semantic_preferences"] == []
 
     result, summary = apply_condition_actions(overrides, [{"op": "clear_all"}])
-    assert result == {"fields": {}, "removed_fields": [], "extra_excluded_industries": [], "semantic_preferences": []}
+    assert result == {
+        "fields": {},
+        "removed_fields": [],
+        "extra_excluded_industries": [],
+        "semantic_preferences": [],
+        "disabled_scenarios": [],
+    }
     assert summary == "恢复默认条件"
 
 
@@ -185,3 +191,63 @@ def test_describe_condition_ops_readable() -> None:
     assert "净利润下限=1500万" in text
     assert "取消PE上限" in text
     assert "排除风电" in text
+
+
+def test_scenario_actions_share_the_condition_action_vocabulary() -> None:
+    from backend.app.services.recommendation_conditions import apply_condition_actions
+
+    disabled, summary = apply_condition_actions(
+        {},
+        [{"op": "disable_scenario", "scenario_id": "s-1", "label": "上市方案"}],
+    )
+    assert disabled["disabled_scenarios"] == ["s-1"]
+    assert "停用上市方案" in summary
+
+    restored, summary = apply_condition_actions(
+        disabled,
+        [{"op": "enable_scenario", "scenario_id": "s-1", "label": "上市方案"}],
+    )
+    assert restored["disabled_scenarios"] == []
+    assert "恢复上市方案" in summary
+
+
+def test_clear_all_also_restores_disabled_scenarios() -> None:
+    from backend.app.services.recommendation_conditions import apply_condition_actions
+
+    result, _ = apply_condition_actions(
+        {"disabled_scenarios": ["s-1", "s-2"]},
+        [{"op": "clear_all"}],
+    )
+
+    assert result["disabled_scenarios"] == []
+
+
+def test_scenario_fields_go_through_the_shared_whitelist() -> None:
+    from backend.app.services.recommendation_conditions import normalize_scenario_fields
+
+    fields = normalize_scenario_fields(
+        {
+            "max_pe": "13",
+            "requires_control": "YES",
+            "industries_json": "医药与健康",
+            "seller_target_id": "越权字段",
+            "min_net_profit_yuan": "not-a-number",
+        }
+    )
+
+    assert fields == {"max_pe": 13.0, "requires_control": "yes", "industries_json": ["医药与健康"]}
+
+
+def test_merge_scenario_into_anchor_keeps_global_conditions() -> None:
+    from backend.app.services.recommendation_conditions import merge_scenario_into_anchor
+
+    merged = merge_scenario_into_anchor(
+        {"industries_json": ["医药与健康"], "excluded_industries_json": ["纯贸易"], "max_pe": 20},
+        {"max_pe": 13, "requires_control": "yes"},
+    )
+
+    # 全局排除项不因方案而丢失；方案自己的值覆盖同名全局值
+    assert merged["excluded_industries_json"] == ["纯贸易"]
+    assert merged["industries_json"] == ["医药与健康"]
+    assert merged["max_pe"] == 13
+    assert merged["requires_control"] == "yes"

@@ -1,5 +1,11 @@
-import { X } from 'lucide-react';
-import type { BuyerIntent, RecommendationConditionAction, RecommendationConditionOverrides, SellerTarget } from '../../types/api';
+import { Check, X } from 'lucide-react';
+import type {
+  BuyerIntent,
+  RecommendationConditionAction,
+  RecommendationConditionOverrides,
+  RecommendationScenarioRef,
+  SellerTarget,
+} from '../../types/api';
 import { valueLabel } from '../../lib/fieldLabels';
 import { formatCompactMoney } from '../../lib/format';
 
@@ -92,6 +98,7 @@ export function normalizeOverrides(raw: unknown): {
     removedFields: Array.isArray(data.removed_fields) ? data.removed_fields.map(String) : [],
     extraExcluded: Array.isArray(data.extra_excluded_industries) ? data.extra_excluded_industries.map(String) : [],
     preferences: Array.isArray(data.semantic_preferences) ? data.semantic_preferences.map(String) : [],
+    disabledScenarios: Array.isArray(data.disabled_scenarios) ? data.disabled_scenarios.map(String) : [],
   };
 }
 
@@ -102,6 +109,7 @@ export function hasOverrides(raw: unknown): boolean {
     || data.removedFields.length > 0
     || data.extraExcluded.length > 0
     || data.preferences.length > 0
+    || data.disabledScenarios.length > 0
   );
 }
 
@@ -110,12 +118,14 @@ export default function ConditionChips({
   overrides,
   interactive,
   busy = false,
+  scenarios = [],
   onAction,
 }: {
   baseChips: ConditionChip[];
   overrides: unknown;
   interactive: boolean;
   busy?: boolean;
+  scenarios?: RecommendationScenarioRef[];
   onAction?: (actions: RecommendationConditionAction[]) => void;
 }) {
   const data = normalizeOverrides(overrides as RecommendationConditionOverrides);
@@ -124,11 +134,45 @@ export default function ConditionChips({
     if (!busy && onAction) onAction([action]);
   };
 
-  if (!baseChips.length && !hasOverrides(overrides)) return null;
+  if (!baseChips.length && !hasOverrides(overrides) && !scenarios.length) return null;
 
   return (
     <div className="flex flex-wrap items-center gap-1.5 border border-gray-200 bg-white px-3 py-2 text-xs">
       <span className="shrink-0 text-gray-400">生效条件:</span>
+
+      {/* 方案是"或"关系的分支，停用只影响本次会话，不改买家需求 */}
+      {scenarios.map((scenario) => {
+        const disabled = data.disabledScenarios.includes(scenario.id);
+        return (
+          <span
+            key={`sc-${scenario.id}`}
+            className={`inline-flex items-center gap-1 border px-2 py-0.5 ${
+              disabled
+                ? 'border-gray-200 bg-gray-50 text-gray-300 line-through'
+                : 'border-indigo-200 bg-indigo-50 text-indigo-700'
+            }`}
+            title={disabled ? '该方案已在本会话停用，点 ✓ 恢复' : '并列方案之一，点 × 本会话内停用'}
+          >
+            {scenario.label}
+            {interactive && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() =>
+                  act({
+                    op: disabled ? 'enable_scenario' : 'disable_scenario',
+                    scenario_id: scenario.id,
+                    label: scenario.label,
+                  })
+                }
+                className="text-current opacity-60 hover:opacity-100 disabled:opacity-40"
+              >
+                {disabled ? <Check className="h-3 w-3" /> : <X className="h-3 w-3" />}
+              </button>
+            )}
+          </span>
+        );
+      })}
 
       {baseChips.map((chip) => {
         const suppressed = chip.field ? overriddenFields.has(chip.field) : false;

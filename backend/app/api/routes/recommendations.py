@@ -449,24 +449,27 @@ def generate_recommendation_candidates(
     semantic_preferences = list(overrides.get("semantic_preferences") or [])
     extra_query_lines = [line for line in [*semantic_preferences, user_message or None] if line]
 
-    def run_filter() -> tuple[list[dict[str, Any]], dict[str, int]]:
+    disabled_scenarios = set(overrides.get("disabled_scenarios") or [])
+
+    def run_filter() -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
         result = (
-            _candidate_targets_for_intent(db, effective_anchor, payload.limit)
+            _candidate_targets_for_intent(db, effective_anchor, payload.limit, disabled_scenarios)
             if payload.mode == "buyer_to_target"
             else _candidate_intents_for_target(db, effective_anchor, payload.limit)
         )
-        return result["candidates"], result["funnel"]
+        return result["candidates"], result["funnel"], result.get("scenarios") or []
 
     candidates: list[dict[str, Any]] = []
-    funnel: dict[str, int] | None = None
+    funnel: dict[str, Any] | None = None
+    scenarios: list[dict[str, Any]] = []
     new_round = route in {"refilter", "re_evaluate"}
     if route == "refilter":
-        candidates, funnel = run_filter()
+        candidates, funnel, scenarios = run_filter()
     elif route == "re_evaluate" and existing_session is not None:
         messages = _list_recommendation_messages(db, session_id=payload.session_id, limit=500, offset=0)
         candidates = _extract_recommendation_candidate_sets(messages)["initial_candidates"]
         if not candidates:
-            candidates, funnel = run_filter()
+            candidates, funnel, scenarios = run_filter()
     elif existing_session is not None:
         # display / question / noop keep the current round; return it for context.
         messages = _list_recommendation_messages(db, session_id=payload.session_id, limit=500, offset=0)
@@ -522,6 +525,7 @@ def generate_recommendation_candidates(
                     "candidate_count": len(candidates),
                     "candidates": candidates,
                     "funnel": funnel,
+                    "scenarios": scenarios,
                 },
                 metadata_json=message_metadata,
                 created_by=current_user.user_id,
@@ -572,6 +576,7 @@ def generate_recommendation_candidates(
                 "candidate_count": len(candidates),
                 "candidates": candidates,
                 "funnel": funnel,
+                "scenarios": scenarios,
             },
             metadata_json=message_metadata,
             created_by=current_user.user_id,
@@ -605,6 +610,7 @@ def generate_recommendation_candidates(
         "candidates": candidates,
         "conversation": conversation,
         "funnel": funnel,
+        "scenarios": scenarios,
         "debug": {
             "engine": "rule_v3_deep_eval" if rerank_job_id else "rule_v3",
             "rerank": bool(rerank_job_id),

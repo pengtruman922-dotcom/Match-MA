@@ -91,6 +91,7 @@ function FunnelBar({ funnel }: { funnel: Round['funnel'] }) {
       {funnel.conflict_count > 0 && <span className="text-gray-400">（{funnel.conflict_count} 个条件冲突已排除）</span>}
       <span className="text-gray-300">›</span>
       <span>AI 深评 {funnel.deep_eval_count}</span>
+      {funnel.scenario_count ? <span className="text-indigo-600">{funnel.scenario_count} 个方案并行筛选</span> : null}
       {overflow && (
         <span className="inline-flex items-center gap-1 font-medium">
           <AlertTriangle className="h-3 w-3" />
@@ -163,6 +164,11 @@ function CandidateRow({
           )}
         </div>
         <span className="flex shrink-0 items-center gap-1">
+          {candidate.bestScenarioLabel && (
+            <span className="border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-xs text-indigo-700">
+              {candidate.bestScenarioLabel}
+            </span>
+          )}
           {candidate.deepEvalGrade && (
             <span
               className={`border px-2 py-0.5 text-xs font-semibold ${
@@ -187,6 +193,11 @@ function CandidateRow({
         {candidate.gapSummary && <p className="text-amber-700">缺口: {candidate.gapSummary}</p>}
         {candidate.deepEvalRisks && candidate.deepEvalRisks !== '暂无' && (
           <p className="text-amber-600">AI 风险: {candidate.deepEvalRisks}</p>
+        )}
+        {candidate.matchedScenarioLabels.filter((label) => label !== candidate.bestScenarioLabel).length > 0 && (
+          <p className="text-indigo-600">
+            同时满足: {candidate.matchedScenarioLabels.filter((label) => label !== candidate.bestScenarioLabel).join('、')}
+          </p>
         )}
         {candidate.missingDimensions.length > 0 && (
           <p className="text-gray-500">待确认: {candidate.missingDimensions.join('、')}</p>

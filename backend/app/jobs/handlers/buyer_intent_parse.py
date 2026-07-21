@@ -14,6 +14,7 @@ from backend.app.jobs.queue import JobClaim
 from backend.app.services.search_docs import (
     create_search_doc_rebuild_job,
 )
+from backend.app.services.recommendation_conditions import normalize_scenario_fields
 from backend.app.services.industry_taxonomy import (
     industry_l1_prompt_list,
     industry_l2_prompt_list,
@@ -151,6 +152,11 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
             normalization_notes,
             source_context,
         )
+    scenario_count = _replace_buyer_intent_scenarios(
+        db,
+        buyer_intent_id=buyer_intent_id,
+        raw_scenarios=(parsed_output_json or {}).get("scenarios"),
+    )
 
     return {
         "handled": True,
@@ -160,11 +166,88 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
         "field_count": len(applied_fields),
         "applied_buyer_party_fields": [],
         "buyer_party_field_count": 0,
+        "scenario_count": scenario_count,
         "trace_created": True,
         "model_name": node_config["model_name"],
         "prompt_version": node_config["prompt_version"],
         "schema_valid": schema_validation_json["valid"],
     }
+
+MAX_PARSED_SCENARIOS = 6
+
+
+def _replace_buyer_intent_scenarios(
+    db: Session,
+    *,
+    buyer_intent_id: UUID,
+    raw_scenarios: Any,
+) -> int:
+    """Rewrite the intent's scenarios from the parser output.
+
+    A single scenario carries no information a flat intent does not already
+    hold, so it is dropped: leaving zero rows keeps screening on the original
+    single-pass path. Only genuine disjunctions ("已上市且市值≤50亿" OR
+    "未上市且可控股") are persisted.
+    """
+    if not isinstance(raw_scenarios, list):
+        return 0
+    parsed: list[tuple[str, dict[str, Any]]] = []
+    for index, item in enumerate(raw_scenarios[:MAX_PARSED_SCENARIOS]):
+        if not isinstance(item, dict):
+            continue
+        fields = normalize_scenario_fields(item.get("fields") or item.get("conditions") or {})
+        if not fields:
+            continue
+        label = str(item.get("label") or item.get("name") or f"方案{index + 1}").strip()[:120]
+        parsed.append((label, fields))
+    if len(parsed) < 2:
+        return 0
+
+    db.execute(
+        text(
+            """
+            update buyer_intent_scenario
+            set deleted_at = now(), updated_at = now()
+            where buyer_intent_id = :buyer_intent_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+              and source = 'parser'
+            """
+        ),
+        {
+            "buyer_intent_id": buyer_intent_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )
+    for sort_order, (label, fields) in enumerate(parsed):
+        db.execute(
+            text(
+                """
+                insert into buyer_intent_scenario (
+                  team_id, workspace_id, buyer_intent_id, label, sort_order,
+                  fields_json, source, created_by, updated_by
+                )
+                values (
+                  :team_id, :workspace_id, :buyer_intent_id, :label, :sort_order,
+                  :fields_json, 'parser', :user_id, :user_id
+                )
+                """
+            ).bindparams(bindparam("fields_json", type_=JSONB)),
+            {
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+                "buyer_intent_id": buyer_intent_id,
+                "label": label,
+                "sort_order": sort_order,
+                "fields_json": fields,
+                "user_id": SYSTEM_USER_ID,
+            },
+        )
+    db.commit()
+    return len(parsed)
+
 
 def _get_buyer_intent_for_parse(db: Session, buyer_intent_id: UUID) -> dict[str, Any]:
     row = db.execute(
