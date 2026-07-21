@@ -4,6 +4,10 @@ import type {
   ProfileSection,
   ProfileSectionsResponse,
   ProfileSectionWrite,
+  ResearchBatchResponse,
+  ResearchJob,
+  ResearchProposal,
+  SellerResearchStatus,
   SellerTarget,
   SellerTargetBulkDeleteResponse,
   SellerTargetCreate,
@@ -420,6 +424,28 @@ export const profileSections = {
       method: 'PUT',
       body: JSON.stringify(data),
     }),
+};
+
+export const research = {
+  startSellerTarget: (sellerTargetId: string) =>
+    apiRequest<ResearchJob>(`/research/seller-targets/${sellerTargetId}`, { method: 'POST' }),
+  startSellerTargets: (sellerTargetIds: string[]) =>
+    apiRequest<ResearchBatchResponse>('/research/seller-targets', {
+      method: 'POST',
+      body: JSON.stringify({ seller_target_ids: sellerTargetIds }),
+    }),
+  sellerTargetStatus: (sellerTargetId: string) =>
+    apiRequest<SellerResearchStatus>(`/research/seller-targets/${sellerTargetId}/status`),
+  proposals: (entityId: string, reviewStatus?: string) =>
+    apiRequest<ResearchProposal[]>(`/research/proposals${buildQuery({
+      entity_type: 'seller_target',
+      entity_id: entityId,
+      review_status: reviewStatus,
+    })}`),
+  acceptProposal: (proposalId: string) =>
+    apiRequest<ResearchProposal>(`/research/proposals/${proposalId}/accept`, { method: 'POST' }),
+  rejectProposal: (proposalId: string) =>
+    apiRequest<ResearchProposal>(`/research/proposals/${proposalId}/reject`, { method: 'POST' }),
 };
 
 export const globalSearch = {

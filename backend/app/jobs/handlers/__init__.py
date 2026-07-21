@@ -230,6 +230,15 @@ from backend.app.jobs.handlers.model_node_test import (
     _model_node_test_result,
     _redact_test_messages,
 )
+from backend.app.jobs.handlers.research import (
+    RESEARCH_NODE_NAME,
+    RESEARCH_STRUCTURED_FIELDS,
+    _handle_seller_target_research,
+    build_research_queries,
+    classify_research_conflict,
+    normalize_research_output,
+    research_source_type,
+)
 from backend.app.jobs.handlers.dispatch import (
     execute_job,
 )

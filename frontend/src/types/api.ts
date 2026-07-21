@@ -1814,6 +1814,53 @@ export interface ProfileSectionWrite {
   as_of_date?: string | null;
 }
 
+export interface ResearchJob {
+  job_id: string;
+  seller_target_id: string;
+  status: string;
+  queue_name: string;
+  reused_existing: boolean;
+}
+
+export interface ResearchBatchResponse {
+  jobs: ResearchJob[];
+  queued_count: number;
+  reused_count: number;
+}
+
+export interface ResearchProposal {
+  id: string;
+  entity_type: 'seller_target';
+  entity_id: string;
+  job_id: string | null;
+  proposal_kind: 'profile_section' | 'structured_fact';
+  section_code: string | null;
+  section_label: string | null;
+  field_path: string | null;
+  proposed_value_json: Record<string, unknown>;
+  current_value_json: Record<string, unknown>;
+  conflict_kind: 'consistent' | 'supplement' | 'temporal_update' | 'same_period_conflict';
+  period_label: string | null;
+  as_of_date: string | null;
+  source_type: string | null;
+  source_url: string | null;
+  source_title: string | null;
+  source_excerpt: string | null;
+  anchor_matches_json: Array<{ kind: string; value: string }>;
+  confidence: number | null;
+  review_status: string;
+  reviewed_at: string | null;
+  created_at: string;
+}
+
+export interface SellerResearchStatus {
+  seller_target_id: string;
+  last_research_at: string | null;
+  research_last_outcome: 'found' | 'no_public_information' | 'failed' | null;
+  research_retry_after: string | null;
+  latest_job: Pick<BackgroundJob, 'id' | 'status' | 'result_json' | 'error_code' | 'error_message' | 'created_at' | 'finished_at'> | null;
+}
+
 export interface SearchProviderConfig {
   id: string;
   provider_name: string;

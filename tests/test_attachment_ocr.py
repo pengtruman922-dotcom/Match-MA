@@ -614,6 +614,50 @@ def test_business_update_derives_and_keeps_seller_industry_dimensions() -> None:
     }
 
 
+def test_business_update_extracts_profile_sections_outside_seller_columns() -> None:
+    actions = _normalize_actions(
+        {
+            "actions": [
+                {
+                    "action_type": "seller_fact_update",
+                    "target_entity_type": "seller_target",
+                    "target_entity_id": str(SELLER_TARGET_ID),
+                    "proposed_changes_json": {
+                        "business_summary": "生命科学自动化设备企业",
+                        "profile_sections_json": [
+                            {
+                                "section_code": "business_product",
+                                "content_text": "提供实验室自动化设备及成套解决方案",
+                                "source_excerpt": "为生命科学实验室提供自动化设备",
+                                "confidence": 0.94,
+                            },
+                            {
+                                "section_code": "tech_team",
+                                "content_text": "移液技术全部自研，团队来自产业公司",
+                            },
+                        ],
+                    },
+                }
+            ]
+        },
+        {
+            "bound_seller_target_ids_json": [str(SELLER_TARGET_ID)],
+            "bound_buyer_party_ids_json": [],
+            "bound_buyer_intent_ids_json": [],
+            "attachment_evidence_ids": [],
+            "image_evidence_attachment_ids": [],
+        },
+    )
+
+    assert actions[0]["proposed_changes_json"] == {
+        "business_summary": "生命科学自动化设备企业"
+    }
+    assert [item["section_code"] for item in actions[0]["profile_sections"]] == [
+        "business_product",
+        "tech_team",
+    ]
+
+
 def test_business_update_rejects_empty_actions_instead_of_reporting_success() -> None:
     validation = _validate_extractor_output({"actions": []})
 

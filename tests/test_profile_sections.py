@@ -3,6 +3,7 @@ from backend.app.services.profile_sections import (
     PROFILE_SECTION_CODES,
     PROFILE_TOTAL_BUDGET,
     buyer_party_fact_block,
+    normalize_profile_section_items,
     profile_coverage,
     render_profile_text,
 )
@@ -118,3 +119,26 @@ def test_buyer_party_block_carries_business_facts_without_identity() -> None:
 
 def test_buyer_party_block_is_empty_without_a_party() -> None:
     assert buyer_party_fact_block(None, None) == ""
+
+
+def test_profile_parser_rejects_unknown_duplicate_and_invalid_date_rows() -> None:
+    sections, notes = normalize_profile_section_items(
+        [
+            {
+                "section_code": "business_product",
+                "content_text": "核心产品为实验室自动化设备",
+                "as_of_date": "2026-07-21",
+                "confidence": 1.2,
+            },
+            {"section_code": "business_product", "content_text": "重复内容"},
+            {"section_code": "unknown", "content_text": "不应保留"},
+            {"section_code": "tech_team", "content_text": "技术自研", "as_of_date": "2026年"},
+        ]
+    )
+
+    assert [item["section_code"] for item in sections] == ["business_product", "tech_team"]
+    assert sections[0]["confidence"] == 1.0
+    assert sections[1]["as_of_date"] is None
+    assert any("duplicate_section" in note for note in notes)
+    assert any("unknown_section" in note for note in notes)
+    assert any("invalid_as_of_date" in note for note in notes)

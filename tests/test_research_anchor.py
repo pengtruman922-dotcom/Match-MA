@@ -13,6 +13,7 @@ ENTITY = {
     "unified_social_credit_code": "91330100MA2GX8RT7K",
     "official_website": "https://www.xinghai-materials.com/about",
     "legal_representative": "陈立",
+    "registered_city": "杭州市",
 }
 
 
@@ -73,6 +74,17 @@ def test_name_plus_legal_person_is_enough() -> None:
         source_url="https://unknown-media.example.com/x",
     )
 
+    assert is_evidence_trusted(matches)
+
+
+def test_full_name_plus_registered_region_is_enough() -> None:
+    matches = match_anchors(
+        build_anchors(ENTITY),
+        evidence_text="杭州星海新材料股份有限公司位于杭州，主营偏光膜材料",
+        source_url="https://unknown-media.example.com/x",
+    )
+
+    assert {match.kind for match in matches} >= {"name", "region"}
     assert is_evidence_trusted(matches)
 
 

@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
 from backend.app.config import get_settings
-from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
 from backend.app.services.extracted_action_apply import (
     apply_buyer_intent_follow_up_action,
     apply_buyer_intent_target_exclusion_action,
@@ -30,6 +30,10 @@ from backend.app.services.image_inputs import (
 )
 from backend.app.services.industry_taxonomy import (
     industry_l1_prompt_list,
+)
+from backend.app.services.profile_sections import (
+    normalize_profile_section_items,
+    upsert_profile_section,
 )
 
 from backend.app.jobs.handlers.buyer_intent_parse import (
@@ -221,6 +225,11 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
     try:
         created_actions = _insert_extracted_actions(db, business_update_id, actions, job.id)
         auto_apply_results = _auto_apply_safe_actions(db, created_actions)
+        profile_sections_written = _persist_document_profile_sections(
+            db,
+            actions=actions,
+            attachment_context=attachment_context,
+        )
         applied_action_ids = {
             _optional_uuid(result.get("extracted_action_id")) for result in auto_apply_results
         }
@@ -271,6 +280,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
                     "last_processing_result": "llm_parsed",
                     "last_actions_created": len(created_actions),
                     "last_auto_applied_actions": len(auto_apply_results),
+                    "last_profile_sections_written": profile_sections_written,
                     "last_bound_seller_targets_completed": completed_target_count,
                     "last_schema_valid": schema_validation_json["valid"],
                 },
@@ -294,6 +304,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
         "prompt_version": node_config["prompt_version"],
         "schema_valid": schema_validation_json["valid"],
         "auto_applied_actions": len(auto_apply_results),
+        "profile_sections_written": profile_sections_written,
         "bound_seller_targets_completed": completed_target_count,
     }
 
@@ -656,6 +667,12 @@ def _normalize_actions(
             proposed_changes,
         )
         normalization_notes = [*shape_notes, *normalization_notes]
+        profile_sections: list[dict[str, Any]] = []
+        if action_type == "seller_fact_update":
+            profile_sections, profile_notes = normalize_profile_section_items(
+                proposed_changes.get("profile_sections_json")
+            )
+            normalization_notes.extend(profile_notes)
         if action_type == "seller_fact_update" and db is not None:
             normalization_notes.extend(
                 _normalize_seller_target_industry_changes(db, normalized_changes)
@@ -699,6 +716,7 @@ def _normalize_actions(
                 "reason": action.get("reason"),
                 "raw_action": raw_action,
                 "normalization_notes": normalization_notes,
+                "profile_sections": profile_sections,
             }
         )
     return normalized
@@ -1219,11 +1237,69 @@ def _insert_extracted_actions(
                     "reason": action.get("reason"),
                     "raw_action": action.get("raw_action"),
                     "normalization_notes": action.get("normalization_notes", []),
+                    "profile_sections": action.get("profile_sections", []),
                 },
             },
         ).mappings().one()
         action_ids.append(row["id"])
     return action_ids
+
+
+def _persist_document_profile_sections(
+    db: Session,
+    *,
+    actions: list[dict[str, Any]],
+    attachment_context: dict[str, Any],
+) -> int:
+    """Write qualitative claims extracted from user-supplied target material.
+
+    The uploaded attachment is first-party evidence, so supported non-empty
+    sections can be auto-accepted. Missing sections are not marked not_found:
+    an attachment is rarely intended to be an exhaustive company profile.
+    """
+    attachment_names = [
+        str(item.get("file_name") or "").strip()
+        for item in attachment_context.get("attachments", [])
+        if str(item.get("file_name") or "").strip()
+    ]
+    source_title = "、".join(dict.fromkeys(attachment_names[:3])) or "业务更新材料"
+    attachment_evidence = str(attachment_context.get("combined_text") or "")
+    written = 0
+    for action in actions:
+        if action.get("action_type") != "seller_fact_update":
+            continue
+        target_id = _optional_uuid(action.get("target_entity_id"))
+        if target_id is None:
+            continue
+        fallback_excerpt = str(action.get("raw_evidence_text") or "").strip()[:2000] or None
+        action_confidence = action.get("confidence")
+        for section in action.get("profile_sections") or []:
+            confidence = section.get("confidence")
+            if confidence is None and action_confidence is not None:
+                confidence = float(action_confidence)
+            proposed_excerpt = str(section.get("source_excerpt") or "").strip()
+            source_excerpt = (
+                proposed_excerpt[:2000]
+                if proposed_excerpt and proposed_excerpt in attachment_evidence
+                else fallback_excerpt
+            )
+            upsert_profile_section(
+                db,
+                entity_type="seller_target",
+                entity_id=target_id,
+                section_code=section["section_code"],
+                info_status="filled",
+                content_text=section["content_text"],
+                source_type="user_attachment",
+                source_title=source_title,
+                source_excerpt=source_excerpt,
+                as_of_date=section.get("as_of_date"),
+                confidence=confidence,
+                review_status="auto_accepted",
+                user_id=SYSTEM_USER_ID,
+            )
+            written += 1
+    return written
 
 AUTO_APPLY_ACTION_TYPE_ORDER = {
     "seller_fact_update": 0,

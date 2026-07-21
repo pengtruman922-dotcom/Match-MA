@@ -22,6 +22,9 @@ from backend.app.jobs.handlers.recommendation import (
     _handle_recommendation_report_generate,
     _handle_recommendation_rerank,
 )
+from backend.app.jobs.handlers.research import (
+    _handle_seller_target_research,
+)
 from backend.app.jobs.handlers.search_embedding import (
     _handle_buyer_intent_search_doc_rebuild,
     _handle_embedding_generate,
@@ -54,6 +57,8 @@ def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
         return _handle_recommendation_rerank(db, job)
     if job.job_type == "model_node_test":
         return _handle_model_node_test(db, job)
+    if job.job_type == "seller_target_research":
+        return _handle_seller_target_research(db, job)
 
     return {
         "handled": False,

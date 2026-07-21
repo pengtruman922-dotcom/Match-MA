@@ -31,7 +31,13 @@ class AnchorMatch:
 
 def build_anchors(entity: dict[str, Any]) -> dict[str, list[str]]:
     """Collect the identifying features we can check evidence against."""
-    anchors: dict[str, list[str]] = {"credit_code": [], "name": [], "domain": [], "legal_person": []}
+    anchors: dict[str, list[str]] = {
+        "credit_code": [],
+        "name": [],
+        "domain": [],
+        "legal_person": [],
+        "region": [],
+    }
 
     for key in ("unified_social_credit_code", "credit_code"):
         value = str(entity.get(key) or "").strip()
@@ -43,6 +49,13 @@ def build_anchors(entity: dict[str, Any]) -> dict[str, list[str]]:
         if len(value) >= MIN_NAME_ANCHOR_LENGTH and value not in anchors["name"]:
             anchors["name"].append(value)
 
+    aliases = entity.get("aliases_json")
+    if isinstance(aliases, list):
+        for alias in aliases:
+            value = str(alias or "").strip()
+            if len(value) >= MIN_NAME_ANCHOR_LENGTH and value not in anchors["name"]:
+                anchors["name"].append(value)
+
     for key in ("official_website", "website", "homepage_url"):
         domain = _domain_of(str(entity.get(key) or ""))
         if domain and domain not in anchors["domain"]:
@@ -52,6 +65,23 @@ def build_anchors(entity: dict[str, Any]) -> dict[str, list[str]]:
         value = str(entity.get(key) or "").strip()
         if len(value) >= 2 and value not in anchors["legal_person"]:
             anchors["legal_person"].append(value)
+
+    for key in (
+        "registered_province",
+        "registered_city",
+        "headquarter_province",
+        "headquarter_city",
+        "region_province",
+        "region_city",
+    ):
+        value = str(entity.get(key) or "").strip()
+        variants = [value]
+        short_value = re.sub(r"(壮族自治区|回族自治区|维吾尔自治区|自治区|特别行政区|省|市)$", "", value)
+        if short_value and short_value != value:
+            variants.append(short_value)
+        for variant in variants:
+            if len(variant) >= 2 and variant not in anchors["region"]:
+                anchors["region"].append(variant)
 
     return {kind: values for kind, values in anchors.items() if values}
 
@@ -79,6 +109,15 @@ def match_anchors(
     for value in anchors.get("legal_person", []):
         if value and value in haystack:
             matches.append(AnchorMatch("legal_person", value))
+    # A city embedded in the legal name (e.g. 杭州星海…) is not independent
+    # corroboration. Remove matched names before checking the region anchor.
+    region_haystack = haystack
+    for name in anchors.get("name", []):
+        if name:
+            region_haystack = region_haystack.replace(name, "")
+    for value in anchors.get("region", []):
+        if value and value in region_haystack:
+            matches.append(AnchorMatch("region", value))
     return matches
 
 
@@ -91,7 +130,7 @@ def is_evidence_trusted(matches: list[AnchorMatch]) -> bool:
     kinds = {match.kind for match in matches}
     if kinds & {"credit_code", "domain"}:
         return True
-    return "name" in kinds and "legal_person" in kinds
+    return "name" in kinds and bool(kinds & {"legal_person", "region"})
 
 
 def _domain_of(url: str) -> str:

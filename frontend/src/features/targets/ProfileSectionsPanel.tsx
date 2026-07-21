@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Check, Loader2, Pencil, X } from 'lucide-react';
-import { profileSections } from '../../lib/api';
-import type { ProfileSection, ProfileSectionsResponse } from '../../types/api';
+import { Check, ExternalLink, Loader2, Pencil, Search, X } from 'lucide-react';
+import { backgroundJobs, profileSections, research } from '../../lib/api';
+import { fieldLabel, sourceTypeLabel } from '../../lib/fieldLabels';
+import type { ProfileSection, ProfileSectionsResponse, ResearchProposal } from '../../types/api';
 
 const STATUS_LABELS: Record<ProfileSection['info_status'], string> = {
   filled: '已填写',
@@ -25,12 +26,21 @@ export default function ProfileSectionsPanel({
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [saving, setSaving] = useState(false);
+  const [researching, setResearching] = useState(false);
+  const [researchJobId, setResearchJobId] = useState<string | null>(null);
+  const [proposals, setProposals] = useState<ResearchProposal[]>([]);
+  const [reviewingProposalId, setReviewingProposalId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setData(await profileSections.list(entityType, entityId));
+      const [profileData, proposalData] = await Promise.all([
+        profileSections.list(entityType, entityId),
+        entityType === 'seller_target' ? research.proposals(entityId, 'pending_review') : Promise.resolve([]),
+      ]);
+      setData(profileData);
+      setProposals(proposalData);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载画像失败');
@@ -42,6 +52,27 @@ export default function ProfileSectionsPanel({
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (!researchJobId) return;
+    const timer = window.setInterval(() => {
+      void backgroundJobs.get(researchJobId).then((job) => {
+        if (['succeeded', 'failed', 'canceled'].includes(job.status)) {
+          window.clearInterval(timer);
+          setResearchJobId(null);
+          setResearching(false);
+          if (job.status === 'failed') setError(job.error_message || '调研任务失败');
+          void load();
+        }
+      }).catch((err) => {
+        window.clearInterval(timer);
+        setResearchJobId(null);
+        setResearching(false);
+        setError(err instanceof Error ? err.message : '读取调研任务失败');
+      });
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [load, researchJobId]);
 
   const currentByCode = new Map<string, ProfileSection>();
   for (const section of data?.sections || []) {
@@ -66,6 +97,31 @@ export default function ProfileSectionsPanel({
     }
   };
 
+  const startResearch = async () => {
+    setResearching(true);
+    setError(null);
+    try {
+      const job = await research.startSellerTarget(entityId);
+      setResearchJobId(job.job_id);
+    } catch (err) {
+      setResearching(false);
+      setError(err instanceof Error ? err.message : '启动调研失败');
+    }
+  };
+
+  const reviewProposal = async (proposalId: string, decision: 'accept' | 'reject') => {
+    setReviewingProposalId(proposalId);
+    try {
+      if (decision === 'accept') await research.acceptProposal(proposalId);
+      else await research.rejectProposal(proposalId);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '处理调研建议失败');
+    } finally {
+      setReviewingProposalId(null);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center gap-2 border border-gray-200 bg-white px-4 py-3 text-xs text-gray-400">
@@ -79,12 +135,25 @@ export default function ProfileSectionsPanel({
     <div className="border border-gray-200 bg-white">
       <div className="flex items-center justify-between border-b border-gray-100 px-4 py-2">
         <h2 className="text-sm font-semibold text-gray-900">匹配画像</h2>
-        {data && (
-          <span className="text-xs text-gray-400">
-            已填 {data.coverage.filled_sections.length}/{data.section_catalog.length}
-            {data.coverage.missing_sections.length > 0 && ` 待补：${data.coverage.missing_sections.join('、')}`}
-          </span>
-        )}
+        <div className="flex items-center gap-3">
+          {data && (
+            <span className="text-xs text-gray-400">
+              已填 {data.coverage.filled_sections.length}/{data.section_catalog.length}
+              {data.coverage.missing_sections.length > 0 && ` 待补：${data.coverage.missing_sections.join('、')}`}
+            </span>
+          )}
+          {entityType === 'seller_target' && (
+            <button
+              type="button"
+              disabled={researching}
+              onClick={() => void startResearch()}
+              className="inline-flex items-center gap-1 border border-brand-200 px-2.5 py-1 text-xs text-brand-700 disabled:opacity-50"
+            >
+              {researching ? <Loader2 className="h-3 w-3 animate-spin" /> : <Search className="h-3 w-3" />}
+              {researching ? '调研中' : '公开信息调研'}
+            </button>
+          )}
+        </div>
       </div>
       {error && <p className="border-b border-red-100 bg-red-50 px-4 py-1.5 text-xs text-red-600">{error}</p>}
       <div className="divide-y divide-gray-100">
@@ -155,18 +224,85 @@ export default function ProfileSectionsPanel({
                   </div>
                 </div>
               ) : (
-                <p className={`mt-0.5 text-xs ${section ? 'text-gray-600' : 'text-gray-300'}`}>
-                  {section
-                    ? section.info_status === 'filled'
-                      ? section.content_text
-                      : `（${STATUS_LABELS[section.info_status]}）`
-                    : '未填写'}
-                </p>
+                <>
+                  <p className={`mt-0.5 text-xs ${section ? 'text-gray-600' : 'text-gray-300'}`}>
+                    {section
+                      ? section.info_status === 'filled'
+                        ? section.content_text
+                        : `（${STATUS_LABELS[section.info_status]}）`
+                      : '未填写'}
+                  </p>
+                  {section && (section.source_title || section.source_type) && (
+                    <p className="mt-1 text-[11px] text-gray-400">
+                      来源：{section.source_url ? (
+                        <a href={section.source_url} target="_blank" rel="noreferrer" className="hover:text-brand-600 hover:underline">
+                          {section.source_title || sourceTypeLabel(section.source_type)}
+                        </a>
+                      ) : section.source_title || sourceTypeLabel(section.source_type)}
+                      {section.as_of_date && ` · 截至 ${section.as_of_date}`}
+                      {section.confidence !== null && ` · 置信度 ${Math.round(section.confidence * 100)}%`}
+                    </p>
+                  )}
+                </>
               )}
             </div>
           );
         })}
       </div>
+      {proposals.length > 0 && (
+        <div className="border-t border-amber-100 bg-amber-50/50 px-4 py-3">
+          <p className="text-xs font-medium text-amber-800">待确认调研建议（{proposals.length}）</p>
+          <div className="mt-2 space-y-2">
+            {proposals.map((proposal) => {
+              const proposed = proposal.proposal_kind === 'profile_section'
+                ? String(proposal.proposed_value_json.content_text || '')
+                : String(proposal.proposed_value_json.value || '');
+              return (
+                <div key={proposal.id} className="border border-amber-100 bg-white px-3 py-2 text-xs">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="font-medium text-gray-700">
+                        {proposal.section_label || fieldLabel('seller_target', proposal.field_path || '')}
+                        <span className="ml-2 font-normal text-amber-700">{conflictLabel(proposal.conflict_kind)}</span>
+                      </p>
+                      <p className="mt-1 text-gray-600">{proposed}</p>
+                      {proposal.source_url && (
+                        <a href={proposal.source_url} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 text-brand-600 hover:underline">
+                          <ExternalLink className="h-3 w-3" />
+                          {proposal.source_title || proposal.source_url}
+                        </a>
+                      )}
+                    </div>
+                    <div className="flex shrink-0 gap-1.5">
+                      <button
+                        type="button"
+                        disabled={reviewingProposalId === proposal.id}
+                        onClick={() => void reviewProposal(proposal.id, 'accept')}
+                        className="bg-brand-600 px-2 py-1 text-white disabled:opacity-50"
+                      >确认</button>
+                      <button
+                        type="button"
+                        disabled={reviewingProposalId === proposal.id}
+                        onClick={() => void reviewProposal(proposal.id, 'reject')}
+                        className="border border-gray-200 px-2 py-1 text-gray-500 disabled:opacity-50"
+                      >忽略</button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
+}
+
+function conflictLabel(kind: ResearchProposal['conflict_kind']): string {
+  return {
+    consistent: '与现有信息一致',
+    supplement: '补充信息',
+    temporal_update: '新期间信息',
+    same_period_conflict: '与当前信息冲突',
+  }[kind];
 }

@@ -9,6 +9,7 @@ sliced off the front of one long document.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 from uuid import UUID
 
@@ -41,6 +42,61 @@ INFO_STATUS_LABELS = {
     "not_found": "（暂无信息）",
     "not_applicable": "（不适用）",
 }
+
+
+def normalize_profile_section_items(values: Any) -> tuple[list[dict[str, Any]], list[str]]:
+    """Validate profile sections emitted by a parser or research node.
+
+    Profile text is deliberately qualitative. Empty rows, unknown section
+    codes and non-object values are dropped before they can reach the profile
+    table; duplicate sections keep the first supported claim so one LLM call
+    cannot overwrite itself nondeterministically.
+    """
+    if not isinstance(values, list):
+        return [], [] if values is None else ["profile_sections:not_a_list"]
+    normalized: list[dict[str, Any]] = []
+    notes: list[str] = []
+    seen: set[str] = set()
+    for index, value in enumerate(values):
+        if not isinstance(value, dict):
+            notes.append(f"profile_sections[{index}]:not_an_object")
+            continue
+        section_code = str(value.get("section_code") or "").strip()
+        if section_code not in PROFILE_SECTION_CODES:
+            notes.append(f"profile_sections[{index}]:unknown_section:{section_code[:50]}")
+            continue
+        if section_code in seen:
+            notes.append(f"profile_sections[{index}]:duplicate_section:{section_code}")
+            continue
+        content_text = str(value.get("content_text") or "").strip()
+        if not content_text:
+            notes.append(f"profile_sections[{index}]:empty_content:{section_code}")
+            continue
+        confidence_value = value.get("confidence")
+        try:
+            confidence = max(0.0, min(float(confidence_value), 1.0))
+        except (TypeError, ValueError):
+            confidence = None
+        raw_as_of_date = str(value.get("as_of_date") or "").strip()[:10]
+        as_of_date = None
+        if raw_as_of_date:
+            try:
+                as_of_date = date.fromisoformat(raw_as_of_date).isoformat()
+            except ValueError:
+                notes.append(
+                    f"profile_sections[{index}]:invalid_as_of_date:{raw_as_of_date}"
+                )
+        normalized.append(
+            {
+                "section_code": section_code,
+                "content_text": content_text[:2000],
+                "source_excerpt": str(value.get("source_excerpt") or "").strip()[:2000] or None,
+                "as_of_date": as_of_date,
+                "confidence": confidence,
+            }
+        )
+        seen.add(section_code)
+    return normalized, notes
 
 
 def load_profile_sections(
@@ -191,33 +247,35 @@ def upsert_profile_section(
     confidence: float | None = None,
     review_status: str = "accepted",
     user_id: Any = None,
+    supersede_current: bool = True,
 ) -> dict[str, Any]:
     """Insert a new revision of a section rather than overwriting the old one."""
     if section_code not in PROFILE_SECTION_CODES:
         raise ValueError(f"Unknown profile section: {section_code}")
-    db.execute(
-        text(
-            """
-            update entity_profile_section
-            set deleted_at = now(), updated_at = now(), updated_by = :user_id
-            where team_id = :team_id
-              and workspace_id = :workspace_id
-              and entity_type = :entity_type
-              and entity_id = :entity_id
-              and section_code = :section_code
-              and deleted_at is null
-              and review_status in ('accepted', 'auto_accepted')
-            """
-        ),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "entity_type": entity_type,
-            "entity_id": entity_id,
-            "section_code": section_code,
-            "user_id": user_id,
-        },
-    )
+    if supersede_current:
+        db.execute(
+            text(
+                """
+                update entity_profile_section
+                set deleted_at = now(), updated_at = now(), updated_by = :user_id
+                where team_id = :team_id
+                  and workspace_id = :workspace_id
+                  and entity_type = :entity_type
+                  and entity_id = :entity_id
+                  and section_code = :section_code
+                  and deleted_at is null
+                  and review_status in ('accepted', 'auto_accepted')
+                """
+            ),
+            {
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "section_code": section_code,
+                "user_id": user_id,
+            },
+        )
     row = db.execute(
         text(
             """
