@@ -27,7 +27,10 @@ from backend.app.jobs.handlers import (
     _parse_source_context,
     _validate_extractor_output,
 )
-from backend.app.jobs.handlers.business_update import _verified_document_excerpt
+from backend.app.jobs.handlers.business_update import (
+    _document_profile_sections_for_action,
+    _verified_document_excerpt,
+)
 from backend.app.jobs.queue import JobClaim
 from backend.app.services.attachment_storage import decode_text_bytes, is_text_upload, safe_upload_filename
 
@@ -675,6 +678,26 @@ def test_attachment_profile_excerpt_tolerates_ocr_whitespace_only() -> None:
         fallback_excerpt="fallback",
     )
     assert excerpt == "移液技术 100%自研"
+
+
+def test_document_business_profile_prefers_constrained_business_summary() -> None:
+    sections = _document_profile_sections_for_action(
+        {
+            "proposed_changes_json": {
+                "business_summary": "为生命科学实验室提供自动化设备及成套解决方案。"
+            },
+            "profile_sections": [
+                {
+                    "section_code": "business_product",
+                    "content_text": "国内第一，唯一全产业链覆盖。",
+                },
+                {"section_code": "chain_position", "content_text": "国内第一。"},
+            ],
+        }
+    )
+
+    assert sections[0]["content_text"] == "为生命科学实验室提供自动化设备及成套解决方案。"
+    assert sections[1]["content_text"] == "国内第一。"
 
 
 def test_business_update_rejects_empty_actions_instead_of_reporting_success() -> None:

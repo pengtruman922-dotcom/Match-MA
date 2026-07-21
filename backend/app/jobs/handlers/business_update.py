@@ -1273,7 +1273,7 @@ def _persist_document_profile_sections(
             continue
         fallback_excerpt = str(action.get("raw_evidence_text") or "").strip()[:2000] or None
         action_confidence = action.get("confidence")
-        for section in action.get("profile_sections") or []:
+        for section in _document_profile_sections_for_action(action):
             confidence = section.get("confidence")
             if confidence is None and action_confidence is not None:
                 confidence = float(action_confidence)
@@ -1300,6 +1300,40 @@ def _persist_document_profile_sections(
             )
             written += 1
     return written
+
+
+def _document_profile_sections_for_action(action: dict[str, Any]) -> list[dict[str, Any]]:
+    """Use the parser's constrained business summary for business_product.
+
+    The model sometimes duplicates a ranking claim into both business_product
+    and chain_position. ``business_summary`` already has stricter instructions
+    (what the company sells, to whom, with deal/finance/risk excluded), making
+    it the more reliable source for the first profile dimension.
+    """
+    sections = [dict(item) for item in (action.get("profile_sections") or [])]
+    business_summary = str(
+        (action.get("proposed_changes_json") or {}).get("business_summary") or ""
+    ).strip()
+    if not business_summary:
+        return sections
+    current = next(
+        (item for item in sections if item.get("section_code") == "business_product"),
+        None,
+    )
+    if current is None:
+        sections.insert(
+            0,
+            {
+                "section_code": "business_product",
+                "content_text": business_summary[:2000],
+                "source_excerpt": None,
+                "as_of_date": None,
+                "confidence": None,
+            },
+        )
+    else:
+        current["content_text"] = business_summary[:2000]
+    return sections
 
 
 def _verified_document_excerpt(
