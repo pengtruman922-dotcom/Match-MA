@@ -6,6 +6,9 @@ export interface SellerTarget {
   lifecycle_status: string;
   recommendation_status: string;
   information_status: string;
+  // L1/L2 是筛选实际读取的规范维度；industry_primary/secondary 是解析原文。
+  industry_l1: string | null;
+  industry_l2: string | null;
   industry_primary: string | null;
   industry_secondary: string | null;
   registered_province: string | null;
@@ -15,6 +18,7 @@ export interface SellerTarget {
   raw_region_text: string | null;
   region_granularity: string | null;
   listed_status: string | null;
+  listing_market_region: string | null;
   market_cap_yuan: string | null;
   current_revenue_yuan: string | null;
   current_net_profit_yuan: string | null;
@@ -57,6 +61,8 @@ export interface SellerTarget {
   updated_at: string;
   latest_follow_up_on?: string | null;
   latest_follow_up_content?: string | null;
+  last_research_at?: string | null;
+  research_last_outcome?: 'found' | 'no_public_information' | 'failed' | null;
 }
 
 export interface SellerTargetListResponse {
@@ -1857,7 +1863,6 @@ export interface SellerResearchStatus {
   seller_target_id: string;
   last_research_at: string | null;
   research_last_outcome: 'found' | 'no_public_information' | 'failed' | null;
-  research_retry_after: string | null;
   latest_job: Pick<BackgroundJob, 'id' | 'status' | 'result_json' | 'error_code' | 'error_message' | 'created_at' | 'finished_at'> | null;
 }
 

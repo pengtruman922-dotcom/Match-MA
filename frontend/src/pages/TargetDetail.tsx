@@ -25,7 +25,7 @@ import type {
 } from '../types/api';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
 import UpdateHistory from '../components/UpdateHistory';
-import ProfileSectionsPanel from '../features/targets/ProfileSectionsPanel';
+import TargetInfoPanel from '../features/targets/TargetInfoPanel';
 import {
   sellerTargetDisplayStatus,
   sellerTargetDisplayStatusClass,
@@ -33,9 +33,8 @@ import {
   sellerTargetStatusClass,
   sellerTargetStatusLabel,
 } from '../lib/sellerTargetStatus';
-import { valueLabel } from '../lib/fieldLabels';
 
-type Tab = 'info' | 'profile' | 'attachments' | 'relations' | 'history';
+type Tab = 'info' | 'attachments' | 'relations' | 'history';
 
 export default function TargetDetail() {
   const { id } = useParams<{ id: string }>();
@@ -43,7 +42,7 @@ export default function TargetDetail() {
   const [searchParams] = useSearchParams();
   const [target, setTarget] = useState<SellerTarget | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<Tab>(() => (['history', 'profile'] as const).find((tab) => tab === searchParams.get('tab')) || 'info');
+  const [activeTab, setActiveTab] = useState<Tab>(() => (['history', 'attachments', 'relations'] as const).find((tab) => tab === searchParams.get('tab')) || 'info');
   const [relationItems, setRelationItems] = useState<BuyerSellerRelation[]>([]);
   const [relationEvents, setRelationEvents] = useState<RelationEvent[]>([]);
   const [followUps, setFollowUps] = useState<TargetFollowUp[]>([]);
@@ -140,8 +139,7 @@ export default function TargetDetail() {
   if (!target) return null;
 
   const tabs: { key: Tab; label: string }[] = [
-    { key: 'info', label: '基本信息' },
-    { key: 'profile', label: '匹配画像' },
+    { key: 'info', label: '标的信息' },
     { key: 'attachments', label: '附件与证据' },
     { key: 'relations', label: '跟进记录' },
     { key: 'history', label: '更新记录' },
@@ -239,8 +237,7 @@ export default function TargetDetail() {
               ))}
             </div>
             <div className="p-5">
-              {activeTab === 'info' && <InfoTab target={target} />}
-              {activeTab === 'profile' && <ProfileSectionsPanel entityType="seller_target" entityId={target.id} />}
+              {activeTab === 'info' && <TargetInfoPanel target={target} />}
               {activeTab === 'attachments' && <AttachmentsTab targetId={target.id} />}
               {activeTab === 'relations' && (
                 <FollowUpsTab
@@ -301,73 +298,6 @@ export default function TargetDetail() {
           setHistoryRefreshKey((value) => value + 1);
         }}
       />
-    </div>
-  );
-}
-
-function InfoTab({ target }: { target: SellerTarget }) {
-  const groups = [
-    {
-      label: '身份',
-      fields: [
-        { label: '标的名称', value: target.target_name },
-        { label: '标的主体', value: getSubjectDisplay(target) },
-        { label: '类型', value: valueLabel('target_type', target.target_type) },
-        { label: '上市状态', value: formatListedStatus(target.listed_status) },
-      ],
-    },
-    {
-      label: '行业业务',
-      fields: [
-        { label: '一级行业', value: target.industry_primary },
-        { label: '二级行业', value: target.industry_secondary },
-        { label: '业务摘要', value: target.business_summary },
-      ],
-    },
-    {
-      label: '财务',
-      fields: [
-        { label: '营收', value: target.current_revenue_yuan ? formatYuan(target.current_revenue_yuan) : null },
-        { label: '利润', value: target.current_net_profit_yuan ? formatYuan(target.current_net_profit_yuan) : null },
-      ],
-    },
-    {
-      label: '估值交易',
-      fields: [
-        { label: '估值', value: target.valuation_yuan ? formatYuan(target.valuation_yuan) : null },
-        { label: '估值时间', value: target.valuation_date },
-        { label: '报价', value: target.asking_price_yuan ? formatYuan(target.asking_price_yuan) : null },
-        { label: '报价时间', value: target.asking_price_date },
-        { label: 'PE', value: target.pe_ratio ? Number(target.pe_ratio).toFixed(1) : null },
-        { label: '出售比例', value: target.transfer_ratio_text || formatTransferRatio(target) },
-        { label: '是否还卖', value: valueLabel('is_for_sale', target.is_for_sale) },
-        { label: '可控股', value: valueLabel('can_control', target.can_control) },
-        { label: '可并表', value: valueLabel('can_consolidate', target.can_consolidate) },
-      ],
-    },
-    {
-      label: '风险',
-      fields: [
-        { label: '风险摘要', value: target.risk_summary },
-      ],
-    },
-  ];
-
-  return (
-    <div className="space-y-6">
-      {groups.map((group) => (
-        <div key={group.label}>
-          <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">{group.label}</h4>
-          <div className="grid grid-cols-2 gap-x-8 gap-y-2.5">
-            {group.fields.map((field) => (
-              <div key={field.label} className="flex items-baseline gap-2">
-                <span className="text-xs text-gray-500 w-16 shrink-0">{field.label}</span>
-                <span className="text-sm text-gray-800">{field.value || '-'}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      ))}
     </div>
   );
 }
@@ -874,28 +804,3 @@ function formatYuan(val: string): string {
   return String(num);
 }
 
-function formatListedStatus(status: string | null): string {
-  if (status === 'listed') return '已上市';
-  if (status === 'unlisted' || status === 'pre_ipo') return '未上市';
-  return '未知';
-}
-
-function getSubjectDisplay(target: SellerTarget): string {
-  const subject = target.target_subject_name?.trim();
-  return subject || '-';
-}
-
-function formatTransferRatio(target: SellerTarget): string | null {
-  if (target.transfer_ratio_min && target.transfer_ratio_max) {
-    return `${formatRatio(target.transfer_ratio_min)}-${formatRatio(target.transfer_ratio_max)}`;
-  }
-  if (target.transfer_ratio_min) return `>=${formatRatio(target.transfer_ratio_min)}`;
-  if (target.transfer_ratio_max) return `<=${formatRatio(target.transfer_ratio_max)}`;
-  return null;
-}
-
-function formatRatio(value: string): string {
-  const num = Number(value);
-  if (!Number.isFinite(num)) return value;
-  return `${Number(num.toFixed(1))}%`;
-}

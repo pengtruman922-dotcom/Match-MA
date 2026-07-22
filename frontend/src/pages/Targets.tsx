@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Plus, Search, Tag } from 'lucide-react';
 import { research, sellerTargets, users } from '../lib/api';
+import BatchResearchDialog from '../features/targets/BatchResearchDialog';
 import { isAdmin } from '../lib/auth';
 import type {
   AppUserOption,
@@ -53,6 +54,7 @@ export default function Targets() {
   const [assignOwnerId, setAssignOwnerId] = useState('');
   const [assigning, setAssigning] = useState(false);
   const [batchResearching, setBatchResearching] = useState(false);
+  const [researchDialogOpen, setResearchDialogOpen] = useState(false);
 
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const visibleIds = useMemo(() => items.map((item) => item.id), [items]);
@@ -273,17 +275,21 @@ export default function Targets() {
     }
   };
 
-  const handleBatchResearch = async () => {
-    const ids = Array.from(selectedIds);
-    if (!ids.length) {
+  const openBatchResearch = () => {
+    if (!selectedIds.size) {
       alert('请先勾选需要调研的标的。');
       return;
     }
-    if (!window.confirm(`为已选择的 ${ids.length} 个标的启动公开信息调研？`)) return;
+    setResearchDialogOpen(true);
+  };
+
+  const submitBatchResearch = async (ids: string[]) => {
     setBatchResearching(true);
     try {
       const result = await research.startSellerTargets(ids);
+      setResearchDialogOpen(false);
       alert(`已提交 ${result.queued_count} 个调研任务${result.reused_count ? `，复用 ${result.reused_count} 个进行中任务` : ''}。`);
+      fetchTargets();
     } catch (err) {
       alert(err instanceof Error ? err.message : '批量调研启动失败');
     } finally {
@@ -309,7 +315,7 @@ export default function Targets() {
           <button
             type="button"
             disabled={batchResearching}
-            onClick={() => void handleBatchResearch()}
+            onClick={openBatchResearch}
             className="px-3 py-2 border border-gray-200 text-sm font-medium text-gray-700 hover:border-brand-500 hover:text-brand-600 transition-colors bg-white disabled:opacity-50"
           >
             {batchResearching ? '提交中…' : `批量调研${selectedCount ? `（${selectedCount}）` : ''}`}
@@ -503,6 +509,15 @@ export default function Targets() {
         defaultTargetName={updateDrawer.targetName}
         onSuccess={fetchTargets}
       />
+
+      {researchDialogOpen && (
+        <BatchResearchDialog
+          targets={items.filter((item) => selectedIds.has(item.id))}
+          submitting={batchResearching}
+          onCancel={() => setResearchDialogOpen(false)}
+          onConfirm={(ids) => void submitBatchResearch(ids)}
+        />
+      )}
     </div>
   );
 }

@@ -85,6 +85,7 @@ class SellerTargetOut(BaseModel):
     recommendation_status: str
     information_status: str
     industry_l1: str | None = None
+    industry_l2: str | None = None
     industry_primary: str | None
     industry_secondary: str | None
     registered_province: str | None
@@ -94,6 +95,7 @@ class SellerTargetOut(BaseModel):
     raw_region_text: str | None
     region_granularity: str | None
     listed_status: str
+    listing_market_region: str | None = None
     market_cap_yuan: Decimal | None
     current_revenue_yuan: Decimal | None
     current_net_profit_yuan: Decimal | None
@@ -132,6 +134,9 @@ class SellerTargetOut(BaseModel):
     gap_summary: str | None
     owner_user_id: UUID | None = None
     owner_name: str | None = None
+    # 调研节流靠界面二次确认，不靠服务端静默跳过，所以列表也要带上最近调研时间。
+    last_research_at: str | None = None
+    research_last_outcome: str | None = None
     created_at: str
     updated_at: str
     latest_follow_up_on: str | None = None
@@ -309,9 +314,9 @@ class TargetFollowUpOut(BaseModel):
 
 SELLER_TARGET_OUT_COLUMNS = """
               id, target_name, target_type, target_subject_name, lifecycle_status, recommendation_status, information_status,
-              industry_l1, industry_primary, industry_secondary, registered_province, registered_city,
+              industry_l1, industry_l2, industry_primary, industry_secondary, registered_province, registered_city,
               headquarter_province, headquarter_city, raw_region_text, region_granularity,
-              listed_status, market_cap_yuan, current_revenue_yuan, current_net_profit_yuan,
+              listed_status, listing_market_region, market_cap_yuan, current_revenue_yuan, current_net_profit_yuan,
               current_total_profit_yuan, current_assets_yuan, current_debt_ratio,
               current_operating_cash_flow_yuan, financial_period_label, profitability_status,
               cash_flow_status, operation_stability_status, valuation_yuan, valuation_date,
@@ -323,6 +328,7 @@ SELLER_TARGET_OUT_COLUMNS = """
               earnout_dependency_status, business_summary, transaction_summary, risk_summary, gap_summary,
               owner_user_id,
               (select au.name from app_user au where au.id = seller_target.owner_user_id) as owner_name,
+              last_research_at::text as last_research_at, research_last_outcome,
               created_at::text as created_at, updated_at::text as updated_at
 """
 

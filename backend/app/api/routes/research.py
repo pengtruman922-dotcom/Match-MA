@@ -137,8 +137,7 @@ def get_seller_research_status(
         text(
             """
             select last_research_at::text as last_research_at,
-                   research_last_outcome,
-                   research_retry_after::text as research_retry_after
+                   research_last_outcome
             from seller_target
             where id = :target_id and team_id = :team_id and workspace_id = :workspace_id
               and deleted_at is null
