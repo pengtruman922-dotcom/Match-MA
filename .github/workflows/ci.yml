@@ -26,7 +26,8 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17
+        # 不是官方 postgres 镜像：baseline 需要 pgvector（官方镜像不带）
+        image: pgvector/pgvector:pg17
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: match_ma

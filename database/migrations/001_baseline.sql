@@ -6,6 +6,12 @@
 -- Seeds at the bottom: default team/workspace/users, the industry dictionary
 -- and the current default prompt versions exported from production.
 
+-- Extensions the schema depends on: vector(1024) columns with ivfflat
+-- indexes need pgvector, the *_trgm indexes need pg_trgm. Railway installs
+-- both. A fresh database must too (CI uses the pgvector/pgvector image)
+create extension if not exists vector;
+create extension if not exists pg_trgm;
+
 create table action_application_log (
   id uuid not null default gen_random_uuid(),
   team_id uuid not null,
