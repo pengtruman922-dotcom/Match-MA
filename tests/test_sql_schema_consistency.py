@@ -20,8 +20,6 @@ TABLE_ALIASES = {
     "bi": "buyer_intent",
     "bp": "buyer_party",
     "st": "seller_target",
-    "sp": "seller_party",
-    "r": "seller_target_risk",
     "x": "buyer_intent_target_exclusion",
 }
 
