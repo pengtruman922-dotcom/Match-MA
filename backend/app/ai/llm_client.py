@@ -15,6 +15,16 @@ class LlmCallError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict[str, Any]
+    # 参数解析失败时保留原文，便于把错误回传给模型而不是直接失败。
+    raw_arguments: str
+    arguments_error: str | None = None
+
+
+@dataclass(frozen=True)
 class ChatCompletionResult:
     raw_output_text: str
     parsed_output_json: dict[str, Any] | None
@@ -22,6 +32,10 @@ class ChatCompletionResult:
     completion_tokens: int | None
     total_tokens: int | None
     latency_ms: int
+    tool_calls: tuple[ToolCall, ...] = ()
+    finish_reason: str | None = None
+    # choices[0].message 原样保留：工具循环要把它按原样放回 messages。
+    assistant_message: dict[str, Any] | None = None
 
 
 def call_openai_compatible_chat(
@@ -36,6 +50,8 @@ def call_openai_compatible_chat(
     timeout_seconds: int,
     api_key_encrypted: str | None = None,
     response_format: str | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: str | None = None,
 ) -> ChatCompletionResult:
     api_key = _get_api_key(api_key_secret_ref, api_key_encrypted)
     endpoint = base_url.rstrip("/") + "/chat/completions"
@@ -51,6 +67,10 @@ def call_openai_compatible_chat(
         payload["max_tokens"] = int(max_tokens)
     if response_format == "json_object":
         payload["response_format"] = {"type": "json_object"}
+    if tools:
+        payload["tools"] = tools
+        if tool_choice:
+            payload["tool_choice"] = tool_choice
 
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {
@@ -78,10 +98,21 @@ def call_openai_compatible_chat(
         raise LlmCallError(f"LLM response is not valid JSON: {response_body[:500]}") from exc
 
     try:
-        raw_output_text = response_json["choices"][0]["message"]["content"] or ""
+        choice = response_json["choices"][0]
+        assistant_message = choice["message"]
+        if not isinstance(assistant_message, dict):
+            raise TypeError("message is not an object")
     except (KeyError, IndexError, TypeError) as exc:
-        message = f"LLM response missing choices[0].message.content: {response_body[:500]}"
+        message = f"LLM response missing choices[0].message: {response_body[:500]}"
         raise LlmCallError(message) from exc
+
+    tool_calls = _parse_tool_calls(assistant_message.get("tool_calls"))
+    raw_output_text = assistant_message.get("content") or ""
+    # 请求工具时 content 为空是正常的；只有既没内容也没工具调用才是坏响应。
+    if not raw_output_text and not tool_calls:
+        raise LlmCallError(
+            f"LLM response has neither content nor tool_calls: {response_body[:500]}"
+        )
 
     usage = response_json.get("usage") or {}
     parsed_output_json = _parse_json_object(raw_output_text)
@@ -92,7 +123,59 @@ def call_openai_compatible_chat(
         completion_tokens=_optional_int(usage.get("completion_tokens")),
         total_tokens=_optional_int(usage.get("total_tokens")),
         latency_ms=latency_ms,
+        tool_calls=tool_calls,
+        finish_reason=choice.get("finish_reason"),
+        assistant_message=assistant_message,
     )
+
+
+def _parse_tool_calls(value: Any) -> tuple[ToolCall, ...]:
+    """Read tool calls out of an assistant message.
+
+    Malformed arguments are carried through rather than raised: the loop can
+    hand the error back to the model, which usually retries correctly, whereas
+    failing the call throws away every tool result gathered so far.
+    """
+    if not isinstance(value, list):
+        return ()
+    calls: list[ToolCall] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = str(function.get("name") or "").strip()
+        if not name:
+            continue
+        raw_arguments = function.get("arguments")
+        if isinstance(raw_arguments, dict):
+            arguments, raw_text, argument_error = raw_arguments, json.dumps(
+                raw_arguments, ensure_ascii=False
+            ), None
+        else:
+            raw_text = str(raw_arguments or "").strip()
+            arguments, argument_error = {}, None
+            if raw_text:
+                try:
+                    decoded = json.loads(raw_text)
+                except json.JSONDecodeError as exc:
+                    argument_error = f"arguments is not valid JSON: {exc}"
+                else:
+                    if isinstance(decoded, dict):
+                        arguments = decoded
+                    else:
+                        argument_error = "arguments is not a JSON object"
+        calls.append(
+            ToolCall(
+                id=str(item.get("id") or f"call_{index}"),
+                name=name,
+                arguments=arguments,
+                raw_arguments=raw_text,
+                arguments_error=argument_error,
+            )
+        )
+    return tuple(calls)
 
 
 def _get_api_key(api_key_secret_ref: str | None, api_key_encrypted: str | None = None) -> str | None:
