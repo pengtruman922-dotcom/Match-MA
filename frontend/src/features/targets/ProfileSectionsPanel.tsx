@@ -254,9 +254,16 @@ export default function ProfileSectionsPanel({
           <p className="text-xs font-medium text-amber-800">待确认调研建议（{proposals.length}）</p>
           <div className="mt-2 space-y-2">
             {proposals.map((proposal) => {
-              const proposed = proposal.proposal_kind === 'profile_section'
-                ? String(proposal.proposed_value_json.content_text || '')
-                : String(proposal.proposed_value_json.value || '');
+              // 调研查过但没有公开信息时提议 not_found —— 内容为空是正常的，
+              // 它提议的是「确认这一栏是缺口」而不是一段描述。
+              const proposed = proposal.proposal_kind !== 'profile_section'
+                ? String(proposal.proposed_value_json.value || '')
+                : proposal.proposed_value_json.info_status === 'not_found'
+                  ? '公开渠道未找到相关信息，建议标记为暂无信息'
+                  : String(proposal.proposed_value_json.content_text || '');
+              const sources = Array.isArray(proposal.proposed_value_json.sources)
+                ? (proposal.proposed_value_json.sources as string[])
+                : [];
               return (
                 <div key={proposal.id} className="border border-amber-100 bg-white px-3 py-2 text-xs">
                   <div className="flex items-start justify-between gap-3">
@@ -266,12 +273,18 @@ export default function ProfileSectionsPanel({
                         <span className="ml-2 font-normal text-amber-700">{conflictLabel(proposal.conflict_kind)}</span>
                       </p>
                       <p className="mt-1 text-gray-600">{proposed}</p>
-                      {proposal.source_url && (
-                        <a href={proposal.source_url} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 text-brand-600 hover:underline">
-                          <ExternalLink className="h-3 w-3" />
-                          {proposal.source_title || proposal.source_url}
+                      {(sources.length ? sources : proposal.source_url ? [proposal.source_url] : []).map((url) => (
+                        <a
+                          key={url}
+                          href={url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="mt-1 flex items-center gap-1 text-brand-600 hover:underline"
+                        >
+                          <ExternalLink className="h-3 w-3 shrink-0" />
+                          <span className="truncate">{sourceDomain(url)}</span>
                         </a>
-                      )}
+                      ))}
                     </div>
                     <div className="flex shrink-0 gap-1.5">
                       <button
@@ -296,6 +309,14 @@ export default function ProfileSectionsPanel({
       )}
     </div>
   );
+}
+
+function sourceDomain(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return url;
+  }
 }
 
 function conflictLabel(kind: ResearchProposal['conflict_kind']): string {

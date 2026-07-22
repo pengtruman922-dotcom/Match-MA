@@ -375,15 +375,18 @@ def _research_job_output(
 def _accept_profile_proposal(db: Session, proposal: dict[str, Any], *, user_id: UUID) -> None:
     value = proposal.get("proposed_value_json") or {}
     content = str(value.get("content_text") or "").strip()
-    if not content or not proposal.get("section_code"):
+    # 调研查过但确实没有公开信息时提议 not_found —— 这是被确认的缺口，
+    # 和「从未调研」在推荐里含义不同，因此是一条内容为空的合法建议。
+    info_status = "not_found" if str(value.get("info_status")) == "not_found" else "filled"
+    if not proposal.get("section_code") or (info_status == "filled" and not content):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="画像建议内容为空。")
     upsert_profile_section(
         db,
         entity_type="seller_target",
         entity_id=proposal["entity_id"],
         section_code=str(proposal["section_code"]),
-        info_status="filled",
-        content_text=content,
+        info_status=info_status,
+        content_text=content or None,
         source_type=proposal.get("source_type"),
         source_url=proposal.get("source_url"),
         source_title=proposal.get("source_title"),

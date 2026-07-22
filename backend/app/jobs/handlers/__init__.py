@@ -233,9 +233,9 @@ from backend.app.jobs.handlers.model_node_test import (
 from backend.app.jobs.handlers.research import (
     RESEARCH_NODE_NAME,
     RESEARCH_STRUCTURED_FIELDS,
+    RESEARCH_TOOLS,
+    ResearchTools,
     _handle_seller_target_research,
-    build_research_queries,
-    classify_research_conflict,
     normalize_research_output,
     research_source_type,
 )
