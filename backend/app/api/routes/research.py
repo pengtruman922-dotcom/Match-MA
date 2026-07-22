@@ -392,7 +392,6 @@ def _accept_profile_proposal(db: Session, proposal: dict[str, Any], *, user_id: 
         confidence=proposal.get("confidence"),
         review_status="accepted",
         user_id=user_id,
-        supersede_current=False,
     )
 
 

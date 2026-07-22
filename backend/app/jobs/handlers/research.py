@@ -558,7 +558,6 @@ def _write_researched_profile_section(
         confidence=claim.get("confidence"),
         review_status="auto_accepted",
         user_id=SYSTEM_USER_ID,
-        supersede_current=False,
     )
 
 

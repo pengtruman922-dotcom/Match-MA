@@ -3,9 +3,11 @@ from backend.app.services.profile_sections import (
     PROFILE_SECTION_CODES,
     PROFILE_TOTAL_BUDGET,
     buyer_party_fact_block,
+    load_profile_sections,
     normalize_profile_section_items,
     profile_coverage,
     render_profile_text,
+    upsert_profile_section,
 )
 
 
@@ -142,6 +144,64 @@ def test_profile_parser_rejects_unknown_duplicate_and_invalid_date_rows() -> Non
     assert any("duplicate_section" in note for note in notes)
     assert any("unknown_section" in note for note in notes)
     assert any("invalid_as_of_date" in note for note in notes)
+
+
+class _RecordingDb:
+    """Records statements instead of running them."""
+
+    def __init__(self, returning: dict | None = None) -> None:
+        self.statements: list[tuple[str, dict]] = []
+        self._returning = returning or {"id": "row-1", "section_code": "tech_team"}
+
+    def execute(self, statement, params=None):
+        self.statements.append((str(statement), dict(params or {})))
+        outer = self
+
+        class _Result:
+            def mappings(self):
+                return self
+
+            def one(self):
+                return outer._returning
+
+            def all(self):
+                return outer._returning if isinstance(outer._returning, list) else []
+
+        return _Result()
+
+
+def test_accepting_a_section_supersedes_the_current_revision() -> None:
+    """接受即当前值。靠 as_of_date 排序决定当前值时，顾问点了「确认」而
+    建议没带日期（或日期更早），界面会毫无反应——修改看起来丢失了。"""
+    db = _RecordingDb()
+
+    upsert_profile_section(
+        db,
+        entity_type="seller_target",
+        entity_id="11111111-1111-1111-1111-111111111111",
+        section_code="tech_team",
+        info_status="filled",
+        content_text="核心团队来自某上市公司研发中心",
+        review_status="accepted",
+    )
+
+    supersede = [item for item in db.statements if "deleted_at = now()" in item[0]]
+    assert len(supersede) == 1
+    assert "review_status in ('accepted', 'auto_accepted')" in supersede[0][0]
+    assert supersede[0][1]["section_code"] == "tech_team"
+    assert any("insert into entity_profile_section" in item[0] for item in db.statements)
+
+
+def test_current_revision_is_the_last_accepted_not_the_newest_dated() -> None:
+    """调研给的 as_of_date 常常是网页发布时间而非事实时点，不能用它决定
+    顾问看到哪一版。"""
+    db = _RecordingDb(returning=[])
+
+    load_profile_sections(db, entity_type="seller_target", entity_ids=["11111111-1111-1111-1111-111111111111"])
+
+    statement = db.statements[0][0]
+    assert "order by entity_id, section_code, updated_at desc" in statement
+    assert "as_of_date desc" not in statement
 
 
 def test_profile_parser_removes_cross_layer_deal_and_team_noise() -> None:

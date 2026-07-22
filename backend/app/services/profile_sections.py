@@ -142,9 +142,11 @@ def load_profile_sections(
 ) -> dict[str, dict[str, dict[str, Any]]]:
     """Load the current section per entity, keyed by entity id then section.
 
-    Several rows may exist for one section — different periods or sources that
-    the research flow deliberately keeps side by side — so the newest accepted
-    row wins.
+    Accepting supersedes, so one accepted row per section is the normal state.
+    The ordering is a safety net for rows that predate that rule, and it sorts
+    by when the revision was accepted rather than by as_of_date — a researched
+    date is often the page's publication date rather than the fact's, and it
+    must not decide which revision the consultant sees.
     """
     if not entity_ids:
         return {}
@@ -161,8 +163,7 @@ def load_profile_sections(
               and entity_id = any(:entity_ids)
               and deleted_at is null
               and review_status in ('accepted', 'auto_accepted')
-            order by entity_id, section_code,
-                     as_of_date desc nulls last, updated_at desc
+            order by entity_id, section_code, updated_at desc
             """
         ),
         {
@@ -282,35 +283,40 @@ def upsert_profile_section(
     confidence: float | None = None,
     review_status: str = "accepted",
     user_id: Any = None,
-    supersede_current: bool = True,
 ) -> dict[str, Any]:
-    """Insert a new revision of a section rather than overwriting the old one."""
+    """Insert a new revision of a section rather than overwriting the old one.
+
+    Accepting always supersedes the current revision. Letting as_of_date decide
+    which revision is current makes accepting a proposal a silent no-op
+    whenever the incoming date is missing or older than what is on file — the
+    consultant clicks 确认 and the panel does not change. Whoever accepted last
+    wins; as_of_date stays a display and deep-eval signal only.
+    """
     if section_code not in PROFILE_SECTION_CODES:
         raise ValueError(f"Unknown profile section: {section_code}")
-    if supersede_current:
-        db.execute(
-            text(
-                """
-                update entity_profile_section
-                set deleted_at = now(), updated_at = now(), updated_by = :user_id
-                where team_id = :team_id
-                  and workspace_id = :workspace_id
-                  and entity_type = :entity_type
-                  and entity_id = :entity_id
-                  and section_code = :section_code
-                  and deleted_at is null
-                  and review_status in ('accepted', 'auto_accepted')
-                """
-            ),
-            {
-                "team_id": DEFAULT_TEAM_ID,
-                "workspace_id": DEFAULT_WORKSPACE_ID,
-                "entity_type": entity_type,
-                "entity_id": entity_id,
-                "section_code": section_code,
-                "user_id": user_id,
-            },
-        )
+    db.execute(
+        text(
+            """
+            update entity_profile_section
+            set deleted_at = now(), updated_at = now(), updated_by = :user_id
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and entity_type = :entity_type
+              and entity_id = :entity_id
+              and section_code = :section_code
+              and deleted_at is null
+              and review_status in ('accepted', 'auto_accepted')
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "section_code": section_code,
+            "user_id": user_id,
+        },
+    )
     row = db.execute(
         text(
             """

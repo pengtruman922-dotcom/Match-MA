@@ -33,7 +33,17 @@ router = APIRouter(
     dependencies=[Depends(_require_admin_route)],
 )
 
-PROVIDER_TYPES = {"openai_compatible", "dashscope", "deepseek", "azure_openai", "ocr", "embedding", "custom"}
+PROVIDER_TYPES = {
+    "openai_compatible",
+    "dashscope",
+    "deepseek",
+    "azure_openai",
+    "ocr",
+    "embedding",
+    # 搜索供应商与模型共用本表，靠 provider_type 区分；DB 侧约束见迁移 045。
+    "search",
+    "custom",
+}
 AUTH_TYPES = {"none", "bearer", "api_key_header", "custom"}
 NODE_TYPES = {"llm", "embedding", "ocr", "rerank", "research", "parser"}
 OUTPUT_MODES = {"text", "json", "embedding", "file", "mixed"}
@@ -402,7 +412,7 @@ def create_provider(payload: ProviderCreate, db: Session = Depends(get_db)) -> d
     _ensure_unique_model_config_name(db, provider_name)
     secret_data = _model_secret_create_data(payload)
     if payload.is_default:
-        _clear_default_provider(db)
+        _clear_default_provider(db, payload.provider_type)
     row = db.execute(
         _provider_returning_statement(
             """
@@ -503,7 +513,7 @@ def update_provider(provider_id: UUID, payload: ProviderUpdate, db: Session = De
     if "auth_type" in data:
         _validate_choice("auth_type", data["auth_type"], AUTH_TYPES)
     if data.get("is_default") is True:
-        _clear_default_provider(db)
+        _clear_default_provider(db, str(data.get("provider_type") or current["provider_type"]))
     if data.get("is_active") is False and current.get("is_active"):
         _ensure_model_can_deactivate(db, provider_id)
     row = _update_row(
@@ -1363,8 +1373,30 @@ def _list_node_test_traces(db: Session, *, job_id: UUID) -> list[dict[str, Any]]
     return [dict(row) for row in rows]
 
 
-def _clear_default_provider(db: Session) -> None:
-    db.execute(text("update model_provider_config set is_default = false where team_id = :team_id and workspace_id = :workspace_id"), {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID})
+def _clear_default_provider(db: Session, provider_type: str) -> None:
+    """Clear the default flag within one provider_type only.
+
+    Chat models, OCR, embedding and search all live in this table, and each
+    kind needs its own default. Clearing across the whole table means saving a
+    search key silently unsets the default chat model — a failure that only
+    surfaces on the next deep eval.
+    """
+    db.execute(
+        text(
+            """
+            update model_provider_config
+            set is_default = false
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and provider_type = :provider_type
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "provider_type": provider_type,
+        },
+    )
 
 
 def _clear_default_node(db: Session, node_name: str) -> None:
