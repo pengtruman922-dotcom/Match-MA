@@ -41,8 +41,17 @@ def test_split_sql_statements_ignores_semicolon_in_line_comment() -> None:
     ]
 
 
-def test_extracted_action_follow_up_migration_splits_into_two_statements() -> None:
-    sql = load_migration_sql("029_extracted_action_type_target_follow_up.sql")
+def test_constraint_rebuild_splits_into_two_statements() -> None:
+    """The drop-then-add rebuild pattern used for check constraints must stay
+    two statements even with a comment carrying a semicolon in between
+    (the pattern that produced the original splitter incident)."""
+    sql = (
+        "alter table extracted_action drop constraint if exists chk_extracted_action_type;\n"
+        "-- rebuild with the new list; the semicolon above must not leak\n"
+        "alter table extracted_action\n"
+        "  add constraint chk_extracted_action_type\n"
+        "  check (action_type in ('seller_target_new', 'target_follow_up'));"
+    )
 
     statements = split_sql_statements(sql)
 
@@ -63,16 +72,17 @@ class _RecordingBind:
 
 def test_run_migration_sql_escapes_percent_for_psycopg() -> None:
     # psycopg3 scans driver-level SQL for %-placeholders even without bound
-    # parameters; a literal LIKE '%x%' must reach the driver as '%%x%%'
-    # (incident: migration 031 blocked Railway deploys for two days).
+    # parameters; literal percent signs must reach the driver doubled
+    # (incident: the pre-squash migration 031 blocked Railway deploys for
+    # two days). The baseline carries at least one literal percent, so this
+    # exercises the real file.
     bind = _RecordingBind()
 
-    run_migration_sql(bind, "031_buyer_management_flow.sql")
+    run_migration_sql(bind, "001_baseline.sql")
 
     assert bind.statements, "no statements executed"
     joined = "\n".join(bind.statements)
-    assert "%%buyer_intent.status use exactly one of%%" in joined
-    assert "%%manual buyer notes%%" in joined
+    assert "%" in joined, "expected at least one escaped percent in the baseline"
     stripped = joined.replace("%%", "")
     assert "%" not in stripped, "found unescaped percent sign in driver-level SQL"
 

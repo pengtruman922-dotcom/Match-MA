@@ -36,14 +36,18 @@ def _db_constraint_action_types() -> set[str]:
     file order is the one live in production after `alembic upgrade head`.
     """
     latest: str | None = None
+    # 两种写法：迁移重建用 check (action_type in (...))，
+    # 基线文件是 pg_get_constraintdef 的规范形式 CHECK ((action_type = ANY (ARRAY[...])))。
+    pattern = re.compile(
+        r"chk_extracted_action_type\s+"
+        r"(?:check \(action_type in \((?P<plain>.*?)\)\)"
+        r"|CHECK \(\(action_type = ANY \(ARRAY\[(?P<pg>.*?)\]\)\)\))",
+        re.S,
+    )
     for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
         content = path.read_text(encoding="utf-8")
-        for match in re.finditer(
-            r"add constraint chk_extracted_action_type\s+check \(action_type in \((.*?)\)\)",
-            content,
-            re.S,
-        ):
-            latest = match.group(1)
+        for match in pattern.finditer(content):
+            latest = match.group("plain") or match.group("pg")
     assert latest is not None, "chk_extracted_action_type not found in any migration"
     return set(re.findall(r"'([a-z_]+)'", latest))
 

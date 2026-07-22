@@ -21,6 +21,40 @@ jobs:
       - name: Run pytest
         run: python -m pytest -q
 
+  migrations:
+    name: Fresh database from baseline
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: match_ma
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/match_ma
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Apply the baseline to a fresh database
+        run: python -m alembic upgrade 20260722_0048
+      - name: Compare the fresh schema against the production snapshot
+        run: python scripts/verify_schema_against_snapshot.py
+      - name: Apply any migrations after the baseline
+        run: python -m alembic upgrade head
+
   frontend:
     name: Frontend typecheck + build
     runs-on: ubuntu-latest

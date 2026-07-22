@@ -29,7 +29,9 @@ CHECKED_SOURCES = (
     "backend/app/jobs/handlers/recommendation.py",
 )
 
-DDL_LEAD_KEYWORDS = ("constraint", "primary key", "unique", "check", "foreign", "exclude")
+# 词边界匹配：`excluded_industries_json` 这类列名以 exclude 开头，
+# 裸 startswith 会把它误判成 EXCLUDE 约束行（压平后真实踩过）。
+DDL_LEAD_RE = re.compile(r"(?:constraint|primary\s+key|unique|check|foreign|exclude)\b", re.I)
 
 
 def _strip_sql_comments(sql: str) -> str:
@@ -45,7 +47,7 @@ def _build_schema() -> dict[str, set[str]]:
             columns = schema.setdefault(table, set())
             for line in body.splitlines():
                 line = line.strip()
-                if not line or line.lower().startswith(DDL_LEAD_KEYWORDS):
+                if not line or DDL_LEAD_RE.match(line):
                     continue
                 columns.add(line.split()[0].strip(","))
         for match in re.finditer(r"alter table (\w+)([^;]*)", sql, re.I | re.S):
