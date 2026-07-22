@@ -81,6 +81,78 @@ def get_table_stats(
     return {"table_count": len(rows), "rows": rows}
 
 
+@router.get("/schema-snapshot")
+def get_schema_snapshot(
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """临时端点：基线压平的 schema 快照源（总纲 §6.3 步骤 2，R1 收尾时处置）。
+
+    返回 pg_catalog 视角的规范化 schema——列/类型/默认值、约束 DDL、索引 DDL。
+    同一套查询也在 CI 的 migrations job 里对全新库执行，两边比对即等价性验收。
+    """
+    require_admin(current_user)
+    columns = [
+        dict(row)
+        for row in db.execute(
+            text(
+                """
+                select c.relname as table_name,
+                       a.attname as column_name,
+                       a.attnum as position,
+                       format_type(a.atttypid, a.atttypmod) as data_type,
+                       a.attnotnull as not_null,
+                       pg_get_expr(d.adbin, d.adrelid) as default_expr
+                from pg_class c
+                join pg_namespace n on n.oid = c.relnamespace
+                join pg_attribute a on a.attrelid = c.oid
+                left join pg_attrdef d on d.adrelid = c.oid and d.adnum = a.attnum
+                where n.nspname = 'public'
+                  and c.relkind = 'r'
+                  and a.attnum > 0
+                  and not a.attisdropped
+                order by c.relname, a.attnum
+                """
+            )
+        ).mappings()
+    ]
+    constraints = [
+        dict(row)
+        for row in db.execute(
+            text(
+                """
+                select conrelid::regclass::text as table_name,
+                       conname as constraint_name,
+                       pg_get_constraintdef(oid) as definition
+                from pg_constraint
+                where connamespace = 'public'::regnamespace
+                order by 1, 2
+                """
+            )
+        ).mappings()
+    ]
+    indexes = [
+        dict(row)
+        for row in db.execute(
+            text(
+                """
+                select tablename as table_name,
+                       indexname as index_name,
+                       indexdef as definition
+                from pg_indexes
+                where schemaname = 'public'
+                order by 1, 2
+                """
+            )
+        ).mappings()
+    ]
+    return {
+        "columns": columns,
+        "constraints": constraints,
+        "indexes": indexes,
+    }
+
+
 @router.get("/business-updates/{business_update_id}", response_model=BusinessUpdateDebugOut)
 def get_business_update_debug(
     business_update_id: UUID,
