@@ -244,7 +244,36 @@ const FIELD_LABELS_BY_ENTITY: Record<string, Record<string, string>> = {
   buyer_seller_relation: RELATION_FIELD_LABELS,
 };
 
+// 匹配画像不是实体的列，在更新记录里以 profile_section.<code> 的形式出现。
+const PROFILE_SECTION_FIELD_PREFIX = 'profile_section.';
+
+const PROFILE_SECTION_LABELS: Record<string, string> = {
+  business_product: '业务与产品',
+  chain_position: '产业链位置与行业地位',
+  tech_team: '技术与团队能力',
+  ops_quality: '经营质量',
+  deal_terms: '交易属性与配合度',
+  sell_intent_risk: '出售诉求与风险缺口',
+};
+
+const PROFILE_INFO_STATUS_LABELS: Record<string, string> = {
+  filled: '',
+  not_found: '（暂无信息）',
+  not_applicable: '（不适用）',
+};
+
+function profileSectionValueLabel(value: unknown): string {
+  if (typeof value !== 'object' || value === null) return String(value);
+  const row = value as { info_status?: string; content_text?: string };
+  const status = PROFILE_INFO_STATUS_LABELS[row.info_status || 'filled'];
+  return (row.content_text || '').trim() || status || '-';
+}
+
 export function fieldLabel(entityType: EntityType, fieldPath: string): string {
+  if (fieldPath.startsWith(PROFILE_SECTION_FIELD_PREFIX)) {
+    const code = fieldPath.slice(PROFILE_SECTION_FIELD_PREFIX.length);
+    return `画像·${PROFILE_SECTION_LABELS[code] || code}`;
+  }
   return FIELD_LABELS_BY_ENTITY[entityType]?.[fieldPath] || fieldPath;
 }
 
@@ -406,6 +435,7 @@ Object.assign(VALUE_LABELS, {
 export function valueLabel(fieldPath: string, value: unknown): string {
   if (value === null || value === undefined || value === '') return '-';
   if (Array.isArray(value)) return value.length ? value.map((item) => valueLabel(fieldPath, item)).join('、') : '-';
+  if (fieldPath.startsWith(PROFILE_SECTION_FIELD_PREFIX)) return profileSectionValueLabel(value);
   if (typeof value === 'object') return JSON.stringify(value);
 
   const text = String(value);
@@ -424,9 +454,12 @@ const SOURCE_TYPE_LABELS: Record<string, string> = {
 
 Object.assign(SOURCE_TYPE_LABELS, {
   direct_api: '手动编辑',
+  manual: '手动编辑',
   seller_target_parse: '标的解析',
   buyer_intent_parse: '买家意向解析',
   business_update_extractor: '业务更新解析',
+  user_attachment: '附件解析',
+  research_proposal: '公开信息调研',
   update_log_rollback: '更新回滚',
   rollback: '回滚',
 });

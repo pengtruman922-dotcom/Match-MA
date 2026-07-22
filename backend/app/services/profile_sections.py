@@ -17,7 +17,12 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from backend.app.api.routes.utils import write_action_log
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+
+# 更新记录里画像字段的前缀。画像不是实体的列，靠这个前缀和普通字段区分，
+# 回滚时据此走 entity_profile_section 的版本恢复而不是 update 某一列。
+PROFILE_SECTION_FIELD_PREFIX = "profile_section."
 
 # 栏目由指标对照表倒推：每一栏都有明确的买家诉求作为对手方，
 # 没有对手方的维度不设栏，避免画像变成又一份越写越长的公司简介。
@@ -294,7 +299,7 @@ def upsert_profile_section(
     """
     if section_code not in PROFILE_SECTION_CODES:
         raise ValueError(f"Unknown profile section: {section_code}")
-    db.execute(
+    superseded = db.execute(
         text(
             """
             update entity_profile_section
@@ -306,6 +311,7 @@ def upsert_profile_section(
               and section_code = :section_code
               and deleted_at is null
               and review_status in ('accepted', 'auto_accepted')
+            returning id, info_status, content_text
             """
         ),
         {
@@ -316,7 +322,7 @@ def upsert_profile_section(
             "section_code": section_code,
             "user_id": user_id,
         },
-    )
+    ).mappings().all()
     row = db.execute(
         text(
             """
@@ -357,4 +363,83 @@ def upsert_profile_section(
             "user_id": user_id,
         },
     ).mappings().one()
-    return dict(row)
+    previous = dict(superseded[0]) if superseded else None
+    return {**dict(row), "superseded": previous}
+
+
+def apply_profile_section(
+    db: Session,
+    *,
+    entity_type: str,
+    entity_id: UUID,
+    section_code: str,
+    info_status: str,
+    content_text: str | None,
+    source_type: str | None = None,
+    source_url: str | None = None,
+    source_title: str | None = None,
+    source_excerpt: str | None = None,
+    as_of_date: Any = None,
+    confidence: float | None = None,
+    review_status: str = "accepted",
+    user_id: Any = None,
+    log_source_type: str = "direct_api",
+    log_source_id: UUID | None = None,
+    business_update_id: UUID | None = None,
+    extra_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Write a section and record it where 更新记录 can see it.
+
+    Profile sections live in their own table, so nothing about them reached
+    action_application_log — a researched section changed the profile with no
+    entry in the update timeline and no way to undo it. Since research is what
+    writes most of them, that audit trail is the thing making automatic
+    acceptance safe rather than merely convenient.
+    """
+    row = upsert_profile_section(
+        db,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        section_code=section_code,
+        info_status=info_status,
+        content_text=content_text,
+        source_type=source_type,
+        source_url=source_url,
+        source_title=source_title,
+        source_excerpt=source_excerpt,
+        as_of_date=as_of_date,
+        confidence=confidence,
+        review_status=review_status,
+        user_id=user_id,
+    )
+    previous = row.get("superseded")
+    write_action_log(
+        db,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        field_path=f"{PROFILE_SECTION_FIELD_PREFIX}{section_code}",
+        old_value=_profile_log_value(previous),
+        new_value=_profile_log_value(row),
+        source_type=log_source_type,
+        source_id=log_source_id,
+        business_update_id=business_update_id,
+        applied_by=user_id,
+        metadata_json={
+            "section_code": section_code,
+            "section_label": PROFILE_SECTION_LABELS.get(section_code, section_code),
+            "profile_section_id": str(row["id"]),
+            "superseded_profile_section_id": str(previous["id"]) if previous else None,
+            "source_url": source_url,
+            **(extra_metadata or {}),
+        },
+    )
+    return row
+
+
+def _profile_log_value(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+    return {
+        "info_status": row.get("info_status"),
+        "content_text": row.get("content_text"),
+    }

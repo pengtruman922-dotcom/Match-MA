@@ -1,5 +1,7 @@
 """Research output handling and the two tools the agent drives."""
 
+import pytest
+
 from backend.app.jobs.handlers.research import (
     RESEARCH_TOOLS,
     MAX_SEARCH_RESULTS_PER_CALL,
@@ -199,3 +201,33 @@ def test_tool_schemas_declare_both_tools() -> None:
 
     assert names == ["web_search", "fetch_page"]
     assert all(tool["type"] == "function" for tool in RESEARCH_TOOLS)
+
+
+def test_structured_fact_validation_raises_a_plain_error_for_the_worker() -> None:
+    """调研自己采纳建议，校验失败不能是 HTTPException —— 后台任务里没有请求。"""
+    from backend.app.services.research_apply import ResearchApplyError, normalize_structured_fact
+
+    with pytest.raises(ResearchApplyError):
+        normalize_structured_fact(None, "listed_status", "差不多上市了")
+    with pytest.raises(ResearchApplyError):
+        normalize_structured_fact(None, "business_summary", "   ")
+    assert normalize_structured_fact(None, "listed_status", "listed") == "listed"
+    assert len(normalize_structured_fact(None, "registered_city", "城" * 500)) == 120
+
+
+def test_a_rejected_fact_leaves_the_rest_of_the_run_intact() -> None:
+    """一条建议校验不过就留在待复核，不该让整轮调研失败。"""
+    from backend.app.services.research_apply import ResearchApplyError, apply_research_proposal
+
+    with pytest.raises(ResearchApplyError):
+        apply_research_proposal(
+            None,
+            {
+                "id": "p1",
+                "entity_id": "e1",
+                "proposal_kind": "structured_fact",
+                "field_path": "current_revenue_yuan",
+                "proposed_value_json": {"value": 100},
+            },
+            user_id="u1",
+        )

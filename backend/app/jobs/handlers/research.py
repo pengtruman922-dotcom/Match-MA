@@ -39,6 +39,11 @@ from backend.app.services.profile_sections import (
     normalize_profile_section_items,
     profile_coverage,
 )
+from backend.app.services.research_apply import (
+    RESEARCH_STRUCTURED_FIELDS,
+    ResearchApplyError,
+    apply_research_proposal,
+)
 from backend.app.services.search_providers import SearchError
 from backend.app.services.search_providers.fetch import fetch_page_text
 from backend.app.services.search_service import (
@@ -55,24 +60,6 @@ SEARCH_RESULTS_PER_CALL = 6
 MAX_SEARCH_RESULTS_PER_CALL = 10
 FETCH_TEXT_LIMIT = 8000
 SNIPPET_LIMIT = 600
-
-# Research may propose these canonical facts. They stay proposals until a
-# consultant accepts them; values outside this deliberately small list never
-# enter research_proposal. No numeric fields: a wrong revenue figure costs more
-# and is harder to spot than a wrong industry label.
-RESEARCH_STRUCTURED_FIELDS = {
-    "target_subject_name",
-    "industry_primary",
-    "industry_secondary",
-    "industry_l1",
-    "industry_l2",
-    "registered_province",
-    "registered_city",
-    "headquarter_province",
-    "headquarter_city",
-    "listed_status",
-    "business_summary",
-}
 
 RELATION_KINDS = {"consistent", "supplement", "temporal_update", "same_period_conflict"}
 DEFAULT_RELATION = "supplement"
@@ -280,14 +267,30 @@ def _handle_seller_target_research(db: Session, job: JobClaim) -> dict[str, obje
         db.commit()
         raise ValueError(str(schema_validation["error"]))
 
+    applied_count = 0
+    apply_errors: list[str] = []
     for claim in claims:
-        _insert_research_proposal(
+        proposal = _insert_research_proposal(
             db,
             job=job,
             target_id=target_id,
             claim=claim,
             target_website=target.get("website"),
         )
+        # 自动采纳：变更进更新记录且可回滚，兜底靠审计而不是事前拦截。
+        try:
+            apply_research_proposal(
+                db,
+                proposal,
+                user_id=SYSTEM_USER_ID,
+                review_status="auto_accepted",
+            )
+        except ResearchApplyError as exc:
+            # 校验不过的留在待复核，不阻断这一轮其他建议。
+            apply_errors.append(f"{proposal.get('section_code') or proposal.get('field_path')}: {exc}")
+            continue
+        _mark_proposal_auto_accepted(db, proposal["id"])
+        applied_count += 1
 
     proposal_count = len([claim for claim in claims if claim["proposal_kind"] != "not_found"])
     outcome = "found" if proposal_count else "no_public_information"
@@ -299,6 +302,9 @@ def _handle_seller_target_research(db: Session, job: JobClaim) -> dict[str, obje
         "seller_target_id": str(target_id),
         "research_outcome": outcome,
         "proposal_count": len(claims),
+        "auto_accepted_count": applied_count,
+        "pending_review_count": len(apply_errors),
+        "apply_errors": apply_errors,
         "llm_calls": loop.usage.llm_calls,
         "tool_calls": loop.usage.tool_calls_by_name,
         "hit_iteration_limit": loop.hit_iteration_limit,
@@ -496,7 +502,7 @@ def _insert_research_proposal(
     target_id: UUID,
     claim: dict[str, Any],
     target_website: str | None = None,
-) -> UUID:
+) -> dict[str, Any]:
     sources = claim.get("sources") or []
     if claim["proposal_kind"] == "structured_fact":
         proposal_kind = "structured_fact"
@@ -523,7 +529,10 @@ def _insert_research_proposal(
               :proposed_value_json, :current_value_json, :conflict_kind,
               :period_label, :as_of_date, :source_type, :source_url,
               :confidence, 'pending_review', :created_by
-            ) returning id
+            ) returning
+              id, entity_id, proposal_kind, section_code, field_path,
+              proposed_value_json, conflict_kind, as_of_date,
+              source_type, source_url, source_title, source_excerpt, confidence
             """
         ).bindparams(
             bindparam("proposed_value_json", type_=JSONB),
@@ -550,7 +559,20 @@ def _insert_research_proposal(
             "created_by": SYSTEM_USER_ID,
         },
     ).mappings().one()
-    return row["id"]
+    return dict(row)
+
+
+def _mark_proposal_auto_accepted(db: Session, proposal_id: UUID) -> None:
+    db.execute(
+        text(
+            """
+            update research_proposal
+            set review_status = 'auto_accepted', reviewed_at = now(), updated_at = now()
+            where id = :proposal_id
+            """
+        ),
+        {"proposal_id": proposal_id},
+    )
 
 
 def research_source_type(url: str, *, target_website: str | None = None) -> str:

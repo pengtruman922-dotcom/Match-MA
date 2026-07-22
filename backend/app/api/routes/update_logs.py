@@ -18,6 +18,10 @@ from backend.app.api.routes.utils import (
 )
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
+from backend.app.services.profile_sections import (
+    PROFILE_SECTION_CODES,
+    PROFILE_SECTION_FIELD_PREFIX,
+)
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 
 router = APIRouter(prefix="/update-logs", tags=["update-logs"])
@@ -1148,14 +1152,76 @@ def _rollbackability(log: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "reason": "Rollback logs cannot be rolled back again."}
     if entity_type not in ROLLBACK_TABLE_BY_ENTITY:
         return {"ok": False, "reason": f"Rollback is not supported for entity_type={entity_type}."}
+    if _profile_section_code(field_path):
+        return {"ok": True, "reason": None}
     if field_path not in ROLLBACK_FIELDS_BY_ENTITY.get(entity_type, set()):
         return {"ok": False, "reason": f"Rollback is not supported for field_path={field_path}."}
     return {"ok": True, "reason": None}
 
 
+def _rollback_profile_section(db: Session, log: dict[str, Any], *, actor_user_id: UUID) -> None:
+    """Undo one section write by reviving the revision it superseded.
+
+    entity_profile_section keeps every revision, so rolling back is retiring
+    the row this log created and un-deleting the row it replaced — no value has
+    to be reconstructed from the log, which is what makes the restored text
+    exactly what was there before rather than an approximation of it.
+    """
+    metadata = log.get("metadata_json") or {}
+    section_id = metadata.get("profile_section_id")
+    if not section_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This profile section log predates rollback support and cannot be undone.",
+        )
+    db.execute(
+        text(
+            """
+            update entity_profile_section
+            set deleted_at = now(), updated_at = now(), updated_by = :user_id
+            where id = cast(:section_id as uuid) and deleted_at is null
+            """
+        ),
+        {"section_id": section_id, "user_id": actor_user_id},
+    )
+    superseded_id = metadata.get("superseded_profile_section_id")
+    if superseded_id:
+        db.execute(
+            text(
+                """
+                update entity_profile_section
+                set deleted_at = null, updated_at = now(), updated_by = :user_id
+                where id = cast(:section_id as uuid)
+                """
+            ),
+            {"section_id": superseded_id, "user_id": actor_user_id},
+        )
+
+
+def _profile_section_code(field_path: Any) -> str | None:
+    """Profile sections are rows in their own table, not columns on the entity."""
+    value = str(field_path or "")
+    if not value.startswith(PROFILE_SECTION_FIELD_PREFIX):
+        return None
+    code = value[len(PROFILE_SECTION_FIELD_PREFIX) :]
+    return code if code in PROFILE_SECTION_CODES else None
+
+
 def _get_current_field_value(db: Session, log: dict[str, Any]) -> Any:
     entity_type = log["entity_type"]
     field_path = log["field_path"]
+    if _profile_section_code(field_path):
+        row = db.execute(
+            text(
+                """
+                select info_status, content_text
+                from entity_profile_section
+                where id = cast(:section_id as uuid) and deleted_at is null
+                """
+            ),
+            {"section_id": (log.get("metadata_json") or {}).get("profile_section_id")},
+        ).mappings().one_or_none()
+        return dict(row) if row else None
     if entity_type == "buyer_intent" and field_path == "follow_up_record":
         follow_up_id = (log.get("metadata_json") or {}).get("follow_up_id")
         row = db.execute(
@@ -1195,6 +1261,9 @@ def _get_current_field_value(db: Session, log: dict[str, Any]) -> Any:
 def _apply_field_rollback(db: Session, log: dict[str, Any], *, actor_user_id: UUID) -> None:
     entity_type = log["entity_type"]
     field_path = log["field_path"]
+    if _profile_section_code(field_path):
+        _rollback_profile_section(db, log, actor_user_id=actor_user_id)
+        return
     if entity_type == "buyer_intent" and field_path == "follow_up_record":
         follow_up_id = (log.get("metadata_json") or {}).get("follow_up_id")
         result = db.execute(

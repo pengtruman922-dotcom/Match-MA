@@ -33,7 +33,7 @@ from backend.app.services.industry_taxonomy import (
 )
 from backend.app.services.profile_sections import (
     normalize_profile_section_items,
-    upsert_profile_section,
+    apply_profile_section,
 )
 
 from backend.app.jobs.handlers.buyer_intent_parse import (
@@ -229,6 +229,7 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
             db,
             actions=actions,
             attachment_context=attachment_context,
+            business_update_id=business_update_id,
         )
         applied_action_ids = {
             _optional_uuid(result.get("extracted_action_id")) for result in auto_apply_results
@@ -1250,6 +1251,7 @@ def _persist_document_profile_sections(
     *,
     actions: list[dict[str, Any]],
     attachment_context: dict[str, Any],
+    business_update_id: UUID | None = None,
 ) -> int:
     """Write qualitative claims extracted from user-supplied target material.
 
@@ -1283,7 +1285,7 @@ def _persist_document_profile_sections(
                 attachment_evidence=attachment_evidence,
                 fallback_excerpt=fallback_excerpt,
             )
-            upsert_profile_section(
+            apply_profile_section(
                 db,
                 entity_type="seller_target",
                 entity_id=target_id,
@@ -1297,6 +1299,8 @@ def _persist_document_profile_sections(
                 confidence=confidence,
                 review_status="auto_accepted",
                 user_id=SYSTEM_USER_ID,
+                log_source_type="user_attachment",
+                business_update_id=business_update_id,
             )
             written += 1
     return written

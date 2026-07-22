@@ -21,7 +21,7 @@ from backend.app.services.profile_sections import (
     PROFILE_SECTION_CODES,
     PROFILE_SECTION_LABELS,
     profile_coverage,
-    upsert_profile_section,
+    apply_profile_section,
 )
 
 router = APIRouter(prefix="/profile-sections", tags=["profile-sections"])
@@ -132,7 +132,7 @@ def write_profile_section(
 ) -> dict[str, Any]:
     _validate_target(entity_type, payload.section_code)
     ensure_entity_writable(db, current_user, entity_type=entity_type, entity_id=entity_id)
-    row = upsert_profile_section(
+    row = apply_profile_section(
         db,
         entity_type=entity_type,
         entity_id=entity_id,
@@ -146,6 +146,7 @@ def write_profile_section(
         as_of_date=payload.as_of_date,
         confidence=payload.confidence,
         user_id=current_user.user_id,
+        log_source_type="manual",
     )
     db.commit()
     return {

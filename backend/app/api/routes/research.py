@@ -12,22 +12,13 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from backend.app.api.authn import CurrentUser
-from backend.app.api.routes.utils import (
-    ensure_entity_visible,
-    ensure_entity_writable,
-    write_action_log,
-    write_field_value_sources_for_diff,
-)
+from backend.app.api.routes.utils import ensure_entity_visible, ensure_entity_writable
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 from backend.app.jobs.handlers.common import _get_default_node_config
-from backend.app.jobs.handlers.research import (
-    RESEARCH_NODE_NAME,
-    RESEARCH_STRUCTURED_FIELDS,
-)
-from backend.app.services.industry_taxonomy import normalize_l2_values, resolve_l1
-from backend.app.services.profile_sections import PROFILE_SECTION_LABELS, upsert_profile_section
-from backend.app.services.search_docs import create_search_doc_rebuild_job
+from backend.app.jobs.handlers.research import RESEARCH_NODE_NAME
+from backend.app.services.profile_sections import PROFILE_SECTION_LABELS
+from backend.app.services.research_apply import ResearchApplyError, apply_research_proposal
 from backend.app.services.search_service import get_default_search_provider
 
 router = APIRouter(prefix="/research", tags=["research"])
@@ -244,10 +235,10 @@ def accept_research_proposal(
             status_code=status.HTTP_409_CONFLICT,
             detail="Only pending research proposals can be accepted.",
         )
-    if proposal["proposal_kind"] == "profile_section":
-        _accept_profile_proposal(db, proposal, user_id=current_user.user_id)
-    else:
-        _accept_structured_fact_proposal(db, proposal, user_id=current_user.user_id)
+    try:
+        apply_research_proposal(db, proposal, user_id=current_user.user_id)
+    except ResearchApplyError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     _set_proposal_review_status(
         db,
         proposal_id,
@@ -370,138 +361,6 @@ def _research_job_output(
         "queue_name": row["queue_name"],
         "reused_existing": reused,
     }
-
-
-def _accept_profile_proposal(db: Session, proposal: dict[str, Any], *, user_id: UUID) -> None:
-    value = proposal.get("proposed_value_json") or {}
-    content = str(value.get("content_text") or "").strip()
-    # 调研查过但确实没有公开信息时提议 not_found —— 这是被确认的缺口，
-    # 和「从未调研」在推荐里含义不同，因此是一条内容为空的合法建议。
-    info_status = "not_found" if str(value.get("info_status")) == "not_found" else "filled"
-    if not proposal.get("section_code") or (info_status == "filled" and not content):
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="画像建议内容为空。")
-    upsert_profile_section(
-        db,
-        entity_type="seller_target",
-        entity_id=proposal["entity_id"],
-        section_code=str(proposal["section_code"]),
-        info_status=info_status,
-        content_text=content or None,
-        source_type=proposal.get("source_type"),
-        source_url=proposal.get("source_url"),
-        source_title=proposal.get("source_title"),
-        source_excerpt=proposal.get("source_excerpt"),
-        as_of_date=proposal.get("as_of_date"),
-        confidence=proposal.get("confidence"),
-        review_status="accepted",
-        user_id=user_id,
-    )
-
-
-def _accept_structured_fact_proposal(
-    db: Session,
-    proposal: dict[str, Any],
-    *,
-    user_id: UUID,
-) -> None:
-    field_path = str(proposal.get("field_path") or "")
-    if field_path not in RESEARCH_STRUCTURED_FIELDS:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="不支持该基础事实字段。")
-    raw_value = (proposal.get("proposed_value_json") or {}).get("value")
-    new_value = _normalize_accepted_fact(db, field_path, raw_value)
-    old_value = db.execute(
-        text(
-            f"""
-            select {field_path} from seller_target
-            where id = :target_id and team_id = :team_id and workspace_id = :workspace_id
-              and deleted_at is null
-            """
-        ),
-        {
-            "target_id": proposal["entity_id"],
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
-    ).scalar_one_or_none()
-    if old_value == new_value:
-        return
-    db.execute(
-        text(
-            f"""
-            update seller_target set {field_path} = :value, updated_at = now(), updated_by = :user_id
-            where id = :target_id and team_id = :team_id and workspace_id = :workspace_id
-              and deleted_at is null
-            """
-        ),
-        {
-            "value": new_value,
-            "user_id": user_id,
-            "target_id": proposal["entity_id"],
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
-    )
-    diff = {field_path: (old_value, new_value)}
-    write_action_log(
-        db,
-        entity_type="seller_target",
-        entity_id=proposal["entity_id"],
-        field_path=field_path,
-        old_value=old_value,
-        new_value=new_value,
-        source_type="research_proposal",
-        source_id=proposal["id"],
-        metadata_json={
-            "source_url": proposal.get("source_url"),
-            "source_title": proposal.get("source_title"),
-            "conflict_kind": proposal.get("conflict_kind"),
-        },
-        applied_by=user_id,
-    )
-    write_field_value_sources_for_diff(
-        db,
-        entity_type="seller_target",
-        entity_id=proposal["entity_id"],
-        changes={field_path: new_value},
-        diff=diff,
-        source_type="research_proposal",
-        source_id=proposal["id"],
-        source_label=str(proposal.get("source_title") or proposal.get("source_url") or "公开调研"),
-        confidence=proposal.get("confidence"),
-        review_status="accepted",
-        source_context={
-            "source_url": proposal.get("source_url"),
-            "source_excerpt": proposal.get("source_excerpt"),
-        },
-    )
-    create_search_doc_rebuild_job(
-        db,
-        entity_type="seller_target",
-        entity_id=proposal["entity_id"],
-        source="research_proposal_accept",
-    )
-
-
-def _normalize_accepted_fact(db: Session, field_path: str, value: Any) -> Any:
-    text_value = str(value or "").strip()
-    if not text_value:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="建议值为空。")
-    if field_path == "listed_status":
-        if text_value not in {"listed", "unlisted", "pre_ipo", "unknown"}:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="上市状态值无效。")
-        return text_value
-    if field_path == "industry_l1":
-        resolved = resolve_l1(db, text_value)
-        if resolved is None:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="一级行业不在字典中。")
-        return resolved
-    if field_path == "industry_l2":
-        resolved, _ = normalize_l2_values(db, [text_value])
-        if not resolved:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="二级行业不在字典中。")
-        return resolved[0]
-    limit = 300 if field_path in {"target_subject_name", "business_summary"} else 120
-    return text_value[:limit]
 
 
 def _set_proposal_review_status(
