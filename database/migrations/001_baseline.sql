@@ -1185,6 +1185,51 @@ on conflict (id) do nothing;
 
 -- Seed: industry_taxonomy (171 rows exported from production)
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
+values ('e2cb008b-266d-4404-913f-542673838a69', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '交通与物流', 'l1', '交通与物流', true, 5, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
+on conflict (id) do nothing;
+insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
+values ('bfc7c68e-78a5-4de2-8c4b-bbf0fa0d4f9a', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '信息技术与通信', 'l1', '信息技术与通信', true, 3, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
+on conflict (id) do nothing;
+insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
+values ('7e6863b1-7764-4d1d-b471-8ef2888b80e6', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '其他', 'l1', '其他', true, 15, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
+on conflict (id) do nothing;
+insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
+values ('75c8a36f-8bdd-4a40-8a5d-5223ab099934', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '军工', 'l1', '军工', true, 13, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
+on conflict (id) do nothing;
+insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
+values ('425e9594-9f0c-4b1e-97f8-32e0bdec4c09', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '农林牧渔', 'l1', '农林牧渔', true, 12, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
+on conflict (id) do nothing;
+insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
+values ('45932d9b-0c5b-4eaf-abd6-f4f87f4c882f', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '制造与工业', 'l1', '制造与工业', true, 7, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
+on conflict (id) do nothing;
+insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
+values ('8647abac-20c5-41b0-8b24-4f12657b9fd9', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '医药与健康', 'l1', '医药与健康', true, 9, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
+on conflict (id) do nothing;
+insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
+values ('e02a6e07-abb9-4e14-b550-eccefd7b23af', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '商务与专业服务', 'l1', '商务与专业服务', true, 14, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
+on conflict (id) do nothing;
+insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
+values ('8e463190-5368-4068-bb97-6bba70f3cb4f', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '商贸与消费', 'l1', '商贸与消费', true, 8, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
+on conflict (id) do nothing;
+insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
+values ('3a41e089-9a97-4bab-9916-c9cfd2d73c80', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '房地产与建筑', 'l1', '房地产与建筑', true, 4, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
+on conflict (id) do nothing;
+insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
+values ('2176b781-5701-420d-abe8-d9f3a4bb720b', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '教育与科研', 'l1', '教育与科研', true, 10, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
+on conflict (id) do nothing;
+insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
+values ('040e7a76-b8b2-4efe-8848-40eec02426c2', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '文化与传媒', 'l1', '文化与传媒', true, 6, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
+on conflict (id) do nothing;
+insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
+values ('33fa6943-530a-46d1-b51b-50b5df564b90', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '环保与公用事业', 'l1', '环保与公用事业', true, 11, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
+on conflict (id) do nothing;
+insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
+values ('564b82a3-346d-49cb-b578-682b9a9bd702', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '能源', 'l1', '能源', true, 1, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
+on conflict (id) do nothing;
+insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
+values ('cb0af43c-6273-4454-baa5-5a9a83a00df7', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '金融', 'l1', '金融', true, 2, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
+on conflict (id) do nothing;
+insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
 values ('936dfb07-644e-4218-9760-af59f0ab7853', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', 'PCB', 'l2', '信息技术与通信', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-21 07:34:30.493343+00', 'bfc7c68e-78a5-4de2-8c4b-bbf0fa0d4f9a', null)
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
@@ -1198,9 +1243,6 @@ values ('f7f5d071-f755-485e-88e3-ab125378f00c', '00000000-0000-0000-0000-0000000
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
 values ('3868aeb5-6851-4c0b-8d9f-ec7cec2383e3', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '交易所', 'l2', '金融', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', 'cb0af43c-6273-4454-baa5-5a9a83a00df7', null)
-on conflict (id) do nothing;
-insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
-values ('e2cb008b-266d-4404-913f-542673838a69', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '交通与物流', 'l1', '交通与物流', true, 5, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
 values ('6c7b0334-f3e7-4859-bd75-6759764ced52', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '交通基础设施', 'l2', '交通与物流', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-21 07:34:30.493343+00', 'e2cb008b-266d-4404-913f-542673838a69', null)
@@ -1236,9 +1278,6 @@ insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, 
 values ('5249e115-8539-4839-8f50-ef519bc03863', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '保险', 'l2', '金融', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', 'cb0af43c-6273-4454-baa5-5a9a83a00df7', null)
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
-values ('bfc7c68e-78a5-4de2-8c4b-bbf0fa0d4f9a', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '信息技术与通信', 'l1', '信息技术与通信', true, 3, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
-on conflict (id) do nothing;
-insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
 values ('a51fb7de-c554-46e3-8642-222b23983669', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '储能', 'l2', '能源', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', '564b82a3-346d-49cb-b578-682b9a9bd702', null)
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
@@ -1254,12 +1293,6 @@ insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, 
 values ('505fb3b4-f99d-438c-8ef5-832883db84ab', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '公路', 'l2', '交通与物流', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', 'e2cb008b-266d-4404-913f-542673838a69', null)
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
-values ('7e6863b1-7764-4d1d-b471-8ef2888b80e6', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '其他', 'l1', '其他', true, 15, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
-on conflict (id) do nothing;
-insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
-values ('75c8a36f-8bdd-4a40-8a5d-5223ab099934', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '军工', 'l1', '军工', true, 13, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
-on conflict (id) do nothing;
-insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
 values ('fdce8dd1-7bc0-457e-8293-4ba6c49e61a6', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '农业', 'l2', '农林牧渔', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', '425e9594-9f0c-4b1e-97f8-32e0bdec4c09', null)
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
@@ -1269,9 +1302,6 @@ insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, 
 values ('feb3bd54-1dca-43a1-bd10-43a0457c9c83', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '农垦', 'l2', '农林牧渔', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', '425e9594-9f0c-4b1e-97f8-32e0bdec4c09', null)
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
-values ('425e9594-9f0c-4b1e-97f8-32e0bdec4c09', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '农林牧渔', 'l1', '农林牧渔', true, 12, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
-on conflict (id) do nothing;
-insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
 values ('6bab4030-70d1-48a1-a005-69d324dfbe39', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '出版', 'l2', '文化与传媒', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', '040e7a76-b8b2-4efe-8848-40eec02426c2', null)
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
@@ -1279,9 +1309,6 @@ values ('4c6c0d26-8ff3-4542-98f4-0bb14d982138', '00000000-0000-0000-0000-0000000
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
 values ('b21a0a09-daa1-4764-a043-d688b287a9a9', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '制药', 'l2', '医药与健康', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-21 07:34:30.493343+00', '8647abac-20c5-41b0-8b24-4f12657b9fd9', null)
-on conflict (id) do nothing;
-insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
-values ('45932d9b-0c5b-4eaf-abd6-f4f87f4c882f', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '制造与工业', 'l1', '制造与工业', true, 7, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
 values ('092d6a7b-6bca-4ac8-b088-c9479490936a', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '动力电池', 'l2', '能源', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-21 07:34:30.493343+00', '564b82a3-346d-49cb-b578-682b9a9bd702', null)
@@ -1306,9 +1333,6 @@ values ('86c7b65b-7a20-4bdc-acd9-cbf8898ec733', '00000000-0000-0000-0000-0000000
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
 values ('70a0900d-7bce-4396-b73e-1260d0caafc6', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '医美', 'l2', '医药与健康', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', '8647abac-20c5-41b0-8b24-4f12657b9fd9', null)
-on conflict (id) do nothing;
-insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
-values ('8647abac-20c5-41b0-8b24-4f12657b9fd9', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '医药与健康', 'l1', '医药与健康', true, 9, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
 values ('e82e7466-acb0-4009-9ba3-41e9e9697df2', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '医药商业', 'l2', '医药与健康', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-21 07:34:30.493343+00', '8647abac-20c5-41b0-8b24-4f12657b9fd9', null)
@@ -1341,13 +1365,7 @@ insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, 
 values ('9f9aa32a-f46e-43cb-b7b3-2a00d853c7c8', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '售电', 'l2', '能源', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', '564b82a3-346d-49cb-b578-682b9a9bd702', null)
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
-values ('e02a6e07-abb9-4e14-b550-eccefd7b23af', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '商务与专业服务', 'l1', '商务与专业服务', true, 14, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
-on conflict (id) do nothing;
-insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
 values ('64cd37ca-d732-4dac-9c46-e004dde485f7', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '商务服务', 'l2', '商务与专业服务', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', 'e02a6e07-abb9-4e14-b550-eccefd7b23af', null)
-on conflict (id) do nothing;
-insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
-values ('8e463190-5368-4068-bb97-6bba70f3cb4f', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '商贸与消费', 'l1', '商贸与消费', true, 8, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
 values ('06214113-ce6a-4439-b234-88a942185cef', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '大数据', 'l2', '信息技术与通信', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-21 07:34:30.493343+00', 'bfc7c68e-78a5-4de2-8c4b-bbf0fa0d4f9a', null)
@@ -1383,16 +1401,10 @@ insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, 
 values ('1323a1fe-6057-498d-b626-de7658564e44', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '房地产', 'l2', '房地产与建筑', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', '3a41e089-9a97-4bab-9916-c9cfd2d73c80', null)
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
-values ('3a41e089-9a97-4bab-9916-c9cfd2d73c80', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '房地产与建筑', 'l1', '房地产与建筑', true, 4, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
-on conflict (id) do nothing;
-insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
 values ('a3ca70e0-8ecb-4cfd-adf8-fbeb46d8ccf4', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '批发', 'l2', '商贸与消费', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', '8e463190-5368-4068-bb97-6bba70f3cb4f', null)
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
 values ('e30a39b9-b311-423e-b043-8dd0efb0f584', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '控股平台', 'l2', '金融', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', 'cb0af43c-6273-4454-baa5-5a9a83a00df7', null)
-on conflict (id) do nothing;
-insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
-values ('2176b781-5701-420d-abe8-d9f3a4bb720b', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '教育与科研', 'l1', '教育与科研', true, 10, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
 values ('653d12ff-6612-44ba-bc40-df2000b35de9', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '教育培训', 'l2', '教育与科研', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', '2176b781-5701-420d-abe8-d9f3a4bb720b', null)
@@ -1402,9 +1414,6 @@ values ('a8477849-577a-4d88-92af-46bb5242fff5', '00000000-0000-0000-0000-0000000
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
 values ('7156f0a9-0fa6-4849-b7e8-76f5992a5314', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '整车制造', 'l2', '制造与工业', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', '45932d9b-0c5b-4eaf-abd6-f4f87f4c882f', null)
-on conflict (id) do nothing;
-insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
-values ('040e7a76-b8b2-4efe-8848-40eec02426c2', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '文化与传媒', 'l1', '文化与传媒', true, 6, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
 values ('41c93fd7-ead5-4cff-b793-16951fa01b10', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '文化旅游', 'l2', '文化与传媒', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-21 07:34:30.493343+00', '040e7a76-b8b2-4efe-8848-40eec02426c2', null)
@@ -1509,9 +1518,6 @@ insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, 
 values ('a1b590b5-9b92-43b6-b37d-13c71d139e91', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '物流运输', 'l2', '交通与物流', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', 'e2cb008b-266d-4404-913f-542673838a69', null)
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
-values ('33fa6943-530a-46d1-b51b-50b5df564b90', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '环保与公用事业', 'l1', '环保与公用事业', true, 11, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
-on conflict (id) do nothing;
-insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
 values ('1edc541e-c987-4718-8624-93d5d1033914', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '珠宝奢侈品', 'l2', '商贸与消费', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', '8e463190-5368-4068-bb97-6bba70f3cb4f', null)
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
@@ -1590,9 +1596,6 @@ insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, 
 values ('9c0f5dc4-b648-4d8e-b895-0607c820bf9c', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '职业教育', 'l2', '教育与科研', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-21 07:34:30.493343+00', '2176b781-5701-420d-abe8-d9f3a4bb720b', null)
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
-values ('564b82a3-346d-49cb-b578-682b9a9bd702', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '能源', 'l1', '能源', true, 1, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
-on conflict (id) do nothing;
-insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
 values ('d3a2fc73-f3cd-423e-8489-2742ed74e829', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '航空航天', 'l2', '制造与工业', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', '45932d9b-0c5b-4eaf-abd6-f4f87f4c882f', null)
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
@@ -1654,9 +1657,6 @@ values ('25498cce-bd42-4352-9995-801795996dd9', '00000000-0000-0000-0000-0000000
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
 values ('1b1f7377-41f0-410d-8a98-d21abb166454', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '采矿业', 'l2', '制造与工业', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-21 07:34:30.493343+00', '45932d9b-0c5b-4eaf-abd6-f4f87f4c882f', null)
-on conflict (id) do nothing;
-insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
-values ('cb0af43c-6273-4454-baa5-5a9a83a00df7', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '金融', 'l1', '金融', true, 2, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', null, null)
 on conflict (id) do nothing;
 insert into industry_taxonomy (id, team_id, workspace_id, term, level, l1_name, active, sort_order, created_at, updated_at, parent_id, canonical_term_id)
 values ('e9b05afc-a42f-400c-ade0-570d362d99c0', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000101', '金融科技', 'l2', '金融', true, 0, '2026-07-13 02:34:40.024167+00', '2026-07-13 02:34:40.024167+00', 'cb0af43c-6273-4454-baa5-5a9a83a00df7', null)
