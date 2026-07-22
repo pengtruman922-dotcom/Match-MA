@@ -2,6 +2,8 @@
 
 技术栈：FastAPI + PostgreSQL（raw SQL）+ React/TS + Vite，部署在 Railway（生产 API：https://match-ma-production.up.railway.app/api/v1）。
 
+**先读图纸**：`docs/系统总纲.md` 是系统的权威描述（业务流程、领域模型、技术决策、死表判决、待办）。做任何跨模块改动前先读它；大改落地后把结论合并回它。`平台优化方案/*.md` 是施工单（进行中与历史），与图纸冲突时以图纸为准。
+
 ## 测试与验证
 - 本地无后端 venv，用 `py -3.11 -m pytest -q` 跑测试；运行时行为需对生产 API 验证（`scripts/match_ma_api_tools.py`，必须从仓库根目录运行，token 读取 `.match-ma-local-auth.json`）。
 - 推送涉及后端/迁移的提交后，先轮询生产 `/health` 确认返回的 commit hash 已切换到新提交，再验证业务行为；hash 长时间不变说明部署失败（通常是 preDeploy 迁移挂了），去查迁移而不是继续等。
