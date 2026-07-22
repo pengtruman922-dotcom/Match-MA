@@ -53,6 +53,34 @@ class DebugCenterOut(BaseModel):
     quick_actions: list[dict[str, Any]]
 
 
+@router.get("/table-stats")
+def get_table_stats(
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """临时端点：基线压平前的生产行数盘点（总纲 §6.3 步骤 1，R1 收尾时处置）。"""
+    require_admin(current_user)
+    tables = (
+        db.execute(
+            text(
+                """
+                select tablename
+                from pg_tables
+                where schemaname = 'public'
+                order by tablename
+                """
+            )
+        )
+        .scalars()
+        .all()
+    )
+    rows = {
+        str(table): int(db.execute(text(f'select count(*) from "{table}"')).scalar_one())
+        for table in tables
+    }
+    return {"table_count": len(rows), "rows": rows}
+
+
 @router.get("/business-updates/{business_update_id}", response_model=BusinessUpdateDebugOut)
 def get_business_update_debug(
     business_update_id: UUID,

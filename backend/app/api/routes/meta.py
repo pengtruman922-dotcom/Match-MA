@@ -41,25 +41,18 @@ def seed_status(db: Session = Depends(get_db)) -> dict[str, Any]:
         "default_admin_user": _exists(db, "app_user", default_admin_id),
     }
 
-    dictionaries = {
-        "industry": _count_dictionary(db, "industry"),
-        "deal_path": _count_dictionary(db, "deal_path"),
-        "payment_method": _count_dictionary(db, "payment_method"),
-        "control_path": _count_dictionary(db, "control_path"),
-        "risk": _count_dictionary(db, "risk"),
-    }
+    industry_terms = int(
+        db.execute(
+            text("select count(*) from industry_taxonomy where active = true")
+        ).scalar_one()
+    )
 
-    region_alias_count = db.execute(
-        text("select count(*) from region_alias_config where is_active = true")
-    ).scalar_one()
-
-    ok = all(checks.values()) and dictionaries["industry"] > 0 and dictionaries["risk"] > 0
+    ok = all(checks.values()) and industry_terms > 0
 
     return {
         "status": "ok" if ok else "degraded",
         "checks": checks,
-        "dictionary_counts": dictionaries,
-        "region_alias_count": region_alias_count,
+        "industry_taxonomy_terms": industry_terms,
     }
 
 
@@ -293,21 +286,6 @@ def _exists(db: Session, table_name: str, entity_id: str) -> bool:
         {"entity_id": entity_id},
     )
     return bool(result.scalar_one())
-
-
-def _count_dictionary(db: Session, domain: str) -> int:
-    result = db.execute(
-        text(
-            """
-            select count(*)
-            from tag_dictionary
-            where domain = :domain
-              and is_active = true
-            """
-        ),
-        {"domain": domain},
-    )
-    return int(result.scalar_one())
 
 
 def _table_exists(db: Session, table_name: str) -> bool:

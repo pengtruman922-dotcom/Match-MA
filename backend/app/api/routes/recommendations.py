@@ -32,7 +32,6 @@ from backend.app.services.recommendation_flow import (  # noqa: F401 - re-export
     CANDIDATE_STATE_COMPATIBLE,
     CANDIDATE_STATE_CONFLICT,
     CANDIDATE_STATE_POSSIBLE,
-    CRITICAL_RISK_PENALTY,
     DEEP_EVAL_CANDIDATE_LIMIT,
     REGION_GROUPS,
     _build_recommendation_activity,

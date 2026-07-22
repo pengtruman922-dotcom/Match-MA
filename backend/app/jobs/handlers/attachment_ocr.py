@@ -1233,8 +1233,7 @@ def _touch_seller_targets_linked_to_attachment(db: Session, attachment_id: UUID)
         text(
             """
             update seller_target st
-            set last_attachment_parse_at = now(),
-                updated_at = now()
+            set updated_at = now()
             from attachment_link al
             where al.attachment_id = :attachment_id
               and al.team_id = :team_id

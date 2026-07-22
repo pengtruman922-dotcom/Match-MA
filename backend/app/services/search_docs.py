@@ -13,8 +13,6 @@ from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAUL
 
 def rebuild_seller_target_search_doc(db: Session, seller_target_id: UUID) -> dict[str, Any]:
     target = _get_seller_target(db, seller_target_id)
-    tags = _get_seller_tags(db, seller_target_id)
-    risks = _get_seller_risks(db, seller_target_id)
 
     title = target["target_name"]
     structured_summary = _join_lines(
@@ -29,8 +27,7 @@ def rebuild_seller_target_search_doc(db: Session, seller_target_id: UUID) -> dic
             _kv("上市状态", target.get("listed_status")),
         ]
     )
-    tag_text = "；".join(item for item in tags if item)
-    business_text = _join_lines([target.get("business_summary"), tag_text])
+    business_text = _join_lines([target.get("business_summary")])
     financial_text = _join_lines(
         [
             _money("营收", target.get("current_revenue_yuan")),
@@ -50,7 +47,7 @@ def rebuild_seller_target_search_doc(db: Session, seller_target_id: UUID) -> dic
             _kv("交易摘要", target.get("transaction_summary")),
         ]
     )
-    risk_text = _join_lines([target.get("risk_summary"), *risks])
+    risk_text = _join_lines([target.get("risk_summary")])
     gap_text = target.get("gap_summary")
     full_text = _join_lines(
         [
@@ -98,7 +95,7 @@ def rebuild_seller_target_search_doc(db: Session, seller_target_id: UUID) -> dic
             "seller_target_id": seller_target_id,
             "title": title,
             "structured_summary": structured_summary,
-            "tag_text": tag_text,
+            "tag_text": "",
             "business_text": business_text,
             "financial_text": financial_text,
             "transaction_text": transaction_text,
@@ -398,50 +395,6 @@ def _get_seller_target(db: Session, seller_target_id: UUID) -> dict[str, Any]:
     if row is None:
         raise ValueError(f"Seller target not found: {seller_target_id}")
     return dict(row)
-
-
-def _get_seller_tags(db: Session, seller_target_id: UUID) -> list[str]:
-    rows = db.execute(
-        text(
-            """
-            select coalesce(display_name, raw_text) as text_value
-            from seller_target_tag
-            where seller_target_id = :seller_target_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
-            order by created_at desc
-            limit 50
-            """
-        ),
-        {
-            "seller_target_id": seller_target_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
-    ).mappings().all()
-    return [row["text_value"] for row in rows if row["text_value"]]
-
-
-def _get_seller_risks(db: Session, seller_target_id: UUID) -> list[str]:
-    rows = db.execute(
-        text(
-            """
-            select concat_ws('：', title, description) as text_value
-            from seller_target_risk
-            where seller_target_id = :seller_target_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
-            order by updated_at desc
-            limit 20
-            """
-        ),
-        {
-            "seller_target_id": seller_target_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
-    ).mappings().all()
-    return [row["text_value"] for row in rows if row["text_value"]]
 
 
 def _get_buyer_intent(db: Session, buyer_intent_id: UUID) -> dict[str, Any]:

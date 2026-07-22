@@ -411,7 +411,6 @@ def _target_row(**overrides) -> dict:
         "risk_summary": None,
         "gap_summary": None,
         "is_excluded": False,
-        "max_risk_level": 0,
     }
     row.update(overrides)
     return row
@@ -444,28 +443,6 @@ def test_candidate_pool_scans_everything_and_reports_the_funnel() -> None:
     assert names == ["达标", "利润未知"]  # 同为满分，已知条件多的排前面
     assert result["candidates"][1]["match_state"] == "possible"
     assert result["candidates"][1]["missing_dimensions"] == ["净利润"]
-
-
-def test_candidate_pool_downweights_critical_risk_without_dropping_it() -> None:
-    rows = [
-        _target_row(seller_target_name="干净"),
-        _target_row(seller_target_name="重大风险", max_risk_level=4),
-    ]
-    result = _candidate_targets_for_intent(
-        _pool_db(rows),
-        {
-            "id": BUYER_INTENT_ID,
-            "intent_name": "测试需求",
-            "industries_json": ["制造与工业"],
-            "min_net_profit_yuan": 100_000_000,
-        },
-        20,
-    )
-
-    by_name = {candidate["seller_target_name"]: candidate for candidate in result["candidates"]}
-    assert len(by_name) == 2
-    assert by_name["重大风险"]["score"] < by_name["干净"]["score"]
-    assert "存在重大风险记录（critical），需人工核对" in by_name["重大风险"]["evidence_json"]["gaps"]
 
 
 def test_industry_l2_focus_narrows_score_without_dropping_the_candidate() -> None:

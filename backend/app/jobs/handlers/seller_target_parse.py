@@ -175,7 +175,7 @@ def _get_seller_target_for_parse(db: Session, seller_target_id: UUID) -> dict[st
             """
             select
               id, target_name, target_type, target_subject_name, recommendation_status, information_status,
-              industry_primary, industry_secondary, industry_l2, registered_country,
+              industry_primary, industry_secondary, industry_l2,
               registered_province, registered_city, headquarter_province,
               headquarter_city, raw_region_text, region_granularity, listed_status,
               market_cap_yuan, current_revenue_yuan, current_net_profit_yuan,

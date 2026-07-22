@@ -599,11 +599,8 @@ def _get_research_target(db: Session, target_id: UUID) -> dict[str, Any]:
               st.industry_l1, st.industry_l2, st.industry_primary, st.industry_secondary,
               st.registered_province, st.registered_city,
               st.headquarter_province, st.headquarter_city,
-              st.listed_status, st.financial_period_label, st.business_summary,
-              sp.legal_name, sp.aliases_json, sp.unified_credit_code,
-              sp.region_province, sp.region_city, sp.website
+              st.listed_status, st.financial_period_label, st.business_summary
             from seller_target st
-            left join seller_party sp on sp.id = st.seller_party_id and sp.deleted_at is null
             where st.id = :target_id
               and st.team_id = :team_id
               and st.workspace_id = :workspace_id

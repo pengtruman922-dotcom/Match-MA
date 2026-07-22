@@ -1183,19 +1183,7 @@ def _candidate_targets_for_intent(
                   and x.seller_target_id = st.id
                   and x.active = true
                   and x.canceled_at is null
-              ) as is_excluded,
-              coalesce((
-                select max(
-                  case r.severity
-                    when 'critical' then 4 when 'high' then 3
-                    when 'medium' then 2 when 'low' then 1 else 0
-                  end
-                )
-                from seller_target_risk r
-                where r.seller_target_id = st.id
-                  and r.risk_status in ('confirmed_present', 'suspected')
-                  and r.review_status not in ('rejected', 'ignored')
-              ), 0) as max_risk_level
+              ) as is_excluded
             from seller_target st
             where st.team_id = :team_id
               and st.workspace_id = :workspace_id
@@ -1220,7 +1208,6 @@ def _candidate_targets_for_intent(
     conflict_count = 0
     for row in rows:
         item = dict(row)
-        max_risk_level = item.pop("max_risk_level", 0) or 0
         if item.pop("is_excluded"):
             excluded_count += 1
             continue
@@ -1229,10 +1216,6 @@ def _candidate_targets_for_intent(
             conflict_count += 1
             continue
         score = rule_score
-        if max_risk_level >= 4:
-            # 系统级规则：与买家条件无关，只降权并标注，不改三态。
-            score = round(score * CRITICAL_RISK_PENALTY, 2)
-            gaps.append("存在重大风险记录（critical），需人工核对")
         candidates.append(
             _build_candidate_row(
                 mode="buyer_to_target",
@@ -1631,7 +1614,6 @@ CANDIDATE_STATE_CONFLICT = "conflict"
 
 
 # 存在 critical 风险记录时的系统级降权（与买家条件无关，不影响三态）。
-CRITICAL_RISK_PENALTY = 0.8
 
 
 # 规则一：要求 × 意愿。买家侧写"要求强度"，标的侧写"能力/意愿"，两侧枚举不同名
