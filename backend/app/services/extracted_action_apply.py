@@ -15,6 +15,7 @@ from backend.app.api.routes.utils import (
     write_action_logs_for_diff,
     write_field_value_sources_for_diff,
 )
+from backend.app.services.field_writer import WriteProvenance, write_seller_target_fields
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 
 def apply_seller_fact_update_action(
@@ -44,8 +45,31 @@ def apply_seller_fact_update_action(
     if not changes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No supported changes to apply.")
     changes = _seller_target_changes_with_post_parse_status(original, changes)
-    diff = diff_payload(original, changes)
-    if not diff:
+    source_context = _action_source_context(action, default_source_label="Business update extracted action")
+    applied_fields = write_seller_target_fields(
+        db,
+        seller_target_id,
+        changes,
+        provenance=WriteProvenance(
+            source_type="extracted_action",
+            actor_user_id=SYSTEM_USER_ID,
+            source_id=action["id"],
+            evidence_id=source_context["evidence_id"],
+            business_update_id=action["business_update_id"],
+            extracted_action_id=action["id"],
+            field_source_label=source_context["source_label"],
+            confidence=action.get("confidence"),
+            review_status="auto_accepted",
+            source_context=source_context,
+            log_metadata={
+                "source": "extracted_action_apply",
+                "action_type": action["action_type"],
+                "field_value_source": source_context,
+            },
+        ),
+        search_doc_source="seller_fact_update_apply",
+    )
+    if not applied_fields:
         _mark_action_applied(db, action["id"], review_status="auto_accepted")
         _refresh_business_update_status(db, action["business_update_id"])
         return {
@@ -57,66 +81,6 @@ def apply_seller_fact_update_action(
             "applied_fields": [],
         }
 
-    set_clauses = [f"{field} = :{field}" for field in diff]
-    set_clauses.extend(["updated_at = now()", "updated_by = :updated_by"])
-
-    db.execute(
-        text(
-            f"""
-            update seller_target
-            set {', '.join(set_clauses)}
-            where id = :seller_target_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
-              and deleted_at is null
-            """
-        ),
-        {
-            **{field: changes[field] for field in diff},
-            "updated_by": SYSTEM_USER_ID,
-            "seller_target_id": seller_target_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
-    )
-
-    source_context = _action_source_context(action, default_source_label="Business update extracted action")
-    write_action_logs_for_diff(
-        db,
-        entity_type="seller_target",
-        entity_id=seller_target_id,
-        diff=diff,
-        source_type="extracted_action",
-        source_id=action["id"],
-        evidence_id=source_context["evidence_id"],
-        business_update_id=action["business_update_id"],
-        extracted_action_id=action["id"],
-        metadata_json={
-            "source": "extracted_action_apply",
-            "action_type": action["action_type"],
-            "field_value_source": source_context,
-        },
-    )
-    write_field_value_sources_for_diff(
-        db,
-        entity_type="seller_target",
-        entity_id=seller_target_id,
-        changes=changes,
-        diff=diff,
-        source_type="extracted_action",
-        source_id=action["id"],
-        evidence_id=source_context["evidence_id"],
-        source_label=source_context["source_label"],
-        confidence=action.get("confidence"),
-        review_status="auto_accepted",
-        source_context=source_context,
-    )
-    create_search_doc_rebuild_job(
-        db,
-        entity_type="seller_target",
-        entity_id=seller_target_id,
-        source="seller_fact_update_apply",
-    )
     _mark_action_applied(db, action["id"], review_status="auto_accepted" if not require_accepted else None)
     _refresh_business_update_status(db, action["business_update_id"])
 
@@ -126,7 +90,7 @@ def apply_seller_fact_update_action(
         "business_update_id": action["business_update_id"],
         "entity_type": "seller_target",
         "entity_id": seller_target_id,
-        "applied_fields": list(diff.keys()),
+        "applied_fields": applied_fields,
     }
 
 

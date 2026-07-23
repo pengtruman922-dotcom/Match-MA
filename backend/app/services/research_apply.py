@@ -11,12 +11,10 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from backend.app.api.routes.utils import write_action_log, write_field_value_sources_for_diff
-from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.registry.indicators import writable_columns
+from backend.app.services.field_writer import WriteProvenance, write_seller_target_fields
 from backend.app.services.industry_taxonomy import normalize_l2_values, resolve_l1
 from backend.app.services.profile_sections import apply_profile_section
 from backend.app.services.search_docs import create_search_doc_rebuild_job
@@ -99,77 +97,29 @@ def _apply_structured_fact_proposal(
         raise ResearchApplyError("不支持该基础事实字段。")
     raw_value = (proposal.get("proposed_value_json") or {}).get("value")
     new_value = normalize_structured_fact(db, field_path, raw_value)
-    old_value = db.execute(
-        text(
-            f"""
-            select {field_path} from seller_target
-            where id = :target_id and team_id = :team_id and workspace_id = :workspace_id
-              and deleted_at is null
-            """
+    write_seller_target_fields(
+        db,
+        proposal["entity_id"],
+        {field_path: new_value},
+        provenance=WriteProvenance(
+            source_type="research_proposal",
+            actor_user_id=user_id,
+            source_id=proposal["id"],
+            field_source_label=str(proposal.get("source_title") or proposal.get("source_url") or "公开调研"),
+            confidence=proposal.get("confidence"),
+            review_status=review_status,
+            source_context={
+                "source_url": proposal.get("source_url"),
+                "source_excerpt": proposal.get("source_excerpt"),
+            },
+            log_metadata={
+                "source_url": proposal.get("source_url"),
+                "source_title": proposal.get("source_title"),
+                "conflict_kind": proposal.get("conflict_kind"),
+                "auto_accepted": review_status == "auto_accepted",
+            },
         ),
-        {
-            "target_id": proposal["entity_id"],
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
-    ).scalar_one_or_none()
-    if old_value == new_value:
-        return
-    db.execute(
-        text(
-            f"""
-            update seller_target set {field_path} = :value, updated_at = now(), updated_by = :user_id
-            where id = :target_id and team_id = :team_id and workspace_id = :workspace_id
-              and deleted_at is null
-            """
-        ),
-        {
-            "value": new_value,
-            "user_id": user_id,
-            "target_id": proposal["entity_id"],
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
-    )
-    diff = {field_path: (old_value, new_value)}
-    write_action_log(
-        db,
-        entity_type="seller_target",
-        entity_id=proposal["entity_id"],
-        field_path=field_path,
-        old_value=old_value,
-        new_value=new_value,
-        source_type="research_proposal",
-        source_id=proposal["id"],
-        metadata_json={
-            "source_url": proposal.get("source_url"),
-            "source_title": proposal.get("source_title"),
-            "conflict_kind": proposal.get("conflict_kind"),
-            "auto_accepted": review_status == "auto_accepted",
-        },
-        applied_by=user_id,
-    )
-    write_field_value_sources_for_diff(
-        db,
-        entity_type="seller_target",
-        entity_id=proposal["entity_id"],
-        changes={field_path: new_value},
-        diff=diff,
-        source_type="research_proposal",
-        source_id=proposal["id"],
-        source_label=str(proposal.get("source_title") or proposal.get("source_url") or "公开调研"),
-        confidence=proposal.get("confidence"),
-        review_status=review_status,
-        source_context={
-            "source_url": proposal.get("source_url"),
-            "source_excerpt": proposal.get("source_excerpt"),
-        },
-    )
-    create_search_doc_rebuild_job(
-        db,
-        entity_type="seller_target",
-        entity_id=proposal["entity_id"],
-        source="research_proposal_accept",
+        search_doc_source="research_proposal_accept",
     )
 
 
