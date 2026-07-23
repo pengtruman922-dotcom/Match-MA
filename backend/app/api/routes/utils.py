@@ -802,6 +802,7 @@ def write_field_value_sources_for_diff(
     confidence: Any = None,
     review_status: str = "auto_accepted",
     source_context: dict[str, Any] | None = None,
+    created_by: UUID | None = None,
 ) -> None:
     for field_path in diff:
         db.execute(
@@ -835,6 +836,6 @@ def write_field_value_sources_for_diff(
                 "source_label": source_label,
                 "confidence": confidence,
                 "review_status": review_status,
-                "created_by": DEFAULT_ADMIN_USER_ID,
+                "created_by": created_by or DEFAULT_ADMIN_USER_ID,
             },
         )

@@ -19,10 +19,13 @@ from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 from backend.app.services.relation_flow import (
     RELATION_EVENT_TYPES,
+    RELATION_EVENT_LABELS,
     RELATION_STATUSES,
     change_relation_status,
     create_relation,
+    delete_relation_event,
     record_relation_event,
+    update_relation_event,
 )
 
 router = APIRouter(tags=["relations"])
@@ -65,6 +68,8 @@ class RelationEventOut(BaseModel):
     seller_target_name: str | None
     metadata_json: dict[str, Any]
     created_at: str
+    updated_at: str
+    updated_by: UUID | None
 
 
 class RelationCreate(BaseModel):
@@ -91,9 +96,16 @@ class RelationEventCreate(BaseModel):
     next_step: str | None = Field(default=None, max_length=1000)
 
 
+class RelationEventUpdate(BaseModel):
+    event_type: str | None = None
+    title: str | None = Field(default=None, max_length=200)
+    content: str | None = Field(default=None, max_length=4000)
+    next_step: str | None = Field(default=None, max_length=1000)
+
+
 class RelationMeta(BaseModel):
     statuses: list[str]
-    event_types: list[str]
+    event_types: list[dict[str, str]]
 
 
 class BuyerIntentTargetExclusionOut(BaseModel):
@@ -225,7 +237,13 @@ def list_relation_events(
 
 @router.get("/relations-meta", response_model=RelationMeta)
 def get_relations_meta() -> dict[str, Any]:
-    return {"statuses": list(RELATION_STATUSES), "event_types": list(RELATION_EVENT_TYPES)}
+    return {
+        "statuses": list(RELATION_STATUSES),
+        "event_types": [
+            {"value": event_type, "label": RELATION_EVENT_LABELS[event_type]}
+            for event_type in RELATION_EVENT_TYPES
+        ],
+    }
 
 
 @router.post("/relations", response_model=RelationCreateOut, status_code=201)
@@ -296,6 +314,40 @@ def create_relation_event(
         {"event_id": event_id},
     ).mappings().one()
     return dict(row)
+
+
+@router.patch("/relations/{relation_id}/events/{event_id}", response_model=RelationEventOut)
+def update_relation_event_endpoint(
+    relation_id: UUID,
+    event_id: UUID,
+    payload: RelationEventUpdate,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    ensure_relation_visible(db, current_user, relation_id)
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=422, detail="至少修改一个动态字段。")
+    update_relation_event(
+        db,
+        relation_id,
+        event_id,
+        actor_user_id=current_user.user_id,
+        changes=changes,
+    )
+    return _get_relation_event_or_404(db, event_id)
+
+
+@router.delete("/relations/{relation_id}/events/{event_id}", status_code=204)
+def delete_relation_event_endpoint(
+    relation_id: UUID,
+    event_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> None:
+    ensure_relation_visible(db, current_user, relation_id)
+    delete_relation_event(db, relation_id, event_id, actor_user_id=current_user.user_id)
+    return None
 
 
 @router.get("/relation-events", response_model=list[RelationEventOut])
@@ -409,7 +461,9 @@ def _event_select_columns() -> str:
       bp.buyer_name,
       st.target_name as seller_target_name,
       e.metadata_json,
-      e.created_at::text as created_at
+      e.created_at::text as created_at,
+      e.updated_at::text as updated_at,
+      e.updated_by
     """
 
 
@@ -422,7 +476,7 @@ def _list_relation_events(
     limit: int,
     offset: int,
 ) -> list[dict[str, Any]]:
-    where = ["e.team_id = :team_id", "e.workspace_id = :workspace_id", *filters]
+    where = ["e.team_id = :team_id", "e.workspace_id = :workspace_id", "e.deleted_at is null", *filters]
     if owner_scope_required(current_user):
         where.append(relation_event_visible_sql("e"))
         params["scope_user_id"] = current_user.user_id
@@ -448,6 +502,26 @@ def _list_relation_events(
         },
     ).mappings().all()
     return [dict(row) for row in rows]
+
+
+def _get_relation_event_or_404(db: Session, event_id: UUID) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            f"""
+            select {_event_select_columns()}
+            from relation_event e
+            join buyer_intent bi on bi.id = e.buyer_intent_id
+            join seller_target st on st.id = e.seller_target_id
+            left join buyer_party bp on bp.id = e.buyer_party_id
+            where e.id = :event_id and e.team_id = :team_id and e.workspace_id = :workspace_id
+              and e.deleted_at is null
+            """
+        ),
+        {"event_id": event_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    ).mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Relation event not found.")
+    return dict(row)
 
 
 def _ensure_relation_exists(db: Session, relation_id: UUID) -> None:

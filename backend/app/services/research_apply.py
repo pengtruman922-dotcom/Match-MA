@@ -71,7 +71,6 @@ def _apply_profile_proposal(
         source_title=proposal.get("source_title"),
         source_excerpt=proposal.get("source_excerpt"),
         as_of_date=proposal.get("as_of_date"),
-        confidence=proposal.get("confidence"),
         review_status=review_status,
         user_id=user_id,
         log_source_type="research_proposal",
@@ -106,7 +105,6 @@ def _apply_structured_fact_proposal(
             actor_user_id=user_id,
             source_id=proposal["id"],
             field_source_label=str(proposal.get("source_title") or proposal.get("source_url") or "公开调研"),
-            confidence=proposal.get("confidence"),
             review_status=review_status,
             source_context={
                 "source_url": proposal.get("source_url"),

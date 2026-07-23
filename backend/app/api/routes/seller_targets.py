@@ -29,6 +29,8 @@ from backend.app.api.routes.utils import (
 from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
+from backend.app.registry.indicators import writable_columns
+from backend.app.services.field_writer import FieldWriteError, WriteProvenance, write_seller_target_fields
 from backend.app.services.attachment_storage import (
     AttachmentNotFoundError,
     AttachmentStorageError,
@@ -56,10 +58,11 @@ class SellerTargetCreate(BaseModel):
         "researching",
         "parse_failed",
     ] = "pending_review"
-    industry_primary: str | None = None
-    industry_secondary: str | None = None
-    headquarter_province: str | None = None
-    headquarter_city: str | None = None
+    industry_l1: str | None = None
+    industry_l2: str | None = None
+    location_province: str | None = None
+    location_city: str | None = None
+    location_district: str | None = None
     listed_status: str = "unknown"
     current_revenue_yuan: Decimal | None = None
     current_net_profit_yuan: Decimal | None = None
@@ -86,14 +89,9 @@ class SellerTargetOut(BaseModel):
     information_status: str
     industry_l1: str | None = None
     industry_l2: str | None = None
-    industry_primary: str | None
-    industry_secondary: str | None
-    registered_province: str | None
-    registered_city: str | None
-    headquarter_province: str | None
-    headquarter_city: str | None
-    raw_region_text: str | None
-    region_granularity: str | None
+    location_province: str | None
+    location_city: str | None
+    location_district: str | None
     listed_status: str
     listing_market_region: str | None = None
     market_cap_yuan: Decimal | None
@@ -154,14 +152,11 @@ class SellerTargetUpdate(BaseModel):
     target_name: str | None = Field(default=None, min_length=1, max_length=300)
     target_type: str | None = None
     target_subject_name: str | None = Field(default=None, max_length=300)
-    industry_primary: str | None = None
-    industry_secondary: str | None = None
-    registered_province: str | None = None
-    registered_city: str | None = None
-    headquarter_province: str | None = None
-    headquarter_city: str | None = None
-    raw_region_text: str | None = None
-    region_granularity: str | None = None
+    industry_l1: str | None = None
+    industry_l2: str | None = None
+    location_province: str | None = None
+    location_city: str | None = None
+    location_district: str | None = None
     listed_status: str | None = None
     market_cap_yuan: Decimal | None = None
     current_revenue_yuan: Decimal | None = None
@@ -208,6 +203,16 @@ class SellerTargetUpdate(BaseModel):
 class SellerTargetParseRequest(BaseModel):
     raw_target_text: str | None = Field(default=None, min_length=1)
     force: bool = False
+
+
+class SellerTargetFieldsUpdate(BaseModel):
+    """Manual changes to information-page facts only.
+
+    The field set and its type/enum validation live in the indicator registry,
+    not in a second API whitelist.
+    """
+
+    changes: dict[str, Any] = Field(min_length=1, max_length=100)
 
 
 class SellerTargetParseJobOut(BaseModel):
@@ -314,8 +319,7 @@ class TargetFollowUpOut(BaseModel):
 
 SELLER_TARGET_OUT_COLUMNS = """
               id, target_name, target_type, target_subject_name, lifecycle_status, recommendation_status, information_status,
-              industry_l1, industry_l2, industry_primary, industry_secondary, registered_province, registered_city,
-              headquarter_province, headquarter_city, raw_region_text, region_granularity,
+              industry_l1, industry_l2, location_province, location_city, location_district,
               listed_status, listing_market_region, market_cap_yuan, current_revenue_yuan, current_net_profit_yuan,
               current_total_profit_yuan, current_assets_yuan, current_debt_ratio,
               current_operating_cash_flow_yuan, financial_period_label, profitability_status,
@@ -368,7 +372,7 @@ def create_seller_target(
             insert into seller_target (
               team_id, workspace_id, target_name, target_type, target_subject_name, owner_user_id,
               lifecycle_status, recommendation_status, information_status,
-              industry_primary, industry_secondary, headquarter_province, headquarter_city,
+              industry_l1, industry_l2, location_province, location_city, location_district,
               listed_status, current_revenue_yuan, current_net_profit_yuan,
               valuation_yuan, valuation_date, asking_price_yuan, asking_price_date, pe_ratio,
               is_for_sale, can_control, can_consolidate,
@@ -378,7 +382,7 @@ def create_seller_target(
             values (
               :team_id, :workspace_id, :target_name, :target_type, :target_subject_name, :owner_user_id,
               :lifecycle_status, :recommendation_status, :information_status,
-              :industry_primary, :industry_secondary, :headquarter_province, :headquarter_city,
+              :industry_l1, :industry_l2, :location_province, :location_city, :location_district,
               :listed_status, :current_revenue_yuan, :current_net_profit_yuan,
               :valuation_yuan, :valuation_date, :asking_price_yuan, :asking_price_date, :pe_ratio,
               :is_for_sale, :can_control, :can_consolidate,
@@ -455,12 +459,12 @@ def list_seller_targets(
         params["q"] = f"%{q}%"
     if industry:
         where.append(
-            "concat_ws(' / ', nullif(industry_primary, ''), nullif(industry_secondary, '')) = :industry"
+            "concat_ws(' / ', nullif(industry_l1, ''), nullif(industry_l2, '')) = :industry"
         )
         params["industry"] = industry
     if region:
         where.append(
-            "concat_ws(' ', nullif(headquarter_province, ''), nullif(headquarter_city, '')) = :region"
+            "concat_ws(' ', nullif(location_province, ''), nullif(location_city, ''), nullif(location_district, '')) = :region"
         )
         params["region"] = region
     if status:
@@ -529,14 +533,14 @@ def seller_target_filter_options(current_user: CurrentUser, db: Session = Depend
         db,
         f"""
         select
-          concat_ws(' / ', nullif(industry_primary, ''), nullif(industry_secondary, '')) as value,
+          concat_ws(' / ', nullif(industry_l1, ''), nullif(industry_l2, '')) as value,
           count(*) as count
         from seller_target
         where team_id = :team_id
           and workspace_id = :workspace_id
           and deleted_at is null
           {scope_clause}
-          and concat_ws(' / ', nullif(industry_primary, ''), nullif(industry_secondary, '')) <> ''
+          and concat_ws(' / ', nullif(industry_l1, ''), nullif(industry_l2, '')) <> ''
         group by value
         order by count desc, value asc
         limit 80
@@ -547,14 +551,14 @@ def seller_target_filter_options(current_user: CurrentUser, db: Session = Depend
         db,
         f"""
         select
-          concat_ws(' ', nullif(headquarter_province, ''), nullif(headquarter_city, '')) as value,
+          concat_ws(' ', nullif(location_province, ''), nullif(location_city, ''), nullif(location_district, '')) as value,
           count(*) as count
         from seller_target
         where team_id = :team_id
           and workspace_id = :workspace_id
           and deleted_at is null
           {scope_clause}
-          and concat_ws(' ', nullif(headquarter_province, ''), nullif(headquarter_city, '')) <> ''
+          and concat_ws(' ', nullif(location_province, ''), nullif(location_city, ''), nullif(location_district, '')) <> ''
         group by value
         order by count desc, value asc
         limit 80
@@ -1157,6 +1161,11 @@ def update_seller_target(
     ensure_entity_writable(db, current_user, entity_type="seller_target", entity_id=seller_target_id)
     changes = payload.model_dump(exclude_unset=True)
 
+    fact_changes = {key: value for key, value in changes.items() if key in writable_columns("manual")}
+    if fact_changes:
+        _write_manual_information_fields(db, seller_target_id, fact_changes, current_user.user_id)
+        changes = {key: value for key, value in changes.items() if key not in fact_changes}
+
     if "owner_user_id" in changes:
         require_admin(current_user)
         if changes["owner_user_id"] is not None:
@@ -1169,7 +1178,8 @@ def update_seller_target(
             changes[text_field] = _normalize_optional_text(changes[text_field])
 
     if not changes:
-        return original
+        db.commit()
+        return _get_seller_target_or_404(db, seller_target_id)
 
     diff = diff_payload(original, changes)
     if not diff:
@@ -1216,6 +1226,44 @@ def update_seller_target(
 
     db.commit()
     return dict(row)
+
+
+@router.patch("/{seller_target_id}/fields", response_model=SellerTargetOut)
+def update_seller_target_information_fields(
+    seller_target_id: UUID,
+    payload: SellerTargetFieldsUpdate,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Edit any information-page field through the single fact writer."""
+    ensure_entity_writable(db, current_user, entity_type="seller_target", entity_id=seller_target_id)
+    _write_manual_information_fields(db, seller_target_id, payload.changes, current_user.user_id)
+    db.commit()
+    return _get_seller_target_or_404(db, seller_target_id)
+
+
+def _write_manual_information_fields(
+    db: Session,
+    seller_target_id: UUID,
+    changes: dict[str, Any],
+    actor_user_id: UUID,
+) -> None:
+    try:
+        write_seller_target_fields(
+            db,
+            seller_target_id,
+            changes,
+            provenance=WriteProvenance(
+                source_type="manual_edit",
+                actor_user_id=actor_user_id,
+                writer="manual",
+                field_source_label="手动编辑",
+                review_status="accepted",
+            ),
+            search_doc_source="seller_target_manual_edit",
+        )
+    except FieldWriteError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
 
 
 @router.delete("/{seller_target_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -1603,10 +1651,11 @@ def _seller_target_params(payload: SellerTargetCreate, current_user: AuthContext
         "lifecycle_status": payload.lifecycle_status,
         "recommendation_status": payload.recommendation_status,
         "information_status": payload.information_status,
-        "industry_primary": _normalize_optional_text(payload.industry_primary),
-        "industry_secondary": _normalize_optional_text(payload.industry_secondary),
-        "headquarter_province": _normalize_optional_text(payload.headquarter_province),
-        "headquarter_city": _normalize_optional_text(payload.headquarter_city),
+        "industry_l1": _normalize_optional_text(payload.industry_l1),
+        "industry_l2": _normalize_optional_text(payload.industry_l2),
+        "location_province": _normalize_optional_text(payload.location_province),
+        "location_city": _normalize_optional_text(payload.location_city),
+        "location_district": _normalize_optional_text(payload.location_district),
         "listed_status": payload.listed_status,
         "current_revenue_yuan": payload.current_revenue_yuan,
         "current_net_profit_yuan": payload.current_net_profit_yuan,

@@ -727,8 +727,24 @@ def _normalize_proposed_changes(
     proposed_changes: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str]]:
     if action_type == "seller_fact_update":
+        # Old prompt versions still name raw industry fields. Convert them to
+        # normalization candidates before the registry-derived whitelist drops
+        # retired seller_target columns; originals remain in action evidence.
+        candidate = dict(proposed_changes)
+        if "industry_l1" not in candidate and candidate.get("industry_primary"):
+            candidate["industry_l1"] = candidate["industry_primary"]
+        if "industry_l2" not in candidate and candidate.get("industry_secondary"):
+            candidate["industry_l2"] = candidate["industry_secondary"]
+        if "location_province" not in candidate:
+            legacy_province = candidate.get("headquarter_province") or candidate.get("registered_province")
+            if legacy_province:
+                candidate["location_province"] = legacy_province
+        if "location_city" not in candidate:
+            legacy_city = candidate.get("headquarter_city") or candidate.get("registered_city")
+            if legacy_city:
+                candidate["location_city"] = legacy_city
         return _normalize_change_fields(
-            proposed_changes,
+            candidate,
             allowed_fields=SELLER_TARGET_CHANGE_FIELDS,
             aliases=SELLER_TARGET_FIELD_ALIASES,
             nested_aliases=NESTED_FIELD_ALIASES,
@@ -1274,11 +1290,7 @@ def _persist_document_profile_sections(
         if target_id is None:
             continue
         fallback_excerpt = str(action.get("raw_evidence_text") or "").strip()[:2000] or None
-        action_confidence = action.get("confidence")
         for section in _document_profile_sections_for_action(action):
-            confidence = section.get("confidence")
-            if confidence is None and action_confidence is not None:
-                confidence = float(action_confidence)
             proposed_excerpt = str(section.get("source_excerpt") or "").strip()
             source_excerpt = _verified_document_excerpt(
                 proposed_excerpt,
@@ -1296,7 +1308,6 @@ def _persist_document_profile_sections(
                 source_title=source_title,
                 source_excerpt=source_excerpt,
                 as_of_date=section.get("as_of_date"),
-                confidence=confidence,
                 review_status="auto_accepted",
                 user_id=SYSTEM_USER_ID,
                 log_source_type="user_attachment",
@@ -1332,7 +1343,6 @@ def _document_profile_sections_for_action(action: dict[str, Any]) -> list[dict[s
                 "content_text": business_summary[:2000],
                 "source_excerpt": None,
                 "as_of_date": None,
-                "confidence": None,
             },
         )
     else:

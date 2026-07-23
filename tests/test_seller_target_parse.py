@@ -101,7 +101,6 @@ def test_extracted_action_keeps_normalized_industry_fields() -> None:
     assert changes == {
         "industry_l1": "医药与健康",
         "industry_l2": "医疗器械",
-        "industry_primary": "医药健康",
     }
     assert notes == []
 

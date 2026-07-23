@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { AlertTriangle, ChevronRight, Loader2, UserRound, Building2, Plus, Search, X } from 'lucide-react';
 import { relations, sellerTargets, buyerIntents } from '../../lib/api';
-import type { BuyerSellerRelation } from '../../types/api';
+import type { BuyerSellerRelation, RelationEventType } from '../../types/api';
 import RelationTimelineDrawer from './RelationTimelineDrawer';
 import {
   daysSince,
@@ -25,6 +25,7 @@ interface Props {
 export default function ProgressPanel({ side, entityId }: Props) {
   const [items, setItems] = useState<BuyerSellerRelation[]>([]);
   const [statuses, setStatuses] = useState<string[]>([]);
+  const [eventTypes, setEventTypes] = useState<RelationEventType[]>([]);
   const [loading, setLoading] = useState(true);
   const [openId, setOpenId] = useState<string | null>(null);
   const [linking, setLinking] = useState(false);
@@ -41,7 +42,10 @@ export default function ProgressPanel({ side, entityId }: Props) {
   useEffect(() => {
     setLoading(true);
     void load();
-    relations.meta().then((meta) => setStatuses(meta.statuses)).catch(() => {});
+    relations.meta().then((meta) => {
+      setStatuses(meta.statuses);
+      setEventTypes(meta.event_types);
+    }).catch(() => {});
   }, [load]);
 
   const linkCounterparty = async (counterpartyId: string) => {
@@ -140,6 +144,7 @@ export default function ProgressPanel({ side, entityId }: Props) {
           relation={openRelation}
           side={side}
           statuses={statuses}
+          eventTypes={eventTypes}
           onClose={() => setOpenId(null)}
           onChanged={() => void load()}
         />
@@ -297,6 +302,11 @@ function RelationCard({
             >
               {counterpartyName}
             </Link>
+          </div>
+          <div className="mt-1 space-y-0.5 text-[11px] text-gray-500">
+            <p><span className="mr-1 text-gray-400">买家</span>{relation.buyer_name || '-'}</p>
+            <p><span className="mr-1 text-gray-400">意向</span>{relation.buyer_intent_name || '-'}</p>
+            <p><span className="mr-1 text-gray-400">标的</span>{relation.seller_target_name || '-'}</p>
           </div>
           {relation.last_event_summary ? (
             <p className="mt-1 line-clamp-2 text-xs text-gray-500">{relation.last_event_summary}</p>

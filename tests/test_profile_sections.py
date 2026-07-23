@@ -5,7 +5,6 @@ from backend.app.services.profile_sections import (
     buyer_party_fact_block,
     load_profile_sections,
     normalize_profile_section_items,
-    profile_coverage,
     render_profile_text,
     upsert_profile_section,
 )
@@ -16,9 +15,10 @@ def _section(code: str, content: str, status: str = "filled") -> dict:
 
 
 def test_every_section_has_a_budget_and_a_label() -> None:
-    assert len(PROFILE_SECTIONS) == 6
-    assert PROFILE_TOTAL_BUDGET == 1900
+    assert len(PROFILE_SECTIONS) == 7
+    assert PROFILE_TOTAL_BUDGET == 2100
     assert set(PROFILE_SECTION_CODES) == {
+        "identity",
         "business_product",
         "chain_position",
         "tech_team",
@@ -69,22 +69,6 @@ def test_no_information_is_explicit_rather_than_an_empty_string() -> None:
 def test_render_returns_empty_when_no_sections_exist() -> None:
     assert render_profile_text(None) == ""
     assert render_profile_text({}) == ""
-
-
-def test_coverage_reports_missing_sections_as_research_input() -> None:
-    sections = {
-        "business_product": _section("business_product", "醋酸下游精细化工"),
-        "tech_team": _section("tech_team", "", status="not_found"),
-        "deal_terms": _section("deal_terms", "", status="not_applicable"),
-    }
-
-    coverage = profile_coverage(sections)
-
-    assert coverage["filled_sections"] == ["业务与产品"]
-    # not_applicable 不算缺口；not_found 与完全没写都算
-    assert "技术与团队能力" in coverage["missing_sections"]
-    assert "产业链位置与行业地位" in coverage["missing_sections"]
-    assert "交易属性与配合度" not in coverage["missing_sections"]
 
 
 def test_buyer_party_block_carries_business_facts_without_identity() -> None:
@@ -139,7 +123,7 @@ def test_profile_parser_rejects_unknown_duplicate_and_invalid_date_rows() -> Non
     )
 
     assert [item["section_code"] for item in sections] == ["business_product", "tech_team"]
-    assert sections[0]["confidence"] == 1.0
+    assert "confidence" not in sections[0]
     assert sections[1]["as_of_date"] is None
     assert any("duplicate_section" in note for note in notes)
     assert any("unknown_section" in note for note in notes)

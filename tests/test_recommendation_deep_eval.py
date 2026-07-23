@@ -248,8 +248,7 @@ def test_candidate_profile_prefers_sections_over_the_search_doc() -> None:
     assert fields["profile_source"] == "profile_sections"
     assert "链主地位" in fields["profile"]
     assert "结构化摘要" not in fields["profile"]
-    # 未填的栏目直接成为调研任务清单
-    assert "业务与产品" in fields["profile_missing_sections"]
+    assert "profile_missing_sections" not in fields
 
 
 def test_candidate_profile_falls_back_to_the_search_doc_when_no_profile_exists() -> None:
@@ -259,4 +258,4 @@ def test_candidate_profile_falls_back_to_the_search_doc_when_no_profile_exists()
 
     assert fields["profile_source"] == "search_doc"
     assert "行业大类：能源" in fields["profile"]
-    assert len(fields["profile_missing_sections"]) == 6
+    assert "profile_missing_sections" not in fields

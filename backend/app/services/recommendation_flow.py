@@ -1149,10 +1149,10 @@ def _candidate_targets_for_intent(
               st.id as seller_target_id,
               st.target_name as seller_target_name,
               st.industry_l1,
-              st.industry_primary,
-              st.industry_secondary,
-              st.headquarter_province,
-              st.headquarter_city,
+              st.industry_l2,
+              st.location_province,
+              st.location_city,
+              st.location_district,
               st.current_revenue_yuan,
               st.current_net_profit_yuan,
               st.pe_ratio,
@@ -1600,14 +1600,37 @@ def _annotate_candidate_relations(db: Session, result: dict[str, Any], *, mode: 
     ).mappings().all()
 
     exact: dict[tuple[str, str], dict[str, Any]] = {}
-    # 「深入推进中」的另一方集合：buyer_to_target 看标的，target_to_buyer 看意向。
-    deep_targets: set[str] = set()
-    deep_intents: set[str] = set()
     for row in rows:
         exact[(row["buyer_intent_id"], row["seller_target_id"])] = {"id": row["id"], "status": row["status"]}
-        if row["status"] in DEEP_RELATION_STATUSES:
-            deep_targets.add(row["seller_target_id"])
-            deep_intents.add(row["buyer_intent_id"])
+
+    # Never constrain this query by candidate intent IDs. The former combined
+    # predicate only saw relations belonging to the recommended buyer and
+    # therefore hid exactly the “other buyer is in due diligence” situation.
+    deep_rows = db.execute(
+        text(
+            """
+            select buyer_intent_id::text as buyer_intent_id,
+                   seller_target_id::text as seller_target_id
+            from buyer_seller_relation
+            where team_id = :team_id and workspace_id = :workspace_id
+              and deleted_at is null
+              and seller_target_id in :target_ids
+              and status in :deep_statuses
+            """
+        ).bindparams(
+            bindparam("target_ids", expanding=True),
+            bindparam("deep_statuses", expanding=True),
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "target_ids": target_ids,
+            "deep_statuses": list(DEEP_RELATION_STATUSES),
+        },
+    ).mappings().all()
+    deep_intents_by_target: dict[str, set[str]] = {}
+    for row in deep_rows:
+        deep_intents_by_target.setdefault(row["seller_target_id"], set()).add(row["buyer_intent_id"])
 
     for candidate in candidates:
         intent_id = str(candidate.get("buyer_intent_id") or "")
@@ -1615,15 +1638,11 @@ def _annotate_candidate_relations(db: Session, result: dict[str, Any], *, mode: 
         relation = exact.get((intent_id, target_id))
         candidate["relation_id"] = str(relation["id"]) if relation else None
         candidate["relation_status"] = relation["status"] if relation else None
-        if mode == "buyer_to_target":
-            # 该标的与「别的买家」深入推进中（排除与本意向自己的关系）。
-            candidate["deep_progress_elsewhere"] = target_id in deep_targets and not (
-                relation and relation["status"] in DEEP_RELATION_STATUSES
-            )
-        else:
-            candidate["deep_progress_elsewhere"] = intent_id in deep_intents and not (
-                relation and relation["status"] in DEEP_RELATION_STATUSES
-            )
+        # Both recommendation directions mean the same thing: *this target*
+        # is deeply progressing with another buyer. Only expose a boolean.
+        candidate["deep_progress_elsewhere"] = bool(
+            deep_intents_by_target.get(target_id, set()) - {intent_id}
+        )
     return result
 
 
@@ -1790,7 +1809,7 @@ def _excluded_industry_hit(target: dict[str, Any], intent: dict[str, Any]) -> st
 
     descriptive = "／".join(
         str(target.get(key) or "")
-        for key in ("industry_primary", "industry_secondary", "business_summary")
+        for key in ("industry_l1", "industry_l2", "business_summary")
     )
     for term in resolved.get("unresolved") or []:
         if len(term) < DESCRIPTIVE_EXCLUSION_MIN_LENGTH:
@@ -1871,7 +1890,7 @@ def _score_target_against_intent(
             add_dimension(30, "mismatch", dimension="行业", gap_text="行业不在买家关注赛道", gate=True)
     elif intent.get("industry_primary"):
         # 旧数据兜底：字符串相等，不命中只降分不出局
-        if target.get("industry_primary") == intent.get("industry_primary"):
+        if target.get("industry_l1") == intent.get("industry_primary"):
             add_dimension(30, "match", dimension="行业", match_text=f"一级行业匹配：{intent['industry_primary']}")
         else:
             add_dimension(30, "mismatch", dimension="行业", gap_text="一级行业不完全匹配")
@@ -1895,8 +1914,8 @@ def _score_target_against_intent(
     # 区域（含区域组展开；偏好性，不沉底）
     region_scope = str(intent.get("region_scope_summary") or "").strip()
     if region_scope:
-        province = target.get("headquarter_province")
-        city = target.get("headquarter_city")
+        province = target.get("location_province")
+        city = target.get("location_city")
         if not province and not city:
             add_dimension(12, "unknown", dimension="区域", gap_text="标的区域缺失")
         elif _region_scope_matches(region_scope, province, city):
@@ -2144,7 +2163,7 @@ def _score_target_against_intent(
         score = 40.0
 
     # 加分项（不参与归一化）：二级行业一致、现金流状态
-    if intent.get("industry_secondary") and target.get("industry_secondary") == intent.get("industry_secondary"):
+    if intent.get("industry_secondary") and target.get("industry_l2") == intent.get("industry_secondary"):
         score += 4
         evidence.append(f"二级行业一致：{intent['industry_secondary']}")
     cash_flow_status = str(target.get("cash_flow_status") or "")
@@ -2232,8 +2251,8 @@ def _get_seller_target_anchor(db: Session, seller_target_id: UUID | None) -> dic
         text(
             """
             select
-              id, target_name, industry_l1, industry_l2, industry_primary, industry_secondary,
-              headquarter_province, headquarter_city,
+              id, target_name, industry_l1, industry_l2,
+              location_province, location_city, location_district,
               current_revenue_yuan, current_net_profit_yuan, current_total_profit_yuan,
               pe_ratio, valuation_yuan, asking_price_yuan, market_cap_yuan, current_debt_ratio,
               cash_flow_status, profitability_status,
@@ -2802,10 +2821,11 @@ def _build_rerank_query(*, mode: str, anchor: dict[str, Any]) -> str:
     else:
         parts = [
             anchor.get("target_name"),
-            anchor.get("industry_primary"),
-            anchor.get("industry_secondary"),
-            anchor.get("headquarter_province"),
-            anchor.get("headquarter_city"),
+            anchor.get("industry_l1"),
+            anchor.get("industry_l2"),
+            anchor.get("location_province"),
+            anchor.get("location_city"),
+            anchor.get("location_district"),
             anchor.get("business_summary"),
             anchor.get("risk_summary"),
         ]

@@ -64,9 +64,9 @@ export function intentConditionChips(intent: BuyerIntent): ConditionChip[] {
 
 export function targetConditionChips(target: SellerTarget): ConditionChip[] {
   const chips: ConditionChip[] = [];
-  const industry = [target.industry_primary, target.industry_secondary].filter(Boolean).join('/');
+  const industry = [target.industry_l1, target.industry_l2].filter(Boolean).join('/');
   if (industry) chips.push({ label: `行业:${industry}` });
-  const region = [target.headquarter_province, target.headquarter_city].filter(Boolean).join(' ');
+  const region = [target.location_province, target.location_city, target.location_district].filter(Boolean).join(' ');
   if (region) chips.push({ label: `地区:${region}` });
   if (target.current_net_profit_yuan) chips.push({ label: `净利:${formatCompactMoney(Number(target.current_net_profit_yuan))}` });
   if (target.asking_price_yuan) chips.push({ label: `报价:${formatCompactMoney(Number(target.asking_price_yuan))}` });

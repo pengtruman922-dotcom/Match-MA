@@ -19,6 +19,7 @@ from backend.app.services.relation_flow import (
 )
 
 BASELINE = Path(__file__).resolve().parents[1] / "database" / "migrations" / "001_baseline.sql"
+MIGRATION = Path(__file__).resolve().parents[1] / "database" / "migrations" / "003_relation_event_audit.sql"
 
 
 def _enum_containing(column: str, sentinel: str) -> set[str]:
@@ -37,7 +38,9 @@ def test_relation_statuses_match_the_check_constraint() -> None:
 
 
 def test_relation_event_types_match_the_check_constraint() -> None:
-    assert set(RELATION_EVENT_TYPES) == _enum_containing("event_type", "material_sent")
+    sql = MIGRATION.read_text(encoding="utf-8")
+    values = set(re.findall(r"'([a-z_]+)'", sql.split("relation_event_event_type_check", 1)[1]))
+    assert set(RELATION_EVENT_TYPES) == values
 
 
 class _RejectingDb:
@@ -62,10 +65,11 @@ def test_invalid_event_type_is_rejected_before_touching_the_db() -> None:
     assert "Invalid event_type" in str(exc.value.detail)
 
 
-def test_empty_event_is_rejected() -> None:
-    with pytest.raises(Exception) as exc:
+def test_empty_event_reaches_storage_and_gets_a_default_summary() -> None:
+    # With a valid event type, blank content is intentionally legal. The service
+    # generates “已记录：电话沟通” after loading the relation.
+    with pytest.raises(AssertionError, match="validation should have rejected"):
         record_relation_event(_RejectingDb(), _uuid(), actor_user_id=_uuid(), event_type="call")
-    assert "title or content" in str(exc.value.detail)
 
 
 def _uuid():

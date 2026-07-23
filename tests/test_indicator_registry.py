@@ -31,6 +31,7 @@ from backend.app.services.research_apply import RESEARCH_STRUCTURED_FIELDS
 REPO = Path(__file__).resolve().parents[1]
 RECOMMENDATION_FLOW = REPO / "backend/app/services/recommendation_flow.py"
 BASELINE = REPO / "database/migrations/001_baseline.sql"
+R4A_MIGRATION = REPO / "database/migrations/002_target_information_model.sql"
 
 
 def test_consumers_derive_from_the_registry() -> None:
@@ -108,7 +109,14 @@ def test_every_indicator_is_a_real_seller_target_column() -> None:
     assert body, "baseline 未找到 seller_target 建表块"
     columns = set(re.findall(r"^\s+([a-z_0-9]+)\s", body.group(1), re.M))
     missing = {ind.column for ind in SELLER_TARGET_INDICATORS} - columns
-    assert not missing, f"注册表引用了 seller_target 不存在的列：{sorted(missing)}"
+    migration_sql = R4A_MIGRATION.read_text(encoding="utf-8")
+    assert missing <= {"location_province", "location_city", "location_district"}, (
+        f"注册表引用了 seller_target 不存在的列：{sorted(missing)}"
+    )
+    for column in missing:
+        assert f"add column {column} text" in migration_sql
+    for retired in ("industry_primary", "industry_secondary", "registered_province", "registered_city", "headquarter_province", "headquarter_city", "raw_region_text", "region_granularity"):
+        assert f"drop column {retired}" in migration_sql
 
 
 def test_every_indicator_group_key_is_declared() -> None:

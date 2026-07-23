@@ -3,7 +3,7 @@
  *
  * 进度的单元是「买家意向 × 标的」这一对关系，不是任何单个实体。
  * 这里是两侧详情页「推进」tab 共用的展示层。取值集合由后端
- * /relations-meta 提供（对齐 DB check 约束），这里只管中文与视觉。
+ * /relations-meta 提供（对齐 DB check 约束）；这里仅保留状态视觉与阶段判断。
  */
 
 export const RELATION_STATUS_LABELS: Record<string, string> = {
@@ -18,24 +18,6 @@ export const RELATION_STATUS_LABELS: Record<string, string> = {
   lost: '终止',
 };
 
-export const RELATION_EVENT_LABELS: Record<string, string> = {
-  recommended: '推荐',
-  buyer_interested: '买家感兴趣',
-  buyer_not_interested: '买家不感兴趣',
-  meeting: '会议',
-  call: '电话',
-  material_sent: '发送资料',
-  due_diligence_started: '启动尽调',
-  agreement_discussion: '协议沟通',
-  deal_closed: '成交',
-  paused: '暂停',
-  internal_note: '内部备注',
-  other: '其他',
-};
-
-/** 手动记录动态时可选的事件类型（推荐/成交等由状态流转自动生成，不在此列）。 */
-export const MANUAL_EVENT_TYPES = ['meeting', 'call', 'material_sent', 'internal_note', 'other'] as const;
-
 /** 尽调及以后视为「深入推进」——推荐给其他买家时标注、不透露对方（R2b 用）。 */
 export const DEEP_STAGE_STATUSES = new Set(['due_diligence', 'agreement', 'deal_closed']);
 
@@ -46,10 +28,6 @@ export const STALE_RELATION_DAYS = 14;
 
 export function relationStatusLabel(status: string): string {
   return RELATION_STATUS_LABELS[status] || status;
-}
-
-export function relationEventLabel(type: string): string {
-  return RELATION_EVENT_LABELS[type] || type;
 }
 
 export function isRelationEnded(status: string): boolean {

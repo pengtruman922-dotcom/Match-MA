@@ -614,8 +614,6 @@ def test_business_update_derives_and_keeps_seller_industry_dimensions() -> None:
     assert actions[0]["proposed_changes_json"] == {
         "industry_l1": "医药与健康",
         "industry_l2": "医疗器械",
-        "industry_primary": "医药与健康",
-        "industry_secondary": "医疗器械",
     }
 
 

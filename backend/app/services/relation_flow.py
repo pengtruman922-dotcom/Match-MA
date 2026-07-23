@@ -41,14 +41,31 @@ RELATION_EVENT_TYPES: tuple[str, ...] = (
     "buyer_not_interested",
     "meeting",
     "call",
+    "message",
+    "email",
     "material_sent",
+    "quote_update",
+    "nda_signed",
+    "management_meeting",
     "due_diligence_started",
+    "due_diligence_progress",
     "agreement_discussion",
+    "exclusivity",
     "deal_closed",
     "paused",
     "internal_note",
     "other",
 )
+
+RELATION_EVENT_LABELS: dict[str, str] = {
+    "recommended": "推荐", "buyer_interested": "买家有意向", "buyer_not_interested": "买家暂不考虑",
+    "meeting": "会议沟通", "call": "电话沟通", "message": "即时消息", "email": "邮件沟通",
+    "material_sent": "发送材料", "quote_update": "报价更新", "nda_signed": "签署保密协议",
+    "management_meeting": "管理层会谈", "due_diligence_started": "启动尽调",
+    "due_diligence_progress": "尽调进展", "agreement_discussion": "协议讨论",
+    "exclusivity": "排他安排", "deal_closed": "交易完成", "paused": "暂停推进",
+    "internal_note": "内部备注", "other": "其他",
+}
 
 # 状态的中文名，只用于自动生成的动态摘要文案（last_event_summary 是展示字段，
 # LLM 路径也存中文摘要，这里保持一致）。
@@ -109,6 +126,8 @@ def _insert_event(
     title: str | None,
     content: str | None,
     next_step: str | None,
+    source_type: str,
+    source_id: UUID | None = None,
 ) -> UUID:
     return db.execute(
         text(
@@ -116,12 +135,12 @@ def _insert_event(
             insert into relation_event (
               team_id, workspace_id, relation_id, buyer_intent_id, buyer_party_id,
               seller_target_id, event_type, event_time, title, content, next_step,
-              source_type, metadata_json, created_by
+              source_type, source_id, metadata_json, created_by, updated_by
             )
             values (
               :team_id, :workspace_id, :relation_id, :buyer_intent_id, :buyer_party_id,
               :seller_target_id, :event_type, now(), :title, :content, :next_step,
-              'manual', :metadata_json, :created_by
+              :source_type, :source_id, :metadata_json, :created_by, :updated_by
             )
             returning id
             """
@@ -137,13 +156,22 @@ def _insert_event(
             "title": title,
             "content": content,
             "next_step": next_step,
+            "source_type": source_type,
+            "source_id": source_id,
             "metadata_json": {},
             "created_by": actor_user_id,
+            "updated_by": actor_user_id,
         },
     ).scalar_one()
 
 
-def _touch_relation_summary(db: Session, relation_id: UUID, summary: str | None) -> None:
+def _touch_relation_summary(
+    db: Session,
+    relation_id: UUID,
+    summary: str | None,
+    *,
+    actor_user_id: UUID,
+) -> None:
     db.execute(
         text(
             """
@@ -151,7 +179,8 @@ def _touch_relation_summary(db: Session, relation_id: UUID, summary: str | None)
             set last_event_at = now(),
                 last_event_summary = coalesce(:summary, last_event_summary),
                 last_contact_at = now(),
-                updated_at = now()
+                updated_at = now(),
+                updated_by = :updated_by
             where id = :relation_id
               and team_id = :team_id
               and workspace_id = :workspace_id
@@ -159,6 +188,7 @@ def _touch_relation_summary(db: Session, relation_id: UUID, summary: str | None)
         ),
         {
             "summary": summary,
+            "updated_by": actor_user_id,
             "relation_id": relation_id,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
@@ -228,12 +258,14 @@ def create_relation(
             insert into buyer_seller_relation (
               team_id, workspace_id, buyer_intent_id, buyer_party_id, seller_target_id,
               status, first_recommended_at, last_event_at, last_event_summary,
-              last_contact_at, created_by
+              last_contact_at, created_by, updated_by
             )
             values (
               :team_id, :workspace_id, :buyer_intent_id, :buyer_party_id, :seller_target_id,
-              'recommended', now(), now(), :summary, now(), :created_by
+              'recommended', now(), now(), :summary, now(), :created_by, :updated_by
             )
+            on conflict (team_id, buyer_intent_id, seller_target_id)
+              where deleted_at is null do nothing
             returning id
             """
         ),
@@ -245,8 +277,27 @@ def create_relation(
             "seller_target_id": seller_target_id,
             "summary": source_summary or "开始推进",
             "created_by": actor_user_id,
+            "updated_by": actor_user_id,
         },
-    ).scalar_one()
+    ).scalar_one_or_none()
+    if relation_id is None:
+        existing = db.execute(
+            text(
+                """
+                select id from buyer_seller_relation
+                where team_id = :team_id and workspace_id = :workspace_id
+                  and buyer_intent_id = :buyer_intent_id
+                  and seller_target_id = :seller_target_id and deleted_at is null
+                """
+            ),
+            {
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+                "buyer_intent_id": buyer_intent_id,
+                "seller_target_id": seller_target_id,
+            },
+        ).scalar_one()
+        return existing, False
     _insert_event(
         db,
         {
@@ -260,6 +311,7 @@ def create_relation(
         title=None,
         content=source_summary or "开始推进",
         next_step=None,
+        source_type="system",
     )
     db.commit()
     return relation_id, True
@@ -278,20 +330,19 @@ def record_relation_event(
     """Log a manual event (meeting, call, note, …) on the relation timeline."""
     if event_type not in RELATION_EVENT_TYPES:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=f"Invalid event_type: {event_type}")
-    if not (content or title):
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="An event needs a title or content.")
-
     relation = _load_relation(db, relation_id)
+    default_content = f"已记录：{RELATION_EVENT_LABELS[event_type]}"
     event_id = _insert_event(
         db,
         relation,
         actor_user_id=actor_user_id,
         event_type=event_type,
-        title=title,
-        content=content,
+        title=title.strip() if title else None,
+        content=content.strip() if content else default_content,
         next_step=next_step,
+        source_type="manual",
     )
-    _touch_relation_summary(db, relation_id, content or title)
+    _touch_relation_summary(db, relation_id, content or title or default_content, actor_user_id=actor_user_id)
     db.commit()
     return event_id
 
@@ -331,7 +382,8 @@ def change_relation_status(
                 last_contact_at = now(),
                 first_recommended_at = coalesce(first_recommended_at,
                   case when :new_status = 'recommended' then now() else null end),
-                updated_at = now()
+                updated_at = now(),
+                updated_by = :updated_by
             where id = :relation_id
               and team_id = :team_id
               and workspace_id = :workspace_id
@@ -341,6 +393,7 @@ def change_relation_status(
             "new_status": new_status,
             "status_reason": status_reason,
             "summary": summary,
+            "updated_by": actor_user_id,
             "relation_id": relation_id,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
@@ -354,6 +407,7 @@ def change_relation_status(
         title=status_reason,
         content=summary,
         next_step=next_step,
+        source_type="system",
     )
     if new_status != old_status:
         write_action_log(
@@ -368,3 +422,131 @@ def change_relation_status(
         )
     db.commit()
     return _load_relation(db, relation_id)
+
+
+def _recompute_relation_summary(db: Session, relation_id: UUID, *, actor_user_id: UUID) -> None:
+    latest = db.execute(
+        text(
+            """
+            select event_time, coalesce(nullif(content, ''), nullif(title, '')) as summary
+            from relation_event
+            where relation_id = :relation_id and team_id = :team_id
+              and workspace_id = :workspace_id and deleted_at is null
+            order by event_time desc, created_at desc
+            limit 1
+            """
+        ),
+        {"relation_id": relation_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    ).mappings().one_or_none()
+    db.execute(
+        text(
+            """
+            update buyer_seller_relation
+            set last_event_at = :last_event_at,
+                last_event_summary = :summary,
+                updated_at = now(), updated_by = :updated_by
+            where id = :relation_id and team_id = :team_id and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ),
+        {
+            "last_event_at": latest["event_time"] if latest else None,
+            "summary": latest["summary"] if latest else None,
+            "updated_by": actor_user_id,
+            "relation_id": relation_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )
+
+
+def update_relation_event(
+    db: Session,
+    relation_id: UUID,
+    event_id: UUID,
+    *,
+    actor_user_id: UUID,
+    changes: dict[str, Any],
+) -> None:
+    event = _load_editable_manual_event(db, relation_id, event_id)
+    allowed = {"event_type", "title", "content", "next_step"}
+    if set(changes) - allowed:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Unsupported event fields.")
+    event_type = changes.get("event_type", event["event_type"])
+    if event_type not in RELATION_EVENT_TYPES:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=f"Invalid event_type: {event_type}")
+    title = changes.get("title", event["title"])
+    content = changes.get("content", event["content"])
+    if not (str(title or "").strip() or str(content or "").strip()):
+        content = f"已记录：{RELATION_EVENT_LABELS[event_type]}"
+    db.execute(
+        text(
+            """
+            update relation_event
+            set event_type = :event_type, title = :title, content = :content,
+                next_step = :next_step, updated_at = now(), updated_by = :updated_by
+            where id = :event_id and relation_id = :relation_id and team_id = :team_id
+              and workspace_id = :workspace_id and deleted_at is null
+            """
+        ),
+        {
+            "event_type": event_type,
+            "title": title.strip() if isinstance(title, str) and title.strip() else None,
+            "content": content.strip() if isinstance(content, str) and content.strip() else None,
+            "next_step": changes.get("next_step", event["next_step"]),
+            "updated_by": actor_user_id,
+            "event_id": event_id,
+            "relation_id": relation_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )
+    _recompute_relation_summary(db, relation_id, actor_user_id=actor_user_id)
+    db.commit()
+
+
+def delete_relation_event(
+    db: Session,
+    relation_id: UUID,
+    event_id: UUID,
+    *,
+    actor_user_id: UUID,
+) -> None:
+    _load_editable_manual_event(db, relation_id, event_id)
+    db.execute(
+        text(
+            """
+            update relation_event
+            set deleted_at = now(), deleted_by = :deleted_by,
+                updated_at = now(), updated_by = :updated_by
+            where id = :event_id and relation_id = :relation_id and team_id = :team_id
+              and workspace_id = :workspace_id and deleted_at is null
+            """
+        ),
+        {"deleted_by": actor_user_id, "updated_by": actor_user_id, "event_id": event_id,
+         "relation_id": relation_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    )
+    _recompute_relation_summary(db, relation_id, actor_user_id=actor_user_id)
+    db.commit()
+
+
+def _load_editable_manual_event(db: Session, relation_id: UUID, event_id: UUID) -> dict[str, Any]:
+    event = db.execute(
+        text(
+            """
+            select id, event_type, title, content, next_step, source_type, deleted_at
+            from relation_event
+            where id = :event_id and relation_id = :relation_id and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {"event_id": event_id, "relation_id": relation_id,
+         "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    ).mappings().one_or_none()
+    if event is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Relation event not found.")
+    if event["deleted_at"] is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Relation event has been deleted.")
+    if event["source_type"] != "manual":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="System relation events are immutable.")
+    return dict(event)

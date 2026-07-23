@@ -15,11 +15,9 @@ from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_
 from backend.app.jobs.queue import JobClaim
 
 from backend.app.services.profile_sections import (
-    PROFILE_SECTIONS,
     PROFILE_TOTAL_BUDGET,
     buyer_party_fact_block,
     load_profile_sections,
-    profile_coverage,
     render_profile_text,
 )
 
@@ -283,16 +281,13 @@ def _candidate_profile_fields(
     """
     profile_text = render_profile_text(sections)
     if profile_text:
-        coverage = profile_coverage(sections)
         return {
             "profile": profile_text[:PROFILE_TOTAL_BUDGET],
             "profile_source": "profile_sections",
-            "profile_missing_sections": coverage["missing_sections"],
         }
     return {
         "profile": fallback_document[:DEEP_EVAL_PROFILE_CHARS],
         "profile_source": "search_doc",
-        "profile_missing_sections": [label for _, label, _ in PROFILE_SECTIONS],
     }
 
 

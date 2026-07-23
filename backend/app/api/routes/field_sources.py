@@ -28,6 +28,7 @@ class FieldValueSourceOut(BaseModel):
     review_status: str
     created_at: str
     created_by: UUID | None
+    created_by_name: str | None = None
     evidence_span: dict[str, Any] | None = None
     debug_ref: dict[str, Any] | None = None
 
@@ -119,6 +120,7 @@ def list_field_sources(
               fvs.value_snapshot_json, fvs.source_type, fvs.source_id,
               fvs.evidence_id, fvs.source_label, fvs.confidence,
               fvs.review_status, fvs.created_at::text as created_at, fvs.created_by,
+              author.name as created_by_name,
               ev.id as ev_id, ev.source_type as ev_source_type, ev.source_id as ev_source_id,
               ev.attachment_id as ev_attachment_id, ev.parsed_document_id as ev_parsed_document_id,
               ev.page_no as ev_page_no, ev.slide_no as ev_slide_no, ev.sheet_name as ev_sheet_name,
@@ -126,6 +128,7 @@ def list_field_sources(
               ev.char_start as ev_char_start, ev.char_end as ev_char_end,
               ev.created_at::text as ev_created_at
             from field_value_source fvs
+            left join app_user author on author.id = fvs.created_by
             left join evidence_span ev on ev.id = fvs.evidence_id
             where {' and '.join(where)}
             order by fvs.created_at desc
@@ -170,6 +173,7 @@ def _field_value_source_out(row: dict[str, Any]) -> dict[str, Any]:
         "review_status": row["review_status"],
         "created_at": row["created_at"],
         "created_by": row.get("created_by"),
+        "created_by_name": row.get("created_by_name"),
         "evidence_span": evidence_span,
         "debug_ref": _debug_ref(row.get("source_type"), row.get("source_id")),
     }

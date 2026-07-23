@@ -1,6 +1,6 @@
-"""Matching profile sections: the qualitative layer behind deep eval.
+"""Per-group “其他” supplementary information.
 
-Six sections per entity, each carrying its own source and as-of date. Writes
+Seven groups per entity, each carrying its own source and as-of date. Writes
 supersede rather than overwrite so an earlier claim stays auditable, which is
 also what lets the research flow keep competing values side by side.
 """
@@ -20,7 +20,6 @@ from backend.app.db import get_db
 from backend.app.services.profile_sections import (
     PROFILE_SECTION_CODES,
     PROFILE_SECTION_LABELS,
-    profile_coverage,
     apply_profile_section,
 )
 
@@ -42,9 +41,9 @@ class ProfileSectionOut(BaseModel):
     source_title: str | None
     source_excerpt: str | None
     as_of_date: str | None
-    confidence: float | None
     review_status: str
     updated_at: str
+    updated_by_name: str | None = None
 
 
 class ProfileSectionWrite(BaseModel):
@@ -56,7 +55,6 @@ class ProfileSectionWrite(BaseModel):
     source_title: str | None = None
     source_excerpt: str | None = None
     as_of_date: str | None = None
-    confidence: float | None = Field(default=None, ge=0, le=1)
 
 
 def _validate_target(entity_type: str, section_code: str | None = None) -> None:
@@ -85,17 +83,18 @@ def list_profile_sections(
         text(
             """
             select
-              id, entity_type, entity_id, section_code, info_status, content_text,
-              source_type, source_url, source_title, source_excerpt,
-              as_of_date::text as as_of_date, confidence, review_status,
-              updated_at::text as updated_at
-            from entity_profile_section
+              ps.id, ps.entity_type, ps.entity_id, ps.section_code, ps.info_status, ps.content_text,
+              ps.source_type, ps.source_url, ps.source_title, ps.source_excerpt,
+              ps.as_of_date::text as as_of_date, ps.review_status,
+              ps.updated_at::text as updated_at, author.name as updated_by_name
+            from entity_profile_section ps
+            left join app_user author on author.id = ps.updated_by
             where team_id = :team_id
               and workspace_id = :workspace_id
-              and entity_type = :entity_type
-              and entity_id = :entity_id
-              and deleted_at is null
-            order by section_code, as_of_date desc nulls last, updated_at desc
+              and ps.entity_type = :entity_type
+              and ps.entity_id = :entity_id
+              and ps.deleted_at is null
+            order by ps.section_code, ps.updated_at desc
             """
         ),
         {
@@ -110,12 +109,10 @@ def list_profile_sections(
         {**dict(row), "section_label": PROFILE_SECTION_LABELS.get(row["section_code"], row["section_code"])}
         for row in rows
     ]
-    current = {row["section_code"]: dict(row) for row in reversed(rows)}
     return {
         "entity_type": entity_type,
         "entity_id": str(entity_id),
         "sections": sections,
-        "coverage": profile_coverage(current),
         "section_catalog": [
             {"code": code, "label": label} for code, label in PROFILE_SECTION_LABELS.items()
         ],
@@ -139,14 +136,13 @@ def write_profile_section(
         section_code=payload.section_code,
         info_status=payload.info_status,
         content_text=payload.content_text,
-        source_type=payload.source_type or "manual",
+        source_type=payload.source_type or "manual_edit",
         source_url=payload.source_url,
-        source_title=payload.source_title,
+        source_title=payload.source_title or "手动编辑",
         source_excerpt=payload.source_excerpt,
         as_of_date=payload.as_of_date,
-        confidence=payload.confidence,
         user_id=current_user.user_id,
-        log_source_type="manual",
+        log_source_type="manual_edit",
     )
     db.commit()
     return {

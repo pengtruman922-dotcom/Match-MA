@@ -976,8 +976,8 @@ def _seller_targets_by_ids(db: Session, ids: list[UUID]) -> list[dict[str, Any]]
         text(
             """
             select
-              id, target_name, target_type, industry_primary, industry_secondary,
-              headquarter_province, headquarter_city, listed_status,
+              id, target_name, target_type, industry_l1, industry_l2,
+              location_province, location_city, location_district, listed_status,
               current_revenue_yuan, current_net_profit_yuan, current_total_profit_yuan,
               valuation_yuan, asking_price_yuan, pe_ratio, is_for_sale,
               can_control, can_consolidate, accepts_minority_investment,

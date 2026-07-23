@@ -32,6 +32,11 @@ def list_indicators(entity: str = "seller_target") -> dict[str, Any]:
                 "group": ind.group,
                 "kind": ind.kind,
                 "screening": ind.screening,
+                "enum_options": [
+                    {"value": value, "label": label}
+                    for value, label in (ind.enum_options or ())
+                ],
+                "writable_by": sorted(ind.writable_by),
                 "fold_into": ind.fold_into,
             }
             for ind in indicators

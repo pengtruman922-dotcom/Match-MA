@@ -20,9 +20,8 @@ def rebuild_seller_target_search_doc(db: Session, seller_target_id: UUID) -> dic
             f"标的：{target['target_name']}",
             _kv("标的主体", target.get("target_subject_name")),
             f"类型：{target['target_type']}",
-            _kv("行业大类", target.get("industry_l1")),
-            _kv("一级行业", target.get("industry_primary")),
-            _kv("二级行业", target.get("industry_secondary")),
+            _kv("一级行业", target.get("industry_l1")),
+            _kv("二级行业", target.get("industry_l2")),
             _kv("区域", _region_text(target)),
             _kv("上市状态", target.get("listed_status")),
         ]
@@ -373,8 +372,8 @@ def _get_seller_target(db: Session, seller_target_id: UUID) -> dict[str, Any]:
         text(
             """
             select
-              id, target_name, target_type, target_subject_name, industry_l1, industry_primary, industry_secondary,
-              headquarter_province, headquarter_city, listed_status,
+              id, target_name, target_type, target_subject_name, industry_l1, industry_l2,
+              location_province, location_city, location_district, listed_status,
               current_revenue_yuan, current_net_profit_yuan, valuation_yuan, valuation_date,
               asking_price_yuan, asking_price_date, pe_ratio, is_for_sale, can_control,
               can_consolidate, business_summary, transaction_summary,
@@ -434,7 +433,7 @@ def _get_buyer_intent(db: Session, buyer_intent_id: UUID) -> dict[str, Any]:
 
 
 def _region_text(target: dict[str, Any]) -> str | None:
-    parts = [target.get("headquarter_province"), target.get("headquarter_city")]
+    parts = [target.get("location_province"), target.get("location_city"), target.get("location_district")]
     text_value = "".join(str(part) for part in parts if part)
     return text_value or None
 

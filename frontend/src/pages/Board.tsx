@@ -125,10 +125,9 @@ function Card({ relation }: { relation: BuyerSellerRelation }) {
       to={targetProgressPath(relation)}
       className="block border border-gray-200 bg-white px-2.5 py-2 hover:border-brand-400"
     >
-      <p className="truncate text-xs font-medium text-gray-900">{relation.seller_target_name}</p>
-      <p className="mt-0.5 truncate text-[11px] text-gray-500">
-        {relation.buyer_name || relation.buyer_intent_name || '未绑定买家'}
-      </p>
+      <p className="truncate text-xs text-gray-500"><span className="mr-1 text-gray-400">标的</span><span className="font-medium text-gray-900">{relation.seller_target_name || '-'}</span></p>
+      <p className="mt-0.5 truncate text-[11px] text-gray-500"><span className="mr-1 text-gray-400">买家</span>{relation.buyer_name || '-'}</p>
+      <p className="mt-0.5 truncate text-[11px] text-gray-500"><span className="mr-1 text-gray-400">意向</span>{relation.buyer_intent_name || '-'}</p>
       {relation.last_event_summary ? (
         <p className="mt-1 line-clamp-2 text-[11px] text-gray-400">{relation.last_event_summary}</p>
       ) : null}

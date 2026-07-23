@@ -98,7 +98,6 @@ from backend.app.jobs.handlers.seller_target_parse import (
     _seller_target_changes_with_post_parse_status,
     _seller_target_parse_fallback_text,
     _validate_seller_target_parse_output,
-    _write_seller_target_parse_logs,
 )
 from backend.app.jobs.handlers.buyer_intent_parse import (
     BUYER_INTENT_PARSE_FIELDS,

@@ -37,7 +37,6 @@ from backend.app.services.profile_sections import (
     PROFILE_SECTION_LABELS,
     load_profile_sections,
     normalize_profile_section_items,
-    profile_coverage,
 )
 from backend.app.services.research_apply import (
     RESEARCH_STRUCTURED_FIELDS,
@@ -63,6 +62,10 @@ SNIPPET_LIMIT = 600
 
 RELATION_KINDS = {"consistent", "supplement", "temporal_update", "same_period_conflict"}
 DEFAULT_RELATION = "supplement"
+
+PROFILE_SECTION_CATALOG: list[dict[str, str]] = [
+    {"code": code, "label": label} for code, label in PROFILE_SECTION_LABELS.items()
+]
 
 RESEARCH_TOOLS: list[dict[str, Any]] = [
     {
@@ -188,11 +191,8 @@ def _handle_seller_target_research(db: Session, job: JobClaim) -> dict[str, obje
     ).get(str(target_id), {})
     research_context = {
         "target": _research_target_prompt_view(target),
-        "profile_coverage": profile_coverage(current_profiles),
-        "current_profile_sections": _json_safe_value(current_profiles),
-        "profile_section_catalog": [
-            {"code": code, "label": label} for code, label in PROFILE_SECTION_LABELS.items()
-        ],
+        "current_profile_sections": _current_profiles_for_prompt(current_profiles),
+        "profile_section_catalog": PROFILE_SECTION_CATALOG,
         "allowed_structured_fields": sorted(RESEARCH_STRUCTURED_FIELDS),
         "allowed_relations": sorted(RELATION_KINDS),
         "max_tool_calls": MAX_TOOL_ITERATIONS,
@@ -381,7 +381,6 @@ def normalize_research_output(
                 "relation": _relation_of(raw, notes=notes, label=item["section_code"]),
                 "period_label": _short_text(raw.get("period_label"), 100),
                 "as_of_date": item.get("as_of_date"),
-                "confidence": item.get("confidence"),
                 "sources": sources,
             }
         )
@@ -416,7 +415,6 @@ def normalize_research_output(
                 "relation": _relation_of(raw, notes=notes, label=field_path),
                 "period_label": _short_text(raw.get("period_label"), 100),
                 "as_of_date": _valid_date(raw.get("as_of_date")),
-                "confidence": _confidence_of(raw.get("confidence")),
                 "sources": sources,
             }
         )
@@ -437,7 +435,6 @@ def normalize_research_output(
                 "relation": "supplement",
                 "period_label": None,
                 "as_of_date": None,
-                "confidence": None,
                 "sources": [],
             }
         )
@@ -484,13 +481,6 @@ def _relation_of(raw: dict[str, Any], *, notes: list[str], label: str) -> str:
     return DEFAULT_RELATION
 
 
-def _confidence_of(value: Any) -> float | None:
-    try:
-        return max(0.0, min(float(value), 1.0))
-    except (TypeError, ValueError):
-        return None
-
-
 def _short_text(value: Any, limit: int) -> str | None:
     return str(value or "").strip()[:limit] or None
 
@@ -522,17 +512,17 @@ def _insert_research_proposal(
               proposal_kind, section_code, field_path,
               proposed_value_json, current_value_json, conflict_kind,
               period_label, as_of_date, source_type, source_url,
-              confidence, review_status, created_by
+              review_status, created_by
             ) values (
               :team_id, :workspace_id, 'seller_target', :entity_id, :job_id,
               :proposal_kind, :section_code, :field_path,
               :proposed_value_json, :current_value_json, :conflict_kind,
               :period_label, :as_of_date, :source_type, :source_url,
-              :confidence, 'pending_review', :created_by
+              'pending_review', :created_by
             ) returning
               id, entity_id, proposal_kind, section_code, field_path,
               proposed_value_json, conflict_kind, as_of_date,
-              source_type, source_url, source_title, source_excerpt, confidence
+              source_type, source_url, source_title, source_excerpt
             """
         ).bindparams(
             bindparam("proposed_value_json", type_=JSONB),
@@ -555,7 +545,6 @@ def _insert_research_proposal(
             if sources
             else None,
             "source_url": sources[0] if sources else None,
-            "confidence": claim.get("confidence"),
             "created_by": SYSTEM_USER_ID,
         },
     ).mappings().one()
@@ -596,9 +585,8 @@ def _get_research_target(db: Session, target_id: UUID) -> dict[str, Any]:
             """
             select
               st.id, st.target_name, st.target_subject_name,
-              st.industry_l1, st.industry_l2, st.industry_primary, st.industry_secondary,
-              st.registered_province, st.registered_city,
-              st.headquarter_province, st.headquarter_city,
+              st.industry_l1, st.industry_l2,
+              st.location_province, st.location_city, st.location_district,
               st.listed_status, st.financial_period_label, st.business_summary
             from seller_target st
             where st.id = :target_id
@@ -624,6 +612,41 @@ def _research_target_prompt_view(target: dict[str, Any]) -> dict[str, Any]:
         for key, value in target.items()
         if key != "id" and value not in (None, "", [], {})
     }
+
+
+def _current_profiles_for_prompt(
+    profiles: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Convert loaded profile sections into a prompt-friendly list.
+
+    Each element carries the section code, its label (so the model knows what
+    the section is about), and the current content — or a note that it is
+    missing.  This avoids feeding the raw internal dict structure into the
+    prompt and lets the model focus on what matters: which sections are filled
+    and what they already say.
+    """
+    items: list[dict[str, Any]] = []
+    for entry in PROFILE_SECTION_CATALOG:
+        code = entry["code"]
+        label = entry["label"]
+        section = profiles.get(code)
+        if section and str(section.get("info_status") or "filled") == "filled":
+            items.append({
+                "section_code": code,
+                "label": label,
+                "info_status": "filled",
+                "content_text": str(section.get("content_text") or "").strip(),
+                "as_of_date": section.get("as_of_date"),
+                "sources": section.get("sources") or [],
+            })
+        else:
+            items.append({
+                "section_code": code,
+                "label": label,
+                "info_status": str(section.get("info_status")) if section else "missing",
+                "content_text": None,
+            })
+    return items
 
 
 def _mark_research_outcome(db: Session, target_id: UUID, outcome: str) -> None:

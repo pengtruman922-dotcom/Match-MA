@@ -294,7 +294,7 @@ def _industry_term_select_sql(where_sql: str) -> str:
           else
             (select count(*) from seller_target st
              where st.team_id = tax.team_id and st.workspace_id = tax.workspace_id
-               and st.deleted_at is null and st.industry_secondary = tax.term)
+               and st.deleted_at is null and st.industry_l2 = tax.term)
           end as usage_count
         from industry_taxonomy tax
         left join industry_taxonomy parent on parent.id = tax.parent_id

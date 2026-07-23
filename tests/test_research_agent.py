@@ -45,13 +45,13 @@ def test_structured_facts_are_limited_to_the_whitelist() -> None:
     claims, notes = normalize_research_output(
         {
             "structured_facts": [
-                {"field_path": "industry_secondary", "value": "偏光膜", "sources": ["https://a.com/x"]},
+                {"field_path": "industry_l2", "value": "偏光膜", "sources": ["https://a.com/x"]},
                 {"field_path": "current_revenue_yuan", "value": 100, "sources": ["https://a.com/x"]},
             ]
         }
     )
 
-    assert [claim["field_path"] for claim in claims] == ["industry_secondary"]
+    assert [claim["field_path"] for claim in claims] == ["industry_l2"]
     assert any("unsupported_field:current_revenue_yuan" in note for note in notes)
 
 

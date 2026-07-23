@@ -32,8 +32,8 @@ export default function TargetRow({
   deleting: boolean;
 }) {
   const subject = getSubjectDisplay(item);
-  const industry = [item.industry_primary, item.industry_secondary].filter(Boolean).join(' / ') || '-';
-  const region = [item.headquarter_province, item.headquarter_city].filter(Boolean).join(' ') || '-';
+  const industry = [item.industry_l1, item.industry_l2].filter(Boolean).join(' / ') || '-';
+  const region = [item.location_province, item.location_city, item.location_district].filter(Boolean).join(' ') || '-';
   const price = getPreferredPrice(item);
   const priceDisplay = price ? `${formatYuan(price.value)}${price.kind === 'asking' ? '*' : ''}` : '-';
   const priceTitle = price

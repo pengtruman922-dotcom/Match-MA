@@ -1,7 +1,8 @@
-"""Matching profile sections: the qualitative layer screening cannot express.
+"""Per-group supplementary information that structured fields cannot express.
 
 Three layers feed a recommendation. Canonical facts live in the entity's own
-columns and tags. This module owns the middle layer — six qualitative sections
+columns and tags. This module owns one “其他” supplementary block per
+information group
 per entity, each with its own source and as-of date — and builds the third:
 the trimmed text actually sent to deep eval, budgeted per section rather than
 sliced off the front of one long document.
@@ -28,6 +29,7 @@ PROFILE_SECTION_FIELD_PREFIX = "profile_section."
 # 没有对手方的维度不设栏，避免画像变成又一份越写越长的公司简介。
 PROFILE_SECTIONS: tuple[tuple[str, str, int], ...] = (
     # (section_code, 中文栏目名, 送深评时的字符预算)
+    ("identity", "身份与地区", 200),
     ("business_product", "业务与产品", 400),
     ("chain_position", "产业链位置与行业地位", 400),
     ("tech_team", "技术与团队能力", 300),
@@ -87,11 +89,6 @@ def normalize_profile_section_items(values: Any) -> tuple[list[dict[str, Any]], 
         if not cleaned_content:
             notes.append(f"profile_sections[{index}]:empty_after_cleaning:{section_code}")
             continue
-        confidence_value = value.get("confidence")
-        try:
-            confidence = max(0.0, min(float(confidence_value), 1.0))
-        except (TypeError, ValueError):
-            confidence = None
         raw_as_of_date = str(value.get("as_of_date") or "").strip()[:10]
         as_of_date = None
         if raw_as_of_date:
@@ -107,7 +104,6 @@ def normalize_profile_section_items(values: Any) -> tuple[list[dict[str, Any]], 
                 "content_text": cleaned_content[:2000],
                 "source_excerpt": str(value.get("source_excerpt") or "").strip()[:2000] or None,
                 "as_of_date": as_of_date,
-                "confidence": confidence,
             }
         )
         seen.add(section_code)
@@ -160,7 +156,7 @@ def load_profile_sections(
             """
             select
               entity_id, section_code, info_status, content_text,
-              source_type, source_url, as_of_date, confidence, updated_at
+              source_type, source_url, as_of_date, updated_at
             from entity_profile_section
             where team_id = :team_id
               and workspace_id = :workspace_id
@@ -214,21 +210,6 @@ def render_profile_text(sections: dict[str, dict[str, Any]] | None) -> str:
             trimmed += "…"
         parts.append(f"【{label}】{trimmed}")
     return "\n".join(parts)
-
-
-def profile_coverage(sections: dict[str, dict[str, Any]] | None) -> dict[str, Any]:
-    """Which sections carry usable content, and which are still open questions."""
-    filled: list[str] = []
-    missing: list[str] = []
-    for code, label, _ in PROFILE_SECTIONS:
-        row = (sections or {}).get(code)
-        if row and str(row.get("info_status") or "filled") == "filled" and str(row.get("content_text") or "").strip():
-            filled.append(label)
-        elif row and str(row.get("info_status")) == "not_applicable":
-            continue
-        else:
-            missing.append(label)
-    return {"filled_sections": filled, "missing_sections": missing}
 
 
 def buyer_party_fact_block(db: Session, buyer_party_id: Any) -> str:
@@ -285,7 +266,6 @@ def upsert_profile_section(
     source_title: str | None = None,
     source_excerpt: str | None = None,
     as_of_date: Any = None,
-    confidence: float | None = None,
     review_status: str = "accepted",
     user_id: Any = None,
 ) -> dict[str, Any]:
@@ -329,19 +309,19 @@ def upsert_profile_section(
             insert into entity_profile_section (
               team_id, workspace_id, entity_type, entity_id, section_code,
               info_status, content_text, source_type, source_url, source_title,
-              source_excerpt, as_of_date, confidence, review_status,
+              source_excerpt, as_of_date, review_status,
               created_by, updated_by
             )
             values (
               :team_id, :workspace_id, :entity_type, :entity_id, :section_code,
               :info_status, :content_text, :source_type, :source_url, :source_title,
-              :source_excerpt, :as_of_date, :confidence, :review_status,
+              :source_excerpt, :as_of_date, :review_status,
               :user_id, :user_id
             )
             returning
               id, entity_type, entity_id, section_code, info_status, content_text,
               source_type, source_url, source_title, source_excerpt,
-              as_of_date::text as as_of_date, confidence, review_status,
+              as_of_date::text as as_of_date, review_status,
               created_at::text as created_at, updated_at::text as updated_at
             """
         ),
@@ -358,7 +338,6 @@ def upsert_profile_section(
             "source_title": source_title,
             "source_excerpt": source_excerpt,
             "as_of_date": as_of_date,
-            "confidence": confidence,
             "review_status": review_status,
             "user_id": user_id,
         },
@@ -380,7 +359,6 @@ def apply_profile_section(
     source_title: str | None = None,
     source_excerpt: str | None = None,
     as_of_date: Any = None,
-    confidence: float | None = None,
     review_status: str = "accepted",
     user_id: Any = None,
     log_source_type: str = "direct_api",
@@ -408,7 +386,6 @@ def apply_profile_section(
         source_title=source_title,
         source_excerpt=source_excerpt,
         as_of_date=as_of_date,
-        confidence=confidence,
         review_status=review_status,
         user_id=user_id,
     )

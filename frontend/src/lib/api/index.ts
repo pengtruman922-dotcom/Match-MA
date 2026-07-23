@@ -79,6 +79,7 @@ import type {
   UpdateBatchRollbackResponse,
   UpdateLog,
   FailureSummary,
+  FieldValueSource,
   GlobalSearchResponse,
   IndustryDictionaryImportResult,
   IndustryDictionaryTerm,
@@ -141,6 +142,11 @@ export const sellerTargets = {
     apiRequest<SellerTarget>(`/seller-targets/${id}`, {
       method: 'PATCH',
       body: JSON.stringify(data),
+    }),
+  updateFields: (id: string, changes: Record<string, unknown>) =>
+    apiRequest<SellerTarget>(`/seller-targets/${id}/fields`, {
+      method: 'PATCH',
+      body: JSON.stringify({ changes }),
     }),
   delete: (id: string) => apiRequest<{ status: string }>(`/seller-targets/${id}`, { method: 'DELETE' }),
   bulkDelete: (ids: string[]) =>
@@ -343,6 +349,10 @@ export const relations = {
     apiRequest<BuyerSellerRelation>(`/relations/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   createEvent: (id: string, data: { event_type: string; title?: string | null; content?: string | null; next_step?: string | null }) =>
     apiRequest<RelationEvent>(`/relations/${id}/events`, { method: 'POST', body: JSON.stringify(data) }),
+  updateEvent: (relationId: string, eventId: string, data: { event_type?: string; title?: string | null; content?: string | null; next_step?: string | null }) =>
+    apiRequest<RelationEvent>(`/relations/${relationId}/events/${eventId}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteEvent: (relationId: string, eventId: string) =>
+    apiRequest<void>(`/relations/${relationId}/events/${eventId}`, { method: 'DELETE' }),
 };
 
 export const backgroundJobs = {
@@ -434,6 +444,11 @@ export const profileSections = {
       method: 'PUT',
       body: JSON.stringify(data),
     }),
+};
+
+export const fieldSources = {
+  list: (params: { entity_type: string; entity_id: string; limit?: number }) =>
+    apiRequest<FieldValueSource[]>(`/field-sources${buildQuery(params)}`),
 };
 
 export const research = {

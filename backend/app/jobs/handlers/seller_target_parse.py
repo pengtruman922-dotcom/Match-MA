@@ -11,9 +11,8 @@ from sqlalchemy.orm import Session
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
 from backend.app.jobs.queue import JobClaim
-from backend.app.services.search_docs import (
-    create_search_doc_rebuild_job,
-)
+from backend.app.registry.indicators import writable_columns, writable_enum_values
+from backend.app.services.field_writer import WriteProvenance, write_seller_target_fields
 from backend.app.services.industry_taxonomy import (
     industry_l1_prompt_list,
     industry_l2_prompt_list,
@@ -23,11 +22,9 @@ from backend.app.services.industry_taxonomy import (
 
 from backend.app.jobs.handlers.common import (
     SELLER_TARGET_POST_PARSE_STATUSES,
-    _diff_json_safe,
     _get_default_node_config,
     _join_lines,
     _json_safe_dict,
-    _json_safe_value,
     _normalize_allowed_enum,
     _normalize_seller_listed_status,
     _normalize_yes_no_like,
@@ -39,7 +36,6 @@ from backend.app.jobs.handlers.common import (
     _safe_prompt_messages_for_trace,
     _truncate_text,
     _uuid_list,
-    _write_field_value_sources,
 )
 from backend.app.jobs.handlers.traces import (
     _insert_seller_target_parse_trace,
@@ -112,7 +108,7 @@ def _handle_seller_target_parse(db: Session, job: JobClaim) -> dict[str, object]
     parsed_output_json = llm_result.parsed_output_json
     schema_validation_json = _validate_seller_target_parse_output(parsed_output_json)
     changes, normalization_notes = _normalize_seller_target_parse_changes(parsed_output_json)
-    normalization_notes.extend(_normalize_seller_target_industry_changes(db, changes))
+    normalization_notes.extend(_normalize_seller_target_industry_changes(db, changes, parsed_output_json))
     _insert_seller_target_parse_trace(
         db,
         job=job,
@@ -175,9 +171,8 @@ def _get_seller_target_for_parse(db: Session, seller_target_id: UUID) -> dict[st
             """
             select
               id, target_name, target_type, target_subject_name, recommendation_status, information_status,
-              industry_primary, industry_secondary, industry_l2,
-              registered_province, registered_city, headquarter_province,
-              headquarter_city, raw_region_text, region_granularity, listed_status,
+              industry_l1, industry_l2, location_province, location_city,
+              location_district, listed_status,
               market_cap_yuan, current_revenue_yuan, current_net_profit_yuan,
               current_total_profit_yuan, current_assets_yuan, current_debt_ratio,
               current_operating_cash_flow_yuan, financial_period_label,
@@ -230,60 +225,7 @@ def _seller_target_parse_fallback_text(seller_target: dict[str, Any]) -> str:
         ]
     )
 
-SELLER_TARGET_PARSE_FIELDS = {
-    "target_name",
-    "target_type",
-    "target_subject_name",
-    "industry_l1",
-    "industry_l2",
-    "industry_primary",
-    "industry_secondary",
-    "registered_province",
-    "registered_city",
-    "headquarter_province",
-    "headquarter_city",
-    "raw_region_text",
-    "region_granularity",
-    "listed_status",
-    "market_cap_yuan",
-    "current_revenue_yuan",
-    "current_net_profit_yuan",
-    "current_total_profit_yuan",
-    "current_assets_yuan",
-    "current_debt_ratio",
-    "current_operating_cash_flow_yuan",
-    "financial_period_label",
-    "profitability_status",
-    "cash_flow_status",
-    "operation_stability_status",
-    "valuation_yuan",
-    "valuation_date",
-    "asking_price_yuan",
-    "asking_price_date",
-    "pe_ratio",
-    "pe_source_type",
-    "premium_rate",
-    "is_for_sale",
-    "can_control",
-    "can_consolidate",
-    "accepts_minority_investment",
-    "transfer_ratio_min",
-    "transfer_ratio_max",
-    "transfer_ratio_text",
-    "transfer_flexibility_type",
-    "consolidation_path_summary",
-    "accepts_relocation",
-    "accepts_return_investment",
-    "management_team_summary",
-    "management_retention_possible",
-    "earnout_dependency_status",
-    "business_summary",
-    "transaction_summary",
-    "risk_summary",
-    "gap_summary",
-    "information_status",
-    "recommendation_status",
-}
+SELLER_TARGET_PARSE_FIELDS = writable_columns("parse")
 
 SELLER_TARGET_PARSE_NUMERIC_FIELDS = {
     "market_cap_yuan",
@@ -311,27 +253,7 @@ SELLER_TARGET_YES_NO_LIKE_FIELDS = {
     "management_retention_possible",
 }
 
-SELLER_TARGET_PARSE_ENUM_FIELDS = {
-    "target_type": {"company", "equity_package", "business_unit", "asset_package", "project", "other"},
-    "region_granularity": {"country", "province", "city", "district", "region_group", "unknown"},
-    "listed_status": {"listed", "unlisted", "pre_ipo", "unknown"},
-    "pe_source_type": {"user_input", "document", "calculated", "research", "unknown"},
-    "profitability_status": {"profitable", "loss_making", "break_even", "unknown"},
-    "cash_flow_status": {"stable_positive", "positive", "negative", "unstable", "unknown"},
-    "operation_stability_status": {"stable", "unstable", "unknown", "needs_review"},
-    "transfer_flexibility_type": {
-        "control_available",
-        "consolidation_available",
-        "minority_available",
-        "full_sale_available",
-        "flexible",
-        "specific_range",
-        "unknown",
-    },
-    "earnout_dependency_status": {"none", "low", "medium", "high", "unknown"},
-    "information_status": {"normal", "insufficient", "pending_review", "parsing", "researching", "parse_failed"},
-    "recommendation_status": {"recommendable", "not_recommendable"},
-}
+SELLER_TARGET_PARSE_ENUM_FIELDS = writable_enum_values()
 
 SELLER_TARGET_TEXT_LIMITS = {
     "target_name": 300,
@@ -366,6 +288,18 @@ def _normalize_seller_target_parse_changes(
     candidate = parsed_output_json.get("fields", parsed_output_json)
     if not isinstance(candidate, dict):
         return {}, []
+    # Prompt versions are edited at runtime. Accept legacy HQ/registration
+    # keys while production prompts are moved to the single location model;
+    # only the new canonical columns proceed to the writer.
+    candidate = dict(candidate)
+    if "location_province" not in candidate:
+        legacy_province = candidate.get("headquarter_province") or candidate.get("registered_province")
+        if legacy_province:
+            candidate["location_province"] = legacy_province
+    if "location_city" not in candidate:
+        legacy_city = candidate.get("headquarter_city") or candidate.get("registered_city")
+        if legacy_city:
+            candidate["location_city"] = legacy_city
 
     notes: list[str] = []
     changes: dict[str, Any] = {}
@@ -403,48 +337,27 @@ def _apply_seller_target_parse_changes(
     source_context: dict[str, Any],
 ) -> list[str]:
     changes = _seller_target_changes_with_post_parse_status(seller_target, changes)
-    diff = _diff_json_safe(seller_target, changes)
-    if not diff:
-        return []
-
-    set_clauses = [f"{field} = :{field}" for field in diff]
-    set_clauses.extend(["updated_at = now()", "updated_by = :updated_by"])
-    db.execute(
-        text(
-            f"""
-            update seller_target
-            set {', '.join(set_clauses)}
-            where id = :seller_target_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
-              and deleted_at is null
-            """
+    return write_seller_target_fields(
+        db,
+        UUID(str(seller_target["id"])),
+        changes,
+        provenance=WriteProvenance(
+            source_type="seller_target_parse",
+            actor_user_id=SYSTEM_USER_ID,
+            writer="parse",
+            source_id=job_id,
+            evidence_id=source_context.get("evidence_id"),
+            field_source_label=source_context.get("source_label"),
+            review_status="auto_accepted",
+            source_context=source_context,
+            log_metadata={
+                "source": "seller_target_parser",
+                "normalization_notes": normalization_notes,
+                "field_value_source": source_context,
+            },
         ),
-        {
-            **{field: changes[field] for field in diff},
-            "updated_by": SYSTEM_USER_ID,
-            "seller_target_id": seller_target["id"],
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
+        search_doc_source="seller_target_parse",
     )
-    _write_seller_target_parse_logs(db, seller_target, changes, diff, job_id, normalization_notes, source_context)
-    _write_field_value_sources(
-        db,
-        entity_type="seller_target",
-        entity_id=UUID(str(seller_target["id"])),
-        changes=changes,
-        diff=diff,
-        source_context=source_context,
-        review_status="auto_accepted",
-    )
-    create_search_doc_rebuild_job(
-        db,
-        entity_type="seller_target",
-        entity_id=UUID(str(seller_target["id"])),
-        source="seller_target_parse",
-    )
-    return list(diff.keys())
 
 def _seller_target_changes_with_post_parse_status(
     seller_target: dict[str, Any],
@@ -465,69 +378,28 @@ def _seller_target_changes_with_post_parse_status(
         next_changes["recommendation_status"] = "recommendable"
     return next_changes
 
-def _write_seller_target_parse_logs(
+def _normalize_seller_target_industry_changes(
     db: Session,
-    seller_target: dict[str, Any],
     changes: dict[str, Any],
-    diff: dict[str, tuple[Any, Any]],
-    job_id: UUID,
-    normalization_notes: list[str],
-    source_context: dict[str, Any],
-) -> None:
-    for field_path, (old_value, new_value) in diff.items():
-        db.execute(
-            text(
-                """
-                insert into action_application_log (
-                  team_id, workspace_id, entity_type, entity_id, field_path,
-                  old_value_json, new_value_json, source_type, source_id,
-                  evidence_id, applied_by, edited_before_apply, metadata_json
-                )
-                values (
-                  :team_id, :workspace_id, 'seller_target', :seller_target_id, :field_path,
-                  :old_value_json, :new_value_json, 'seller_target_parse', :job_id,
-                  :evidence_id, :applied_by, false, :metadata_json
-                )
-                """
-            ).bindparams(
-                bindparam("old_value_json", type_=JSONB),
-                bindparam("new_value_json", type_=JSONB),
-                bindparam("metadata_json", type_=JSONB),
-            ),
-            {
-                "team_id": DEFAULT_TEAM_ID,
-                "workspace_id": DEFAULT_WORKSPACE_ID,
-                "seller_target_id": seller_target["id"],
-                "field_path": field_path,
-                "old_value_json": _json_safe_value(old_value),
-                "new_value_json": _json_safe_value(new_value),
-                "job_id": job_id,
-                "evidence_id": source_context.get("evidence_id"),
-                "applied_by": SYSTEM_USER_ID,
-                "metadata_json": {
-                    "source": "seller_target_parser",
-                    "normalization_notes": normalization_notes,
-                    "proposed_value": _json_safe_value(changes.get(field_path)),
-                    "field_value_source": _json_safe_value(source_context),
-                },
-            },
-        )
-
-def _normalize_seller_target_industry_changes(db: Session, changes: dict[str, Any]) -> list[str]:
+    parsed_output_json: dict[str, Any] | None = None,
+) -> list[str]:
     """Validate industry_l1/l2 against the dictionary.
 
-    L1 falls back to whatever industry_primary resolves to. L2 is the screening
-    layer, so it is derived from the descriptive industry fields when the parser
-    did not name a dictionary segment outright, and dropped when nothing maps —
-    an invented segment would filter the target out of buyers who want it.
+    Legacy parser output may still contain raw industry labels. They are used
+    only as short-lived normalization candidates and are never written to the
+    seller_target table.
     """
     notes: list[str] = []
     value = changes.get("industry_l1")
     l1_name = resolve_l1(db, value) if value else None
     if value and l1_name is None:
         notes.append(f"industry_l1_unmapped:{str(value)[:50]}")
-    if l1_name is None and changes.get("industry_primary"):
-        l1_name = resolve_l1(db, changes["industry_primary"])
+    raw_fields = (parsed_output_json or {}).get("fields", parsed_output_json or {})
+    raw_fields = raw_fields if isinstance(raw_fields, dict) else {}
+    legacy_l1 = raw_fields.get("industry_primary")
+    legacy_l2 = raw_fields.get("industry_secondary")
+    if l1_name is None and legacy_l1:
+        l1_name = resolve_l1(db, legacy_l1)
     if l1_name:
         changes["industry_l1"] = l1_name
     else:
@@ -535,8 +407,8 @@ def _normalize_seller_target_industry_changes(db: Session, changes: dict[str, An
 
     l2_candidates = [
         changes.get("industry_l2"),
-        changes.get("industry_secondary"),
-        changes.get("industry_primary"),
+        legacy_l2,
+        legacy_l1,
     ]
     l2_name = None
     for candidate in l2_candidates:

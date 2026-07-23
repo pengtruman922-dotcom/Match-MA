@@ -10,6 +10,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
+from backend.app.registry.indicators import writable_columns
 from backend.app.api.routes.utils import (
     diff_payload,
     write_action_logs_for_diff,
@@ -729,8 +730,8 @@ def _get_seller_target_snapshot_or_404(db: Session, seller_target_id: UUID) -> d
             """
             select
               target_name, target_subject_name,
-              industry_l1, industry_l2, industry_primary, industry_secondary,
-              headquarter_province, headquarter_city, listed_status,
+              industry_l1, industry_l2, location_province, location_city,
+              location_district, listed_status,
               current_revenue_yuan, current_net_profit_yuan, valuation_yuan,
               current_total_profit_yuan, financial_period_label,
               valuation_date, asking_price_yuan, asking_price_date, pe_ratio,
@@ -881,46 +882,14 @@ def _get_or_create_relation(
 
 
 def _allowed_seller_target_changes(changes: dict[str, Any]) -> dict[str, Any]:
-    allowed_fields = {
-        "target_name",
-        "target_subject_name",
-        "industry_l1",
-        "industry_l2",
-        "industry_primary",
-        "industry_secondary",
-        "headquarter_province",
-        "headquarter_city",
-        "listed_status",
-        "current_revenue_yuan",
-        "current_net_profit_yuan",
-        "current_total_profit_yuan",
-        "financial_period_label",
-        "valuation_yuan",
-        "valuation_date",
-        "asking_price_yuan",
-        "asking_price_date",
-        "pe_ratio",
-        "is_for_sale",
-        "can_control",
-        "can_consolidate",
-        "accepts_minority_investment",
-        "transfer_ratio_min",
-        "transfer_ratio_max",
-        "transfer_ratio_text",
-        "transfer_flexibility_type",
-        "recommendation_status",
-        "information_status",
-        "business_summary",
-        "transaction_summary",
-        "risk_summary",
-        "gap_summary",
-    }
-    allowed = {key: value for key, value in changes.items() if key in allowed_fields}
-    # business_summary is a short profile shown in list rows; cap it so extracted
-    # actions that echo raw source material cannot flood the UI.
-    summary = allowed.get("business_summary")
-    if isinstance(summary, str):
-        allowed["business_summary"] = summary.strip()[:300]
+    allowed = {key: value for key, value in changes.items() if key in writable_columns("parse")}
+    # Existing editable prompts may still emit the retired raw industry keys.
+    # Consume them only as transient dictionary-normalization candidates; they
+    # are never written back as seller_target columns.
+    if "industry_l1" not in allowed and changes.get("industry_primary"):
+        allowed["industry_l1"] = changes["industry_primary"]
+    if "industry_l2" not in allowed and changes.get("industry_secondary"):
+        allowed["industry_l2"] = changes["industry_secondary"]
     return allowed
 
 
@@ -1040,12 +1009,12 @@ def _insert_relation_event(
             insert into relation_event (
               team_id, workspace_id, relation_id, buyer_intent_id, buyer_party_id,
               seller_target_id, event_type, event_time, title, content, next_step,
-              source_type, source_id, metadata_json, created_by
+              source_type, source_id, metadata_json, created_by, updated_by
             )
             values (
               :team_id, :workspace_id, :relation_id, :buyer_intent_id, :buyer_party_id,
               :seller_target_id, :event_type, now(), :title, :content, :next_step,
-              'extracted_action', :source_id, :metadata_json, :created_by
+              'extracted_action', :source_id, :metadata_json, :created_by, :updated_by
             )
             """
         ).bindparams(bindparam("metadata_json", type_=JSONB)),
@@ -1066,6 +1035,7 @@ def _insert_relation_event(
                 "raw_evidence_text": action.get("raw_evidence_text"),
             },
             "created_by": SYSTEM_USER_ID,
+            "updated_by": SYSTEM_USER_ID,
         },
     )
 

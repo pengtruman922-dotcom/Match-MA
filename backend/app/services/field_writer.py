@@ -17,6 +17,7 @@ seller_target indicators can be written here. The human edit path
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID
 
@@ -29,7 +30,8 @@ from backend.app.api.routes.utils import (
     write_field_value_sources_for_diff,
 )
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
-from backend.app.registry.indicators import indicators_for
+from backend.app.registry.indicators import Indicator, indicator_by_column, indicators_for
+from backend.app.services.industry_taxonomy import normalize_l2_values, resolve_l1
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 
 
@@ -41,8 +43,11 @@ class FieldWriteError(ValueError):
 class WriteProvenance:
     """Where a write came from, carried through to the audit and source trail."""
 
-    source_type: str  # "extracted_action" | "research_proposal"
+    source_type: str  # audit source: extracted_action | research_proposal | manual_edit
     actor_user_id: UUID
+    # Authority source is intentionally separate from the audit source. A
+    # manual UI edit records manual_edit but is authorized as manual.
+    writer: str | None = None  # parse | research | manual
     source_id: UUID | None = None
     evidence_id: UUID | None = None
     business_update_id: UUID | None = None
@@ -57,6 +62,75 @@ class WriteProvenance:
 
 def _seller_target_columns() -> set[str]:
     return {ind.column for ind in indicators_for("seller_target")}
+
+
+def _writer_from_provenance(provenance: WriteProvenance) -> str:
+    if provenance.writer:
+        return provenance.writer
+    return {
+        "extracted_action": "parse",
+        "seller_target_parse": "parse",
+        "research_proposal": "research",
+        "manual_edit": "manual",
+    }.get(provenance.source_type, "")
+
+
+_TEXT_LIMITS = {
+    "target_name": 300,
+    "target_subject_name": 300,
+    "business_summary": 300,
+    "valuation_date": 80,
+    "asking_price_date": 80,
+}
+_REQUIRED_SELLER_TARGET_FIELDS = {"target_name", "target_type", "listed_status"}
+
+
+def _normalize_value(db: Session, indicator: Indicator, value: Any) -> Any:
+    """Validate values at the only structured-fact write boundary."""
+    if value is None:
+        if indicator.column in _REQUIRED_SELLER_TARGET_FIELDS:
+            raise FieldWriteError(f"{indicator.column} may not be empty.")
+        return None
+    if indicator.column == "industry_l1":
+        resolved = resolve_l1(db, str(value).strip())
+        if resolved is None:
+            raise FieldWriteError(f"一级行业不在字典中: {value!r}")
+        return resolved
+    if indicator.column == "industry_l2":
+        resolved, _ = normalize_l2_values(db, [str(value).strip()])
+        if not resolved:
+            raise FieldWriteError(f"二级行业不在字典中: {value!r}")
+        return resolved[0]
+    if indicator.kind == "enum":
+        if not isinstance(value, str):
+            raise FieldWriteError(f"{indicator.column} must be an enum value.")
+        valid = {code for code, _ in indicator.enum_options or ()}
+        if value not in valid:
+            raise FieldWriteError(f"Invalid {indicator.column}: {value!r}")
+        return value
+    if indicator.kind in {"yuan", "ratio"}:
+        try:
+            number = Decimal(str(value))
+        except (InvalidOperation, ValueError) as exc:
+            raise FieldWriteError(f"{indicator.column} must be numeric.") from exc
+        if not number.is_finite():
+            raise FieldWriteError(f"{indicator.column} must be finite.")
+        if indicator.column in {
+            "current_debt_ratio", "premium_rate", "transfer_ratio_min",
+            "transfer_ratio_max",
+        } and not Decimal("0") <= number <= Decimal("100"):
+            raise FieldWriteError(f"{indicator.column} must be between 0 and 100.")
+        return number
+    if indicator.kind == "json":
+        if not isinstance(value, (list, dict)):
+            raise FieldWriteError(f"{indicator.column} must be a JSON object or array.")
+        return value
+    if not isinstance(value, str):
+        raise FieldWriteError(f"{indicator.column} must be text.")
+    normalized = value.strip()
+    if not normalized:
+        return None
+    return normalized[: _TEXT_LIMITS.get(indicator.column, 2000)]
 
 
 def _load_current(db: Session, seller_target_id: UUID, columns: list[str]) -> dict[str, Any]:
@@ -88,10 +162,9 @@ def write_seller_target_fields(
 ) -> list[str]:
     """Apply normalized field changes to a seller_target, audited and sourced.
 
-    `changes` must already be normalized by the caller (its source knows the
-    rules — industry taxonomy, enum coercion). This validates the columns are
-    registry indicators, writes only the fields that actually changed, and
-    returns the applied field names ([] on a no-op).
+    The writer is the validation boundary as well as the audit boundary. It
+    validates each declared column, the provenance's write authority, and the
+    value kind before writing only actual differences.
     """
     if not changes:
         return []
@@ -99,8 +172,18 @@ def write_seller_target_fields(
     if unknown:
         raise FieldWriteError(f"Not writable seller_target indicators: {sorted(unknown)}")
 
-    original = _load_current(db, seller_target_id, list(changes))
-    diff = diff_payload(original, changes)
+    writer = _writer_from_provenance(provenance)
+    if not writer:
+        raise FieldWriteError(f"Unknown field writer for source: {provenance.source_type}")
+    normalized_changes: dict[str, Any] = {}
+    for column, value in changes.items():
+        indicator = indicator_by_column("seller_target", column)
+        if writer not in indicator.writable_by:
+            raise FieldWriteError(f"{writer} may not write seller_target.{column}")
+        normalized_changes[column] = _normalize_value(db, indicator, value)
+
+    original = _load_current(db, seller_target_id, list(normalized_changes))
+    diff = diff_payload(original, normalized_changes)
     if not diff:
         return []
 
@@ -118,7 +201,7 @@ def write_seller_target_fields(
             """
         ),
         {
-            **{column: changes[column] for column in diff},
+            **{column: normalized_changes[column] for column in diff},
             "updated_by": provenance.actor_user_id,
             "seller_target_id": seller_target_id,
             "team_id": DEFAULT_TEAM_ID,
@@ -144,7 +227,7 @@ def write_seller_target_fields(
             db,
             entity_type="seller_target",
             entity_id=seller_target_id,
-            changes=changes,
+            changes=normalized_changes,
             diff=diff,
             source_type=provenance.source_type,
             source_id=provenance.source_id,
@@ -153,6 +236,7 @@ def write_seller_target_fields(
             confidence=provenance.confidence,
             review_status=provenance.review_status,
             source_context=provenance.source_context,
+            created_by=provenance.actor_user_id,
         )
     create_search_doc_rebuild_job(
         db,

@@ -150,9 +150,9 @@ export default function CreateTargetModal({ onClose, onCreated }: { onClose: () 
         target_subject_name: normalizeOptional(form.targetSubjectName),
         recommendation_status: 'not_recommendable',
         information_status: shouldParse ? 'parsing' : 'normal',
-        industry_primary: normalizeOptional(form.industry),
-        headquarter_province: region.province,
-        headquarter_city: region.city,
+        industry_l1: normalizeOptional(form.industry),
+        location_province: region.province,
+        location_city: region.city,
         asking_price_yuan: askingPriceYuan,
         asking_price_date: normalizeOptional(form.askingPriceDate),
       };
@@ -320,7 +320,7 @@ export default function CreateTargetModal({ onClose, onCreated }: { onClose: () 
             {duplicates.map((item) => (
               <div key={item.id} className="flex items-center justify-between gap-3 text-xs">
                 <span className="text-gray-700 line-clamp-2">
-                  {item.target_name} · {item.headquarter_province || '未知'} · {item.industry_primary || '未知'}
+                  {item.target_name} · {item.location_province || '未知'} · {item.industry_l1 || '未知'}
                 </span>
                 <Link to={`/targets/${item.id}`} className="text-brand-600 hover:text-brand-700 font-medium shrink-0" onClick={onClose}>
                   更新它

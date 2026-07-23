@@ -6,17 +6,12 @@ export interface SellerTarget {
   lifecycle_status: string;
   recommendation_status: string;
   information_status: string;
-  // L1/L2 是筛选实际读取的规范维度；industry_primary/secondary 是解析原文。
+  // L1/L2 是唯一展示与筛选行业维度；原始表述保存在更新/证据审计中。
   industry_l1: string | null;
   industry_l2: string | null;
-  industry_primary: string | null;
-  industry_secondary: string | null;
-  registered_province: string | null;
-  registered_city: string | null;
-  headquarter_province: string | null;
-  headquarter_city: string | null;
-  raw_region_text: string | null;
-  region_granularity: string | null;
+  location_province: string | null;
+  location_city: string | null;
+  location_district: string | null;
   listed_status: string | null;
   listing_market_region: string | null;
   market_cap_yuan: string | null;
@@ -134,10 +129,11 @@ export interface SellerTargetCreate {
   lifecycle_status?: string;
   recommendation_status?: string;
   information_status?: string;
-  industry_primary?: string;
-  industry_secondary?: string;
-  headquarter_province?: string;
-  headquarter_city?: string;
+  industry_l1?: string;
+  industry_l2?: string;
+  location_province?: string;
+  location_city?: string;
+  location_district?: string;
   listed_status?: string;
   current_revenue_yuan?: number;
   current_net_profit_yuan?: number;
@@ -159,10 +155,11 @@ export interface SellerTargetUpdate {
   lifecycle_status?: string;
   recommendation_status?: string;
   information_status?: string;
-  industry_primary?: string;
-  industry_secondary?: string;
-  headquarter_province?: string;
-  headquarter_city?: string;
+  industry_l1?: string;
+  industry_l2?: string;
+  location_province?: string;
+  location_city?: string;
+  location_district?: string;
   listed_status?: string;
   current_revenue_yuan?: number;
   current_net_profit_yuan?: number;
@@ -1015,11 +1012,18 @@ export interface RelationEvent {
   seller_target_name: string | null;
   metadata_json: Record<string, unknown>;
   created_at: string;
+  updated_at: string;
+  updated_by: string | null;
+}
+
+export interface RelationEventType {
+  value: string;
+  label: string;
 }
 
 export interface RelationMeta {
   statuses: string[];
-  event_types: string[];
+  event_types: RelationEventType[];
 }
 
 export interface RelationCreateResult {
@@ -1037,14 +1041,29 @@ export interface IndicatorMeta {
   column: string;
   label: string;
   group: string | null;
-  kind: 'text' | 'yuan' | 'ratio' | 'enum' | 'date';
+  kind: 'text' | 'yuan' | 'ratio' | 'enum' | 'date' | 'json';
   screening: boolean;
+  enum_options: Array<{ value: string; label: string }>;
+  writable_by: string[];
   fold_into: string | null;
 }
 
 export interface IndicatorRegistryResponse {
   groups: IndicatorGroupMeta[];
   indicators: IndicatorMeta[];
+}
+
+export interface FieldValueSource {
+  id: string;
+  entity_type: string;
+  entity_id: string;
+  field_path: string;
+  source_type: string | null;
+  source_label: string | null;
+  review_status: string;
+  created_at: string;
+  created_by: string | null;
+  created_by_name: string | null;
 }
 
 export interface BuyerIntentTargetExclusion {
@@ -1828,9 +1847,9 @@ export interface ProfileSection {
   source_title: string | null;
   source_excerpt: string | null;
   as_of_date: string | null;
-  confidence: number | null;
   review_status: string;
   updated_at: string;
+  updated_by_name: string | null;
 }
 
 export interface ProfileSectionCatalogEntry {
@@ -1842,7 +1861,6 @@ export interface ProfileSectionsResponse {
   entity_type: string;
   entity_id: string;
   sections: ProfileSection[];
-  coverage: { filled_sections: string[]; missing_sections: string[] };
   section_catalog: ProfileSectionCatalogEntry[];
 }
 
@@ -1888,7 +1906,6 @@ export interface ResearchProposal {
   source_title: string | null;
   source_excerpt: string | null;
   anchor_matches_json: Array<{ kind: string; value: string }>;
-  confidence: number | null;
   review_status: string;
   reviewed_at: string | null;
   created_at: string;

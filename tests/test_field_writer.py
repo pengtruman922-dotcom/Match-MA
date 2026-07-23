@@ -117,3 +117,31 @@ def test_field_source_can_be_suppressed(recorded) -> None:
     write_seller_target_fields(db, uuid4(), {"business_summary": "新"}, provenance=prov, search_doc_source="t")
     assert recorded["logs"] is not None
     assert recorded["sources"] is None
+
+
+def test_writer_rejects_a_registry_field_when_the_source_is_not_authorized() -> None:
+    class _Boom:
+        def execute(self, *a, **k):
+            raise AssertionError("authorization must reject before reading the db")
+
+    with pytest.raises(FieldWriteError, match="research may not write"):
+        write_seller_target_fields(
+            _Boom(),
+            uuid4(),
+            {"current_revenue_yuan": 100},
+            provenance=_prov(),
+            search_doc_source="t",
+        )
+
+
+def test_manual_write_is_recorded_with_the_real_actor(recorded) -> None:
+    actor = uuid4()
+    db = _Db({"current_revenue_yuan": 1})
+    write_seller_target_fields(
+        db,
+        uuid4(),
+        {"current_revenue_yuan": 100},
+        provenance=WriteProvenance(source_type="manual_edit", writer="manual", actor_user_id=actor),
+        search_doc_source="t",
+    )
+    assert recorded["sources"]["created_by"] == actor

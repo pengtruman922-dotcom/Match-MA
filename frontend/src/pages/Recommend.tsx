@@ -595,8 +595,8 @@ function buildIntentGuidance(intent: BuyerIntent): string {
 
 function buildTargetGuidance(target: SellerTarget): string {
   const parts: string[] = [`已加载标的：${target.target_name}`];
-  if (target.industry_primary) parts.push(`行业：${target.industry_primary}`);
-  if (target.headquarter_province) parts.push(`地区：${target.headquarter_province}${target.headquarter_city || ''}`);
+  if (target.industry_l1) parts.push(`行业：${[target.industry_l1, target.industry_l2].filter(Boolean).join(' / ')}`);
+  if (target.location_province) parts.push(`地区：${[target.location_province, target.location_city, target.location_district].filter(Boolean).join('')}`);
   if (target.current_net_profit_yuan) parts.push(`利润：${(Number(target.current_net_profit_yuan) / 10000).toFixed(0)}万`);
   return [parts.join('\n'), '', '可以直接点击「开始推荐」为该标的匹配买家，也可以输入补充条件。'].join('\n');
 }

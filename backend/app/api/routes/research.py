@@ -61,7 +61,6 @@ class ResearchProposalOut(BaseModel):
     source_title: str | None
     source_excerpt: str | None
     anchor_matches_json: list[dict[str, Any]]
-    confidence: float | None
     review_status: str
     reviewed_at: str | None
     created_at: str
@@ -414,7 +413,7 @@ def _proposal_select_columns() -> str:
       id, entity_type, entity_id, job_id, proposal_kind, section_code, field_path,
       proposed_value_json, current_value_json, conflict_kind, period_label,
       as_of_date::text as as_of_date, source_type, source_url, source_title,
-      source_excerpt, anchor_matches_json, confidence, review_status,
+      source_excerpt, anchor_matches_json, review_status,
       reviewed_at::text as reviewed_at, created_at::text as created_at
     """
 

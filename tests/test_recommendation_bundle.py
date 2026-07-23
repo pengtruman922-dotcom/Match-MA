@@ -171,8 +171,8 @@ def test_score_target_against_intent_uses_expanded_buyer_filters() -> None:
     score, evidence, gaps, meta = _score_target_against_intent(
         {
             "industry_l1": "医药与健康",
-            "industry_primary": "医药健康",
-            "headquarter_province": "浙江省",
+            "industry_l2": "医药健康",
+            "location_province": "浙江省",
             "current_net_profit_yuan": 30_000_000,
             "pe_ratio": 12,
             "valuation_yuan": 800_000_000,
@@ -269,7 +269,7 @@ def test_score_excluded_industry_is_a_conflict() -> None:
     _, _, gaps, meta = _score_target_against_intent(
         {
             "industry_l1": "能源",
-            "industry_primary": "风电",
+            "industry_l2": "风电",
             "current_net_profit_yuan": 300_000_000,
         },
         {
@@ -318,8 +318,8 @@ def test_score_multi_industry_secondary_track_and_region_group() -> None:
     score, evidence, gaps, meta = _score_target_against_intent(
         {
             "industry_l1": "信息技术与通信",
-            "headquarter_province": "江苏省",
-            "headquarter_city": "苏州市",
+            "location_province": "江苏省",
+            "location_city": "苏州市",
         },
         {
             "industries_json": ["制造与工业", "信息技术与通信"],
@@ -391,32 +391,37 @@ def test_annotate_marks_existing_relation_and_deep_progress_elsewhere() -> None:
     }
 
     class _Rel:
+        def __init__(self, rows):
+            self.rows = rows
+
         def mappings(self):
             return self
 
         def all(self):
-            return [
-                # 本意向已在推进 paired_target
-                {"id": relation_id, "buyer_intent_id": intent, "seller_target_id": paired_target, "status": "interested"},
-                # 别的买家正对 busy_target 尽调
-                {"id": "x", "buyer_intent_id": other_intent, "seller_target_id": busy_target, "status": "due_diligence"},
-            ]
+            return self.rows
 
     class _Db:
-        statement = ""
+        statements: list[str] = []
 
         def execute(self, *args, **kwargs):
-            self.statement = str(args[0])
-            return _Rel()
+            statement = str(args[0])
+            self.statements.append(statement)
+            if "status in (__[POSTCOMPILE_deep_statuses])" in statement:
+                # 别的买家正对 busy_target 尽调；深度查询不得受 intent_ids 限制。
+                return _Rel([{"buyer_intent_id": other_intent, "seller_target_id": busy_target}])
+            # 精确关系查询只能返回当前候选意向的 relation。
+            return _Rel([{"id": relation_id, "buyer_intent_id": intent, "seller_target_id": paired_target, "status": "interested"}])
 
     db = _Db()
     annotated = _annotate_candidate_relations(db, result, mode="buyer_to_target")
     by_target = {c["seller_target_id"]: c for c in annotated["candidates"]}
 
-    # SQLAlchemy expands ``IN :ids`` into a PostgreSQL list.  It must not be
-    # wrapped in ANY(), which would turn that list into an invalid row value.
-    assert "buyer_intent_id in (__[POSTCOMPILE_intent_ids])" in db.statement
-    assert "seller_target_id in (__[POSTCOMPILE_target_ids])" in db.statement
+    # 精确查询和深度推进查询的语义分离：后者只按标的筛，不得按候选意向筛。
+    assert len(db.statements) == 2
+    assert "buyer_intent_id in (__[POSTCOMPILE_intent_ids])" in db.statements[0]
+    assert "seller_target_id in (__[POSTCOMPILE_target_ids])" in db.statements[0]
+    assert "buyer_intent_id in (__[POSTCOMPILE_intent_ids])" not in db.statements[1]
+    assert "seller_target_id in (__[POSTCOMPILE_target_ids])" in db.statements[1]
 
     assert by_target[paired_target]["relation_status"] == "interested"
     assert by_target[paired_target]["relation_id"] == relation_id

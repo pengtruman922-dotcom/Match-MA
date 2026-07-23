@@ -82,7 +82,7 @@ def _search_seller_targets(db: Session, params: dict[str, Any], current_user: An
               'seller_target' as entity_type,
               id::text as entity_id,
               target_name as title,
-              nullif(concat_ws(' · ', industry_primary, headquarter_province, headquarter_city), '') as subtitle,
+              nullif(concat_ws(' · ', industry_l1, industry_l2, location_province, location_city, location_district), '') as subtitle,
               business_summary as snippet,
               '/targets/' || id::text as route,
               updated_at::text as updated_at,
@@ -93,10 +93,11 @@ def _search_seller_targets(db: Session, params: dict[str, Any], current_user: An
                 else '字段匹配'
               end as match_reason,
               jsonb_build_object(
-                'industry_primary', industry_primary,
-                'industry_secondary', industry_secondary,
-                'headquarter_province', headquarter_province,
-                'headquarter_city', headquarter_city,
+                'industry_l1', industry_l1,
+                'industry_l2', industry_l2,
+                'location_province', location_province,
+                'location_city', location_city,
+                'location_district', location_district,
                 'listed_status', listed_status
               ) as metadata
             from seller_target
@@ -107,10 +108,11 @@ def _search_seller_targets(db: Session, params: dict[str, Any], current_user: An
               and (
                 target_name ilike :q
                 or coalesce(business_summary, '') ilike :q
-                or coalesce(industry_primary, '') ilike :q
-                or coalesce(industry_secondary, '') ilike :q
-                or coalesce(headquarter_province, '') ilike :q
-                or coalesce(headquarter_city, '') ilike :q
+                or coalesce(industry_l1, '') ilike :q
+                or coalesce(industry_l2, '') ilike :q
+                or coalesce(location_province, '') ilike :q
+                or coalesce(location_city, '') ilike :q
+                or coalesce(location_district, '') ilike :q
               )
             order by
               case
