@@ -1584,8 +1584,8 @@ def _annotate_candidate_relations(db: Session, result: dict[str, Any], *, mode: 
             from buyer_seller_relation
             where team_id = :team_id and workspace_id = :workspace_id
               and deleted_at is null
-              and buyer_intent_id = any(:intent_ids)
-              and seller_target_id = any(:target_ids)
+              and buyer_intent_id in :intent_ids
+              and seller_target_id in :target_ids
             """
         ).bindparams(
             bindparam("intent_ids", expanding=True),

@@ -403,11 +403,20 @@ def test_annotate_marks_existing_relation_and_deep_progress_elsewhere() -> None:
             ]
 
     class _Db:
+        statement = ""
+
         def execute(self, *args, **kwargs):
+            self.statement = str(args[0])
             return _Rel()
 
-    annotated = _annotate_candidate_relations(_Db(), result, mode="buyer_to_target")
+    db = _Db()
+    annotated = _annotate_candidate_relations(db, result, mode="buyer_to_target")
     by_target = {c["seller_target_id"]: c for c in annotated["candidates"]}
+
+    # SQLAlchemy expands ``IN :ids`` into a PostgreSQL list.  It must not be
+    # wrapped in ANY(), which would turn that list into an invalid row value.
+    assert "buyer_intent_id in (__[POSTCOMPILE_intent_ids])" in db.statement
+    assert "seller_target_id in (__[POSTCOMPILE_target_ids])" in db.statement
 
     assert by_target[paired_target]["relation_status"] == "interested"
     assert by_target[paired_target]["relation_id"] == relation_id
