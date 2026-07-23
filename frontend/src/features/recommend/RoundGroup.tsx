@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, ExternalLink, Loader2, Plus, RefreshCw } from 'lucide-react';
+import { AlertTriangle, ArrowRight, CheckCircle2, ChevronDown, ChevronRight, ExternalLink, Loader2, Lock, Plus, RefreshCw } from 'lucide-react';
 import type { CandidateView, Round } from './timeline';
+import { relationStatusLabel } from '../relations/relationLabels';
 
 const PREVIEW_COUNT = 5;
 
@@ -10,12 +11,16 @@ export default function RoundGroup({
   roundNumber,
   isLatest,
   onToggleSelect,
+  onStartProgress,
+  startingProgressKey,
   onRetryDeepEval,
 }: {
   round: Round;
   roundNumber: number;
   isLatest: boolean;
   onToggleSelect: (candidate: CandidateView) => void;
+  onStartProgress: (candidate: CandidateView) => void;
+  startingProgressKey: string | null;
   onRetryDeepEval: () => void;
 }) {
   const [expandedOld, setExpandedOld] = useState(false);
@@ -59,6 +64,8 @@ export default function RoundGroup({
             index={index + 1}
             interactive={isLatest}
             onToggleSelect={() => onToggleSelect(candidate)}
+            onStartProgress={() => onStartProgress(candidate)}
+            startingProgress={startingProgressKey === candidate.pairKey}
           />
         ))}
       </div>
@@ -140,18 +147,34 @@ function CandidateRow({
   index,
   interactive,
   onToggleSelect,
+  onStartProgress,
+  startingProgress,
 }: {
   candidate: CandidateView;
   index: number;
   interactive: boolean;
   onToggleSelect: () => void;
+  onStartProgress: () => void;
+  startingProgress: boolean;
 }) {
+  const progressPath = candidate.detailPath ? `${candidate.detailPath}?tab=progress` : null;
   return (
     <div className={`px-4 py-3 ${candidate.selected ? 'bg-emerald-50/50' : ''}`}>
       <div className="flex items-start justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <span className="w-4 shrink-0 font-mono text-xs text-gray-400">{index}</span>
           <span className="truncate text-sm font-semibold text-gray-900">{candidate.name}</span>
+          {candidate.relationStatus && (
+            <span className="shrink-0 bg-blue-50 px-1.5 py-0.5 text-[11px] font-medium text-blue-700">
+              已在推进 · {relationStatusLabel(candidate.relationStatus)}
+            </span>
+          )}
+          {!candidate.relationStatus && candidate.deepProgressElsewhere && (
+            <span className="inline-flex shrink-0 items-center gap-0.5 bg-amber-50 px-1.5 py-0.5 text-[11px] font-medium text-amber-700">
+              <Lock className="h-2.5 w-2.5" />
+              正与其他买家深入推进
+            </span>
+          )}
           {candidate.detailPath && (
             <Link
               to={candidate.detailPath}
@@ -205,7 +228,7 @@ function CandidateRow({
         {candidate.riskSummary && <p className="text-gray-400">风险: {candidate.riskSummary}</p>}
       </div>
       {interactive && (
-        <div className="ml-6 mt-1.5">
+        <div className="ml-6 mt-1.5 flex flex-wrap items-center gap-2">
           {candidate.selected ? (
             <span className="inline-flex items-center gap-2">
               <span className="inline-flex items-center gap-1 bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white">
@@ -224,6 +247,26 @@ function CandidateRow({
             >
               <Plus className="h-3 w-3" />
               加入推荐列表
+            </button>
+          )}
+          {candidate.relationStatus && progressPath ? (
+            <Link
+              to={progressPath}
+              target="_blank"
+              className="inline-flex items-center gap-1 border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100"
+            >
+              查看推进
+              <ArrowRight className="h-3 w-3" />
+            </Link>
+          ) : (
+            <button
+              type="button"
+              onClick={onStartProgress}
+              disabled={startingProgress}
+              className="inline-flex items-center gap-1 border border-gray-200 px-2.5 py-1 text-xs font-medium text-gray-700 transition-colors hover:border-brand-500 hover:bg-brand-50 hover:text-brand-600 disabled:opacity-50"
+            >
+              {startingProgress ? <Loader2 className="h-3 w-3 animate-spin" /> : <ArrowRight className="h-3 w-3" />}
+              开始推进
             </button>
           )}
         </div>

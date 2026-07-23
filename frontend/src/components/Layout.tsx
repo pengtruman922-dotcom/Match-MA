@@ -7,6 +7,7 @@ const baseNavItems: Array<{ to: string; label: string; end?: boolean }> = [
   { to: '/targets', label: '标的管理' },
   { to: '/buyers', label: '买家管理' },
   { to: '/recommendations', label: '智能推荐' },
+  { to: '/board', label: '撮合看板' },
   { to: '/dashboard', label: '数据看板' },
   { to: '/settings', label: '设置' },
 ];

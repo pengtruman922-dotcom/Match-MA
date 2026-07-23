@@ -181,6 +181,9 @@ class RecommendationCandidateOut(BaseModel):
     display_badges: list[str] = Field(default_factory=list)
     score_breakdown: dict[str, Any] = Field(default_factory=dict)
     card_json: dict[str, Any] = Field(default_factory=dict)
+    relation_id: UUID | None = None
+    relation_status: str | None = None
+    deep_progress_elsewhere: bool = False
 
 
 class RecommendationCandidateResponse(BaseModel):

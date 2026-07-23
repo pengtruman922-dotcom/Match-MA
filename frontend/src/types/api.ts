@@ -1022,6 +1022,11 @@ export interface RelationMeta {
   event_types: string[];
 }
 
+export interface RelationCreateResult {
+  relation: BuyerSellerRelation;
+  created: boolean;
+}
+
 export interface BuyerIntentTargetExclusion {
   id: string;
   buyer_intent_id: string;
@@ -1516,6 +1521,11 @@ export interface RecommendationCandidate {
     info_gaps?: string | null;
     model?: string | null;
   } | null;
+  /** 该候选与本意向已有的关系（已在推进）。 */
+  relation_id?: string | null;
+  relation_status?: string | null;
+  /** 对手方正与其他买家深入推进（尽调及以后），标注但不透露对方。 */
+  deep_progress_elsewhere?: boolean;
 }
 
 export interface RecommendationConditionAction {

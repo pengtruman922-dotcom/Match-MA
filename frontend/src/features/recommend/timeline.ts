@@ -28,6 +28,9 @@ export interface CandidateView {
   deepEvalGrade: string | null;
   deepEvalReason: string | null;
   deepEvalRisks: string | null;
+  relationId: string | null;
+  relationStatus: string | null;
+  deepProgressElsewhere: boolean;
   selected: boolean;
   selectedItemId: string | null;
 }
@@ -93,6 +96,9 @@ export function mapCandidate(candidate: RecommendationCandidate): CandidateView 
     deepEvalGrade: candidate.deep_eval?.grade || null,
     deepEvalReason: candidate.deep_eval?.reason || null,
     deepEvalRisks: candidate.deep_eval?.risks || null,
+    relationId: candidate.relation_id || null,
+    relationStatus: candidate.relation_status || null,
+    deepProgressElsewhere: candidate.deep_progress_elsewhere || false,
     selected: false,
     selectedItemId: null,
   };

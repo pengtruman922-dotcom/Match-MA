@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.api.authn import CurrentUser
 from backend.app.api.routes.utils import (
+    ensure_entity_visible,
     ensure_relation_visible,
     exclusion_visible_sql,
     owner_scope_required,
@@ -20,6 +21,7 @@ from backend.app.services.relation_flow import (
     RELATION_EVENT_TYPES,
     RELATION_STATUSES,
     change_relation_status,
+    create_relation,
     record_relation_event,
 )
 
@@ -63,6 +65,17 @@ class RelationEventOut(BaseModel):
     seller_target_name: str | None
     metadata_json: dict[str, Any]
     created_at: str
+
+
+class RelationCreate(BaseModel):
+    buyer_intent_id: UUID
+    seller_target_id: UUID
+    source_summary: str | None = Field(default=None, max_length=1000)
+
+
+class RelationCreateOut(BaseModel):
+    relation: BuyerSellerRelationOut
+    created: bool
 
 
 class RelationStatusUpdate(BaseModel):
@@ -213,6 +226,24 @@ def list_relation_events(
 @router.get("/relations-meta", response_model=RelationMeta)
 def get_relations_meta() -> dict[str, Any]:
     return {"statuses": list(RELATION_STATUSES), "event_types": list(RELATION_EVENT_TYPES)}
+
+
+@router.post("/relations", response_model=RelationCreateOut, status_code=201)
+def create_relation_endpoint(
+    payload: RelationCreate,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    # 能看见任一侧即可发起（推荐/关联对手方都从自己负责的一侧出发）。
+    ensure_entity_visible(db, current_user, entity_type="buyer_intent", entity_id=payload.buyer_intent_id)
+    relation_id, created = create_relation(
+        db,
+        buyer_intent_id=payload.buyer_intent_id,
+        seller_target_id=payload.seller_target_id,
+        actor_user_id=current_user.user_id,
+        source_summary=payload.source_summary,
+    )
+    return {"relation": get_relation(relation_id, current_user, db), "created": created}
 
 
 @router.patch("/relations/{relation_id}", response_model=BuyerSellerRelationOut)

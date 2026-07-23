@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { ArrowRightLeft, Loader2, Send, Sparkles } from 'lucide-react';
-import { buyerIntents, recommendations, sellerTargets } from '../lib/api';
+import { buyerIntents, recommendations, relations, sellerTargets } from '../lib/api';
 import type {
   BuyerIntent,
   RecommendationConditionAction,
@@ -42,6 +42,7 @@ export default function Recommend() {
   const [reportOpen, setReportOpen] = useState(false);
   const [overrides, setOverrides] = useState<unknown>({});
   const [displayFilter, setDisplayFilter] = useState<{ type: string; value: string | number } | null>(null);
+  const [startingProgressKey, setStartingProgressKey] = useState<string | null>(null);
 
   const pollRef = useRef<number | null>(null);
   const bootstrappedRef = useRef(false);
@@ -292,6 +293,39 @@ export default function Recommend() {
     );
   };
 
+  const startProgress = async (candidate: CandidateView) => {
+    if (!candidate.sellerTargetId || !candidate.buyerIntentId || candidate.relationStatus) return;
+    setStartingProgressKey(candidate.pairKey);
+    try {
+      const result = await relations.create({
+        buyer_intent_id: candidate.buyerIntentId,
+        seller_target_id: candidate.sellerTargetId,
+        source_summary: '由推荐结果发起推进',
+      });
+      setTimeline((prev) =>
+        prev.map((entry) =>
+          entry.kind !== 'round'
+            ? entry
+            : {
+                ...entry,
+                round: {
+                  ...entry.round,
+                  candidates: entry.round.candidates.map((item) =>
+                    item.pairKey === candidate.pairKey
+                      ? { ...item, relationId: result.relation.id, relationStatus: result.relation.status }
+                      : item
+                  ),
+                },
+              }
+        )
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '开始推进失败');
+    } finally {
+      setStartingProgressKey(null);
+    }
+  };
+
   const toggleSelect = async (candidate: CandidateView) => {
     if (!sessionId) return;
     if (candidate.selected && candidate.selectedItemId) {
@@ -478,6 +512,8 @@ export default function Recommend() {
                 roundNumber={roundCounter}
                 isLatest={isLatestRound}
                 onToggleSelect={(candidate) => void toggleSelect(candidate)}
+                onStartProgress={(candidate) => void startProgress(candidate)}
+                startingProgressKey={startingProgressKey}
                 onRetryDeepEval={() => void retryDeepEval()}
               />
             );

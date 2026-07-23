@@ -374,6 +374,49 @@ def test_optional_uuid_accepts_uuid_and_string() -> None:
     assert _optional_uuid("not-a-uuid") is None
 
 
+def test_annotate_marks_existing_relation_and_deep_progress_elsewhere() -> None:
+    from backend.app.services.recommendation_flow import _annotate_candidate_relations
+
+    intent = BUYER_INTENT_ID
+    paired_target = "11111111-1111-1111-1111-111111111111"
+    busy_target = "22222222-2222-2222-2222-222222222222"
+    other_intent = "33333333-3333-3333-3333-333333333333"
+    relation_id = "44444444-4444-4444-4444-444444444444"
+
+    result = {
+        "candidates": [
+            {"buyer_intent_id": intent, "seller_target_id": paired_target},
+            {"buyer_intent_id": intent, "seller_target_id": busy_target},
+        ]
+    }
+
+    class _Rel:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                # 本意向已在推进 paired_target
+                {"id": relation_id, "buyer_intent_id": intent, "seller_target_id": paired_target, "status": "interested"},
+                # 别的买家正对 busy_target 尽调
+                {"id": "x", "buyer_intent_id": other_intent, "seller_target_id": busy_target, "status": "due_diligence"},
+            ]
+
+    class _Db:
+        def execute(self, *args, **kwargs):
+            return _Rel()
+
+    annotated = _annotate_candidate_relations(_Db(), result, mode="buyer_to_target")
+    by_target = {c["seller_target_id"]: c for c in annotated["candidates"]}
+
+    assert by_target[paired_target]["relation_status"] == "interested"
+    assert by_target[paired_target]["relation_id"] == relation_id
+    assert by_target[paired_target]["deep_progress_elsewhere"] is False
+    # busy_target 没和本意向建关系，但别人在尽调 → 标注、不给关系状态
+    assert by_target[busy_target]["relation_status"] is None
+    assert by_target[busy_target]["deep_progress_elsewhere"] is True
+
+
 def _pool_db(rows: list[dict], scenarios: list[dict] | None = None) -> object:
     """Stub that answers by query shape: candidate pool vs scenario lookup."""
 
@@ -395,6 +438,9 @@ def _pool_db(rows: list[dict], scenarios: list[dict] | None = None) -> object:
             if "buyer_intent_scenario" in self.statement:
                 return _Result(scenarios or [])
             if "industry_taxonomy" in self.statement:
+                return _Result([])
+            if "buyer_seller_relation" in self.statement:
+                # 无既有关系：候选全部是新候选（关系接线在别处测）
                 return _Result([])
             return _Result(rows)
 

@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertTriangle, ChevronRight, Loader2, UserRound, Building2 } from 'lucide-react';
-import { relations } from '../../lib/api';
+import { AlertTriangle, ChevronRight, Loader2, UserRound, Building2, Plus, Search, X } from 'lucide-react';
+import { relations, sellerTargets, buyerIntents } from '../../lib/api';
 import type { BuyerSellerRelation } from '../../types/api';
 import RelationTimelineDrawer from './RelationTimelineDrawer';
 import {
@@ -27,6 +27,7 @@ export default function ProgressPanel({ side, entityId }: Props) {
   const [statuses, setStatuses] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [openId, setOpenId] = useState<string | null>(null);
+  const [linking, setLinking] = useState(false);
 
   const load = useCallback(() => {
     const params = side === 'seller_target' ? { seller_target_id: entityId } : { buyer_intent_id: entityId };
@@ -43,6 +44,21 @@ export default function ProgressPanel({ side, entityId }: Props) {
     relations.meta().then((meta) => setStatuses(meta.statuses)).catch(() => {});
   }, [load]);
 
+  const linkCounterparty = async (counterpartyId: string) => {
+    const payload =
+      side === 'seller_target'
+        ? { buyer_intent_id: counterpartyId, seller_target_id: entityId }
+        : { buyer_intent_id: entityId, seller_target_id: counterpartyId };
+    try {
+      const result = await relations.create(payload);
+      setLinking(false);
+      await load();
+      setOpenId(result.relation.id);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '关联失败');
+    }
+  };
+
   const active = items.filter((relation) => !isRelationEnded(relation.status));
   const ended = items.filter((relation) => isRelationEnded(relation.status));
   const openRelation = items.find((relation) => relation.id === openId) || null;
@@ -56,20 +72,43 @@ export default function ProgressPanel({ side, entityId }: Props) {
     );
   }
 
+  const header = (
+    <div className="flex items-center justify-between">
+      <p className="text-xs text-gray-400">
+        {side === 'seller_target' ? '这个标的与各买家的推进' : '这个买家意向与各标的的推进'}
+      </p>
+      <button
+        type="button"
+        onClick={() => setLinking(true)}
+        className="inline-flex items-center gap-1 border border-gray-200 px-2.5 py-1.5 text-xs text-gray-600 hover:border-brand-500 hover:text-brand-600"
+      >
+        <Plus className="h-3.5 w-3.5" />
+        {side === 'seller_target' ? '关联买家意向' : '关联标的'}
+      </button>
+    </div>
+  );
+
   if (items.length === 0) {
     return (
-      <div className="py-12 text-center">
-        <ChevronRight className="mx-auto h-8 w-8 text-gray-300" />
-        <p className="mt-2 text-sm text-gray-500">还没有撮合关系</p>
-        <p className="mt-1 text-xs text-gray-400">
-          在智能推荐里点「开始推进」，或录入含对手方的跟进动态，关系会出现在这里。
-        </p>
+      <div className="space-y-4">
+        {header}
+        <div className="py-10 text-center">
+          <ChevronRight className="mx-auto h-8 w-8 text-gray-300" />
+          <p className="mt-2 text-sm text-gray-500">还没有撮合关系</p>
+          <p className="mt-1 text-xs text-gray-400">
+            点右上角关联对手方，或在智能推荐里点「开始推进」，关系会出现在这里。
+          </p>
+        </div>
+        {linking && (
+          <CounterpartyPicker side={side} onPick={linkCounterparty} onClose={() => setLinking(false)} />
+        )}
       </div>
     );
   }
 
   return (
     <div className="space-y-6">
+      {header}
       {active.length > 0 && (
         <section>
           <h4 className="mb-3 text-xs font-semibold uppercase tracking-wider text-gray-500">
@@ -105,8 +144,120 @@ export default function ProgressPanel({ side, entityId }: Props) {
           onChanged={() => void load()}
         />
       )}
+
+      {linking && (
+        <CounterpartyPicker side={side} onPick={linkCounterparty} onClose={() => setLinking(false)} />
+      )}
     </div>
   );
+}
+
+function CounterpartyPicker({
+  side,
+  onPick,
+  onClose,
+}: {
+  side: 'seller_target' | 'buyer_intent';
+  onPick: (id: string) => void | Promise<void>;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<Array<{ id: string; name: string; sub: string | null }>>([]);
+  const [searching, setSearching] = useState(false);
+  const [picking, setPicking] = useState(false);
+  const debounce = useRef<number | undefined>(undefined);
+
+  // 标的侧关联买家意向，买家意向侧关联标的。
+  const pickTargets = side === 'seller_target';
+
+  useEffect(() => {
+    window.clearTimeout(debounce.current);
+    if (query.trim().length < 2) {
+      setResults([]);
+      return;
+    }
+    debounce.current = window.setTimeout(() => {
+      setSearching(true);
+      const request = pickTargets
+        ? buyerIntents
+            .suggestions({ q: query.trim(), limit: 8 })
+            .then((rows) => rows.map((row) => ({ id: row.id, name: row.intent_name, sub: row.buyer_name })))
+        : sellerTargets
+            .suggestions({ q: query.trim(), limit: 8 })
+            .then((rows) => rows.map((row) => ({ id: row.id, name: row.target_name, sub: row.target_subject_name })));
+      request
+        .then(dedupeById)
+        .then(setResults)
+        .catch(() => setResults([]))
+        .finally(() => setSearching(false));
+    }, 250);
+    return () => window.clearTimeout(debounce.current);
+  }, [query, pickTargets]);
+
+  const choose = async (id: string) => {
+    setPicking(true);
+    await onPick(id);
+    setPicking(false);
+  };
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-start justify-center pt-24" onClick={onClose}>
+      <div className="absolute inset-0 bg-black/30" />
+      <div className="relative z-10 w-full max-w-md border border-gray-200 bg-white shadow-xl" onClick={(event) => event.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
+          <h4 className="text-sm font-semibold text-gray-900">{pickTargets ? '关联买家意向' : '关联标的'}</h4>
+          <button type="button" onClick={onClose} className="p-1 text-gray-400 hover:text-gray-700">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="p-4">
+          <div className="flex items-center gap-2 border border-gray-200 px-2.5 py-1.5">
+            <Search className="h-4 w-4 shrink-0 text-gray-400" />
+            <input
+              autoFocus
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder={pickTargets ? '搜索买家意向名称' : '搜索标的名称'}
+              className="w-full text-sm text-gray-800 outline-none"
+            />
+            {searching ? <Loader2 className="h-3.5 w-3.5 animate-spin text-gray-400" /> : null}
+          </div>
+          <div className="mt-2 max-h-64 overflow-y-auto">
+            {query.trim().length < 2 ? (
+              <p className="py-6 text-center text-xs text-gray-400">输入至少 2 个字符搜索</p>
+            ) : results.length === 0 && !searching ? (
+              <p className="py-6 text-center text-xs text-gray-400">没有匹配结果</p>
+            ) : (
+              results.map((row) => (
+                <button
+                  key={row.id}
+                  type="button"
+                  disabled={picking}
+                  onClick={() => void choose(row.id)}
+                  className="flex w-full items-center gap-2 px-2 py-2 text-left hover:bg-gray-50 disabled:opacity-50"
+                >
+                  {pickTargets ? (
+                    <UserRound className="h-3.5 w-3.5 shrink-0 text-gray-400" />
+                  ) : (
+                    <Building2 className="h-3.5 w-3.5 shrink-0 text-gray-400" />
+                  )}
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm text-gray-800">{row.name}</span>
+                    {row.sub ? <span className="block truncate text-xs text-gray-400">{row.sub}</span> : null}
+                  </span>
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function dedupeById<T extends { id: string }>(rows: T[]): T[] {
+  const seen = new Set<string>();
+  return rows.filter((row) => (seen.has(row.id) ? false : (seen.add(row.id), true)));
 }
 
 function RelationCard({

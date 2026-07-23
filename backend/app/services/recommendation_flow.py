@@ -1234,14 +1234,18 @@ def _candidate_targets_for_intent(
             )
         )
 
-    return _rank_and_report(
-        candidates,
-        limit=limit,
-        scan_count=len(rows),
-        excluded_count=excluded_count,
-        conflict_count=conflict_count,
-        scenario_ids=scenario_ids,
-        scenarios=scenarios,
+    return _annotate_candidate_relations(
+        db,
+        _rank_and_report(
+            candidates,
+            limit=limit,
+            scan_count=len(rows),
+            excluded_count=excluded_count,
+            conflict_count=conflict_count,
+            scenario_ids=scenario_ids,
+            scenarios=scenarios,
+        ),
+        mode="buyer_to_target",
     )
 
 
@@ -1347,7 +1351,11 @@ def _candidate_intents_for_target(
             )
         )
 
-    return _rank_and_report(candidates, limit=limit, scan_count=len(rows), excluded_count=excluded_count, conflict_count=conflict_count)
+    return _annotate_candidate_relations(
+        db,
+        _rank_and_report(candidates, limit=limit, scan_count=len(rows), excluded_count=excluded_count, conflict_count=conflict_count),
+        mode="target_to_buyer",
+    )
 
 
 # 每个方案的保底名额：宽方案不得把用户亲口写的窄方案整条挤出深评队列。
@@ -1520,6 +1528,10 @@ def _build_candidate_row(
         "match_summary": _summary_text(evidence, fallback="具备初步匹配基础"),
         "gap_summary": _summary_text(gaps) if gaps else None,
         "risk_summary": risk_summary,
+        # 关系状态由 _annotate_candidate_relations 填充；默认无关系。
+        "relation_id": None,
+        "relation_status": None,
+        "deep_progress_elsewhere": False,
         "evidence_json": {
             "matches": evidence,
             "gaps": gaps,
@@ -1535,6 +1547,84 @@ def _build_candidate_row(
             },
         },
     }
+
+
+# 尽调及以后视为「深入推进」——对其他买家的推荐里标注、不透露对方。
+DEEP_RELATION_STATUSES = ("due_diligence", "agreement", "deal_closed")
+# 终态关系不算「已在推进」，仍作为新候选参与排名。
+ENDED_RELATION_STATUSES = ("deal_closed", "not_interested", "paused", "lost")
+
+
+def _annotate_candidate_relations(db: Session, result: dict[str, Any], *, mode: str) -> dict[str, Any]:
+    """Mark each candidate with any existing relation and deep-progress-elsewhere.
+
+    Recommendation and progress meet here: a candidate the buyer is already
+    working is shown apart from fresh ones instead of silently re-ranked, and a
+    target deep in progress with a different buyer is flagged without naming them.
+    """
+    candidates = result.get("candidates") or []
+    if not candidates:
+        return result
+
+    pairs = [
+        (str(candidate["buyer_intent_id"]), str(candidate["seller_target_id"]))
+        for candidate in candidates
+        if candidate.get("buyer_intent_id") and candidate.get("seller_target_id")
+    ]
+    if not pairs:
+        return result
+
+    intent_ids = sorted({intent for intent, _ in pairs})
+    target_ids = sorted({target for _, target in pairs})
+    rows = db.execute(
+        text(
+            """
+            select id, buyer_intent_id::text as buyer_intent_id,
+                   seller_target_id::text as seller_target_id, status
+            from buyer_seller_relation
+            where team_id = :team_id and workspace_id = :workspace_id
+              and deleted_at is null
+              and buyer_intent_id = any(:intent_ids)
+              and seller_target_id = any(:target_ids)
+            """
+        ).bindparams(
+            bindparam("intent_ids", expanding=True),
+            bindparam("target_ids", expanding=True),
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "intent_ids": intent_ids,
+            "target_ids": target_ids,
+        },
+    ).mappings().all()
+
+    exact: dict[tuple[str, str], dict[str, Any]] = {}
+    # 「深入推进中」的另一方集合：buyer_to_target 看标的，target_to_buyer 看意向。
+    deep_targets: set[str] = set()
+    deep_intents: set[str] = set()
+    for row in rows:
+        exact[(row["buyer_intent_id"], row["seller_target_id"])] = {"id": row["id"], "status": row["status"]}
+        if row["status"] in DEEP_RELATION_STATUSES:
+            deep_targets.add(row["seller_target_id"])
+            deep_intents.add(row["buyer_intent_id"])
+
+    for candidate in candidates:
+        intent_id = str(candidate.get("buyer_intent_id") or "")
+        target_id = str(candidate.get("seller_target_id") or "")
+        relation = exact.get((intent_id, target_id))
+        candidate["relation_id"] = str(relation["id"]) if relation else None
+        candidate["relation_status"] = relation["status"] if relation else None
+        if mode == "buyer_to_target":
+            # 该标的与「别的买家」深入推进中（排除与本意向自己的关系）。
+            candidate["deep_progress_elsewhere"] = target_id in deep_targets and not (
+                relation and relation["status"] in DEEP_RELATION_STATUSES
+            )
+        else:
+            candidate["deep_progress_elsewhere"] = intent_id in deep_intents and not (
+                relation and relation["status"] in DEEP_RELATION_STATUSES
+            )
+    return result
 
 
 def _rank_and_report(

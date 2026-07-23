@@ -7,6 +7,7 @@ import Buyers from './pages/Buyers';
 import BuyerDetail from './pages/BuyerDetail';
 import BuyerIntentDetail from './pages/BuyerIntentDetail';
 import Recommend from './pages/Recommend';
+import Board from './pages/Board';
 import Dashboard from './pages/Dashboard';
 import Settings from './pages/Settings';
 import Users from './pages/Users';
@@ -30,6 +31,7 @@ function App() {
             <Route path="buyers/:id" element={<BuyerDetail />} />
             <Route path="buyer-intents/:id" element={<BuyerIntentDetail />} />
             <Route path="recommendations" element={<Recommend />} />
+            <Route path="board" element={<Board />} />
             <Route path="search" element={<SearchResults />} />
             <Route path="debug/entities/:entityType/:entityId" element={<DebugEntityPage />} />
             <Route path="updates" element={<Navigate to="/targets" replace />} />

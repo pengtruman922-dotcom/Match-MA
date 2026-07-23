@@ -55,6 +55,7 @@ import type {
   ExtractedActionCreate,
   RelationEvent,
   RelationMeta,
+  RelationCreateResult,
   RecommendationCandidateRequest,
   RecommendationCandidateResponse,
   RecommendationMessage,
@@ -335,6 +336,8 @@ export const relations = {
   exclusions: (params?: { buyer_intent_id?: string; seller_target_id?: string; active?: boolean; limit?: number; offset?: number }) =>
     apiRequest<BuyerIntentTargetExclusion[]>(`/buyer-intent-target-exclusions${buildQuery(params || {})}`),
   meta: () => apiRequest<RelationMeta>('/relations-meta'),
+  create: (data: { buyer_intent_id: string; seller_target_id: string; source_summary?: string | null }) =>
+    apiRequest<RelationCreateResult>('/relations', { method: 'POST', body: JSON.stringify(data) }),
   updateStatus: (id: string, data: { status: string; status_reason?: string | null; next_step?: string | null }) =>
     apiRequest<BuyerSellerRelation>(`/relations/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   createEvent: (id: string, data: { event_type: string; title?: string | null; content?: string | null; next_step?: string | null }) =>
