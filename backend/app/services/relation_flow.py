@@ -50,6 +50,20 @@ RELATION_EVENT_TYPES: tuple[str, ...] = (
     "other",
 )
 
+# 状态的中文名，只用于自动生成的动态摘要文案（last_event_summary 是展示字段，
+# LLM 路径也存中文摘要，这里保持一致）。
+_STATUS_LABELS: dict[str, str] = {
+    "recommended": "已推荐",
+    "interested": "有意向",
+    "in_discussion": "沟通中",
+    "due_diligence": "尽调中",
+    "agreement": "协议阶段",
+    "deal_closed": "已成交",
+    "not_interested": "不感兴趣",
+    "paused": "暂停",
+    "lost": "终止",
+}
+
 # A status change records an event; this is the event type it carries.
 _STATUS_EVENT_TYPE: dict[str, str] = {
     "recommended": "recommended",
@@ -305,7 +319,7 @@ def change_relation_status(
     if new_status == old_status and not next_step and not status_reason:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Status is already set to this value.")
 
-    summary = status_reason or f"状态更新为「{new_status}」"
+    summary = status_reason or f"状态更新为「{_STATUS_LABELS.get(new_status, new_status)}」"
     db.execute(
         text(
             """
