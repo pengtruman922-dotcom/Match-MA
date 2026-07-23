@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from backend.app.ai.prompting import render_template
 from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
+from backend.app.registry.indicators import writable_columns, writable_enum_values
 from backend.app.jobs.queue import JobClaim
 from backend.app.services.attachment_storage import (
     AttachmentStorageError,
@@ -71,40 +72,8 @@ MONEY_UNIT_PATTERN = re.compile(
     f"{_MONEY_UNIT_WAN}{_MONEY_UNIT_YUAN}|{_MONEY_UNIT_WAN}|{_MONEY_UNIT_YUAN})"
 )
 
-SELLER_TARGET_CHANGE_FIELDS = {
-    "target_name",
-    "target_subject_name",
-    "industry_l1",
-    "industry_l2",
-    "industry_primary",
-    "industry_secondary",
-    "headquarter_province",
-    "headquarter_city",
-    "listed_status",
-    "current_revenue_yuan",
-    "current_net_profit_yuan",
-    "current_total_profit_yuan",
-    "financial_period_label",
-    "valuation_yuan",
-    "valuation_date",
-    "asking_price_yuan",
-    "asking_price_date",
-    "pe_ratio",
-    "is_for_sale",
-    "can_control",
-    "can_consolidate",
-    "accepts_minority_investment",
-    "transfer_ratio_min",
-    "transfer_ratio_max",
-    "transfer_ratio_text",
-    "transfer_flexibility_type",
-    "business_summary",
-    "transaction_summary",
-    "risk_summary",
-    "gap_summary",
-    "information_status",
-    "recommendation_status",
-}
+# 派生自指标注册表（唯一事实源）：哪些 seller_target 列允许解析写入。
+SELLER_TARGET_CHANGE_FIELDS = writable_columns("parse")
 
 SELLER_TARGET_FIELD_ALIASES = {
     "summary": "business_summary",
@@ -245,31 +214,8 @@ BUYER_SELLER_RELATION_FIELD_ALIASES = {
     "content": "event_content",
 }
 
-SELLER_TARGET_ENUM_FIELDS = {
-    "listed_status": {"listed", "unlisted", "pre_ipo", "unknown"},
-    "is_for_sale": {"yes", "no", "unknown", "likely"},
-    "can_control": {"yes", "no", "unknown", "likely"},
-    "can_consolidate": {"yes", "no", "unknown", "likely"},
-    "accepts_minority_investment": {"yes", "no", "unknown", "likely"},
-    "transfer_flexibility_type": {
-        "control_available",
-        "consolidation_available",
-        "minority_available",
-        "full_sale_available",
-        "flexible",
-        "specific_range",
-        "unknown",
-    },
-    "information_status": {
-        "normal",
-        "insufficient",
-        "pending_review",
-        "parsing",
-        "researching",
-        "parse_failed",
-    },
-    "recommendation_status": {"recommendable", "not_recommendable"},
-}
+# 派生自指标注册表：可写枚举列的合法取值。
+SELLER_TARGET_ENUM_FIELDS = writable_enum_values()
 
 SELLER_TARGET_POST_PARSE_STATUSES = {"parsing", "pending_review", "insufficient", "parse_failed"}
 

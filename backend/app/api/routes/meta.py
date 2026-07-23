@@ -6,8 +6,38 @@ from sqlalchemy.orm import Session
 
 from backend.app.config import get_settings
 from backend.app.db import get_db
+from backend.app.registry.indicators import GROUPS, indicators_for
 
 router = APIRouter(prefix="/meta", tags=["meta"])
+
+
+@router.get("/indicators")
+def list_indicators(entity: str = "seller_target") -> dict[str, Any]:
+    """The indicator registry as the frontend renders it: groups + display fields.
+
+    Structure (which fields, their group, label, kind, screening badge, and how
+    province/city fold together) comes from here; value formatting stays in the
+    frontend. Adding a field to the registry makes it appear on the page.
+    """
+    indicators = indicators_for(entity)
+    return {
+        "groups": [
+            {"key": group.key, "label": group.label, "section_code": group.section_code}
+            for group in GROUPS
+        ],
+        "indicators": [
+            {
+                "column": ind.column,
+                "label": ind.label,
+                "group": ind.group,
+                "kind": ind.kind,
+                "screening": ind.screening,
+                "fold_into": ind.fold_into,
+            }
+            for ind in indicators
+            if ind.group is not None
+        ],
+    }
 
 
 @router.get("/version")

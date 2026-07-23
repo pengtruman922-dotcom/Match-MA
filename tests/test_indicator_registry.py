@@ -1,10 +1,11 @@
-"""The registry must reproduce the five sources it will replace.
+"""The registry is the single source; these guard it against reality.
 
-Until each consumer is switched to read from the registry, the old source stays
-authoritative. These tests pin the registry to every one of those sources, so
-the registry cannot drift from reality while the migration is in flight — and
-once a consumer is switched, the same assertion guarantees the switch changed
-no behaviour.
+The parse and research whitelists now derive from the registry (common.py and
+research_apply.py read writable_columns/writable_enum_values), so there is no
+separate hand-list to reconcile — the registry IS the definition. What still
+needs guarding is the registry against the sources it does NOT yet own: the
+frontend screening badges (until R3a-2 switches the panel), the columns the
+scorer reads, the real DB columns, and the DB enum check constraints.
 """
 
 import re
@@ -29,16 +30,24 @@ RECOMMENDATION_FLOW = REPO / "backend/app/services/recommendation_flow.py"
 BASELINE = REPO / "database/migrations/001_baseline.sql"
 
 
-def test_parse_whitelist_matches_the_registry() -> None:
-    assert writable_columns("parse") == set(SELLER_TARGET_CHANGE_FIELDS)
+def test_consumers_derive_from_the_registry() -> None:
+    # 白名单已改为派生，这里确认「派生」这条线没被谁悄悄改回硬列表。
+    assert SELLER_TARGET_CHANGE_FIELDS == writable_columns("parse")
+    assert set(RESEARCH_STRUCTURED_FIELDS) == writable_columns("research")
+    assert SELLER_TARGET_ENUM_FIELDS == writable_enum_values()
 
 
-def test_research_whitelist_matches_the_registry() -> None:
-    assert writable_columns("research") == set(RESEARCH_STRUCTURED_FIELDS)
-
-
-def test_writable_enum_values_match_the_parser() -> None:
-    assert writable_enum_values() == {k: set(v) for k, v in SELLER_TARGET_ENUM_FIELDS.items()}
+def test_registry_enum_values_are_valid_db_values() -> None:
+    # 注册表声明的枚举取值必须是 baseline 里对应 check 约束的子集，
+    # 否则解析写入会被 DB 拒。
+    sql = BASELINE.read_text(encoding="utf-8")
+    for column, values in writable_enum_values().items():
+        match = re.search(column + r" = ANY \(ARRAY\[(.*?)\]\)", sql, re.S)
+        if not match:
+            continue  # 无 DB check 约束的列（如 information_status 若用文本）跳过
+        allowed = set(re.findall(r"'([a-z_]+)'", match.group(1)))
+        extra = values - allowed
+        assert not extra, f"{column} 注册表枚举含 DB 不接受的值：{sorted(extra)}"
 
 
 def _infogroups_screening() -> set[str]:

@@ -16,28 +16,18 @@ from sqlalchemy.orm import Session
 
 from backend.app.api.routes.utils import write_action_log, write_field_value_sources_for_diff
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+from backend.app.registry.indicators import writable_columns
 from backend.app.services.industry_taxonomy import normalize_l2_values, resolve_l1
 from backend.app.services.profile_sections import apply_profile_section
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 
 LISTED_STATUS_VALUES = {"listed", "unlisted", "pre_ipo", "unknown"}
 
-# Research may propose these canonical facts. No numeric fields: a wrong
+# Which canonical facts research may propose. Derived from the indicator
+# registry (the single source). No numeric fields there by design: a wrong
 # industry label is visible on the page and cheap to undo, a wrong revenue
 # figure is neither.
-RESEARCH_STRUCTURED_FIELDS = {
-    "target_subject_name",
-    "industry_primary",
-    "industry_secondary",
-    "industry_l1",
-    "industry_l2",
-    "registered_province",
-    "registered_city",
-    "headquarter_province",
-    "headquarter_city",
-    "listed_status",
-    "business_summary",
-}
+RESEARCH_STRUCTURED_FIELDS = writable_columns("research")
 
 
 class ResearchApplyError(ValueError):
