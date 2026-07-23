@@ -12,12 +12,16 @@ import re
 from pathlib import Path
 
 from backend.app.jobs.handlers.common import (
+    BUYER_INTENT_CHANGE_FIELDS,
+    BUYER_INTENT_ENUM_FIELDS,
     SELLER_TARGET_CHANGE_FIELDS,
     SELLER_TARGET_ENUM_FIELDS,
 )
 from backend.app.registry.indicators import (
+    BUYER_INTENT_INDICATORS,
     SELLER_TARGET_INDICATORS,
     GROUPS,
+    indicators_for,
     screening_columns,
     writable_columns,
     writable_enum_values,
@@ -34,19 +38,42 @@ def test_consumers_derive_from_the_registry() -> None:
     assert SELLER_TARGET_CHANGE_FIELDS == writable_columns("parse")
     assert set(RESEARCH_STRUCTURED_FIELDS) == writable_columns("research")
     assert SELLER_TARGET_ENUM_FIELDS == writable_enum_values()
+    assert BUYER_INTENT_CHANGE_FIELDS == writable_columns("parse", "buyer_intent")
+    assert BUYER_INTENT_ENUM_FIELDS == writable_enum_values("buyer_intent")
 
 
-def test_registry_enum_values_are_valid_db_values() -> None:
-    # 注册表声明的枚举取值必须是 baseline 里对应 check 约束的子集，
-    # 否则解析写入会被 DB 拒。
+def test_buyer_intent_indicators_are_real_columns() -> None:
     sql = BASELINE.read_text(encoding="utf-8")
-    for column, values in writable_enum_values().items():
-        match = re.search(column + r" = ANY \(ARRAY\[(.*?)\]\)", sql, re.S)
-        if not match:
-            continue  # 无 DB check 约束的列（如 information_status 若用文本）跳过
-        allowed = set(re.findall(r"'([a-z_]+)'", match.group(1)))
-        extra = values - allowed
-        assert not extra, f"{column} 注册表枚举含 DB 不接受的值：{sorted(extra)}"
+    body = re.search(r"create table buyer_intent \((.*?)\n\);", sql, re.S)
+    assert body, "baseline 未找到 buyer_intent 建表块"
+    columns = set(re.findall(r"^\s+([a-z_0-9]+)\s", body.group(1), re.M))
+    missing = {ind.column for ind in BUYER_INTENT_INDICATORS} - columns
+    assert not missing, f"注册表引用了 buyer_intent 不存在的列：{sorted(missing)}"
+    assert indicators_for("buyer_intent") is BUYER_INTENT_INDICATORS
+
+
+def _db_accepts(sql: str, column: str, values: set[str]) -> bool | None:
+    """Whether some `column = ANY (ARRAY[...])` check constraint accepts `values`.
+
+    Returns None when the column has no such constraint. The column name can
+    appear in several tables (status especially), so this accepts the values if
+    *any* constraint for that name is a superset — the relevant table's is.
+    """
+    arrays = re.findall(column + r" = ANY \(ARRAY\[(.*?)\]\)", sql, re.S)
+    if not arrays:
+        return None
+    return any(values <= set(re.findall(r"'([a-z_]+)'", body)) for body in arrays)
+
+
+def test_registry_enum_values_valid_for_both_entities() -> None:
+    # 注册表声明的枚举取值必须能被对应 DB check 约束接受，否则写入会被 DB 拒。
+    sql = BASELINE.read_text(encoding="utf-8")
+    for entity in ("seller_target", "buyer_intent"):
+        for column, values in writable_enum_values(entity).items():
+            accepted = _db_accepts(sql, column, values)
+            if accepted is None:
+                continue  # 无 DB check 约束的列
+            assert accepted, f"{entity}.{column} 注册表枚举含 DB 不接受的值"
 
 
 def _scorer_reads() -> set[str]:

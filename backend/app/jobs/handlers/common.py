@@ -103,52 +103,8 @@ SELLER_TARGET_FIELD_ALIASES = {
     "pe_multiple": "pe_ratio",
 }
 
-BUYER_INTENT_CHANGE_FIELDS = {
-    "raw_requirement_text",
-    "intent_summary",
-    "industry_primary",
-    "industry_secondary",
-    "industries_json",
-    "excluded_industries_json",
-    "industry_focus_tags_json",
-    "region_scope_summary",
-    "min_revenue_yuan",
-    "min_net_profit_yuan",
-    "min_total_profit_yuan",
-    "max_pe",
-    "max_ps",
-    "min_net_margin",
-    "min_gross_margin",
-    "min_valuation_yuan",
-    "max_valuation_yuan",
-    "min_market_cap_yuan",
-    "max_market_cap_yuan",
-    "market_cap_range_summary",
-    "requires_control",
-    "requires_consolidation",
-    "accepts_minority_investment",
-    "desired_equity_ratio_min",
-    "desired_equity_ratio_max",
-    "equity_ratio_summary",
-    "equity_requirement_type",
-    "preferred_listed_status",
-    "listing_board_requirement_summary",
-    "financing_stage_requirement_summary",
-    "transaction_type",
-    "transaction_types_json",
-    "premium_tolerance_summary",
-    "max_premium_rate",
-    "max_debt_ratio",
-    "debt_ratio_requirement_summary",
-    "major_risk_tolerance_summary",
-    "buyer_industry_advantage_summary",
-    "negative_summary",
-    "priority_summary",
-    "preference_summary",
-    "unknown_summary",
-    "status",
-    "pause_reason",
-}
+# 派生自指标注册表（唯一事实源）：哪些 buyer_intent 列允许解析写入。
+BUYER_INTENT_CHANGE_FIELDS = writable_columns("parse", "buyer_intent")
 
 BUYER_INTENT_FIELD_ALIASES = {
     "requirement": "intent_summary",
@@ -219,22 +175,8 @@ SELLER_TARGET_ENUM_FIELDS = writable_enum_values()
 
 SELLER_TARGET_POST_PARSE_STATUSES = {"parsing", "pending_review", "insufficient", "parse_failed"}
 
-BUYER_INTENT_ENUM_FIELDS = {
-    "status": {"active", "paused", "closed"},
-    "requires_control": {"yes", "no", "unknown", "likely"},
-    "requires_consolidation": {"yes", "no", "unknown", "likely"},
-    "accepts_minority_investment": {"yes", "no", "unknown", "likely"},
-    "equity_requirement_type": {
-        "control_required",
-        "consolidation_required",
-        "minority_acceptable",
-        "minority_only",
-        "flexible",
-        "specific_range",
-        "unknown",
-    },
-    "preferred_listed_status": {"listed", "preparing_listing", "pre_ipo", "unlisted", "any", "unknown"},
-}
+# 派生自指标注册表：买家意向可写枚举列的合法取值。
+BUYER_INTENT_ENUM_FIELDS = writable_enum_values("buyer_intent")
 
 BUYER_SELLER_RELATION_ENUM_FIELDS = {
     "status": {

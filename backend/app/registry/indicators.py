@@ -130,10 +130,72 @@ SELLER_TARGET_INDICATORS: tuple[Indicator, ...] = (
 )
 
 
+# buyer_intent 指标：目前的消费方只有解析白名单与枚举校验（买家侧无注册表驱动
+# 面板、无调研），所以 column + writable_by(parse) + enum_values 是被测试锁死的
+# 部分；group 一律 None（无面板），label/kind 为将来建买家面板预留，best-effort。
+_BI_PARSE = frozenset({"parse"})
+_BI_EQUITY_TYPE = ("control_required", "consolidation_required", "minority_acceptable",
+                   "minority_only", "flexible", "specific_range", "unknown")
+_BI_LISTED = ("listed", "preparing_listing", "pre_ipo", "unlisted", "any", "unknown")
+
+BUYER_INTENT_INDICATORS: tuple[Indicator, ...] = (
+    Indicator("intent_summary", "需求摘要", None, "text", writable_by=_BI_PARSE),
+    Indicator("raw_requirement_text", "原始需求", None, "text", writable_by=_BI_PARSE),
+    Indicator("industry_primary", "行业原文（一级）", None, "text", writable_by=_BI_PARSE),
+    Indicator("industry_secondary", "行业原文（二级）", None, "text", writable_by=_BI_PARSE),
+    Indicator("industries_json", "关注行业", None, "json", writable_by=_BI_PARSE),
+    Indicator("industry_focus_tags_json", "细分赛道", None, "json", writable_by=_BI_PARSE),
+    Indicator("excluded_industries_json", "排除行业", None, "json", writable_by=_BI_PARSE),
+    Indicator("region_scope_summary", "地域范围", None, "text", writable_by=_BI_PARSE),
+    Indicator("min_revenue_yuan", "最低营收", None, "yuan", writable_by=_BI_PARSE),
+    Indicator("min_net_profit_yuan", "最低净利润", None, "yuan", writable_by=_BI_PARSE),
+    Indicator("min_total_profit_yuan", "最低利润总额", None, "yuan", writable_by=_BI_PARSE),
+    Indicator("min_net_margin", "最低净利率", None, "ratio", writable_by=_BI_PARSE),
+    Indicator("min_gross_margin", "最低毛利率", None, "ratio", writable_by=_BI_PARSE),
+    Indicator("max_pe", "PE 上限", None, "ratio", writable_by=_BI_PARSE),
+    Indicator("max_ps", "PS 上限", None, "ratio", writable_by=_BI_PARSE),
+    Indicator("min_valuation_yuan", "最低估值", None, "yuan", writable_by=_BI_PARSE),
+    Indicator("max_valuation_yuan", "最高估值", None, "yuan", writable_by=_BI_PARSE),
+    Indicator("min_market_cap_yuan", "最低市值", None, "yuan", writable_by=_BI_PARSE),
+    Indicator("max_market_cap_yuan", "最高市值", None, "yuan", writable_by=_BI_PARSE),
+    Indicator("market_cap_range_summary", "市值范围", None, "text", writable_by=_BI_PARSE),
+    Indicator("requires_control", "控股要求", None, "enum", writable_by=_BI_PARSE, enum_values=_YES_NO_LIKE),
+    Indicator("requires_consolidation", "并表要求", None, "enum", writable_by=_BI_PARSE, enum_values=_YES_NO_LIKE),
+    Indicator("accepts_minority_investment", "接受少数股权", None, "enum", writable_by=_BI_PARSE, enum_values=_YES_NO_LIKE),
+    Indicator("equity_requirement_type", "股权诉求类型", None, "enum", writable_by=_BI_PARSE, enum_values=_BI_EQUITY_TYPE),
+    Indicator("desired_equity_ratio_min", "期望股比下限", None, "ratio", writable_by=_BI_PARSE),
+    Indicator("desired_equity_ratio_max", "期望股比上限", None, "ratio", writable_by=_BI_PARSE),
+    Indicator("equity_ratio_summary", "股权比例", None, "text", writable_by=_BI_PARSE),
+    Indicator("preferred_listed_status", "上市要求", None, "enum", writable_by=_BI_PARSE, enum_values=_BI_LISTED),
+    Indicator("listing_board_requirement_summary", "上市板块要求", None, "text", writable_by=_BI_PARSE),
+    Indicator("financing_stage_requirement_summary", "融资阶段要求", None, "text", writable_by=_BI_PARSE),
+    Indicator("transaction_type", "交易方式", None, "text", writable_by=_BI_PARSE),
+    Indicator("transaction_types_json", "交易方式（多值）", None, "json", writable_by=_BI_PARSE),
+    Indicator("max_premium_rate", "溢价上限", None, "ratio", writable_by=_BI_PARSE),
+    Indicator("premium_tolerance_summary", "溢价要求", None, "text", writable_by=_BI_PARSE),
+    Indicator("max_debt_ratio", "负债率上限", None, "ratio", writable_by=_BI_PARSE),
+    Indicator("debt_ratio_requirement_summary", "负债率要求", None, "text", writable_by=_BI_PARSE),
+    Indicator("major_risk_tolerance_summary", "风险容忍", None, "text", writable_by=_BI_PARSE),
+    Indicator("buyer_industry_advantage_summary", "产业优势", None, "text", writable_by=_BI_PARSE),
+    Indicator("priority_summary", "优先条件", None, "text", writable_by=_BI_PARSE),
+    Indicator("preference_summary", "其他偏好", None, "text", writable_by=_BI_PARSE),
+    Indicator("negative_summary", "排除项", None, "text", writable_by=_BI_PARSE),
+    Indicator("unknown_summary", "待确认", None, "text", writable_by=_BI_PARSE),
+    Indicator("status", "状态", None, "enum", writable_by=_BI_PARSE, enum_values=("active", "paused", "closed")),
+    Indicator("pause_reason", "暂停原因", None, "text", writable_by=_BI_PARSE),
+)
+
+_BY_ENTITY: dict[str, tuple[Indicator, ...]] = {
+    "seller_target": SELLER_TARGET_INDICATORS,
+    "buyer_intent": BUYER_INTENT_INDICATORS,
+}
+
+
 def indicators_for(entity: str = "seller_target") -> tuple[Indicator, ...]:
-    if entity != "seller_target":
-        raise ValueError(f"registry only covers seller_target for now, not {entity!r}")
-    return SELLER_TARGET_INDICATORS
+    try:
+        return _BY_ENTITY[entity]
+    except KeyError:
+        raise ValueError(f"registry does not cover entity {entity!r}") from None
 
 
 def writable_columns(source: str, entity: str = "seller_target") -> set[str]:
