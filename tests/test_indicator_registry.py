@@ -25,7 +25,6 @@ from backend.app.registry.indicators import (
 from backend.app.services.research_apply import RESEARCH_STRUCTURED_FIELDS
 
 REPO = Path(__file__).resolve().parents[1]
-INFO_GROUPS = REPO / "frontend/src/features/targets/infoGroups.ts"
 RECOMMENDATION_FLOW = REPO / "backend/app/services/recommendation_flow.py"
 BASELINE = REPO / "database/migrations/001_baseline.sql"
 
@@ -48,21 +47,6 @@ def test_registry_enum_values_are_valid_db_values() -> None:
         allowed = set(re.findall(r"'([a-z_]+)'", match.group(1)))
         extra = values - allowed
         assert not extra, f"{column} 注册表枚举含 DB 不接受的值：{sorted(extra)}"
-
-
-def _infogroups_screening() -> set[str]:
-    source = INFO_GROUPS.read_text(encoding="utf-8")
-    fields = re.findall(r"\{\s*field:\s*'([a-z_0-9]+)',[^}]*?\}", source, re.S)
-    marked = re.findall(r"\{\s*field:\s*'([a-z_0-9]+)',[^}]*?screening:\s*true[^}]*?\}", source, re.S)
-    assert len(fields) > 40, "infoGroups 解析失败"
-    return set(marked)
-
-
-def test_screening_matches_the_frontend_badges() -> None:
-    # 注册表的筛选列（去掉展示折叠列）应与 infoGroups 的「筛」角标一致，
-    # 这样 R3a-2 把前端切到注册表时角标不变。
-    registry = {ind.column for ind in SELLER_TARGET_INDICATORS if ind.screening and ind.fold_into is None}
-    assert registry == _infogroups_screening()
 
 
 def _scorer_reads() -> set[str]:

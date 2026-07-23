@@ -1027,6 +1027,26 @@ export interface RelationCreateResult {
   created: boolean;
 }
 
+export interface IndicatorGroupMeta {
+  key: string;
+  label: string;
+  section_code: string | null;
+}
+
+export interface IndicatorMeta {
+  column: string;
+  label: string;
+  group: string | null;
+  kind: 'text' | 'yuan' | 'ratio' | 'enum' | 'date';
+  screening: boolean;
+  fold_into: string | null;
+}
+
+export interface IndicatorRegistryResponse {
+  groups: IndicatorGroupMeta[];
+  indicators: IndicatorMeta[];
+}
+
 export interface BuyerIntentTargetExclusion {
   id: string;
   buyer_intent_id: string;

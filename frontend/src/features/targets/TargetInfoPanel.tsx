@@ -9,10 +9,11 @@ import {
   Search,
   X,
 } from 'lucide-react';
-import { backgroundJobs, profileSections, research } from '../../lib/api';
+import { backgroundJobs, indicatorRegistry, profileSections, research } from '../../lib/api';
 import { formatYuan } from '../../lib/format';
 import { sourceTypeLabel } from '../../lib/fieldLabels';
 import type {
+  IndicatorRegistryResponse,
   ProfileSection,
   ProfileSectionsResponse,
   ResearchProposal,
@@ -47,27 +48,32 @@ export default function TargetInfoPanel({ target }: { target: SellerTarget }) {
   const [reviewingProposalId, setReviewingProposalId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [error, setError] = useState<string | null>(null);
+  const [registry, setRegistry] = useState<IndicatorRegistryResponse | null>(null);
 
   const groups = useMemo(
     () =>
-      buildInfoGroups(target, {
-        formatYuan: (value) => formatYuan(value as string),
-        formatListedStatus,
-        formatTransferRatio,
-        getSubjectDisplay,
-      }),
-    [target],
+      registry
+        ? buildInfoGroups(target, registry, {
+            formatYuan: (value) => formatYuan(value as string),
+            formatListedStatus,
+            formatTransferRatio,
+            getSubjectDisplay,
+          })
+        : [],
+    [target, registry],
   );
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [profileData, proposalData] = await Promise.all([
+      const [profileData, proposalData, registryData] = await Promise.all([
         profileSections.list('seller_target', target.id),
         research.proposals(target.id, 'pending_review'),
+        indicatorRegistry.list('seller_target'),
       ]);
       setData(profileData);
       setProposals(proposalData);
+      setRegistry(registryData);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载标的信息失败');

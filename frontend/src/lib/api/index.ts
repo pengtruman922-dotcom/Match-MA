@@ -82,6 +82,7 @@ import type {
   GlobalSearchResponse,
   IndustryDictionaryImportResult,
   IndustryDictionaryTerm,
+  IndicatorRegistryResponse,
   ModelConnectionTestResult,
   ModelConfigSettingsPage,
   ModelNodeConfig,
@@ -566,6 +567,11 @@ export const modelConfig = {
       method: 'POST',
       body: JSON.stringify({ input_text }),
     }),
+};
+
+export const indicatorRegistry = {
+  list: (entity: string = 'seller_target') =>
+    apiRequest<IndicatorRegistryResponse>(`/meta/indicators${buildQuery({ entity })}`),
 };
 
 export const dataDictionaries = {
