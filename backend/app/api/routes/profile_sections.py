@@ -89,8 +89,8 @@ def list_profile_sections(
               ps.updated_at::text as updated_at, author.name as updated_by_name
             from entity_profile_section ps
             left join app_user author on author.id = ps.updated_by
-            where team_id = :team_id
-              and workspace_id = :workspace_id
+            where ps.team_id = :team_id
+              and ps.workspace_id = :workspace_id
               and ps.entity_type = :entity_type
               and ps.entity_id = :entity_id
               and ps.deleted_at is null
