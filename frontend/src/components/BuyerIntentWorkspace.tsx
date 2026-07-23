@@ -19,8 +19,9 @@ import type {
 } from '../types/api';
 import { valueLabel } from '../lib/fieldLabels';
 import UpdateHistory from './UpdateHistory';
+import ProgressPanel from '../features/relations/ProgressPanel';
 
-export type BuyerWorkspaceTab = 'intent' | 'buyer' | 'attachments' | 'followups' | 'history';
+export type BuyerWorkspaceTab = 'intent' | 'buyer' | 'progress' | 'attachments' | 'followups' | 'history';
 
 interface Props {
   intent: BuyerIntent;
@@ -37,6 +38,7 @@ interface Props {
 const TABS: Array<{ key: BuyerWorkspaceTab; label: string }> = [
   { key: 'intent', label: '需求信息' },
   { key: 'buyer', label: '买家资料' },
+  { key: 'progress', label: '推进' },
   { key: 'attachments', label: '附件与证据' },
   { key: 'followups', label: '跟进记录' },
   { key: 'history', label: '更新记录' },
@@ -81,6 +83,7 @@ export default function BuyerIntentWorkspace({
             <EmptyState title="当前需求未关联买家" description="可在买家管理中补充关联关系。" />
           )
         ) : null}
+        {activeTab === 'progress' ? <ProgressPanel side="buyer_intent" entityId={intent.id} /> : null}
         {activeTab === 'attachments' ? <IntentAttachments intentId={intent.id} /> : null}
         {activeTab === 'followups' ? <IntentFollowUps intentId={intent.id} items={followUps} onRefresh={onIntentRefresh} /> : null}
         {activeTab === 'history' ? (

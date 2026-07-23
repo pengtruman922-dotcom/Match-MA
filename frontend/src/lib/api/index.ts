@@ -54,6 +54,7 @@ import type {
   ExtractedAction,
   ExtractedActionCreate,
   RelationEvent,
+  RelationMeta,
   RecommendationCandidateRequest,
   RecommendationCandidateResponse,
   RecommendationMessage,
@@ -333,6 +334,11 @@ export const relations = {
   }) => apiRequest<RelationEvent[]>(`/relation-events${buildQuery(params || {})}`),
   exclusions: (params?: { buyer_intent_id?: string; seller_target_id?: string; active?: boolean; limit?: number; offset?: number }) =>
     apiRequest<BuyerIntentTargetExclusion[]>(`/buyer-intent-target-exclusions${buildQuery(params || {})}`),
+  meta: () => apiRequest<RelationMeta>('/relations-meta'),
+  updateStatus: (id: string, data: { status: string; status_reason?: string | null; next_step?: string | null }) =>
+    apiRequest<BuyerSellerRelation>(`/relations/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  createEvent: (id: string, data: { event_type: string; title?: string | null; content?: string | null; next_step?: string | null }) =>
+    apiRequest<RelationEvent>(`/relations/${id}/events`, { method: 'POST', body: JSON.stringify(data) }),
 };
 
 export const backgroundJobs = {

@@ -2,7 +2,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -16,6 +16,12 @@ from backend.app.api.routes.utils import (
 )
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
+from backend.app.services.relation_flow import (
+    RELATION_EVENT_TYPES,
+    RELATION_STATUSES,
+    change_relation_status,
+    record_relation_event,
+)
 
 router = APIRouter(tags=["relations"])
 
@@ -57,6 +63,24 @@ class RelationEventOut(BaseModel):
     seller_target_name: str | None
     metadata_json: dict[str, Any]
     created_at: str
+
+
+class RelationStatusUpdate(BaseModel):
+    status: str
+    status_reason: str | None = Field(default=None, max_length=1000)
+    next_step: str | None = Field(default=None, max_length=1000)
+
+
+class RelationEventCreate(BaseModel):
+    event_type: str
+    title: str | None = Field(default=None, max_length=200)
+    content: str | None = Field(default=None, max_length=4000)
+    next_step: str | None = Field(default=None, max_length=1000)
+
+
+class RelationMeta(BaseModel):
+    statuses: list[str]
+    event_types: list[str]
 
 
 class BuyerIntentTargetExclusionOut(BaseModel):
@@ -184,6 +208,63 @@ def list_relation_events(
         limit=limit,
         offset=offset,
     )
+
+
+@router.get("/relations-meta", response_model=RelationMeta)
+def get_relations_meta() -> dict[str, Any]:
+    return {"statuses": list(RELATION_STATUSES), "event_types": list(RELATION_EVENT_TYPES)}
+
+
+@router.patch("/relations/{relation_id}", response_model=BuyerSellerRelationOut)
+def update_relation_status(
+    relation_id: UUID,
+    payload: RelationStatusUpdate,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    ensure_relation_visible(db, current_user, relation_id)
+    change_relation_status(
+        db,
+        relation_id,
+        actor_user_id=current_user.user_id,
+        new_status=payload.status,
+        status_reason=payload.status_reason,
+        next_step=payload.next_step,
+    )
+    return get_relation(relation_id, current_user, db)
+
+
+@router.post("/relations/{relation_id}/events", response_model=RelationEventOut, status_code=201)
+def create_relation_event(
+    relation_id: UUID,
+    payload: RelationEventCreate,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    ensure_relation_visible(db, current_user, relation_id)
+    event_id = record_relation_event(
+        db,
+        relation_id,
+        actor_user_id=current_user.user_id,
+        event_type=payload.event_type,
+        title=payload.title,
+        content=payload.content,
+        next_step=payload.next_step,
+    )
+    row = db.execute(
+        text(
+            f"""
+            select {_event_select_columns()}
+            from relation_event e
+            join buyer_intent bi on bi.id = e.buyer_intent_id
+            join seller_target st on st.id = e.seller_target_id
+            left join buyer_party bp on bp.id = e.buyer_party_id
+            where e.id = :event_id
+            """
+        ),
+        {"event_id": event_id},
+    ).mappings().one()
+    return dict(row)
 
 
 @router.get("/relation-events", response_model=list[RelationEventOut])

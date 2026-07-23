@@ -1017,6 +1017,11 @@ export interface RelationEvent {
   created_at: string;
 }
 
+export interface RelationMeta {
+  statuses: string[];
+  event_types: string[];
+}
+
 export interface BuyerIntentTargetExclusion {
   id: string;
   buyer_intent_id: string;
