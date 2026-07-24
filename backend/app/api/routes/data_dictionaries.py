@@ -286,7 +286,8 @@ def _industry_term_select_sql(where_sql: str) -> str:
           case when tax.level = 'l1' then
             (select count(*) from seller_target st
              where st.team_id = tax.team_id and st.workspace_id = tax.workspace_id
-               and st.deleted_at is null and st.industry_l1 = tax.term)
+               and st.deleted_at is null
+               and st.industry_pairs_json @> jsonb_build_array(jsonb_build_object('l1', tax.term)))
             +
             (select count(*) from buyer_intent bi
              where bi.team_id = tax.team_id and bi.workspace_id = tax.workspace_id
@@ -294,7 +295,8 @@ def _industry_term_select_sql(where_sql: str) -> str:
           else
             (select count(*) from seller_target st
              where st.team_id = tax.team_id and st.workspace_id = tax.workspace_id
-               and st.deleted_at is null and st.industry_l2 = tax.term)
+               and st.deleted_at is null
+               and st.industry_pairs_json @> jsonb_build_array(jsonb_build_object('l2', tax.term)))
           end as usage_count
         from industry_taxonomy tax
         left join industry_taxonomy parent on parent.id = tax.parent_id

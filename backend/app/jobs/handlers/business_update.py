@@ -731,10 +731,15 @@ def _normalize_proposed_changes(
         # normalization candidates before the registry-derived whitelist drops
         # retired seller_target columns; originals remain in action evidence.
         candidate = dict(proposed_changes)
-        if "industry_l1" not in candidate and candidate.get("industry_primary"):
-            candidate["industry_l1"] = candidate["industry_primary"]
-        if "industry_l2" not in candidate and candidate.get("industry_secondary"):
-            candidate["industry_l2"] = candidate["industry_secondary"]
+        if "industry_pairs_json" not in candidate:
+            legacy_pair = {
+                "l1": candidate.get("industry_l1") or candidate.get("industry_primary"),
+                "l2": candidate.get("industry_l2") or candidate.get("industry_secondary"),
+            }
+            if legacy_pair["l1"] or legacy_pair["l2"]:
+                candidate["industry_pairs_json"] = [legacy_pair]
+        candidate.pop("industry_l1", None)
+        candidate.pop("industry_l2", None)
         if "location_province" not in candidate:
             legacy_province = candidate.get("headquarter_province") or candidate.get("registered_province")
             if legacy_province:
@@ -1318,36 +1323,28 @@ def _persist_document_profile_sections(
 
 
 def _document_profile_sections_for_action(action: dict[str, Any]) -> list[dict[str, Any]]:
-    """Use the parser's constrained business summary for business_product.
+    """Keep per-group ``其他`` genuinely supplementary.
 
-    The model sometimes duplicates a ranking claim into both business_product
-    and chain_position. ``business_summary`` already has stricter instructions
-    (what the company sells, to whom, with deal/finance/risk excluded), making
-    it the more reliable source for the first profile dimension.
+    ``business_summary`` is a structured target field. It must never be copied
+    into the business/product supplement just to make that block non-empty.
+    Old prompts can still emit the same text twice, so remove an exact
+    whitespace-insensitive duplicate before the profile writer persists it.
     """
     sections = [dict(item) for item in (action.get("profile_sections") or [])]
     business_summary = str(
         (action.get("proposed_changes_json") or {}).get("business_summary") or ""
     ).strip()
-    if not _business_summary_profile_worthy(business_summary):
-        return sections
     current = next(
         (item for item in sections if item.get("section_code") == "business_product"),
         None,
     )
-    if current is None:
-        sections.insert(
-            0,
-            {
-                "section_code": "business_product",
-                "content_text": business_summary[:2000],
-                "source_excerpt": None,
-                "as_of_date": None,
-            },
-        )
-    else:
-        current["content_text"] = business_summary[:2000]
+    if current is not None and _same_profile_text(current.get("content_text"), business_summary):
+        sections.remove(current)
     return sections
+
+
+def _same_profile_text(left: Any, right: Any) -> bool:
+    return re.sub(r"\s+", "", str(left or "")) == re.sub(r"\s+", "", str(right or ""))
 
 
 def _business_summary_profile_worthy(summary: str) -> bool:

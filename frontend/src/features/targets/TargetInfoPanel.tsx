@@ -9,11 +9,12 @@ import {
   Search,
   X,
 } from 'lucide-react';
-import { backgroundJobs, fieldSources, indicatorRegistry, profileSections, research, sellerTargets } from '../../lib/api';
+import { areaList } from '@vant/area-data';
+import { backgroundJobs, fieldSources, indicatorRegistry, meta, profileSections, research, sellerTargets } from '../../lib/api';
 import { formatYuan } from '../../lib/format';
-import { sourceTypeLabel } from '../../lib/fieldLabels';
 import type {
   IndicatorRegistryResponse,
+  IndustryOptionsResponse,
   FieldValueSource,
   ProfileSection,
   ProfileSectionsResponse,
@@ -46,11 +47,12 @@ export default function TargetInfoPanel({ target }: { target: SellerTarget }) {
   const [error, setError] = useState<string | null>(null);
   const [registry, setRegistry] = useState<IndicatorRegistryResponse | null>(null);
   const [sources, setSources] = useState<FieldValueSource[]>([]);
+  const [industryOptions, setIndustryOptions] = useState<IndustryOptionsResponse>({ l1: [], l2: [] });
 
   const groups = useMemo(
     () =>
       registry
-        ? buildInfoGroups(target, registry, {
+        ? buildInfoGroups(currentTarget, registry, {
             formatYuan: (value) => formatYuan(value as string),
             formatListedStatus,
             formatTransferRatio,
@@ -65,16 +67,18 @@ export default function TargetInfoPanel({ target }: { target: SellerTarget }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [profileData, proposalData, registryData, sourceData] = await Promise.all([
+      const [profileData, proposalData, registryData, sourceData, industryData] = await Promise.all([
         profileSections.list('seller_target', currentTarget.id),
         research.proposals(currentTarget.id, 'pending_review'),
         indicatorRegistry.list('seller_target'),
         fieldSources.list({ entity_type: 'seller_target', entity_id: currentTarget.id, limit: 200 }),
+        meta.industryOptions(),
       ]);
       setData(profileData);
       setProposals(proposalData);
       setRegistry(registryData);
       setSources(sourceData);
+      setIndustryOptions(industryData);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载标的信息失败');
@@ -138,10 +142,10 @@ export default function TargetInfoPanel({ target }: { target: SellerTarget }) {
     }
   };
 
-  const saveField = async (field: string, value: unknown) => {
+  const saveFields = async (changes: Record<string, unknown>) => {
     setSaving(true);
     try {
-      const updated = await sellerTargets.updateFields(currentTarget.id, { [field]: value });
+      const updated = await sellerTargets.updateFields(currentTarget.id, changes);
       setCurrentTarget(updated);
       setEditing(null);
       setDraft('');
@@ -152,6 +156,8 @@ export default function TargetInfoPanel({ target }: { target: SellerTarget }) {
       setSaving(false);
     }
   };
+
+  const saveField = (field: string, value: unknown) => saveFields({ [field]: value });
 
   const startResearch = async () => {
     setResearching(true);
@@ -258,12 +264,26 @@ export default function TargetInfoPanel({ target }: { target: SellerTarget }) {
               <div className="border-t border-gray-100 px-4 py-3">
                 {group.fields.length > 0 && (
                   <div className="grid grid-cols-1 gap-x-8 gap-y-2 sm:grid-cols-2">
-                    {group.fields.map((field) => <StructuredField
-                      key={field.field} field={field} editing={editing === `field:${field.field}`} draft={draft} saving={saving}
-                      source={sourceByField.get(field.field)}
-                      onStart={() => { setEditing(`field:${field.field}`); setDraft(String((currentTarget as unknown as Record<string, unknown>)[field.field] ?? '')); }}
-                      onCancel={() => setEditing(null)} onDraft={setDraft} onSave={(value) => saveField(field.field, value)}
-                    />)}
+                    {group.fields.map((field) => {
+                      const shared = {
+                        field,
+                        editing: editing === `field:${field.field}`,
+                        saving,
+                        source: sourceByField.get(field.field),
+                        onStart: () => { setEditing(`field:${field.field}`); setDraft(String((currentTarget as unknown as Record<string, unknown>)[field.field] ?? '')); },
+                        onCancel: () => setEditing(null),
+                      };
+                      if (field.field === 'industry_pairs_json') {
+                        return <IndustryPairsField key={field.field} {...shared} pairs={currentTarget.industry_pairs_json || []} options={industryOptions} onSave={(value) => saveField(field.field, value)} />;
+                      }
+                      if (field.field === 'location_province') {
+                        return <LocationField key={field.field} {...shared} target={currentTarget} onSave={saveFields} />;
+                      }
+                      return <StructuredField
+                        key={field.field} {...shared} draft={draft}
+                        onDraft={setDraft} onSave={(value) => saveField(field.field, value)}
+                      />;
+                    })}
                   </div>
                 )}
                 {group.sectionCode && (
@@ -311,9 +331,131 @@ function StructuredField({ field, editing, draft, saving, source, onStart, onCan
           : <input type={field.kind === 'yuan' || field.kind === 'ratio' ? 'number' : 'text'} value={draft} onChange={(event) => onDraft(event.target.value)} className="min-w-0 flex-1 border border-gray-200 px-1 text-xs" />}
         <button type="button" disabled={saving} onClick={() => void save()} className="text-brand-600"><Check className="h-3.5 w-3.5" /></button><button type="button" onClick={onCancel} className="text-gray-400"><X className="h-3.5 w-3.5" /></button>
       </div> : <button type="button" disabled={!field.writable} onClick={onStart} className={`group flex w-full items-center justify-between text-left text-sm ${field.value ? 'text-gray-800' : 'text-gray-300'} ${field.writable ? 'hover:text-brand-600' : ''}`}><span>{field.value || '-'}</span>{field.writable && <Pencil className="h-3 w-3 opacity-0 group-hover:opacity-100" />}</button>}
-      {!editing && source && <p className="mt-0.5 text-[10px] text-gray-400">来源：{source.source_label || source.source_type || '-'}{source.created_by_name && ` · ${source.created_by_name}`}{source.created_at && ` · ${formatSourceTime(source.created_at)}`}</p>}
+      {!editing && source && <p className="mt-0.5 text-[10px] text-gray-400">来源：{fieldSourceLabel(source)}{source.created_by_name && ` · ${source.created_by_name}`}{source.created_at && ` · ${formatSourceTime(source.created_at)}`}</p>}
     </div>
   </div>;
+}
+
+type SpecialFieldProps = {
+  field: InfoGroup['fields'][number];
+  editing: boolean;
+  saving: boolean;
+  source?: FieldValueSource;
+  onStart: () => void;
+  onCancel: () => void;
+};
+
+function FieldCaption({ source }: { source?: FieldValueSource }) {
+  if (!source) return null;
+  return <p className="mt-0.5 text-[10px] text-gray-400">来源：{fieldSourceLabel(source)}{source.created_by_name && ` · ${source.created_by_name}`}{source.created_at && ` · ${formatSourceTime(source.created_at)}`}</p>;
+}
+
+function FieldLabel({ field }: { field: InfoGroup['fields'][number] }) {
+  return <span className="flex w-28 shrink-0 items-center gap-1 pt-1 text-xs text-gray-500">{field.label}{field.screening && <span title="参与筛选与打分" className="bg-brand-50 px-1 text-[10px] font-medium text-brand-700">筛</span>}</span>;
+}
+
+function IndustryPairsField({ field, editing, saving, source, onStart, onCancel, pairs, options, onSave }: SpecialFieldProps & {
+  pairs: Array<{ l1: string; l2?: string }>;
+  options: IndustryOptionsResponse;
+  onSave: (value: Array<{ l1: string; l2?: string }>) => Promise<void>;
+}) {
+  const [draftPairs, setDraftPairs] = useState<Array<{ l1: string; l2?: string }>>(pairs);
+  const [l1Query, setL1Query] = useState('');
+  const [l2Query, setL2Query] = useState('');
+  const [l2Scope, setL2Scope] = useState('selected');
+
+  useEffect(() => {
+    if (editing) {
+      setDraftPairs(pairs);
+      setL1Query('');
+      setL2Query('');
+      setL2Scope('selected');
+    }
+  }, [editing, pairs]);
+
+  const selectedL1 = [...new Set(draftPairs.map((pair) => pair.l1))];
+  const visibleL1 = options.l1.filter(({ term }) => term.includes(l1Query.trim()));
+  const scopedL2 = options.l2.filter(({ l1, term }) => {
+    const inScope = l2Scope === 'all' || (l2Scope === 'selected' ? selectedL1.includes(l1) : l1 === l2Scope);
+    return inScope && term.includes(l2Query.trim());
+  });
+  const toggleL1 = (l1: string) => setDraftPairs((current) => (
+    current.some((pair) => pair.l1 === l1)
+      ? current.filter((pair) => pair.l1 !== l1)
+      : [...current, { l1 }]
+  ));
+  const toggleL2 = (l1: string, l2: string) => setDraftPairs((current) => (
+    current.some((pair) => pair.l1 === l1 && pair.l2 === l2)
+      ? current.filter((pair) => !(pair.l1 === l1 && pair.l2 === l2))
+      : [...current, { l1, l2 }]
+  ));
+  const display = pairs.map((pair) => [pair.l1, pair.l2].filter(Boolean).join(' / ')).join('；');
+
+  return <div className="flex items-start gap-2 sm:col-span-2">
+    <FieldLabel field={field} />
+    <div className="min-w-0 flex-1">
+      {editing ? <div className="space-y-2 border border-gray-200 bg-gray-50 p-2">
+        <div>
+          <div className="mb-1 flex items-center gap-2 text-xs text-gray-600"><span className="font-medium">一级行业（可多选）</span><input value={l1Query} onChange={(event) => setL1Query(event.target.value)} placeholder="搜索" className="min-w-0 border border-gray-200 bg-white px-1.5 py-0.5 text-xs" /></div>
+          <div className="grid grid-cols-2 gap-x-3 gap-y-1 sm:grid-cols-3">
+            {visibleL1.map(({ term }) => <label key={term} className="flex min-w-0 items-center gap-1 text-xs text-gray-700"><input type="checkbox" checked={selectedL1.includes(term)} onChange={() => toggleL1(term)} /> <span className="truncate">{term}</span></label>)}
+          </div>
+        </div>
+        <div className="border-t border-gray-200 pt-2">
+          <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-gray-600"><span className="font-medium">二级行业（可多选）</span><select value={l2Scope} onChange={(event) => setL2Scope(event.target.value)} className="border border-gray-200 bg-white px-1 py-0.5 text-xs"><option value="selected">已选一级行业</option><option value="all">全部一级行业</option>{selectedL1.map((l1) => <option key={l1} value={l1}>{l1}</option>)}</select><input value={l2Query} onChange={(event) => setL2Query(event.target.value)} placeholder="搜索" className="min-w-0 border border-gray-200 bg-white px-1.5 py-0.5 text-xs" /></div>
+          {selectedL1.length === 0 && l2Scope === 'selected' ? <p className="text-xs text-gray-400">先选择一级行业，或切换为“全部一级行业”。</p> : <div className="max-h-32 overflow-y-auto space-y-1"><div className="grid grid-cols-1 gap-x-3 gap-y-1 sm:grid-cols-2">{scopedL2.map(({ term, l1 }) => <label key={`${l1}:${term}`} className="flex min-w-0 items-center gap-1 text-xs text-gray-700"><input type="checkbox" checked={draftPairs.some((pair) => pair.l1 === l1 && pair.l2 === term)} onChange={() => toggleL2(l1, term)} /> <span className="truncate">{term}</span><span className="ml-auto shrink-0 text-[10px] text-gray-400">{l1}</span></label>)}</div></div>}
+        </div>
+        <div className="flex items-center gap-2"><button type="button" disabled={saving} onClick={() => void onSave(draftPairs)} className="inline-flex items-center gap-1 bg-brand-600 px-2.5 py-1 text-xs text-white disabled:opacity-40"><Check className="h-3 w-3" />保存</button><button type="button" onClick={onCancel} className="text-xs text-gray-400 hover:text-gray-600">取消</button></div>
+      </div> : <><button type="button" disabled={!field.writable} onClick={onStart} className={`group flex w-full items-center justify-between text-left text-sm ${display ? 'text-gray-800' : 'text-gray-300'} ${field.writable ? 'hover:text-brand-600' : ''}`}><span>{display || '-'}</span>{field.writable && <Pencil className="h-3 w-3 opacity-0 group-hover:opacity-100" />}</button><FieldCaption source={source} /></>}
+    </div>
+  </div>;
+}
+
+const areaEntries = {
+  province: Object.entries(areaList.province_list),
+  city: Object.entries(areaList.city_list),
+  district: Object.entries(areaList.county_list),
+};
+
+function areaCode(entries: Array<[string, string]>, name: string | null): string {
+  return entries.find(([, label]) => label === name)?.[0] || '';
+}
+
+function LocationField({ field, editing, saving, source, onStart, onCancel, target, onSave }: SpecialFieldProps & {
+  target: SellerTarget;
+  onSave: (changes: Record<string, unknown>) => Promise<void>;
+}) {
+  const [province, setProvince] = useState(target.location_province || '');
+  const [city, setCity] = useState(target.location_city || '');
+  const [district, setDistrict] = useState(target.location_district || '');
+  const provinceCode = areaCode(areaEntries.province, province);
+  const cityCode = areaCode(areaEntries.city, city);
+  const cityOptions = areaEntries.city.filter(([code]) => !provinceCode || code.slice(0, 2) === provinceCode.slice(0, 2));
+  const districtOptions = areaEntries.district.filter(([code]) => !cityCode || code.slice(0, 4) === cityCode.slice(0, 4));
+
+  useEffect(() => {
+    if (editing) {
+      setProvince(target.location_province || '');
+      setCity(target.location_city || '');
+      setDistrict(target.location_district || '');
+    }
+  }, [editing, target.location_city, target.location_district, target.location_province]);
+
+  const display = [target.location_province, target.location_city, target.location_district].filter(Boolean).join(' / ');
+  return <div className="flex items-start gap-2">
+    <FieldLabel field={field} />
+    <div className="min-w-0 flex-1">
+      {editing ? <div className="space-y-2 border border-gray-200 bg-gray-50 p-2"><div className="grid grid-cols-1 gap-1 sm:grid-cols-3"><select value={province} onChange={(event) => { setProvince(event.target.value); setCity(''); setDistrict(''); }} className="border border-gray-200 bg-white px-1.5 py-1 text-xs"><option value="">省（可不填）</option>{areaEntries.province.map(([code, name]) => <option key={code} value={name}>{name}</option>)}</select><select value={city} onChange={(event) => { setCity(event.target.value); setDistrict(''); }} disabled={!province} className="border border-gray-200 bg-white px-1.5 py-1 text-xs disabled:bg-gray-100"><option value="">市（可不填）</option>{cityOptions.map(([code, name]) => <option key={code} value={name}>{name}</option>)}</select><select value={district} onChange={(event) => setDistrict(event.target.value)} disabled={!city} className="border border-gray-200 bg-white px-1.5 py-1 text-xs disabled:bg-gray-100"><option value="">区/县（可不填）</option>{districtOptions.map(([code, name]) => <option key={code} value={name}>{name}</option>)}</select></div><p className="text-[10px] text-gray-400">变更上级会自动清空下级；筛选仍按省、市、区三个字段命中。</p><div className="flex items-center gap-2"><button type="button" disabled={saving} onClick={() => void onSave({ location_province: province || null, location_city: city || null, location_district: district || null })} className="inline-flex items-center gap-1 bg-brand-600 px-2.5 py-1 text-xs text-white disabled:opacity-40"><Check className="h-3 w-3" />保存</button><button type="button" onClick={onCancel} className="text-xs text-gray-400 hover:text-gray-600">取消</button></div></div> : <><button type="button" disabled={!field.writable} onClick={onStart} className={`group flex w-full items-center justify-between text-left text-sm ${display ? 'text-gray-800' : 'text-gray-300'} ${field.writable ? 'hover:text-brand-600' : ''}`}><span>{display || '-'}</span>{field.writable && <Pencil className="h-3 w-3 opacity-0 group-hover:opacity-100" />}</button><FieldCaption source={source} /></>}
+    </div>
+  </div>;
+}
+
+function fieldSourceLabel(source: FieldValueSource): string {
+  if (['direct_api', 'manual', 'manual_edit'].includes(source.source_type || '')) return '手动编辑';
+  if (source.source_type === 'research_proposal') return '公开信息调研';
+  if (['update_log_rollback', 'rollback'].includes(source.source_type || '')) return '更新回滚';
+  if (source.evidence_span?.attachment_id) return '文字+附件更新';
+  return '文字更新';
 }
 
 function ProfileBlock({
@@ -393,10 +535,10 @@ function ProfileBlock({
                   rel="noreferrer"
                   className="hover:text-brand-600 hover:underline"
                 >
-                  {section.source_title || sourceTypeLabel(section.source_type)}
+                  {profileSourceLabel(section.source_type)}
                 </a>
               ) : (
-                section.source_title || sourceTypeLabel(section.source_type)
+                profileSourceLabel(section.source_type)
               )}
               {section.as_of_date && ` · 截至 ${section.as_of_date}`}
               {section.updated_by_name && ` · ${section.updated_by_name}`}
@@ -407,6 +549,13 @@ function ProfileBlock({
       )}
     </div>
   );
+}
+
+function profileSourceLabel(sourceType: string | null): string {
+  if (['manual_edit', 'manual', 'direct_api'].includes(sourceType || '')) return '手动编辑';
+  if (sourceType === 'research_proposal') return '公开信息调研';
+  if (['rollback', 'update_log_rollback'].includes(sourceType || '')) return '更新回滚';
+  return '文字更新';
 }
 
 function ProposalCard({

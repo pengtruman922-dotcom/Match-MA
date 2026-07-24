@@ -82,7 +82,10 @@ def _search_seller_targets(db: Session, params: dict[str, Any], current_user: An
               'seller_target' as entity_type,
               id::text as entity_id,
               target_name as title,
-              nullif(concat_ws(' · ', industry_l1, industry_l2, location_province, location_city, location_district), '') as subtitle,
+              nullif(concat_ws(' · ',
+                (select string_agg(concat_ws(' / ', pair ->> 'l1', pair ->> 'l2'), '；')
+                 from jsonb_array_elements(industry_pairs_json) pair),
+                location_province, location_city, location_district), '') as subtitle,
               business_summary as snippet,
               '/targets/' || id::text as route,
               updated_at::text as updated_at,
@@ -95,6 +98,7 @@ def _search_seller_targets(db: Session, params: dict[str, Any], current_user: An
               jsonb_build_object(
                 'industry_l1', industry_l1,
                 'industry_l2', industry_l2,
+                'industry_pairs_json', industry_pairs_json,
                 'location_province', location_province,
                 'location_city', location_city,
                 'location_district', location_district,
@@ -108,8 +112,7 @@ def _search_seller_targets(db: Session, params: dict[str, Any], current_user: An
               and (
                 target_name ilike :q
                 or coalesce(business_summary, '') ilike :q
-                or coalesce(industry_l1, '') ilike :q
-                or coalesce(industry_l2, '') ilike :q
+                or industry_pairs_json::text ilike :q
                 or coalesce(location_province, '') ilike :q
                 or coalesce(location_city, '') ilike :q
                 or coalesce(location_district, '') ilike :q

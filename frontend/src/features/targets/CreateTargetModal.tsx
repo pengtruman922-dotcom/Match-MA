@@ -151,6 +151,7 @@ export default function CreateTargetModal({ onClose, onCreated }: { onClose: () 
         recommendation_status: 'not_recommendable',
         information_status: shouldParse ? 'parsing' : 'normal',
         industry_l1: normalizeOptional(form.industry),
+        industry_pairs_json: normalizeOptional(form.industry) ? [{ l1: normalizeOptional(form.industry)! }] : [],
         location_province: region.province,
         location_city: region.city,
         asking_price_yuan: askingPriceYuan,

@@ -150,6 +150,54 @@ def normalize_l2_values(db: Session, values: Any) -> tuple[list[str], list[str]]
     return normalized, notes
 
 
+def normalize_industry_pairs(db: Session, values: Any) -> tuple[list[dict[str, str]], list[str]]:
+    """Canonicalize a target's industry pairs without losing L2 parentage.
+
+    A target can span several L1 categories and several L2 tracks. Keeping
+    two independent arrays makes an L2's parent unknowable, so the canonical
+    value is an ordered, de-duplicated list of ``{"l1": ..., "l2": ...}``
+    objects. A pair is also allowed to contain L1 only.
+    """
+    if not isinstance(values, list):
+        return [], ["industry_pairs:not_a_list"]
+
+    normalized: list[dict[str, str]] = []
+    notes: list[str] = []
+    for index, value in enumerate(values):
+        if isinstance(value, dict):
+            raw_l1 = value.get("l1") or value.get("industry_l1")
+            raw_l2 = value.get("l2") or value.get("industry_l2")
+        else:
+            # A legacy list of terms is accepted as an L1/L2 candidate so old
+            # prompt versions can be recovered without persisting raw terms.
+            raw_l1 = value
+            raw_l2 = value
+        l1 = resolve_l1(db, raw_l1) if raw_l1 else None
+        resolved_l2, l2_notes = normalize_l2_values(db, [raw_l2]) if raw_l2 else ([], [])
+        l2 = resolved_l2[0] if resolved_l2 else None
+        if raw_l1 and l1 is None and not l2:
+            notes.append(f"industry_pairs[{index}]:l1_unmapped:{str(raw_l1)[:50]}")
+        if raw_l2 and not l2 and not l1:
+            notes.append(f"industry_pairs[{index}]:l2_unmapped:{str(raw_l2)[:50]}")
+        if l2:
+            l2_l1 = resolve_l1(db, l2)
+            if not l2_l1:
+                notes.append(f"industry_pairs[{index}]:l2_missing_parent:{l2[:50]}")
+                l2 = None
+            else:
+                if l1 and l1 != l2_l1:
+                    notes.append(f"industry_pairs[{index}]:l2_parent_overrode_l1")
+                l1 = l2_l1
+        if not l1:
+            continue
+        pair: dict[str, str] = {"l1": l1}
+        if l2:
+            pair["l2"] = l2
+        if pair not in normalized:
+            normalized.append(pair)
+    return normalized, notes
+
+
 def load_term_levels(db: Session) -> dict[str, tuple[str, str]]:
     """Map every dictionary term to ``(level, l1_name)`` in one query.
 

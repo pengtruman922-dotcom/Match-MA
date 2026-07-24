@@ -9,6 +9,7 @@ const SELLER_TARGET_FIELD_LABELS: Record<string, string> = {
   information_status: '信息状态',
   industry_l1: '行业大类',
   industry_l2: '细分赛道',
+  industry_pairs_json: '所属行业',
   location_province: '所在省',
   location_city: '所在市',
   location_district: '所在区',

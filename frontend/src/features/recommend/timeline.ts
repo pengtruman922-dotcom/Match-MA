@@ -138,6 +138,13 @@ function messageType(message: RecommendationMessage, content: Record<string, unk
 export function buildTimeline(bundle: RecommendationSessionBundle): TimelineEntry[] {
   const entries: TimelineEntry[] = [];
   const selectedItems = bundle.selected_items || [];
+  // Candidate messages are an immutable historical snapshot.  Relation state
+  // is intentionally recomputed by the server every time the bundle is read:
+  // someone can start progress after this message was written.  Overlay the
+  // current annotation before rendering so a successful “开始推进” never flips
+  // back to “开始推进” on the next polling refresh.
+  const annotatedInitial = candidatesByPair(bundle.initial_candidates || []);
+  const annotatedReranked = candidatesByPair(bundle.reranked_candidates || []);
 
   for (const message of bundle.messages || []) {
     if (message.role === 'user' && message.content_type === 'text') {
@@ -153,7 +160,14 @@ export function buildTimeline(bundle: RecommendationSessionBundle): TimelineEntr
       const type = messageType(message, content);
       const rawCandidates = Array.isArray(content?.candidates) ? (content?.candidates as RecommendationCandidate[]) : null;
       if (!rawCandidates) continue;
-      const candidates = applySelection(rawCandidates.map(mapCandidate), selectedItems);
+      const annotations = type === 'reranked_candidates' ? annotatedReranked : annotatedInitial;
+      const candidates = applySelection(
+        rawCandidates.map((candidate) => mapCandidate(annotations.get(candidatePairKey(
+          candidate.seller_target_id,
+          candidate.buyer_intent_id,
+        )) || candidate)),
+        selectedItems,
+      );
       if (type === 'reranked_candidates') {
         const lastRound = [...entries].reverse().find((entry) => entry.kind === 'round');
         if (lastRound && lastRound.kind === 'round') {
@@ -190,6 +204,13 @@ export function buildTimeline(bundle: RecommendationSessionBundle): TimelineEntr
     }
   }
   return entries;
+}
+
+function candidatesByPair(candidates: RecommendationCandidate[]): Map<string, RecommendationCandidate> {
+  return new Map(candidates.map((candidate) => [
+    candidatePairKey(candidate.seller_target_id, candidate.buyer_intent_id),
+    candidate,
+  ]));
 }
 
 export function latestRoundEntry(entries: TimelineEntry[]): Extract<TimelineEntry, { kind: 'round' }> | null {

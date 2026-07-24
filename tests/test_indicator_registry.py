@@ -16,6 +16,7 @@ from backend.app.jobs.handlers.common import (
     BUYER_INTENT_ENUM_FIELDS,
     SELLER_TARGET_CHANGE_FIELDS,
     SELLER_TARGET_ENUM_FIELDS,
+    SELLER_TARGET_SYSTEM_FACT_FIELDS,
 )
 from backend.app.registry.indicators import (
     BUYER_INTENT_INDICATORS,
@@ -32,11 +33,12 @@ REPO = Path(__file__).resolve().parents[1]
 RECOMMENDATION_FLOW = REPO / "backend/app/services/recommendation_flow.py"
 BASELINE = REPO / "database/migrations/001_baseline.sql"
 R4A_MIGRATION = REPO / "database/migrations/002_target_information_model.sql"
+R5_MIGRATION = REPO / "database/migrations/004_information_refinement.sql"
 
 
 def test_consumers_derive_from_the_registry() -> None:
     # 白名单已改为派生，这里确认「派生」这条线没被谁悄悄改回硬列表。
-    assert SELLER_TARGET_CHANGE_FIELDS == writable_columns("parse")
+    assert SELLER_TARGET_CHANGE_FIELDS == writable_columns("parse") | SELLER_TARGET_SYSTEM_FACT_FIELDS
     assert set(RESEARCH_STRUCTURED_FIELDS) == writable_columns("research")
     assert SELLER_TARGET_ENUM_FIELDS == writable_enum_values()
     assert BUYER_INTENT_CHANGE_FIELDS == writable_columns("parse", "buyer_intent")
@@ -110,11 +112,15 @@ def test_every_indicator_is_a_real_seller_target_column() -> None:
     columns = set(re.findall(r"^\s+([a-z_0-9]+)\s", body.group(1), re.M))
     missing = {ind.column for ind in SELLER_TARGET_INDICATORS} - columns
     migration_sql = R4A_MIGRATION.read_text(encoding="utf-8")
-    assert missing <= {"location_province", "location_city", "location_district"}, (
+    refinement_sql = R5_MIGRATION.read_text(encoding="utf-8")
+    assert missing <= {"location_province", "location_city", "location_district", "industry_pairs_json"}, (
         f"注册表引用了 seller_target 不存在的列：{sorted(missing)}"
     )
     for column in missing:
-        assert f"add column {column} text" in migration_sql
+        if column == "industry_pairs_json":
+            assert f"add column {column} jsonb" in refinement_sql
+        else:
+            assert f"add column {column} text" in migration_sql
     for retired in ("industry_primary", "industry_secondary", "registered_province", "registered_city", "headquarter_province", "headquarter_city", "raw_region_text", "region_granularity"):
         assert f"drop column {retired}" in migration_sql
 

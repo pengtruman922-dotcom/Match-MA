@@ -52,6 +52,12 @@ function formatValue(indicator: IndicatorMeta, target: SellerTarget, helpers: In
       return text(target.transfer_ratio_text) || helpers.formatTransferRatio(target);
     case 'pe_ratio':
       return target.pe_ratio ? Number(target.pe_ratio).toFixed(1) : null;
+    case 'location_province':
+      return [target.location_province, target.location_city, target.location_district].filter(Boolean).join(' / ') || null;
+    case 'industry_pairs_json': {
+      const pairs = Array.isArray(target.industry_pairs_json) ? target.industry_pairs_json : [];
+      return pairs.map((pair) => [pair.l1, pair.l2].filter(Boolean).join(' / ')).join('；') || null;
+    }
     default:
       break;
   }
@@ -59,6 +65,10 @@ function formatValue(indicator: IndicatorMeta, target: SellerTarget, helpers: In
     case 'yuan':
       return raw ? helpers.formatYuan(String(raw)) : null;
     case 'enum':
+      // `unknown` is a stored, intentional state.  It remains distinct from
+      // NULL for scoring and audit, but the information page presents both as
+      // the agreed neutral placeholder rather than exposing "未知" selectively.
+      if (raw === 'unknown') return null;
       return indicator.enum_options.find((option) => option.value === raw)?.label || text(raw);
     default:
       return text(raw);

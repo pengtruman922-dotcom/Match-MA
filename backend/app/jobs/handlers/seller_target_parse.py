@@ -16,6 +16,7 @@ from backend.app.services.field_writer import WriteProvenance, write_seller_targ
 from backend.app.services.industry_taxonomy import (
     industry_l1_prompt_list,
     industry_l2_prompt_list,
+    normalize_industry_pairs,
     normalize_l2_values,
     resolve_l1,
 )
@@ -171,7 +172,7 @@ def _get_seller_target_for_parse(db: Session, seller_target_id: UUID) -> dict[st
             """
             select
               id, target_name, target_type, target_subject_name, recommendation_status, information_status,
-              industry_l1, industry_l2, location_province, location_city,
+              industry_l1, industry_l2, industry_pairs_json, location_province, location_city,
               location_district, listed_status,
               market_cap_yuan, current_revenue_yuan, current_net_profit_yuan,
               current_total_profit_yuan, current_assets_yuan, current_debt_ratio,
@@ -300,6 +301,17 @@ def _normalize_seller_target_parse_changes(
         legacy_city = candidate.get("headquarter_city") or candidate.get("registered_city")
         if legacy_city:
             candidate["location_city"] = legacy_city
+    if "industry_pairs_json" not in candidate:
+        legacy_pair = {
+            "l1": candidate.get("industry_l1") or candidate.get("industry_primary"),
+            "l2": candidate.get("industry_l2") or candidate.get("industry_secondary"),
+        }
+        if legacy_pair["l1"] or legacy_pair["l2"]:
+            candidate["industry_pairs_json"] = [legacy_pair]
+    # They are normalization inputs only. The canonical writer receives the
+    # paired representation so L2 parentage can never be lost.
+    candidate.pop("industry_l1", None)
+    candidate.pop("industry_l2", None)
 
     notes: list[str] = []
     changes: dict[str, Any] = {}
@@ -320,6 +332,9 @@ def _normalize_seller_target_parse_changes(
             continue
         if key in SELLER_TARGET_PARSE_ENUM_FIELDS:
             changes[key] = _normalize_allowed_enum(value, SELLER_TARGET_PARSE_ENUM_FIELDS[key])
+            continue
+        if key == "industry_pairs_json":
+            changes[key] = value
             continue
         text_value = str(value).strip() if value is not None else None
         if text_value and key in SELLER_TARGET_TEXT_LIMITS:
@@ -383,47 +398,22 @@ def _normalize_seller_target_industry_changes(
     changes: dict[str, Any],
     parsed_output_json: dict[str, Any] | None = None,
 ) -> list[str]:
-    """Validate industry_l1/l2 against the dictionary.
-
-    Legacy parser output may still contain raw industry labels. They are used
-    only as short-lived normalization candidates and are never written to the
-    seller_target table.
-    """
-    notes: list[str] = []
-    value = changes.get("industry_l1")
-    l1_name = resolve_l1(db, value) if value else None
-    if value and l1_name is None:
-        notes.append(f"industry_l1_unmapped:{str(value)[:50]}")
+    """Normalize current and legacy parser outputs into canonical pairs."""
     raw_fields = (parsed_output_json or {}).get("fields", parsed_output_json or {})
     raw_fields = raw_fields if isinstance(raw_fields, dict) else {}
-    legacy_l1 = raw_fields.get("industry_primary")
-    legacy_l2 = raw_fields.get("industry_secondary")
-    if l1_name is None and legacy_l1:
-        l1_name = resolve_l1(db, legacy_l1)
-    if l1_name:
-        changes["industry_l1"] = l1_name
+    values = changes.get("industry_pairs_json")
+    if not values:
+        values = [{
+            "l1": raw_fields.get("industry_l1") or raw_fields.get("industry_primary"),
+            "l2": raw_fields.get("industry_l2") or raw_fields.get("industry_secondary"),
+        }]
+    pairs, notes = normalize_industry_pairs(db, values)
+    if pairs:
+        changes["industry_pairs_json"] = pairs
     else:
-        changes.pop("industry_l1", None)
-
-    l2_candidates = [
-        changes.get("industry_l2"),
-        legacy_l2,
-        legacy_l1,
-    ]
-    l2_name = None
-    for candidate in l2_candidates:
-        if not candidate:
-            continue
-        resolved, _ = normalize_l2_values(db, [candidate])
-        if resolved:
-            l2_name = resolved[0]
-            break
-    if l2_name:
-        changes["industry_l2"] = l2_name
-    else:
-        if changes.get("industry_l2"):
-            notes.append(f"industry_l2_unmapped:{str(changes['industry_l2'])[:50]}")
-        changes.pop("industry_l2", None)
+        changes.pop("industry_pairs_json", None)
+    changes.pop("industry_l1", None)
+    changes.pop("industry_l2", None)
     return notes
 
 def _mark_seller_target_parse_failed_if_final_attempt(

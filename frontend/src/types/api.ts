@@ -9,6 +9,7 @@ export interface SellerTarget {
   // L1/L2 是唯一展示与筛选行业维度；原始表述保存在更新/证据审计中。
   industry_l1: string | null;
   industry_l2: string | null;
+  industry_pairs_json: Array<{ l1: string; l2?: string }>;
   location_province: string | null;
   location_city: string | null;
   location_district: string | null;
@@ -131,6 +132,7 @@ export interface SellerTargetCreate {
   information_status?: string;
   industry_l1?: string;
   industry_l2?: string;
+  industry_pairs_json?: Array<{ l1: string; l2?: string }>;
   location_province?: string;
   location_city?: string;
   location_district?: string;
@@ -157,6 +159,7 @@ export interface SellerTargetUpdate {
   information_status?: string;
   industry_l1?: string;
   industry_l2?: string;
+  industry_pairs_json?: Array<{ l1: string; l2?: string }>;
   location_province?: string;
   location_city?: string;
   location_district?: string;
@@ -986,6 +989,10 @@ export interface BuyerSellerRelation {
   last_contact_at: string | null;
   last_event_at: string | null;
   last_event_summary: string | null;
+  last_event_type: string | null;
+  last_event_content: string | null;
+  last_event_next_step: string | null;
+  deep_progress_elsewhere: boolean;
   buyer_intent_name: string | null;
   buyer_name: string | null;
   seller_target_name: string | null;
@@ -1053,6 +1060,11 @@ export interface IndicatorRegistryResponse {
   indicators: IndicatorMeta[];
 }
 
+export interface IndustryOptionsResponse {
+  l1: Array<{ term: string }>;
+  l2: Array<{ term: string; l1: string }>;
+}
+
 export interface FieldValueSource {
   id: string;
   entity_type: string;
@@ -1064,6 +1076,9 @@ export interface FieldValueSource {
   created_at: string;
   created_by: string | null;
   created_by_name: string | null;
+  evidence_span?: {
+    attachment_id?: string | null;
+  } | null;
 }
 
 export interface BuyerIntentTargetExclusion {

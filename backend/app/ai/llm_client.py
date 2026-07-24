@@ -65,12 +65,14 @@ def call_openai_compatible_chat(
         payload["top_p"] = float(top_p)
     if max_tokens is not None:
         payload["max_tokens"] = int(max_tokens)
-    if response_format == "json_object":
-        payload["response_format"] = {"type": "json_object"}
     if tools:
         payload["tools"] = tools
         if tool_choice:
             payload["tool_choice"] = tool_choice
+        # 部分 OpenAI 兼容层在同时传 tools 和 response_format 时会冲突，
+        # 工具调用时不强制 json_object 格式。
+    elif response_format == "json_object":
+        payload["response_format"] = {"type": "json_object"}
 
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {

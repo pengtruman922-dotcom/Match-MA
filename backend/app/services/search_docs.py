@@ -372,7 +372,7 @@ def _get_seller_target(db: Session, seller_target_id: UUID) -> dict[str, Any]:
         text(
             """
             select
-              id, target_name, target_type, target_subject_name, industry_l1, industry_l2,
+              id, target_name, target_type, target_subject_name, industry_l1, industry_l2, industry_pairs_json,
               location_province, location_city, location_district, listed_status,
               current_revenue_yuan, current_net_profit_yuan, valuation_yuan, valuation_date,
               asking_price_yuan, asking_price_date, pe_ratio, is_for_sale, can_control,

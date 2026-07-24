@@ -30,14 +30,14 @@ def test_claims_without_a_source_url_are_dropped() -> None:
         {
             "profile_sections": [
                 _profile_claim(),
-                _profile_claim(section_code="chain_position", content_text="行业第一", sources=[]),
+                _profile_claim(section_code="tech_team", content_text="行业第一", sources=[]),
             ]
         }
     )
 
     assert [claim["section_code"] for claim in claims] == ["business_product"]
     assert claims[0]["sources"] == ["https://www.szse.cn/disclosure/a"]
-    assert any("chain_position:missing_sources" in note for note in notes)
+    assert any("tech_team:missing_sources" in note for note in notes)
 
 
 def test_structured_facts_are_limited_to_the_whitelist() -> None:
@@ -45,13 +45,13 @@ def test_structured_facts_are_limited_to_the_whitelist() -> None:
     claims, notes = normalize_research_output(
         {
             "structured_facts": [
-                {"field_path": "industry_l2", "value": "偏光膜", "sources": ["https://a.com/x"]},
+                {"field_path": "industry_pairs_json", "value": [{"l1": "信息技术与通信", "l2": "偏光膜"}], "sources": ["https://a.com/x"]},
                 {"field_path": "current_revenue_yuan", "value": 100, "sources": ["https://a.com/x"]},
             ]
         }
     )
 
-    assert [claim["field_path"] for claim in claims] == ["industry_l2"]
+    assert [claim["field_path"] for claim in claims] == ["industry_pairs_json"]
     assert any("unsupported_field:current_revenue_yuan" in note for note in notes)
 
 

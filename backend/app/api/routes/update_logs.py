@@ -871,6 +871,7 @@ ROLLBACK_FIELDS_BY_ENTITY = {
         "target_subject_name",
         "industry_l1",
         "industry_l2",
+        "industry_pairs_json",
         "location_province",
         "location_city",
         "location_district",
@@ -1005,6 +1006,7 @@ ROLLBACK_FIELDS_BY_ENTITY = {
 }
 
 JSONB_ROLLBACK_FIELDS = {
+    ("seller_target", "industry_pairs_json"),
     ("buyer_intent", "contact_info_json"),
     ("buyer_intent", "parsed_requirement_json"),
     ("buyer_intent", "region_constraints_json"),

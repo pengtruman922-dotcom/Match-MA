@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.registry.indicators import writable_columns
 from backend.app.services.field_writer import WriteProvenance, write_seller_target_fields
-from backend.app.services.industry_taxonomy import normalize_l2_values, resolve_l1
+from backend.app.services.industry_taxonomy import normalize_industry_pairs, normalize_l2_values, resolve_l1
 from backend.app.services.profile_sections import apply_profile_section
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 
@@ -128,6 +128,11 @@ def normalize_structured_fact(db: Session, field_path: str, value: Any) -> Any:
     label outside the taxonomy silently removes the target from the pools it
     belongs in rather than showing up as a bad value on the page.
     """
+    if field_path == "industry_pairs_json":
+        pairs, notes = normalize_industry_pairs(db, value)
+        if not pairs:
+            raise ResearchApplyError(f"行业不在字典中：{notes[0] if notes else '空值'}")
+        return pairs
     text_value = str(value or "").strip()
     if not text_value:
         raise ResearchApplyError("建议值为空。")

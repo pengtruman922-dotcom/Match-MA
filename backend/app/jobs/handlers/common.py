@@ -73,7 +73,10 @@ MONEY_UNIT_PATTERN = re.compile(
 )
 
 # 派生自指标注册表（唯一事实源）：哪些 seller_target 列允许解析写入。
-SELLER_TARGET_CHANGE_FIELDS = writable_columns("parse")
+# lifecycle_status is a named system-fact exception: it is not an information
+# page indicator, but explicit sold/off-market evidence may safely stop a deal.
+SELLER_TARGET_SYSTEM_FACT_FIELDS = {"lifecycle_status"}
+SELLER_TARGET_CHANGE_FIELDS = writable_columns("parse") | SELLER_TARGET_SYSTEM_FACT_FIELDS
 
 SELLER_TARGET_FIELD_ALIASES = {
     "summary": "business_summary",
@@ -619,7 +622,7 @@ def _fetch_seller_targets(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
         text(
             """
             select
-              id, target_name, target_type, target_subject_name, industry_l1, industry_l2,
+              id, target_name, target_type, target_subject_name, industry_l1, industry_l2, industry_pairs_json,
               location_province, location_city, location_district, listed_status,
               current_revenue_yuan, current_net_profit_yuan, valuation_yuan,
               valuation_date, asking_price_yuan, asking_price_date, pe_ratio, is_for_sale, can_control,

@@ -1,6 +1,7 @@
 from backend.app.api.routes.extracted_actions import (
     _seller_target_changes_with_post_parse_status as _action_seller_target_changes_with_post_parse_status,
 )
+from backend.app.services.extracted_action_apply import _lifecycle_status_from_changes
 from backend.app.jobs.handlers import (
     _normalize_change_fields,
     _normalize_seller_listed_status,
@@ -89,9 +90,7 @@ def test_seller_target_parse_supports_rollback_fields() -> None:
 def test_extracted_action_keeps_normalized_industry_fields() -> None:
     changes, notes = _normalize_change_fields(
         {
-            "industry_l1": "医药与健康",
-            "industry_l2": "医疗器械",
-            "industry_primary": "医药健康",
+            "industry_pairs_json": [{"l1": "医药与健康", "l2": "医疗器械"}],
         },
         allowed_fields=SELLER_TARGET_CHANGE_FIELDS,
         aliases=SELLER_TARGET_FIELD_ALIASES,
@@ -99,8 +98,7 @@ def test_extracted_action_keeps_normalized_industry_fields() -> None:
     )
 
     assert changes == {
-        "industry_l1": "医药与健康",
-        "industry_l2": "医疗器械",
+        "industry_pairs_json": [{"l1": "医药与健康", "l2": "医疗器械"}],
     }
     assert notes == []
 
@@ -134,3 +132,11 @@ def test_post_parse_status_does_not_override_manual_recommendability() -> None:
     )
 
     assert changes == {"business_summary": "later update"}
+
+
+def test_terminal_sale_statuses_close_the_target_lifecycle() -> None:
+    """Explicit transaction facts synchronise lifecycle and “是否还卖”."""
+    assert _lifecycle_status_from_changes({"lifecycle_status": "已售出"}) == "sold"
+    assert _lifecycle_status_from_changes({"sale_status": "已停售"}) == "off_market"
+    assert _lifecycle_status_from_changes({"is_for_sale": "no"}) == "off_market"
+    assert _lifecycle_status_from_changes({"is_for_sale": "yes"}) is None

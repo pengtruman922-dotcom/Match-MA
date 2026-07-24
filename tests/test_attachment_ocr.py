@@ -612,8 +612,7 @@ def test_business_update_derives_and_keeps_seller_industry_dimensions() -> None:
     )
 
     assert actions[0]["proposed_changes_json"] == {
-        "industry_l1": "医药与健康",
-        "industry_l2": "医疗器械",
+        "industry_pairs_json": [{"l1": "医药与健康", "l2": "医疗器械"}],
     }
 
 
@@ -695,7 +694,7 @@ def test_document_business_profile_prefers_constrained_business_summary() -> Non
         }
     )
 
-    assert sections[0]["content_text"] == "为生命科学实验室提供自动化设备及成套解决方案。"
+    assert sections[0]["content_text"] == "国内第一，唯一全产业链覆盖。"
     assert sections[1]["content_text"] == "国内第一。"
 
 

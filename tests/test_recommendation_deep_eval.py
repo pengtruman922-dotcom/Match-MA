@@ -240,7 +240,7 @@ def test_candidate_profile_prefers_sections_over_the_search_doc() -> None:
     from backend.app.jobs.handlers.recommendation import _candidate_profile_fields
 
     sections = {
-        "chain_position": {"section_code": "chain_position", "info_status": "filled", "content_text": "细分领域前三，链主地位"},
+        "business_product": {"section_code": "business_product", "info_status": "filled", "content_text": "细分领域前三，链主地位"},
     }
 
     fields = _candidate_profile_fields(sections, "结构化摘要 / 财务 / 交易 / 风险……")

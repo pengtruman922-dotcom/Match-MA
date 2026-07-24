@@ -42,6 +42,10 @@ class BuyerSellerRelationOut(BaseModel):
     last_contact_at: str | None
     last_event_at: str | None
     last_event_summary: str | None
+    last_event_type: str | None
+    last_event_content: str | None
+    last_event_next_step: str | None
+    deep_progress_elsewhere: bool = False
     buyer_intent_name: str | None
     buyer_name: str | None
     seller_target_name: str | None
@@ -443,6 +447,32 @@ def _relation_select_columns() -> str:
       r.last_contact_at::text as last_contact_at,
       r.last_event_at::text as last_event_at,
       r.last_event_summary,
+      (
+        select e.event_type from relation_event e
+        where e.relation_id = r.id and e.team_id = r.team_id
+          and e.workspace_id = r.workspace_id and e.deleted_at is null
+        order by e.event_time desc, e.created_at desc limit 1
+      ) as last_event_type,
+      (
+        select e.content from relation_event e
+        where e.relation_id = r.id and e.team_id = r.team_id
+          and e.workspace_id = r.workspace_id and e.deleted_at is null
+        order by e.event_time desc, e.created_at desc limit 1
+      ) as last_event_content,
+      (
+        select e.next_step from relation_event e
+        where e.relation_id = r.id and e.team_id = r.team_id
+          and e.workspace_id = r.workspace_id and e.deleted_at is null
+        order by e.event_time desc, e.created_at desc limit 1
+      ) as last_event_next_step,
+      exists (
+        select 1 from buyer_seller_relation other
+        where other.team_id = r.team_id and other.workspace_id = r.workspace_id
+          and other.seller_target_id = r.seller_target_id
+          and other.buyer_intent_id <> r.buyer_intent_id
+          and other.deleted_at is null
+          and other.status in ('due_diligence', 'agreement', 'deal_closed')
+      ) as deep_progress_elsewhere,
       bi.intent_name as buyer_intent_name,
       bp.buyer_name,
       st.target_name as seller_target_name,

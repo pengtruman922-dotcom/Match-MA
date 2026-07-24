@@ -21,7 +21,8 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from backend.app.api.routes.utils import (
@@ -31,7 +32,7 @@ from backend.app.api.routes.utils import (
 )
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.registry.indicators import Indicator, indicator_by_column, indicators_for
-from backend.app.services.industry_taxonomy import normalize_l2_values, resolve_l1
+from backend.app.services.industry_taxonomy import normalize_industry_pairs, normalize_l2_values, resolve_l1
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 
 
@@ -101,6 +102,11 @@ def _normalize_value(db: Session, indicator: Indicator, value: Any) -> Any:
         if not resolved:
             raise FieldWriteError(f"二级行业不在字典中: {value!r}")
         return resolved[0]
+    if indicator.column == "industry_pairs_json":
+        normalized, notes = normalize_industry_pairs(db, value)
+        if notes and not normalized:
+            raise FieldWriteError(f"行业不在字典中: {notes[0]}")
+        return normalized
     if indicator.kind == "enum":
         if not isinstance(value, str):
             raise FieldWriteError(f"{indicator.column} must be an enum value.")
@@ -188,26 +194,34 @@ def write_seller_target_fields(
         return []
 
     set_clauses = [f"{column} = :{column}" for column in diff]
+    statement_params: dict[str, Any] = {
+        **{column: normalized_changes[column] for column in diff},
+        "updated_by": provenance.actor_user_id,
+        "seller_target_id": seller_target_id,
+        "team_id": DEFAULT_TEAM_ID,
+        "workspace_id": DEFAULT_WORKSPACE_ID,
+    }
+    if "industry_pairs_json" in diff:
+        # The retired scalar columns are a read compatibility projection only.
+        # Their values are always derived from the first canonical pair.
+        first_pair = normalized_changes["industry_pairs_json"][0] if normalized_changes["industry_pairs_json"] else {}
+        set_clauses.extend(["industry_l1 = :compat_industry_l1", "industry_l2 = :compat_industry_l2"])
+        statement_params["compat_industry_l1"] = first_pair.get("l1")
+        statement_params["compat_industry_l2"] = first_pair.get("l2")
     set_clauses.extend(["updated_at = now()", "updated_by = :updated_by"])
-    db.execute(
-        text(
-            f"""
-            update seller_target
-            set {', '.join(set_clauses)}
-            where id = :seller_target_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
-              and deleted_at is null
-            """
-        ),
-        {
-            **{column: normalized_changes[column] for column in diff},
-            "updated_by": provenance.actor_user_id,
-            "seller_target_id": seller_target_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
+    statement = text(
+        f"""
+        update seller_target
+        set {', '.join(set_clauses)}
+        where id = :seller_target_id
+          and team_id = :team_id
+          and workspace_id = :workspace_id
+          and deleted_at is null
+        """
     )
+    if "industry_pairs_json" in diff:
+        statement = statement.bindparams(bindparam("industry_pairs_json", type_=JSONB))
+    db.execute(statement, statement_params)
 
     write_action_logs_for_diff(
         db,

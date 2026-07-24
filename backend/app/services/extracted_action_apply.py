@@ -43,6 +43,12 @@ def apply_seller_fact_update_action(
     seller_target_id = action["target_entity_id"]
     original = _get_seller_target_snapshot_or_404(db, seller_target_id)
     changes = _allowed_seller_target_changes(action["proposed_changes_json"])
+    lifecycle_status = _lifecycle_status_from_changes(action["proposed_changes_json"])
+    if lifecycle_status in {"sold", "off_market"}:
+        # Terminal market evidence is a safe one-way sync. A later in-sale
+        # signal never reactivates a sold or off-market target automatically.
+        changes["is_for_sale"] = "no"
+        changes["recommendation_status"] = "not_recommendable"
     if not changes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No supported changes to apply.")
     changes = _seller_target_changes_with_post_parse_status(original, changes)
@@ -70,6 +76,39 @@ def apply_seller_fact_update_action(
         ),
         search_doc_source="seller_fact_update_apply",
     )
+    if lifecycle_status is not None and lifecycle_status != original.get("lifecycle_status"):
+        db.execute(
+            text(
+                """
+                update seller_target
+                set lifecycle_status = :lifecycle_status,
+                    updated_at = now(), updated_by = :updated_by
+                where id = :seller_target_id and team_id = :team_id
+                  and workspace_id = :workspace_id and deleted_at is null
+                """
+            ),
+            {
+                "lifecycle_status": lifecycle_status,
+                "updated_by": SYSTEM_USER_ID,
+                "seller_target_id": seller_target_id,
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+            },
+        )
+        write_action_logs_for_diff(
+            db,
+            entity_type="seller_target",
+            entity_id=seller_target_id,
+            diff={"lifecycle_status": (original.get("lifecycle_status"), lifecycle_status)},
+            source_type="extracted_action",
+            source_id=action["id"],
+            evidence_id=source_context["evidence_id"],
+            business_update_id=action["business_update_id"],
+            extracted_action_id=action["id"],
+            metadata_json={"source": "seller_fact_update_lifecycle_sync"},
+            applied_by=SYSTEM_USER_ID,
+        )
+        applied_fields.append("lifecycle_status")
     if not applied_fields:
         _mark_action_applied(db, action["id"], review_status="auto_accepted")
         _refresh_business_update_status(db, action["business_update_id"])
@@ -729,8 +768,8 @@ def _get_seller_target_snapshot_or_404(db: Session, seller_target_id: UUID) -> d
         text(
             """
             select
-              target_name, target_subject_name,
-              industry_l1, industry_l2, location_province, location_city,
+              target_name, target_subject_name, lifecycle_status,
+              industry_l1, industry_l2, industry_pairs_json, location_province, location_city,
               location_district, listed_status,
               current_revenue_yuan, current_net_profit_yuan, valuation_yuan,
               current_total_profit_yuan, financial_period_label,
@@ -886,11 +925,47 @@ def _allowed_seller_target_changes(changes: dict[str, Any]) -> dict[str, Any]:
     # Existing editable prompts may still emit the retired raw industry keys.
     # Consume them only as transient dictionary-normalization candidates; they
     # are never written back as seller_target columns.
-    if "industry_l1" not in allowed and changes.get("industry_primary"):
-        allowed["industry_l1"] = changes["industry_primary"]
-    if "industry_l2" not in allowed and changes.get("industry_secondary"):
-        allowed["industry_l2"] = changes["industry_secondary"]
+    if "industry_pairs_json" not in allowed:
+        legacy_pair = {
+            "l1": changes.get("industry_l1") or changes.get("industry_primary"),
+            "l2": changes.get("industry_l2") or changes.get("industry_secondary"),
+        }
+        if legacy_pair["l1"] or legacy_pair["l2"]:
+            # The writer performs the database-backed canonicalization. This
+            # local shape conversion only keeps old prompt output actionable.
+            allowed["industry_pairs_json"] = [legacy_pair]
     return allowed
+
+
+def _lifecycle_status_from_changes(changes: dict[str, Any]) -> str | None:
+    """Derive the market lifecycle from explicit parser facts.
+
+    Runtime prompt versions are editable, so newer versions may emit either a
+    lifecycle code or a direct transaction-status field.  Keeping the mapping
+    here makes an unequivocal “已售出/已停售” update close both the lifecycle
+    and the user-facing “是否还卖” fact, without treating an ordinary follow-up
+    as a fact update (that routing remains deliberately deferred).
+    """
+    raw = str(
+        changes.get("lifecycle_status")
+        or changes.get("sale_status")
+        or changes.get("market_status")
+        or changes.get("is_for_sale")
+        or ""
+    ).strip().lower()
+    return {
+        "sold": "sold",
+        "已售出": "sold",
+        "已成交": "sold",
+        "off_market": "off_market",
+        "已停售": "off_market",
+        "停售": "off_market",
+        "暂停出售": "off_market",
+        "不再出售": "off_market",
+        "no": "off_market",
+        "active": "active",
+        "在售": "active",
+    }.get(raw)
 
 
 def _seller_target_changes_with_post_parse_status(

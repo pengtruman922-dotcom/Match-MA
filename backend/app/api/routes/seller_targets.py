@@ -31,6 +31,7 @@ from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAUL
 from backend.app.db import get_db
 from backend.app.registry.indicators import writable_columns
 from backend.app.services.field_writer import FieldWriteError, WriteProvenance, write_seller_target_fields
+from backend.app.services.industry_taxonomy import normalize_industry_pairs
 from backend.app.services.attachment_storage import (
     AttachmentNotFoundError,
     AttachmentStorageError,
@@ -60,6 +61,7 @@ class SellerTargetCreate(BaseModel):
     ] = "pending_review"
     industry_l1: str | None = None
     industry_l2: str | None = None
+    industry_pairs_json: list[dict[str, str]] = Field(default_factory=list)
     location_province: str | None = None
     location_city: str | None = None
     location_district: str | None = None
@@ -89,6 +91,7 @@ class SellerTargetOut(BaseModel):
     information_status: str
     industry_l1: str | None = None
     industry_l2: str | None = None
+    industry_pairs_json: list[dict[str, str]] = Field(default_factory=list)
     location_province: str | None
     location_city: str | None
     location_district: str | None
@@ -154,6 +157,7 @@ class SellerTargetUpdate(BaseModel):
     target_subject_name: str | None = Field(default=None, max_length=300)
     industry_l1: str | None = None
     industry_l2: str | None = None
+    industry_pairs_json: list[dict[str, str]] | None = None
     location_province: str | None = None
     location_city: str | None = None
     location_district: str | None = None
@@ -196,7 +200,6 @@ class SellerTargetUpdate(BaseModel):
     business_summary: str | None = None
     transaction_summary: str | None = None
     risk_summary: str | None = None
-    gap_summary: str | None = None
     owner_user_id: UUID | None = None
 
 
@@ -319,7 +322,7 @@ class TargetFollowUpOut(BaseModel):
 
 SELLER_TARGET_OUT_COLUMNS = """
               id, target_name, target_type, target_subject_name, lifecycle_status, recommendation_status, information_status,
-              industry_l1, industry_l2, location_province, location_city, location_district,
+              industry_l1, industry_l2, industry_pairs_json, location_province, location_city, location_district,
               listed_status, listing_market_region, market_cap_yuan, current_revenue_yuan, current_net_profit_yuan,
               current_total_profit_yuan, current_assets_yuan, current_debt_ratio,
               current_operating_cash_flow_yuan, financial_period_label, profitability_status,
@@ -366,13 +369,24 @@ def create_seller_target(
     current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    params = _seller_target_params(payload, current_user)
+    raw_pairs = params["industry_pairs_json"] or [
+        {"l1": params.get("industry_l1"), "l2": params.get("industry_l2")}
+    ]
+    pairs, notes = normalize_industry_pairs(db, raw_pairs)
+    if raw_pairs and not pairs:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=f"行业不在字典中：{notes[0] if notes else '无有效行业'}")
+    params["industry_pairs_json"] = pairs
+    if pairs:
+        params["industry_l1"] = pairs[0]["l1"]
+        params["industry_l2"] = pairs[0].get("l2")
     row = db.execute(
         text(
             f"""
             insert into seller_target (
               team_id, workspace_id, target_name, target_type, target_subject_name, owner_user_id,
               lifecycle_status, recommendation_status, information_status,
-              industry_l1, industry_l2, location_province, location_city, location_district,
+              industry_l1, industry_l2, industry_pairs_json, location_province, location_city, location_district,
               listed_status, current_revenue_yuan, current_net_profit_yuan,
               valuation_yuan, valuation_date, asking_price_yuan, asking_price_date, pe_ratio,
               is_for_sale, can_control, can_consolidate,
@@ -382,7 +396,7 @@ def create_seller_target(
             values (
               :team_id, :workspace_id, :target_name, :target_type, :target_subject_name, :owner_user_id,
               :lifecycle_status, :recommendation_status, :information_status,
-              :industry_l1, :industry_l2, :location_province, :location_city, :location_district,
+              :industry_l1, :industry_l2, :industry_pairs_json, :location_province, :location_city, :location_district,
               :listed_status, :current_revenue_yuan, :current_net_profit_yuan,
               :valuation_yuan, :valuation_date, :asking_price_yuan, :asking_price_date, :pe_ratio,
               :is_for_sale, :can_control, :can_consolidate,
@@ -392,8 +406,8 @@ def create_seller_target(
             returning
 {SELLER_TARGET_OUT_COLUMNS}
             """
-        ),
-        _seller_target_params(payload, current_user),
+        ).bindparams(bindparam("industry_pairs_json", type_=JSONB)),
+        params,
     ).mappings().one()
     create_search_doc_rebuild_job(
         db,
@@ -458,10 +472,14 @@ def list_seller_targets(
             where.append("(target_name ilike :q or target_subject_name ilike :q or business_summary ilike :q)")
         params["q"] = f"%{q}%"
     if industry:
+        industry_l1, separator, industry_l2 = industry.partition(" / ")
         where.append(
-            "concat_ws(' / ', nullif(industry_l1, ''), nullif(industry_l2, '')) = :industry"
+            "exists (select 1 from jsonb_array_elements(industry_pairs_json) pair "
+            "where pair ->> 'l1' = :industry_l1 "
+            "and (:industry_l2 is null or pair ->> 'l2' = :industry_l2))"
         )
-        params["industry"] = industry
+        params["industry_l1"] = industry_l1
+        params["industry_l2"] = industry_l2 if separator else None
     if region:
         where.append(
             "concat_ws(' ', nullif(location_province, ''), nullif(location_city, ''), nullif(location_district, '')) = :region"
@@ -533,14 +551,15 @@ def seller_target_filter_options(current_user: CurrentUser, db: Session = Depend
         db,
         f"""
         select
-          concat_ws(' / ', nullif(industry_l1, ''), nullif(industry_l2, '')) as value,
-          count(*) as count
+          concat_ws(' / ', pair ->> 'l1', pair ->> 'l2') as value,
+          count(distinct seller_target.id) as count
         from seller_target
+        cross join lateral jsonb_array_elements(industry_pairs_json) pair
         where team_id = :team_id
           and workspace_id = :workspace_id
           and deleted_at is null
           {scope_clause}
-          and concat_ws(' / ', nullif(industry_l1, ''), nullif(industry_l2, '')) <> ''
+          and coalesce(pair ->> 'l1', '') <> ''
         group by value
         order by count desc, value asc
         limit 80
@@ -1160,6 +1179,12 @@ def update_seller_target(
     original = _get_seller_target_or_404(db, seller_target_id)
     ensure_entity_writable(db, current_user, entity_type="seller_target", entity_id=seller_target_id)
     changes = payload.model_dump(exclude_unset=True)
+    if "industry_pairs_json" not in changes and ("industry_l1" in changes or "industry_l2" in changes):
+        legacy_pair = {"l1": changes.get("industry_l1"), "l2": changes.get("industry_l2")}
+        if legacy_pair["l1"] or legacy_pair["l2"]:
+            changes["industry_pairs_json"] = [legacy_pair]
+    changes.pop("industry_l1", None)
+    changes.pop("industry_l2", None)
 
     fact_changes = {key: value for key, value in changes.items() if key in writable_columns("manual")}
     if fact_changes:
@@ -1653,6 +1678,7 @@ def _seller_target_params(payload: SellerTargetCreate, current_user: AuthContext
         "information_status": payload.information_status,
         "industry_l1": _normalize_optional_text(payload.industry_l1),
         "industry_l2": _normalize_optional_text(payload.industry_l2),
+        "industry_pairs_json": payload.industry_pairs_json,
         "location_province": _normalize_optional_text(payload.location_province),
         "location_city": _normalize_optional_text(payload.location_city),
         "location_district": _normalize_optional_text(payload.location_district),

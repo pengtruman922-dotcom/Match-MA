@@ -84,6 +84,7 @@ import type {
   IndustryDictionaryImportResult,
   IndustryDictionaryTerm,
   IndicatorRegistryResponse,
+  IndustryOptionsResponse,
   ModelConnectionTestResult,
   ModelConfigSettingsPage,
   ModelNodeConfig,
@@ -587,6 +588,10 @@ export const modelConfig = {
 export const indicatorRegistry = {
   list: (entity: string = 'seller_target') =>
     apiRequest<IndicatorRegistryResponse>(`/meta/indicators${buildQuery({ entity })}`),
+};
+
+export const meta = {
+  industryOptions: () => apiRequest<IndustryOptionsResponse>('/meta/industry-options'),
 };
 
 export const dataDictionaries = {

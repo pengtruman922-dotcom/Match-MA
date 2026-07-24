@@ -31,14 +31,16 @@ PROFILE_SECTIONS: tuple[tuple[str, str, int], ...] = (
     # (section_code, 中文栏目名, 送深评时的字符预算)
     ("identity", "身份与地区", 200),
     ("business_product", "业务与产品", 400),
-    ("chain_position", "产业链位置与行业地位", 400),
     ("tech_team", "技术与团队能力", 300),
     ("ops_quality", "经营质量", 300),
-    ("deal_terms", "交易属性与配合度", 300),
-    ("sell_intent_risk", "出售诉求与风险缺口", 200),
+    ("deal_terms", "交易属性与出售诉求", 400),
 )
 
 PROFILE_SECTION_CODES = tuple(code for code, _, _ in PROFILE_SECTIONS)
+PROFILE_SECTION_ALIASES = {
+    "chain_position": "business_product",
+    "sell_intent_risk": "deal_terms",
+}
 
 PROFILE_SECTION_LABELS = {code: label for code, label, _ in PROFILE_SECTIONS}
 
@@ -72,7 +74,8 @@ def normalize_profile_section_items(values: Any) -> tuple[list[dict[str, Any]], 
         if not isinstance(value, dict):
             notes.append(f"profile_sections[{index}]:not_an_object")
             continue
-        section_code = str(value.get("section_code") or "").strip()
+        raw_section_code = str(value.get("section_code") or "").strip()
+        section_code = PROFILE_SECTION_ALIASES.get(raw_section_code, raw_section_code)
         if section_code not in PROFILE_SECTION_CODES:
             notes.append(f"profile_sections[{index}]:unknown_section:{section_code[:50]}")
             continue

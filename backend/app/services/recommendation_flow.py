@@ -51,6 +51,18 @@ def _build_recommendation_session_bundle(
         candidate_sets["reranked_candidates"],
         selected_items,
     )
+    # Candidate messages are an immutable recommendation snapshot, whereas a
+    # buyer-seller relation can be created or move stage while the page is
+    # polling.  Recompute relation annotations on every bundle read so a
+    # locally-created "已在推进" badge cannot revert after the next refresh and
+    # the other-buyer deep-progress warning stays current.
+    mode = str(session["mode"])
+    initial_candidates = _annotate_candidate_relations(
+        db, {"candidates": initial_candidates}, mode=mode
+    )["candidates"]
+    reranked_candidates = _annotate_candidate_relations(
+        db, {"candidates": reranked_candidates}, mode=mode
+    )["candidates"]
     latest_candidates = reranked_candidates or initial_candidates
     candidate_source = "reranked_candidates" if reranked_candidates else (
         "initial_candidates" if initial_candidates else "none"
@@ -1150,6 +1162,7 @@ def _candidate_targets_for_intent(
               st.target_name as seller_target_name,
               st.industry_l1,
               st.industry_l2,
+              st.industry_pairs_json,
               st.location_province,
               st.location_city,
               st.location_district,
@@ -1781,6 +1794,26 @@ def _intent_industry_list(intent: dict[str, Any]) -> list[str]:
 DESCRIPTIVE_EXCLUSION_MIN_LENGTH = 2
 
 
+def _target_industry_values(target: dict[str, Any]) -> tuple[set[str], set[str]]:
+    """Return all canonical L1/L2 values with a pre-migration fallback."""
+    l1_values: set[str] = set()
+    l2_values: set[str] = set()
+    for pair in target.get("industry_pairs_json") or []:
+        if not isinstance(pair, dict):
+            continue
+        l1 = str(pair.get("l1") or "").strip()
+        l2 = str(pair.get("l2") or "").strip()
+        if l1:
+            l1_values.add(l1)
+        if l2:
+            l2_values.add(l2)
+    if not l1_values and target.get("industry_l1"):
+        l1_values.add(str(target["industry_l1"]).strip())
+    if not l2_values and target.get("industry_l2"):
+        l2_values.add(str(target["industry_l2"]).strip())
+    return l1_values, l2_values
+
+
 def _excluded_industry_hit(target: dict[str, Any], intent: dict[str, Any]) -> str | None:
     """Match exclusions at the granularity the buyer wrote them.
 
@@ -1798,23 +1831,22 @@ def _excluded_industry_hit(target: dict[str, Any], intent: dict[str, Any]) -> st
     if not isinstance(resolved, dict):
         resolved = {"l1": [], "l2": [], "unresolved": [str(value).strip() for value in values if value]}
 
-    industry_l1 = str(target.get("industry_l1") or "").strip()
-    industry_l2 = str(target.get("industry_l2") or "").strip()
+    industry_l1_values, industry_l2_values = _target_industry_values(target)
     for term in resolved.get("l1") or []:
-        if term and term == industry_l1:
+        if term and term in industry_l1_values:
             return term
     for term in resolved.get("l2") or []:
-        if term and term == industry_l2:
+        if term and term in industry_l2_values:
             return term
 
     descriptive = "／".join(
         str(target.get(key) or "")
-        for key in ("industry_l1", "industry_l2", "business_summary")
+        for key in ("business_summary",)
     )
     for term in resolved.get("unresolved") or []:
         if len(term) < DESCRIPTIVE_EXCLUSION_MIN_LENGTH:
             continue
-        if term == industry_l1 or term == industry_l2 or term in descriptive:
+        if term in industry_l1_values or term in industry_l2_values or term in descriptive:
             return term
     return None
 
@@ -1873,24 +1905,25 @@ def _score_target_against_intent(
 
     # 行业（多值，任一命中；主赛道全分，其余 85%）
     intent_industries = _intent_industry_list(intent)
-    target_l1 = str(target.get("industry_l1") or "").strip()
+    target_l1_values, target_l2_values = _target_industry_values(target)
     if intent_industries:
-        if not target_l1:
+        if not target_l1_values:
             add_dimension(30, "unknown", dimension="行业", gap_text="标的行业待归类")
-        elif target_l1 in intent_industries:
-            is_primary_track = target_l1 == intent_industries[0]
+        elif target_l1_values & set(intent_industries):
+            matched_l1 = sorted(target_l1_values & set(intent_industries))
+            is_primary_track = intent_industries[0] in matched_l1
             add_dimension(
                 30,
                 "match",
                 dimension="行业",
-                match_text=f"行业命中：{target_l1}" + ("（主赛道）" if is_primary_track else ""),
+                match_text=f"行业命中：{'、'.join(matched_l1)}" + ("（主赛道）" if is_primary_track else ""),
                 earned_override=30.0 if is_primary_track else 25.5,
             )
         else:
             add_dimension(30, "mismatch", dimension="行业", gap_text="行业不在买家关注赛道", gate=True)
     elif intent.get("industry_primary"):
         # 旧数据兜底：字符串相等，不命中只降分不出局
-        if target.get("industry_l1") == intent.get("industry_primary"):
+        if intent.get("industry_primary") in target_l1_values:
             add_dimension(30, "match", dimension="行业", match_text=f"一级行业匹配：{intent['industry_primary']}")
         else:
             add_dimension(30, "mismatch", dimension="行业", gap_text="一级行业不完全匹配")
@@ -1903,11 +1936,10 @@ def _score_target_against_intent(
         if item is not None and str(item).strip()
     ]
     if intent_l2:
-        target_l2 = str(target.get("industry_l2") or "").strip()
-        if not target_l2:
+        if not target_l2_values:
             add_dimension(15, "unknown", dimension="细分赛道", gap_text="标的细分赛道待归类")
-        elif target_l2 in intent_l2:
-            add_dimension(15, "match", dimension="细分赛道", match_text=f"细分赛道命中：{target_l2}")
+        elif target_l2_values & set(intent_l2):
+            add_dimension(15, "match", dimension="细分赛道", match_text=f"细分赛道命中：{'、'.join(sorted(target_l2_values & set(intent_l2)))}")
         else:
             add_dimension(15, "mismatch", dimension="细分赛道", gap_text="细分赛道不在买家关注方向")
 
@@ -2163,7 +2195,7 @@ def _score_target_against_intent(
         score = 40.0
 
     # 加分项（不参与归一化）：二级行业一致、现金流状态
-    if intent.get("industry_secondary") and target.get("industry_l2") == intent.get("industry_secondary"):
+    if intent.get("industry_secondary") and intent.get("industry_secondary") in target_l2_values:
         score += 4
         evidence.append(f"二级行业一致：{intent['industry_secondary']}")
     cash_flow_status = str(target.get("cash_flow_status") or "")
@@ -2251,7 +2283,7 @@ def _get_seller_target_anchor(db: Session, seller_target_id: UUID | None) -> dic
         text(
             """
             select
-              id, target_name, industry_l1, industry_l2,
+              id, target_name, industry_l1, industry_l2, industry_pairs_json,
               location_province, location_city, location_district,
               current_revenue_yuan, current_net_profit_yuan, current_total_profit_yuan,
               pe_ratio, valuation_yuan, asking_price_yuan, market_cap_yuan, current_debt_ratio,

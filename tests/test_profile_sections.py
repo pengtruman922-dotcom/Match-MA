@@ -15,16 +15,14 @@ def _section(code: str, content: str, status: str = "filled") -> dict:
 
 
 def test_every_section_has_a_budget_and_a_label() -> None:
-    assert len(PROFILE_SECTIONS) == 7
-    assert PROFILE_TOTAL_BUDGET == 2100
+    assert len(PROFILE_SECTIONS) == 5
+    assert PROFILE_TOTAL_BUDGET == 1600
     assert set(PROFILE_SECTION_CODES) == {
         "identity",
         "business_product",
-        "chain_position",
         "tech_team",
         "ops_quality",
         "deal_terms",
-        "sell_intent_risk",
     }
 
 
@@ -32,14 +30,14 @@ def test_render_budgets_each_section_instead_of_cutting_one_long_document() -> N
     """按栏目分配预算：任何一栏写得再长，也不会把后面的栏目挤没。"""
     sections = {
         "business_product": _section("business_product", "业" * 900),
-        "sell_intent_risk": _section("sell_intent_risk", "原股东拟出让 60%，接受产业买家"),
+        "deal_terms": _section("deal_terms", "原股东拟出让 60%，接受产业买家"),
     }
 
     rendered = render_profile_text(sections)
 
     assert "【业务与产品】" in rendered
     # 靠后的栏目仍然出现，不会因为前一栏超长被截断掉
-    assert "【出售诉求与风险缺口】原股东拟出让 60%，接受产业买家" in rendered
+    assert "【交易属性与出售诉求】原股东拟出让 60%，接受产业买家" in rendered
     assert "业" * 400 in rendered
     assert "业" * 401 not in rendered
     assert "…" in rendered
@@ -63,7 +61,7 @@ def test_no_information_is_explicit_rather_than_an_empty_string() -> None:
     rendered = render_profile_text(sections)
 
     assert "【技术与团队能力】（暂无信息）" in rendered
-    assert "【交易属性与配合度】（不适用）" in rendered
+    assert "【交易属性与出售诉求】（不适用）" in rendered
 
 
 def test_render_returns_empty_when_no_sections_exist() -> None:

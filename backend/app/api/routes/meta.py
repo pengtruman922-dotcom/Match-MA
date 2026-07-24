@@ -5,6 +5,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from backend.app.config import get_settings
+from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 from backend.app.registry.indicators import GROUPS, indicators_for
 
@@ -41,6 +42,30 @@ def list_indicators(entity: str = "seller_target") -> dict[str, Any]:
             }
             for ind in indicators
             if ind.group is not None
+        ],
+    }
+
+
+@router.get("/industry-options")
+def list_industry_options(db: Session = Depends(get_db)) -> dict[str, list[dict[str, str]]]:
+    """Public, active taxonomy choices for the target information editor."""
+    rows = db.execute(
+        text(
+            """
+            select term, level, l1_name
+            from industry_taxonomy
+            where team_id = :team_id and workspace_id = :workspace_id
+              and active = true and level in ('l1', 'l2')
+            order by case level when 'l1' then 0 else 1 end, l1_name, sort_order, term
+            """
+        ),
+        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    ).mappings().all()
+    return {
+        "l1": [{"term": str(row["term"])} for row in rows if row["level"] == "l1"],
+        "l2": [
+            {"term": str(row["term"]), "l1": str(row["l1_name"])}
+            for row in rows if row["level"] == "l2"
         ],
     }
 

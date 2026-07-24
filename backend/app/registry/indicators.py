@@ -33,11 +33,9 @@ class Indicator:
 GROUPS: tuple[IndicatorGroup, ...] = (
     IndicatorGroup("identity", "身份与地区", "identity"),
     IndicatorGroup("business_product", "业务与产品", "business_product"),
-    IndicatorGroup("chain_position", "产业链位置", "chain_position"),
     IndicatorGroup("tech_team", "技术与团队", "tech_team"),
     IndicatorGroup("ops_quality", "经营质量", "ops_quality"),
-    IndicatorGroup("deal_terms", "交易属性", "deal_terms"),
-    IndicatorGroup("sell_intent_risk", "出售诉求", "sell_intent_risk"),
+    IndicatorGroup("deal_terms", "交易属性与出售诉求", "deal_terms"),
 )
 
 _PARSE = frozenset({"parse"})
@@ -77,12 +75,11 @@ SELLER_TARGET_INDICATORS: tuple[Indicator, ...] = (
     Indicator("target_name", "标的名称", "identity", "text", writable_by=_PARSE_MANUAL),
     Indicator("target_subject_name", "标的主体", "identity", "text", writable_by=_BOTH_MANUAL),
     Indicator("target_type", "类型", "identity", "enum", writable_by=_PARSE_MANUAL, enum_options=_TARGET_TYPE),
-    Indicator("location_province", "所在省", "identity", "text", screening=True, writable_by=_BOTH_MANUAL),
-    Indicator("location_city", "所在市", "identity", "text", screening=True, writable_by=_BOTH_MANUAL),
-    Indicator("location_district", "所在区", "identity", "text", screening=True, writable_by=_BOTH_MANUAL),
+    Indicator("location_province", "所在地", "identity", "text", screening=True, writable_by=_BOTH_MANUAL),
+    Indicator("location_city", "所在市", "identity", "text", screening=True, writable_by=_BOTH_MANUAL, fold_into="location_province"),
+    Indicator("location_district", "所在区", "identity", "text", screening=True, writable_by=_BOTH_MANUAL, fold_into="location_province"),
     # 业务与产品
-    Indicator("industry_l1", "一级行业", "business_product", "text", screening=True, writable_by=_BOTH_MANUAL),
-    Indicator("industry_l2", "二级行业", "business_product", "text", screening=True, writable_by=_BOTH_MANUAL),
+    Indicator("industry_pairs_json", "所属行业", "business_product", "json", screening=True, writable_by=_BOTH_MANUAL),
     Indicator("business_summary", "业务摘要", "business_product", "text", writable_by=_BOTH_MANUAL),
     # 技术与团队
     Indicator("management_retention_possible", "团队可留任", "tech_team", "enum", screening=True, writable_by=_PARSE_MANUAL, enum_options=_YES_NO_LIKE),
@@ -122,9 +119,8 @@ SELLER_TARGET_INDICATORS: tuple[Indicator, ...] = (
     Indicator("earnout_dependency_status", "对赌依赖", "deal_terms", "enum", writable_by=_PARSE_MANUAL, enum_options=_EARNOUT),
     Indicator("transaction_summary", "交易摘要", "deal_terms", "text", writable_by=_PARSE_MANUAL),
     # 出售诉求
-    Indicator("is_for_sale", "是否还卖", "sell_intent_risk", "enum", writable_by=_PARSE_MANUAL, enum_options=_YES_NO_LIKE),
-    Indicator("risk_summary", "风险摘要", "sell_intent_risk", "text", writable_by=_PARSE_MANUAL),
-    Indicator("gap_summary", "其他说明", "sell_intent_risk", "text", writable_by=_PARSE_MANUAL),
+    Indicator("is_for_sale", "是否还卖", "deal_terms", "enum", writable_by=_PARSE_MANUAL, enum_options=_YES_NO_LIKE),
+    Indicator("risk_summary", "风险摘要", "deal_terms", "text", writable_by=_PARSE_MANUAL),
     # 系统状态不是信息页业务事实，不允许手动编辑。
     Indicator("information_status", "信息状态", None, "enum", writable_by=_PARSE, enum_options=(("normal", "正常"), ("insufficient", "信息不足"), ("pending_review", "待审核"), ("parsing", "解析中"), ("researching", "调研中"), ("parse_failed", "解析失败"))),
     Indicator("recommendation_status", "推荐状态", None, "enum", writable_by=_PARSE, enum_options=(("recommendable", "可推荐"), ("not_recommendable", "暂不可推荐"))),

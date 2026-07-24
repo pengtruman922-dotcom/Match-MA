@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertTriangle, ChevronRight, Loader2, UserRound, Building2, Plus, Search, X } from 'lucide-react';
+import { AlertTriangle, ChevronRight, Loader2, Plus, Search, X, Lock, UserRound, Building2 } from 'lucide-react';
 import { relations, sellerTargets, buyerIntents } from '../../lib/api';
 import type { BuyerSellerRelation, RelationEventType } from '../../types/api';
 import RelationTimelineDrawer from './RelationTimelineDrawer';
@@ -120,7 +120,7 @@ export default function ProgressPanel({ side, entityId }: Props) {
           </h4>
           <div className="space-y-2">
             {active.map((relation) => (
-              <RelationCard key={relation.id} relation={relation} side={side} onOpen={() => setOpenId(relation.id)} />
+              <RelationCard key={relation.id} relation={relation} side={side} eventTypes={eventTypes} onOpen={() => setOpenId(relation.id)} />
             ))}
           </div>
         </section>
@@ -133,7 +133,7 @@ export default function ProgressPanel({ side, entityId }: Props) {
           </h4>
           <div className="space-y-2">
             {ended.map((relation) => (
-              <RelationCard key={relation.id} relation={relation} side={side} onOpen={() => setOpenId(relation.id)} muted />
+              <RelationCard key={relation.id} relation={relation} side={side} eventTypes={eventTypes} onOpen={() => setOpenId(relation.id)} muted />
             ))}
           </div>
         </section>
@@ -268,49 +268,40 @@ function dedupeById<T extends { id: string }>(rows: T[]): T[] {
 function RelationCard({
   relation,
   side,
+  eventTypes,
   onOpen,
   muted = false,
 }: {
   relation: BuyerSellerRelation;
   side: 'seller_target' | 'buyer_intent';
+  eventTypes: RelationEventType[];
   onOpen: () => void;
   muted?: boolean;
 }) {
-  const counterpartyName =
-    side === 'seller_target'
-      ? relation.buyer_name || relation.buyer_intent_name || '未绑定买家'
-      : relation.seller_target_name || '未命名标的';
+  const counterpartyName = side === 'seller_target'
+    ? [relation.buyer_name, relation.buyer_intent_name].filter(Boolean).join(' · ') || '未绑定买家意向'
+    : relation.seller_target_name || '未命名标的';
   const counterpartyLink =
     side === 'seller_target' ? `/buyer-intents/${relation.buyer_intent_id}` : `/targets/${relation.seller_target_id}`;
   const stale = isStaleRelation(relation.status, relation.last_event_at);
   const staleDays = daysSince(relation.last_event_at);
+  const eventLabel = eventTypes.find((item) => item.value === relation.last_event_type)?.label || '最近动态';
+  const eventContent = relation.last_event_content || relation.last_event_summary;
 
   return (
     <div className={`border px-3 py-2.5 ${muted ? 'border-gray-100 bg-gray-50/40' : 'border-gray-200'}`}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="flex items-center gap-1.5">
-            {side === 'seller_target' ? (
-              <UserRound className="h-3.5 w-3.5 shrink-0 text-gray-400" />
-            ) : (
-              <Building2 className="h-3.5 w-3.5 shrink-0 text-gray-400" />
-            )}
-            <Link
-              to={counterpartyLink}
-              className="truncate text-sm font-medium text-gray-900 hover:text-brand-600"
-              onClick={(event) => event.stopPropagation()}
-            >
-              {counterpartyName}
-            </Link>
-          </div>
-          <div className="mt-1 space-y-0.5 text-[11px] text-gray-500">
-            <p><span className="mr-1 text-gray-400">买家</span>{relation.buyer_name || '-'}</p>
-            <p><span className="mr-1 text-gray-400">意向</span>{relation.buyer_intent_name || '-'}</p>
-            <p><span className="mr-1 text-gray-400">标的</span>{relation.seller_target_name || '-'}</p>
-          </div>
-          {relation.last_event_summary ? (
-            <p className="mt-1 line-clamp-2 text-xs text-gray-500">{relation.last_event_summary}</p>
-          ) : null}
+          <Link
+            to={counterpartyLink}
+            className="block truncate text-sm font-medium text-gray-900 hover:text-brand-600"
+            onClick={(event) => event.stopPropagation()}
+          >
+            {counterpartyName}
+          </Link>
+          {eventContent ? <p className="mt-1 line-clamp-2 text-xs text-gray-600"><span className="mr-1 text-gray-400">{eventLabel}</span>{eventContent}</p> : <p className="mt-1 text-xs text-gray-400">暂无推进动态</p>}
+          {relation.last_event_next_step ? <p className="mt-1 line-clamp-1 text-xs text-brand-700"><span className="mr-1 text-gray-400">下一步</span>{relation.last_event_next_step}</p> : null}
+          {relation.deep_progress_elsewhere ? <p className="mt-1 inline-flex items-center gap-1 text-[11px] text-amber-700"><Lock className="h-3 w-3" />正与其他买家深入推进</p> : null}
           <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-gray-400">
             {relation.last_event_at ? <span>最新 {formatDate(relation.last_event_at)}</span> : <span>暂无动态</span>}
             {stale ? (
