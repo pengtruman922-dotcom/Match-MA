@@ -14,6 +14,7 @@ export default function RoundGroup({
   onStartProgress,
   startingProgressKey,
   onRetryDeepEval,
+  readOnly = false,
 }: {
   round: Round;
   roundNumber: number;
@@ -22,6 +23,8 @@ export default function RoundGroup({
   onStartProgress: (candidate: CandidateView) => void;
   startingProgressKey: string | null;
   onRetryDeepEval: () => void;
+  /** Temporary-filter sessions have no real counterpart to associate. */
+  readOnly?: boolean;
 }) {
   const [expandedOld, setExpandedOld] = useState(false);
   const [showAll, setShowAll] = useState(false);
@@ -66,6 +69,7 @@ export default function RoundGroup({
             onToggleSelect={() => onToggleSelect(candidate)}
             onStartProgress={() => onStartProgress(candidate)}
             startingProgress={startingProgressKey === candidate.pairKey}
+            readOnly={readOnly}
           />
         ))}
       </div>
@@ -149,6 +153,7 @@ function CandidateRow({
   onToggleSelect,
   onStartProgress,
   startingProgress,
+  readOnly,
 }: {
   candidate: CandidateView;
   index: number;
@@ -156,6 +161,7 @@ function CandidateRow({
   onToggleSelect: () => void;
   onStartProgress: () => void;
   startingProgress: boolean;
+  readOnly: boolean;
 }) {
   const progressPath = candidate.detailPath ? `${candidate.detailPath}?tab=progress` : null;
   return (
@@ -227,7 +233,7 @@ function CandidateRow({
         )}
         {candidate.riskSummary && <p className="text-gray-400">风险: {candidate.riskSummary}</p>}
       </div>
-      {interactive && (
+      {interactive && !readOnly && (
         <div className="ml-6 mt-1.5 flex flex-wrap items-center gap-2">
           {candidate.selected ? (
             <span className="inline-flex items-center gap-2">
@@ -270,6 +276,9 @@ function CandidateRow({
             </button>
           )}
         </div>
+      )}
+      {interactive && readOnly && (
+        <p className="ml-6 mt-1.5 text-xs text-amber-700">临时筛选结果仅供查看；选择已有对象后可发起关联或推进。</p>
       )}
     </div>
   );

@@ -1620,6 +1620,8 @@ export interface RecommendationCandidateRequest {
   mode: 'buyer_to_target' | 'target_to_buyer';
   buyer_intent_id?: string;
   seller_target_id?: string;
+  /** One-off request without a persisted buyer intent or seller target. */
+  temporary_input?: string;
   limit?: number;
   create_session?: boolean;
   enable_rerank?: boolean;

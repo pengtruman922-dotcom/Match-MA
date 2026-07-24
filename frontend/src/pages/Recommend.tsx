@@ -24,6 +24,7 @@ import {
 } from '../features/recommend/timeline';
 
 type Mode = 'buyer_to_target' | 'target_to_buyer';
+type AnchorMode = 'entity' | 'temporary';
 
 const DEEP_EVAL_POLL_INTERVAL_MS = 5000;
 const DEEP_EVAL_POLL_MAX_ATTEMPTS = 36;
@@ -33,6 +34,8 @@ export default function Recommend() {
   const [mode, setMode] = useState<Mode>(searchParams.get('mode') === 'target-to-buyer' ? 'target_to_buyer' : 'buyer_to_target');
   const [intent, setIntent] = useState<BuyerIntent | null>(null);
   const [target, setTarget] = useState<SellerTarget | null>(null);
+  const [anchorMode, setAnchorMode] = useState<AnchorMode>('entity');
+  const [temporaryInput, setTemporaryInput] = useState('');
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
   const [selectedItems, setSelectedItems] = useState<RecommendationSelectedItem[]>([]);
@@ -48,13 +51,20 @@ export default function Recommend() {
   const bootstrappedRef = useRef(false);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
 
-  const anchorReady = mode === 'buyer_to_target' ? Boolean(intent) : Boolean(target);
-  const anchorLabel = mode === 'buyer_to_target'
-    ? intent ? `${intent.buyer_name ? `${intent.buyer_name} / ` : ''}${intent.intent_name}` : ''
-    : target ? target.target_name : '';
-  const chips = mode === 'buyer_to_target'
-    ? intent ? intentConditionChips(intent) : []
-    : target ? targetConditionChips(target) : [];
+  const temporaryMode = anchorMode === 'temporary';
+  const anchorReady = temporaryMode
+    ? Boolean(temporaryInput.trim())
+    : mode === 'buyer_to_target' ? Boolean(intent) : Boolean(target);
+  const anchorLabel = temporaryMode
+    ? mode === 'buyer_to_target' ? '临时买家需求' : '临时标的画像'
+    : mode === 'buyer_to_target'
+      ? intent ? `${intent.buyer_name ? `${intent.buyer_name} / ` : ''}${intent.intent_name}` : ''
+      : target ? target.target_name : '';
+  const chips = temporaryMode
+    ? []
+    : mode === 'buyer_to_target'
+      ? intent ? intentConditionChips(intent) : []
+      : target ? targetConditionChips(target) : [];
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -145,9 +155,12 @@ export default function Recommend() {
       const sessionMode = session.mode as Mode;
       setMode(sessionMode);
       setSessionId(restoreId);
-      if (sessionMode === 'buyer_to_target' && session.buyer_intent_id) {
+      const isTemporary = Boolean(session.metadata_json?.temporary_filter);
+      setAnchorMode(isTemporary ? 'temporary' : 'entity');
+      setTemporaryInput(isTemporary ? session.anonymous_input_snapshot || '' : '');
+      if (!isTemporary && sessionMode === 'buyer_to_target' && session.buyer_intent_id) {
         await loadIntentAnchor(session.buyer_intent_id);
-      } else if (sessionMode === 'target_to_buyer' && session.seller_target_id) {
+      } else if (!isTemporary && sessionMode === 'target_to_buyer' && session.seller_target_id) {
         await loadTargetAnchor(session.seller_target_id);
       }
       setTimeline(buildTimeline(bundle));
@@ -199,11 +212,15 @@ export default function Recommend() {
     setMode(nextMode);
     setIntent(null);
     setTarget(null);
+    setAnchorMode('entity');
+    setTemporaryInput('');
     resetConversation();
   };
 
   const handlePickAnchor = async (option: ObjectOption) => {
     resetConversation();
+    setAnchorMode('entity');
+    setTemporaryInput('');
     if (mode === 'buyer_to_target') {
       setTarget(null);
       const loaded = await loadIntentAnchor(option.id);
@@ -215,9 +232,24 @@ export default function Recommend() {
     }
   };
 
+  const startTemporaryFilter = () => {
+    resetConversation();
+    setIntent(null);
+    setTarget(null);
+    setAnchorMode('temporary');
+  };
+
+  const switchToEntityAnchor = () => {
+    resetConversation();
+    setAnchorMode('entity');
+    setTemporaryInput('');
+  };
+
   const runRound = async (userMessage?: string, conditionActions?: RecommendationConditionAction[]) => {
     if (!anchorReady) {
-      setError(mode === 'buyer_to_target' ? '请先选择买家意向' : '请先选择标的');
+      setError(temporaryMode
+        ? '请先输入本次筛选要求'
+        : mode === 'buyer_to_target' ? '请先选择买家意向' : '请先选择标的');
       return;
     }
     setGenerating(true);
@@ -229,8 +261,9 @@ export default function Recommend() {
     try {
       const response = await recommendations.candidates({
         mode,
-        buyer_intent_id: mode === 'buyer_to_target' ? intent!.id : undefined,
-        seller_target_id: mode === 'target_to_buyer' ? target!.id : undefined,
+        buyer_intent_id: !temporaryMode && mode === 'buyer_to_target' ? intent!.id : undefined,
+        seller_target_id: !temporaryMode && mode === 'target_to_buyer' ? target!.id : undefined,
+        temporary_input: temporaryMode && !sessionId ? temporaryInput.trim() : undefined,
         limit: 20,
         create_session: true,
         session_id: sessionId || undefined,
@@ -294,6 +327,7 @@ export default function Recommend() {
   };
 
   const startProgress = async (candidate: CandidateView) => {
+    if (temporaryMode) return;
     if (!candidate.sellerTargetId || !candidate.buyerIntentId || candidate.relationStatus) return;
     setStartingProgressKey(candidate.pairKey);
     try {
@@ -327,6 +361,7 @@ export default function Recommend() {
   };
 
   const toggleSelect = async (candidate: CandidateView) => {
+    if (temporaryMode) return;
     if (!sessionId) return;
     if (candidate.selected && candidate.selectedItemId) {
       try {
@@ -386,6 +421,8 @@ export default function Recommend() {
     stopPolling();
     setIntent(null);
     setTarget(null);
+    setAnchorMode('entity');
+    setTemporaryInput('');
     setSessionId(null);
     setTimeline([]);
     setSelectedItems([]);
@@ -410,25 +447,57 @@ export default function Recommend() {
         </div>
         <div className="flex items-center gap-2">
           <SessionPicker onPick={openSession} />
-          <SelectedDrawer items={selectedItems} onRemove={(item) => void removeSelected(item)} onOpenReport={() => setReportOpen(true)} />
+          {!temporaryMode && (
+            <SelectedDrawer items={selectedItems} onRemove={(item) => void removeSelected(item)} onOpenReport={() => setReportOpen(true)} />
+          )}
         </div>
       </div>
 
       <div className="mb-2 flex flex-wrap items-center gap-2 border border-gray-200 bg-white px-3 py-2">
-        <span className="text-xs text-gray-500">对象:</span>
-        <ObjectSelect
-          placeholder={mode === 'buyer_to_target' ? '搜索选择买家意向...' : '搜索选择标的...'}
-          displayLabel={anchorLabel}
-          onSelect={(option) => void handlePickAnchor(option)}
-          fetchOptions={async (q) => {
-            if (mode === 'buyer_to_target') {
-              const response = await buyerIntents.list({ q: q || undefined, status: 'active', limit: 20 });
-              return response.items.map((item) => ({ id: item.id, label: item.intent_name, subtitle: item.buyer_name || undefined }));
-            }
-            const response = await sellerTargets.list({ q: q || undefined, limit: 20 });
-            return response.items.map((item) => ({ id: item.id, label: item.target_name, subtitle: item.business_summary || undefined }));
-          }}
-        />
+        {temporaryMode ? (
+          <>
+            <div className="min-w-[280px] flex-1">
+              <label className="mb-1 block text-xs font-medium text-gray-700">
+                {mode === 'buyer_to_target' ? '临时买家需求' : '临时标的画像与出售条件'}
+              </label>
+              <textarea
+                value={temporaryInput}
+                onChange={(event) => setTemporaryInput(event.target.value)}
+                rows={2}
+                maxLength={4000}
+                disabled={Boolean(sessionId)}
+                placeholder={mode === 'buyer_to_target'
+                  ? '例如：寻找华北地区殡葬服务企业，净利润 2000 万以上，可控股'
+                  : '例如：某华东消费品牌，拟出售控股权，估值约 10 亿元，寻找产业买家'}
+                className="w-full resize-y border border-gray-200 px-3 py-2 text-sm outline-none focus:border-brand-600 disabled:bg-gray-50"
+              />
+              {sessionId && <p className="mt-1 text-[11px] text-gray-400">初始条件已保存；可在下方继续补充条件。</p>}
+            </div>
+            <button type="button" onClick={switchToEntityAnchor} className="text-xs text-brand-600 hover:underline">
+              选择已有对象
+            </button>
+          </>
+        ) : (
+          <>
+            <span className="text-xs text-gray-500">对象:</span>
+            <ObjectSelect
+              placeholder={mode === 'buyer_to_target' ? '搜索选择买家意向...' : '搜索选择标的...'}
+              displayLabel={anchorLabel}
+              onSelect={(option) => void handlePickAnchor(option)}
+              fetchOptions={async (q) => {
+                if (mode === 'buyer_to_target') {
+                  const response = await buyerIntents.list({ q: q || undefined, status: 'active', limit: 20 });
+                  return response.items.map((item) => ({ id: item.id, label: item.intent_name, subtitle: item.buyer_name || undefined }));
+                }
+                const response = await sellerTargets.list({ q: q || undefined, limit: 20 });
+                return response.items.map((item) => ({ id: item.id, label: item.target_name, subtitle: item.business_summary || undefined }));
+              }}
+            />
+            <button type="button" onClick={startTemporaryFilter} className="text-xs text-brand-600 hover:underline">
+              没有对象？使用临时筛选
+            </button>
+          </>
+        )}
         <button
           onClick={() => void runRound()}
           disabled={generating || !anchorReady}
@@ -449,6 +518,11 @@ export default function Recommend() {
           onAction={(actions) => void runRound(undefined, actions)}
         />
       </div>
+      {temporaryMode && (
+        <div className="mb-2 border border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">
+          临时筛选不会创建买家、标的或撮合关系；结果仅供查看。选择已有对象后，才可加入推荐列表或开始推进。
+        </div>
+      )}
       {displayFilter && (
         <div className="mb-2 flex items-center gap-2 border border-blue-200 bg-blue-50 px-4 py-1.5 text-xs text-blue-700">
           <span>
@@ -464,9 +538,13 @@ export default function Recommend() {
           {timeline.length === 0 && (
             <div className="border border-gray-200 bg-white px-4 py-3 text-sm text-gray-600">
               <p className="mb-1 font-medium text-gray-800">
-                {anchorReady ? '已加载对象条件。' : mode === 'buyer_to_target' ? '请先选择买家意向。' : '请先选择标的。'}
+                {anchorReady
+                  ? temporaryMode ? '已载入临时筛选条件。' : '已加载对象条件。'
+                  : temporaryMode ? '请输入本次筛选要求。' : mode === 'buyer_to_target' ? '请先选择买家意向。' : '请先选择标的。'}
               </p>
-              <p className="text-xs text-gray-500">选择对象后点击「开始推荐」，或在下方输入补充条件。</p>
+              <p className="text-xs text-gray-500">
+                {temporaryMode ? '临时筛选结果仅供查看，不会建立关联或推进。' : '选择对象后点击「开始推荐」，或在下方输入补充条件。'}
+              </p>
             </div>
           )}
           {timeline.map((entry) => {
@@ -515,6 +593,7 @@ export default function Recommend() {
                 onStartProgress={(candidate) => void startProgress(candidate)}
                 startingProgressKey={startingProgressKey}
                 onRetryDeepEval={() => void retryDeepEval()}
+                readOnly={temporaryMode}
               />
             );
           })}
@@ -533,7 +612,9 @@ export default function Recommend() {
               value={inputValue}
               onChange={(event) => setInputValue(event.target.value)}
               onKeyDown={(event) => event.key === 'Enter' && handleSend()}
-              placeholder={anchorReady ? '输入补充条件（如：只看浙江、利润1500万以上），回车发送...' : '请先在上方选择对象...'}
+              placeholder={anchorReady
+                ? '输入补充条件（如：只看浙江、利润1500万以上），回车发送...'
+                : temporaryMode ? '请先在上方输入临时筛选要求...' : '请先在上方选择对象...'}
               disabled={!anchorReady}
               className="flex-1 px-4 py-2.5 text-sm outline-none placeholder:text-gray-400 disabled:bg-gray-50"
             />
@@ -548,7 +629,7 @@ export default function Recommend() {
         </div>
       </div>
 
-      {reportOpen && sessionId && (
+      {reportOpen && sessionId && !temporaryMode && (
         <ReportModal
           sessionId={sessionId}
           selectedItems={selectedItems}

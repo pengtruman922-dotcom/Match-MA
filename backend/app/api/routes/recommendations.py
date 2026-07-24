@@ -131,6 +131,10 @@ class RecommendationCandidateRequest(BaseModel):
     mode: str = Field(pattern="^(buyer_to_target|target_to_buyer)$")
     buyer_intent_id: UUID | None = None
     seller_target_id: UUID | None = None
+    # A one-off request is deliberately not persisted as a fake buyer intent or
+    # seller target.  The text is kept only in the recommendation session
+    # snapshot and drives a read-only temporary-filter session.
+    temporary_input: str | None = Field(default=None, max_length=4000)
     limit: int = Field(default=20, ge=1, le=50)
     create_session: bool = True
     enable_rerank: bool = True
@@ -145,11 +149,69 @@ class RecommendationCandidateRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_anchor(self) -> "RecommendationCandidateRequest":
-        if self.mode == "buyer_to_target" and self.buyer_intent_id is None:
+        has_temporary_input = bool((self.temporary_input or "").strip())
+        if has_temporary_input and (self.buyer_intent_id is not None or self.seller_target_id is not None):
+            raise ValueError("temporary_input cannot be combined with an existing recommendation anchor.")
+        if has_temporary_input and (self.user_message or "").strip():
+            raise ValueError("temporary_input is the initial request; send follow-up requirements in user_message.")
+        # A continuation obtains its anchor from the persisted session.  The
+        # endpoint then verifies that the supplied anchor still matches it.
+        if self.session_id is not None:
+            return self
+        if self.mode == "buyer_to_target" and self.buyer_intent_id is None and not has_temporary_input:
             raise ValueError("buyer_intent_id is required for buyer_to_target.")
-        if self.mode == "target_to_buyer" and self.seller_target_id is None:
+        if self.mode == "target_to_buyer" and self.seller_target_id is None and not has_temporary_input:
             raise ValueError("seller_target_id is required for target_to_buyer.")
         return self
+
+
+TEMPORARY_FILTER_METADATA_KEY = "temporary_filter"
+
+
+def _is_temporary_filter_session(session: dict[str, Any]) -> bool:
+    return bool((session.get("metadata_json") or {}).get(TEMPORARY_FILTER_METADATA_KEY))
+
+
+def _build_temporary_anchor(mode: str, temporary_input: str) -> dict[str, Any]:
+    """Build an in-memory scoring anchor for a one-off filter.
+
+    The object intentionally has no id.  That is the guardrail which prevents
+    a temporary result from becoming a buyer-target relation by accident.
+    """
+    if mode == "buyer_to_target":
+        return {
+            "id": None,
+            "buyer_party_id": None,
+            "buyer_name": None,
+            "intent_name": "临时买家需求",
+            "raw_requirement_text": temporary_input,
+            "intent_summary": temporary_input,
+            "preference_summary": temporary_input,
+            "industries_json": [],
+            "excluded_industries_json": [],
+        }
+    return {
+        "id": None,
+        "target_name": "临时标的画像",
+        "business_summary": temporary_input,
+        "transaction_summary": temporary_input,
+        "risk_summary": None,
+        "gap_summary": None,
+        "industry_pairs_json": [],
+    }
+
+
+def _temporary_anchor_from_session(session: dict[str, Any]) -> dict[str, Any]:
+    snapshot = session.get("initial_condition_snapshot_json")
+    if isinstance(snapshot, dict) and snapshot:
+        return dict(snapshot)
+    # Sessions are only created through the candidate endpoint, but keep a
+    # defensive fallback so an old manually-created anonymous session returns
+    # a useful validation error rather than operating on an empty dict.
+    raw_input = str(session.get("anonymous_input_snapshot") or "").strip()
+    if not raw_input:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Temporary recommendation session has no input.")
+    return _build_temporary_anchor(str(session["mode"]), raw_input)
 
 
 class RecommendationCandidateOut(BaseModel):
@@ -378,7 +440,43 @@ def generate_recommendation_candidates(
     current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    if payload.mode == "buyer_to_target":
+    existing_session = None
+    temporary_input = (payload.temporary_input or "").strip()
+    is_temporary_filter = bool(temporary_input)
+    if payload.session_id is not None:
+        ensure_recommendation_session_visible(db, current_user, payload.session_id)
+        existing_session = _get_recommendation_session_or_404(db, payload.session_id)
+        if existing_session["mode"] != payload.mode:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Session mode does not match the request mode.",
+            )
+        is_temporary_filter = _is_temporary_filter_session(existing_session)
+        if temporary_input:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A temporary session already has its initial request; use user_message to refine it.",
+            )
+
+    if is_temporary_filter:
+        if payload.buyer_intent_id is not None or payload.seller_target_id is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Temporary filtering cannot be combined with an existing recommendation anchor.",
+            )
+        anchor = (
+            _temporary_anchor_from_session(existing_session)
+            if existing_session is not None
+            else _build_temporary_anchor(payload.mode, temporary_input)
+        )
+        session_anchor = {
+            "buyer_intent_id": None,
+            "buyer_party_id": None,
+            "seller_target_id": None,
+        }
+    elif payload.mode == "buyer_to_target":
+        if payload.buyer_intent_id is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Buyer intent anchor is required for this session.")
         ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=payload.buyer_intent_id)
         anchor = _get_buyer_intent_anchor(db, payload.buyer_intent_id)
         session_anchor = {
@@ -387,6 +485,8 @@ def generate_recommendation_candidates(
             "seller_target_id": None,
         }
     else:
+        if payload.seller_target_id is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Seller target anchor is required for this session.")
         ensure_entity_writable(db, current_user, entity_type="seller_target", entity_id=payload.seller_target_id)
         anchor = _get_seller_target_anchor(db, payload.seller_target_id)
         session_anchor = {
@@ -395,15 +495,8 @@ def generate_recommendation_candidates(
             "seller_target_id": payload.seller_target_id,
         }
 
-    existing_session = None
     overrides: dict[str, Any] = {}
-    if payload.session_id is not None:
-        existing_session = _get_recommendation_session_or_404(db, payload.session_id)
-        if existing_session["mode"] != payload.mode:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Session mode does not match the request mode.",
-            )
+    if existing_session is not None:
         session_anchor_matches = (
             str(existing_session.get("buyer_intent_id") or "") == str(payload.buyer_intent_id or "")
             and str(existing_session.get("seller_target_id") or "") == str(payload.seller_target_id or "")
@@ -423,11 +516,12 @@ def generate_recommendation_candidates(
     # Chat message -> structured extraction; routing is derived in code.
     parse_result = None
     user_message = (payload.user_message or "").strip()
-    if user_message:
+    parser_input = user_message or temporary_input
+    if parser_input:
         parse_result = parse_recommendation_message(
             db,
             mode=payload.mode,
-            user_message=user_message,
+            user_message=parser_input,
             current_conditions=conditions_snapshot(anchor, overrides) if payload.mode == "buyer_to_target" else {},
         )
         if payload.mode == "target_to_buyer" and parse_result["condition_ops"]:
@@ -449,7 +543,7 @@ def generate_recommendation_candidates(
         apply_overrides_to_anchor(anchor, overrides) if payload.mode == "buyer_to_target" else anchor
     )
     semantic_preferences = list(overrides.get("semantic_preferences") or [])
-    extra_query_lines = [line for line in [*semantic_preferences, user_message or None] if line]
+    extra_query_lines = [line for line in [*semantic_preferences, parser_input or None] if line]
 
     disabled_scenarios = set(overrides.get("disabled_scenarios") or [])
 
@@ -463,7 +557,12 @@ def generate_recommendation_candidates(
                 semantic_query_lines=extra_query_lines,
             )
             if payload.mode == "buyer_to_target"
-            else _candidate_intents_for_target(db, effective_anchor, payload.limit)
+            else _candidate_intents_for_target(
+                db,
+                effective_anchor,
+                payload.limit,
+                semantic_query_lines=extra_query_lines,
+            )
         )
         return result["candidates"], result["funnel"], result.get("scenarios") or []
 
@@ -567,10 +666,11 @@ def generate_recommendation_candidates(
         session_id = _create_recommendation_session(
             db,
             mode=payload.mode,
-            user_message=payload.user_message,
+            user_message=parser_input,
             initial_snapshot=anchor,
             candidates=candidates,
             created_by=current_user.user_id,
+            is_temporary_filter=is_temporary_filter,
             **session_anchor,
         )
         _insert_recommendation_message(
@@ -1045,6 +1145,7 @@ def create_selected_item(
 ) -> dict[str, Any]:
     ensure_recommendation_session_visible(db, current_user, session_id)
     session = _get_recommendation_session_or_404(db, session_id)
+    _ensure_session_is_not_temporary_filter(session)
     _ensure_selected_item_matches_session(session, payload)
     _ensure_selected_item_allowed_from_session_candidates(db, current_user, session_id, payload)
     existing = _get_active_selected_item_for_pair(
@@ -1217,6 +1318,7 @@ def create_recommendation_report(
 ) -> dict[str, Any]:
     ensure_recommendation_session_visible(db, current_user, session_id)
     session = _get_recommendation_session_or_404(db, session_id)
+    _ensure_session_is_not_temporary_filter(session)
     selected_items = _list_selected_items_for_report(
         db,
         session_id=session_id,
@@ -1301,6 +1403,7 @@ def create_recommendation_report_job(
 ) -> dict[str, Any]:
     ensure_recommendation_session_visible(db, current_user, session_id)
     session = _get_recommendation_session_or_404(db, session_id)
+    _ensure_session_is_not_temporary_filter(session)
     selected_items = _list_selected_items_for_report(
         db,
         session_id=session_id,
@@ -1471,6 +1574,14 @@ def _ensure_recommendation_anchor_writable(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Buyer anchor is required.")
     if payload.mode == "target_to_buyer" and not payload.seller_target_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Seller target anchor is required.")
+
+
+def _ensure_session_is_not_temporary_filter(session: dict[str, Any]) -> None:
+    if _is_temporary_filter_session(session):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Temporary recommendation results are read-only. Select an existing buyer intent or seller target before adding candidates or starting progress.",
+        )
 
 
 def _ensure_selected_item_matches_session(

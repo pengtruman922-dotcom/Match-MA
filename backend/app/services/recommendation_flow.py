@@ -289,6 +289,16 @@ def _build_recommendation_session_summary(
 
 def _recommendation_session_display(session: dict[str, Any]) -> dict[str, Any]:
     mode = session.get("mode")
+    is_temporary_filter = bool((session.get("metadata_json") or {}).get("temporary_filter"))
+    if is_temporary_filter:
+        return {
+            "title": "临时条件筛选",
+            "subtitle": "仅查看结果，未关联业务对象",
+            "mode_label": "买家找标的" if mode == "buyer_to_target" else "标的找买家",
+            "anchor": {"entity_type": None, "entity_id": None},
+            "primary_action": "temporary_filter",
+            "route": f"/recommendations/sessions/{session['id']}",
+        }
     if mode == "buyer_to_target":
         title = session.get("buyer_intent_name") or session.get("buyer_name") or "买家找标的"
         subtitle = session.get("buyer_name")
@@ -1219,7 +1229,7 @@ def _candidate_targets_for_intent(
         {
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
-            "buyer_intent_id": intent["id"],
+            "buyer_intent_id": intent.get("id"),
         },
     ).mappings().all()
 
@@ -1244,8 +1254,8 @@ def _candidate_targets_for_intent(
             mode="buyer_to_target",
             seller_target_id=item["seller_target_id"],
             seller_target_name=item["seller_target_name"],
-            buyer_intent_id=intent["id"],
-            buyer_intent_name=intent["intent_name"],
+            buyer_intent_id=intent.get("id"),
+            buyer_intent_name=intent.get("intent_name") or "临时买家需求",
             buyer_party_id=intent.get("buyer_party_id"),
             buyer_name=intent.get("buyer_name"),
             score=score,
@@ -1288,6 +1298,7 @@ def _candidate_intents_for_target(
     db: Session,
     target: dict[str, Any],
     limit: int,
+    semantic_query_lines: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     rows = db.execute(
         text(
@@ -1329,7 +1340,11 @@ def _candidate_intents_for_target(
               bi.requires_team_retention,
               bi.major_risk_tolerance_summary,
               bi.negative_summary,
+              bi.raw_requirement_text,
+              bi.intent_summary,
+              bi.priority_summary,
               bi.preference_summary,
+              bi.industry_focus_tags_json,
               exists(
                 select 1
                 from buyer_intent_target_exclusion x
@@ -1350,7 +1365,7 @@ def _candidate_intents_for_target(
         {
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
-            "seller_target_id": target["id"],
+            "seller_target_id": target.get("id"),
         },
     ).mappings().all()
 
@@ -1358,6 +1373,7 @@ def _candidate_intents_for_target(
     candidates: list[dict[str, Any]] = []
     excluded_count = 0
     conflict_count = 0
+    semantic_terms = _semantic_query_terms(semantic_query_lines or [])
     for row in rows:
         item = dict(row)
         if item.pop("is_excluded"):
@@ -1371,8 +1387,9 @@ def _candidate_intents_for_target(
         candidates.append(
             _build_candidate_row(
                 mode="target_to_buyer",
-                seller_target_id=target["id"],
-                seller_target_name=target["target_name"],
+                seller_target_id=target.get("id"),
+                # Every real and temporary anchor carries this display field.
+                seller_target_name=target["target_name"] or "临时标的画像",
                 buyer_intent_id=item["buyer_intent_id"],
                 buyer_intent_name=item["buyer_intent_name"],
                 buyer_party_id=item.get("buyer_party_id"),
@@ -1384,6 +1401,22 @@ def _candidate_intents_for_target(
                 meta=meta,
                 risk_summary=target.get("risk_summary") or target.get("gap_summary"),
             )
+        )
+        _apply_semantic_keyword_match(
+            candidates[-1],
+            terms=semantic_terms,
+            searchable_text="\n".join(
+                str(value or "")
+                for value in (
+                    item.get("buyer_name"),
+                    item.get("buyer_intent_name"),
+                    item.get("raw_requirement_text"),
+                    item.get("intent_summary"),
+                    item.get("priority_summary"),
+                    item.get("preference_summary"),
+                    item.get("industry_focus_tags_json"),
+                )
+            ),
         )
 
     return _annotate_candidate_relations(
@@ -2425,6 +2458,7 @@ def _create_recommendation_session(
     initial_snapshot: dict[str, Any],
     candidates: list[dict[str, Any]],
     created_by: UUID,
+    is_temporary_filter: bool = False,
 ) -> UUID:
     row = db.execute(
         text(
@@ -2462,6 +2496,7 @@ def _create_recommendation_session(
             "metadata_json": {
                 "source": "recommendation_candidate_api",
                 "candidate_count": len(candidates),
+                "temporary_filter": is_temporary_filter,
             },
         },
     ).mappings().one()
