@@ -18,8 +18,10 @@ export const RELATION_STATUS_LABELS: Record<string, string> = {
   lost: '终止',
 };
 
-/** 尽调及以后视为「深入推进」——推荐给其他买家时标注、不透露对方（R2b 用）。 */
-export const DEEP_STAGE_STATUSES = new Set(['due_diligence', 'agreement', 'deal_closed']);
+/** 其他买家已有活跃撮合时显示匿名提示，不透露对方或具体阶段。 */
+export const OTHER_BUYER_PROGRESS_STATUSES = new Set([
+  'recommended', 'interested', 'in_discussion', 'due_diligence', 'agreement',
+]);
 
 const ENDED_STATUSES = new Set(['deal_closed', 'not_interested', 'paused', 'lost']);
 

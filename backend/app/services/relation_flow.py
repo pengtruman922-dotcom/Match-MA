@@ -420,8 +420,107 @@ def change_relation_status(
             source_type="direct_api",
             applied_by=actor_user_id,
         )
+    if new_status == "deal_closed":
+        mark_seller_target_sold_for_deal_closed(
+            db,
+            seller_target_id=UUID(str(relation["seller_target_id"])),
+            relation_id=relation_id,
+            actor_user_id=actor_user_id,
+        )
     db.commit()
     return _load_relation(db, relation_id)
+
+
+def _seller_target_deal_closed_changes(target: dict[str, Any]) -> dict[str, Any]:
+    """The only target-state outcome of a manually closed deal.
+
+    A relation reaching ``deal_closed`` is an explicit transaction fact, not a
+    tentative follow-up.  Keep the target list, recommendation pool, and
+    information page coherent by making the target sold and unavailable for
+    future recommendations.  Returning only actual differences keeps the
+    linkage idempotent and makes its audit concise.
+    """
+    desired = {
+        "lifecycle_status": "sold",
+        "recommendation_status": "not_recommendable",
+        "is_for_sale": "no",
+    }
+    return {field: value for field, value in desired.items() if target.get(field) != value}
+
+
+def mark_seller_target_sold_for_deal_closed(
+    db: Session,
+    *,
+    seller_target_id: UUID,
+    relation_id: UUID,
+    actor_user_id: UUID,
+) -> None:
+    target_row = db.execute(
+        text(
+            """
+            select lifecycle_status, recommendation_status, is_for_sale
+            from seller_target
+            where id = :seller_target_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ),
+        {
+            "seller_target_id": seller_target_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    if target_row is None:
+        # The relation is historical if its target has since been deleted; do
+        # not make the valid relation status transition fail because of that.
+        return
+    original = dict(target_row)
+    changes = _seller_target_deal_closed_changes(original)
+    if not changes:
+        return
+
+    db.execute(
+        text(
+            """
+            update seller_target
+            set lifecycle_status = :lifecycle_status,
+                recommendation_status = :recommendation_status,
+                is_for_sale = :is_for_sale,
+                updated_at = now(),
+                updated_by = :updated_by
+            where id = :seller_target_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ),
+        {
+            "lifecycle_status": changes.get("lifecycle_status", original["lifecycle_status"]),
+            "recommendation_status": changes.get("recommendation_status", original["recommendation_status"]),
+            "is_for_sale": changes.get("is_for_sale", original["is_for_sale"]),
+            "updated_by": actor_user_id,
+            "seller_target_id": seller_target_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )
+    for field_path, new_value in changes.items():
+        write_action_log(
+            db,
+            entity_type="seller_target",
+            entity_id=seller_target_id,
+            field_path=field_path,
+            old_value=original[field_path],
+            new_value=new_value,
+            source_type="direct_api",
+            metadata_json={
+                "source": "relation_deal_closed_seller_target_sync",
+                "relation_id": str(relation_id),
+            },
+            applied_by=actor_user_id,
+        )
 
 
 def _recompute_relation_summary(db: Session, relation_id: UUID, *, actor_user_id: UUID) -> None:

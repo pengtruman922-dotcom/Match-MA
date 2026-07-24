@@ -14,6 +14,7 @@ import pytest
 from backend.app.services.relation_flow import (
     RELATION_EVENT_TYPES,
     RELATION_STATUSES,
+    _seller_target_deal_closed_changes,
     change_relation_status,
     record_relation_event,
 )
@@ -70,6 +71,21 @@ def test_empty_event_reaches_storage_and_gets_a_default_summary() -> None:
     # generates “已记录：电话沟通” after loading the relation.
     with pytest.raises(AssertionError, match="validation should have rejected"):
         record_relation_event(_RejectingDb(), _uuid(), actor_user_id=_uuid(), event_type="call")
+
+
+def test_deal_closed_marks_the_target_sold_and_unrecommendable() -> None:
+    changes = _seller_target_deal_closed_changes(
+        {"lifecycle_status": "active", "recommendation_status": "recommendable", "is_for_sale": "yes"}
+    )
+
+    assert changes == {
+        "lifecycle_status": "sold",
+        "recommendation_status": "not_recommendable",
+        "is_for_sale": "no",
+    }
+    assert _seller_target_deal_closed_changes(
+        {"lifecycle_status": "sold", "recommendation_status": "not_recommendable", "is_for_sale": "no"}
+    ) == {}
 
 
 def _uuid():

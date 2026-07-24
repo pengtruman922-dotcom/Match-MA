@@ -1,6 +1,7 @@
 from backend.app.api.routes.extracted_actions import (
     _seller_target_changes_with_post_parse_status as _action_seller_target_changes_with_post_parse_status,
 )
+from backend.app.api.routes.seller_targets import _normalized_create_industry_pairs
 from backend.app.services.extracted_action_apply import _lifecycle_status_from_changes
 from backend.app.jobs.handlers import (
     _normalize_change_fields,
@@ -140,3 +141,13 @@ def test_terminal_sale_statuses_close_the_target_lifecycle() -> None:
     assert _lifecycle_status_from_changes({"sale_status": "已停售"}) == "off_market"
     assert _lifecycle_status_from_changes({"is_for_sale": "no"}) == "off_market"
     assert _lifecycle_status_from_changes({"is_for_sale": "yes"}) is None
+
+
+def test_blank_industry_is_allowed_when_creating_a_target() -> None:
+    class _NoDbAccess:
+        def execute(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            raise AssertionError("blank industry must not query the taxonomy")
+
+    assert _normalized_create_industry_pairs(
+        _NoDbAccess(), {"industry_pairs_json": [], "industry_l1": None, "industry_l2": None}
+    ) == []

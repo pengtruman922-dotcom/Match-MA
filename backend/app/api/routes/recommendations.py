@@ -455,7 +455,13 @@ def generate_recommendation_candidates(
 
     def run_filter() -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
         result = (
-            _candidate_targets_for_intent(db, effective_anchor, payload.limit, disabled_scenarios)
+            _candidate_targets_for_intent(
+                db,
+                effective_anchor,
+                payload.limit,
+                disabled_scenarios,
+                semantic_query_lines=extra_query_lines,
+            )
             if payload.mode == "buyer_to_target"
             else _candidate_intents_for_target(db, effective_anchor, payload.limit)
         )

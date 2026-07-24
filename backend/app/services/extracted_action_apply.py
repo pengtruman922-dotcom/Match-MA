@@ -17,6 +17,7 @@ from backend.app.api.routes.utils import (
     write_field_value_sources_for_diff,
 )
 from backend.app.services.field_writer import WriteProvenance, write_seller_target_fields
+from backend.app.services.relation_flow import mark_seller_target_sold_for_deal_closed
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 
 def apply_seller_fact_update_action(
@@ -650,6 +651,16 @@ def apply_buyer_seller_relation_update_action(
             confidence=action.get("confidence"),
             review_status="auto_accepted",
             source_context=source_context,
+        )
+    if relation_updates.get("status") == "deal_closed":
+        # AI-extracted and manually changed relation statuses share the same
+        # target lifecycle consequence: an explicit closed deal sells the
+        # target and removes it from subsequent recommendation candidates.
+        mark_seller_target_sold_for_deal_closed(
+            db,
+            seller_target_id=seller_target_id,
+            relation_id=relation["id"],
+            actor_user_id=SYSTEM_USER_ID,
         )
 
     _insert_relation_event(db, action, relation["id"], buyer_intent_id, seller_target_id, buyer_party_id, changes)

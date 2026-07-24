@@ -471,7 +471,7 @@ def _relation_select_columns() -> str:
           and other.seller_target_id = r.seller_target_id
           and other.buyer_intent_id <> r.buyer_intent_id
           and other.deleted_at is null
-          and other.status in ('due_diligence', 'agreement', 'deal_closed')
+          and other.status in ('recommended', 'interested', 'in_discussion', 'due_diligence', 'agreement')
       ) as deep_progress_elsewhere,
       bi.intent_name as buyer_intent_name,
       bp.buyer_name,

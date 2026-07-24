@@ -370,12 +370,7 @@ def create_seller_target(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     params = _seller_target_params(payload, current_user)
-    raw_pairs = params["industry_pairs_json"] or [
-        {"l1": params.get("industry_l1"), "l2": params.get("industry_l2")}
-    ]
-    pairs, notes = normalize_industry_pairs(db, raw_pairs)
-    if raw_pairs and not pairs:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=f"行业不在字典中：{notes[0] if notes else '无有效行业'}")
+    pairs = _normalized_create_industry_pairs(db, params)
     params["industry_pairs_json"] = pairs
     if pairs:
         params["industry_l1"] = pairs[0]["l1"]
@@ -417,6 +412,20 @@ def create_seller_target(
     )
     db.commit()
     return dict(row)
+
+
+def _normalized_create_industry_pairs(db: Session, params: dict[str, Any]) -> list[dict[str, str]]:
+    raw_pairs = params["industry_pairs_json"]
+    # An industry is optional at creation time.  Only use the retired scalar
+    # fields as a compatibility input when the caller actually supplied one;
+    # turning an empty pair into ``[{l1: null, l2: null}]`` made a blank
+    # industry incorrectly fail dictionary validation with 422.
+    if not raw_pairs and (params.get("industry_l1") or params.get("industry_l2")):
+        raw_pairs = [{"l1": params.get("industry_l1"), "l2": params.get("industry_l2")}]
+    pairs, notes = normalize_industry_pairs(db, raw_pairs)
+    if raw_pairs and not pairs:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=f"行业不在字典中：{notes[0] if notes else '无有效行业'}")
+    return pairs
 
 
 SELLER_TARGET_SEARCH_COLUMNS = {

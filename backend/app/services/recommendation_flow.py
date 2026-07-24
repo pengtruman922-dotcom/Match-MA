@@ -1,5 +1,6 @@
 """Recommendation session/candidate/report flow logic shared with API routes."""
 
+import re
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -1153,6 +1154,7 @@ def _candidate_targets_for_intent(
     intent: dict[str, Any],
     limit: int,
     disabled_scenario_ids: set[str] | None = None,
+    semantic_query_lines: list[str] | None = None,
 ) -> dict[str, Any]:
     rows = db.execute(
         text(
@@ -1189,6 +1191,14 @@ def _candidate_targets_for_intent(
               st.risk_summary,
               st.gap_summary,
               st.business_summary,
+              coalesce((
+                select string_agg(section.content_text, E'\n')
+                from entity_profile_section section
+                where section.entity_type = 'seller_target'
+                  and section.entity_id = st.id
+                  and section.deleted_at is null
+                  and section.review_status in ('accepted', 'auto_accepted')
+              ), '') as profile_supplement_text,
               exists(
                 select 1
                 from buyer_intent_target_exclusion x
@@ -1219,6 +1229,7 @@ def _candidate_targets_for_intent(
     candidates: list[dict[str, Any]] = []
     excluded_count = 0
     conflict_count = 0
+    semantic_terms = _semantic_query_terms(semantic_query_lines or [])
     for row in rows:
         item = dict(row)
         if item.pop("is_excluded"):
@@ -1229,23 +1240,34 @@ def _candidate_targets_for_intent(
             conflict_count += 1
             continue
         score = rule_score
-        candidates.append(
-            _build_candidate_row(
-                mode="buyer_to_target",
-                seller_target_id=item["seller_target_id"],
-                seller_target_name=item["seller_target_name"],
-                buyer_intent_id=intent["id"],
-                buyer_intent_name=intent["intent_name"],
-                buyer_party_id=intent.get("buyer_party_id"),
-                buyer_name=intent.get("buyer_name"),
-                score=score,
-                rule_score=rule_score,
-                evidence=evidence,
-                gaps=gaps,
-                meta=meta,
-                risk_summary=item.get("risk_summary") or item.get("gap_summary"),
-            )
+        candidate = _build_candidate_row(
+            mode="buyer_to_target",
+            seller_target_id=item["seller_target_id"],
+            seller_target_name=item["seller_target_name"],
+            buyer_intent_id=intent["id"],
+            buyer_intent_name=intent["intent_name"],
+            buyer_party_id=intent.get("buyer_party_id"),
+            buyer_name=intent.get("buyer_name"),
+            score=score,
+            rule_score=rule_score,
+            evidence=evidence,
+            gaps=gaps,
+            meta=meta,
+            risk_summary=item.get("risk_summary") or item.get("gap_summary"),
         )
+        _apply_semantic_keyword_match(
+            candidate,
+            terms=semantic_terms,
+            searchable_text="\n".join(
+                str(value or "")
+                for value in (
+                    item.get("seller_target_name"),
+                    item.get("business_summary"),
+                    item.get("profile_supplement_text"),
+                )
+            ),
+        )
+        candidates.append(candidate)
 
     return _annotate_candidate_relations(
         db,
@@ -1562,8 +1584,15 @@ def _build_candidate_row(
     }
 
 
-# 尽调及以后视为「深入推进」——对其他买家的推荐里标注、不透露对方。
-DEEP_RELATION_STATUSES = ("due_diligence", "agreement", "deal_closed")
+# 任何已开始的其他买家撮合都对当前候选显示匿名提醒。产品仍沿用
+# “正与其他买家深入推进”这一固定文案，但绝不透出对方或具体状态。
+OTHER_BUYER_PROGRESS_STATUSES = (
+    "recommended",
+    "interested",
+    "in_discussion",
+    "due_diligence",
+    "agreement",
+)
 # 终态关系不算「已在推进」，仍作为新候选参与排名。
 ENDED_RELATION_STATUSES = ("deal_closed", "not_interested", "paused", "lost")
 
@@ -1638,7 +1667,7 @@ def _annotate_candidate_relations(db: Session, result: dict[str, Any], *, mode: 
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
             "target_ids": target_ids,
-            "deep_statuses": list(DEEP_RELATION_STATUSES),
+            "deep_statuses": list(OTHER_BUYER_PROGRESS_STATUSES),
         },
     ).mappings().all()
     deep_intents_by_target: dict[str, set[str]] = {}
@@ -1676,7 +1705,14 @@ def _rank_and_report(
     scored well because unknowns were assumed to match. When the buyer wrote
     several scenarios, each one keeps a floor of the deep-eval budget.
     """
-    candidates.sort(key=lambda candidate: (candidate["score"], candidate["known_count"]), reverse=True)
+    candidates.sort(
+        key=lambda candidate: (
+            bool(candidate.get("semantic_keyword_matches")),
+            candidate["score"],
+            candidate["known_count"],
+        ),
+        reverse=True,
+    )
     keep = max(limit, DEEP_EVAL_CANDIDATE_LIMIT)
     selected = _select_with_scenario_quota(candidates, scenario_ids or [], keep)
     for index, candidate in enumerate(selected, start=1):
@@ -1812,6 +1848,74 @@ def _target_industry_values(target: dict[str, Any]) -> tuple[set[str], set[str]]
     if not l2_values and target.get("industry_l2"):
         l2_values.add(str(target["industry_l2"]).strip())
     return l1_values, l2_values
+
+
+_SEMANTIC_QUERY_STOP_TERMS = frozenset({
+    "推荐", "标的", "买家", "公司", "企业", "相关", "关键词", "关键字", "业务", "行业", "项目",
+})
+_SEMANTIC_KEYWORD_BOOST = 12.0
+
+
+def _semantic_query_terms(lines: list[str]) -> tuple[str, ...]:
+    """Extract conservative literal recall terms from a chat query.
+
+    The recommendation parser deliberately keeps free-text requests as a
+    semantic preference for deep evaluation.  That happened too late for a
+    niche word only recorded in a target's ``其他`` supplement: the target
+    could never enter the deep-eval candidate set.  We use only a transparent
+    literal boost here, not an untraceable LLM filter.  For Chinese text,
+    useful business words are often joined without spaces, so two-to-four
+    character n-grams provide a recall bridge (e.g. “殡葬墓地” -> “殡葬”).
+    """
+    terms: set[str] = set()
+    for line in lines:
+        for token in re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9][A-Za-z0-9_+.-]{1,}", str(line or "")):
+            normalized = token.strip().lower()
+            if normalized and normalized not in _SEMANTIC_QUERY_STOP_TERMS:
+                terms.add(normalized)
+            if re.fullmatch(r"[\u4e00-\u9fff]{3,}", token):
+                for width in range(2, min(4, len(token)) + 1):
+                    for start in range(0, len(token) - width + 1):
+                        ngram = token[start : start + width]
+                        if ngram not in _SEMANTIC_QUERY_STOP_TERMS:
+                            terms.add(ngram)
+    return tuple(sorted(terms, key=lambda item: (-len(item), item)))
+
+
+def _apply_semantic_keyword_match(
+    candidate: dict[str, Any],
+    *,
+    terms: tuple[str, ...],
+    searchable_text: str,
+) -> None:
+    """Add an explainable keyword recall bonus without bypassing hard rules."""
+    if not terms or not searchable_text:
+        return
+    haystack = searchable_text.lower()
+    matches = [term for term in terms if term in haystack]
+    if not matches:
+        return
+    # Prefer the longest terms in the user-facing explanation; the candidate
+    # still retains the full term list for diagnostic use.
+    display_matches = matches[:3]
+    candidate["semantic_keyword_matches"] = matches
+    candidate["score"] = float(candidate["score"]) + _SEMANTIC_KEYWORD_BOOST
+    candidate["recommendation_level"] = _recommendation_level(float(candidate["score"]))
+    candidate["match_summary"] = _summary_text(
+        [f"关键词命中：{'、'.join(display_matches)}", str(candidate.get("match_summary") or "")],
+        fallback="关键词匹配",
+    )
+    evidence_json = candidate.get("evidence_json") if isinstance(candidate.get("evidence_json"), dict) else {}
+    score_json = evidence_json.get("score") if isinstance(evidence_json.get("score"), dict) else {}
+    candidate["evidence_json"] = {
+        **evidence_json,
+        "semantic_keyword_matches": matches,
+        "score": {
+            **score_json,
+            "semantic_keyword_boost": _SEMANTIC_KEYWORD_BOOST,
+            "final_score": candidate["score"],
+        },
+    }
 
 
 def _excluded_industry_hit(target: dict[str, Any], intent: dict[str, Any]) -> str | None:

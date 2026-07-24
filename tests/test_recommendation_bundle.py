@@ -11,6 +11,11 @@ from backend.app.api.routes.recommendations import (
     _score_target_against_intent,
     _with_frontend_candidate_fields,
 )
+from backend.app.services.recommendation_flow import (
+    OTHER_BUYER_PROGRESS_STATUSES,
+    _apply_semantic_keyword_match,
+    _semantic_query_terms,
+)
 
 
 SELLER_TARGET_ID = "5e415f59-79ba-44b3-9d48-519092ffa07b"
@@ -104,6 +109,55 @@ def test_enrich_candidates_with_active_selection() -> None:
     assert enriched[0]["selected_at"] == "2026-06-02 10:02:00+00"
     assert enriched[0]["display_title"] == "浙江医疗器械标的"
     assert enriched[0]["card_json"]["action_label"] == "add_target_to_recommendation"
+
+
+def test_semantic_keyword_recall_reads_business_supplement_text() -> None:
+    """A niche business only in “其他” must enter keyword recommendation recall."""
+    candidate = {
+        "score": 70.0,
+        "recommendation_level": "possible",
+        "match_summary": "具备初步匹配基础",
+        "evidence_json": {"score": {"rule_score": 70.0, "final_score": 70.0}},
+    }
+
+    _apply_semantic_keyword_match(
+        candidate,
+        terms=_semantic_query_terms(["殡葬墓地"]),
+        searchable_text="其他：提供殡葬服务及墓园运营。",
+    )
+
+    assert "殡葬" in candidate["semantic_keyword_matches"]
+    assert "关键词命中：殡葬" in candidate["match_summary"]
+    assert candidate["score"] == 82.0
+    assert candidate["evidence_json"]["score"]["semantic_keyword_boost"] == 12.0
+
+
+def test_other_buyer_progress_prompt_covers_every_active_stage() -> None:
+    assert set(OTHER_BUYER_PROGRESS_STATUSES) == {
+        "recommended", "interested", "in_discussion", "due_diligence", "agreement",
+    }
+
+
+def test_candidate_pool_prioritizes_a_keyword_only_in_profile_supplement() -> None:
+    funeral_id = "11111111-1111-1111-1111-111111111112"
+    rows = [
+        _target_row(seller_target_name="普通食品企业"),
+        _target_row(
+            seller_target_id=funeral_id,
+            seller_target_name="福成五丰",
+            profile_supplement_text="业务补充：同时经营殡葬服务及墓园运营。",
+        ),
+    ]
+
+    result = _candidate_targets_for_intent(
+        _pool_db(rows),
+        {"id": BUYER_INTENT_ID, "intent_name": "关键词检索"},
+        20,
+        semantic_query_lines=["殡葬墓地"],
+    )
+
+    assert result["candidates"][0]["seller_target_id"] == funeral_id
+    assert "关键词命中：殡葬" in result["candidates"][0]["match_summary"]
 
 
 def test_frontend_candidate_fields_include_rule_and_deep_eval_breakdown() -> None:
