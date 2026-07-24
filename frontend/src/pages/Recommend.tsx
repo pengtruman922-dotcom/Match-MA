@@ -432,6 +432,29 @@ export default function Recommend() {
     void restoreSession(pickId);
   };
 
+  const startNewConversation = () => {
+    if (generating) return;
+    stopPolling();
+    setIntent(null);
+    setTarget(null);
+    setAnchorMode('entity');
+    setTemporaryInput('');
+    setSessionId(null);
+    setTimeline([]);
+    setSelectedItems([]);
+    setInputValue('');
+    setOverrides({});
+    setDisplayFilter(null);
+    setStartingProgressKey(null);
+    setReportOpen(false);
+    setError(null);
+    // Deliberately retain the current recommendation direction, while
+    // removing every old anchor/session parameter from the URL.
+    const next = new URLSearchParams();
+    next.set('mode', mode === 'target_to_buyer' ? 'target-to-buyer' : 'buyer-to-target');
+    setSearchParams(next, { replace: true });
+  };
+
   let roundCounter = 0;
   const latest = latestRoundEntry(timeline);
 
@@ -446,6 +469,14 @@ export default function Recommend() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={startNewConversation}
+            disabled={generating}
+            className="border border-gray-200 px-3 py-1.5 text-sm font-medium text-gray-700 hover:border-brand-500 hover:text-brand-600 disabled:opacity-40"
+          >
+            新开对话
+          </button>
           <SessionPicker onPick={openSession} />
           {!temporaryMode && (
             <SelectedDrawer items={selectedItems} onRemove={(item) => void removeSelected(item)} onOpenReport={() => setReportOpen(true)} />
