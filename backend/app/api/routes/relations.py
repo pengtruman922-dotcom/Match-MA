@@ -13,6 +13,7 @@ from backend.app.api.routes.utils import (
     exclusion_visible_sql,
     owner_scope_required,
     relation_event_visible_sql,
+    relation_sole_owner_sql,
     relation_visible_sql,
 )
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
@@ -52,6 +53,20 @@ class BuyerSellerRelationOut(BaseModel):
     created_at: str
     updated_at: str
     metadata_json: dict[str, Any]
+
+
+class RelationBoardCardOut(BaseModel):
+    """撮合看板卡片字段集——刻意比 BuyerSellerRelationOut 瘦，见 _relation_board_columns。"""
+
+    id: UUID
+    seller_target_id: UUID
+    buyer_intent_id: UUID
+    status: str
+    last_event_at: str | None
+    last_activity_at: str | None
+    seller_target_name: str | None
+    buyer_intent_name: str | None
+    buyer_name: str | None
 
 
 class RelationEventOut(BaseModel):
@@ -141,35 +156,15 @@ def list_relations(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
-    where = ["r.team_id = :team_id", "r.workspace_id = :workspace_id", "r.deleted_at is null"]
-    params: dict[str, Any] = {
-        "team_id": DEFAULT_TEAM_ID,
-        "workspace_id": DEFAULT_WORKSPACE_ID,
-        "limit": limit,
-        "offset": offset,
-    }
-    if seller_target_id:
-        where.append("r.seller_target_id = :seller_target_id")
-        params["seller_target_id"] = seller_target_id
-    if buyer_intent_id:
-        where.append("r.buyer_intent_id = :buyer_intent_id")
-        params["buyer_intent_id"] = buyer_intent_id
-    if buyer_party_id:
-        where.append("r.buyer_party_id = :buyer_party_id")
-        params["buyer_party_id"] = buyer_party_id
-    if status_filter:
-        where.append("r.status = :status")
-        params["status"] = status_filter
-    if q:
-        where.append(
-            """
-            (
-              st.target_name ilike :q or bi.intent_name ilike :q or bp.buyer_name ilike :q
-              or r.last_event_summary ilike :q or r.status_reason ilike :q
-            )
-            """
-        )
-        params["q"] = f"%{q}%"
+    params: dict[str, Any] = {"limit": limit, "offset": offset}
+    where = _relation_base_where(
+        params,
+        seller_target_id=seller_target_id,
+        buyer_intent_id=buyer_intent_id,
+        buyer_party_id=buyer_party_id,
+        status_filter=status_filter,
+        q=q,
+    )
     if owner_scope_required(current_user):
         where.append(relation_visible_sql("r"))
         params["scope_user_id"] = current_user.user_id
@@ -178,6 +173,56 @@ def list_relations(
         text(
             f"""
             select {_relation_select_columns()}
+            from buyer_seller_relation r
+            join seller_target st on st.id = r.seller_target_id
+            join buyer_intent bi on bi.id = r.buyer_intent_id
+            left join buyer_party bp on bp.id = r.buyer_party_id
+            where {' and '.join(where)}
+            order by coalesce(r.last_event_at, r.updated_at, r.created_at) desc
+            limit :limit offset :offset
+            """
+        ),
+        params,
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+# 必须注册在 /relations/{relation_id} 之前，否则 "board" 会被当成 UUID 路径参数。
+@router.get("/relations/board", response_model=list[RelationBoardCardOut])
+def list_relations_board(
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+    ownership: str = Query(default="involved", pattern="^(all|involved|sole)$"),
+    q: str | None = Query(default=None, max_length=200),
+    limit: int = Query(default=2000, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
+    """撮合看板取数：瘦字段集 + 零关联子查询，一次拉完整块数据交前端分组。
+
+    ownership 是**视图筛选**（责任范围三态），不是权限收紧：
+      all       仅受权限地板约束
+      involved  任一方归我（默认，与权限地板同一谓词）
+      sole      标的与买家都归我
+    """
+    params: dict[str, Any] = {"limit": limit, "offset": offset}
+    where = _relation_base_where(params, q=q)
+
+    # 权限地板与视图筛选落在同一组谓词上，去重后追加（sole ⊆ involved，不会互相矛盾）。
+    scope_sql: list[str] = []
+    if owner_scope_required(current_user):
+        scope_sql.append(relation_visible_sql("r"))
+    if ownership == "involved":
+        scope_sql.append(relation_visible_sql("r"))
+    elif ownership == "sole":
+        scope_sql.append(relation_sole_owner_sql("r"))
+    if scope_sql:
+        where.extend(dict.fromkeys(scope_sql))
+        params["scope_user_id"] = current_user.user_id
+
+    rows = db.execute(
+        text(
+            f"""
+            select {_relation_board_columns()}
             from buyer_seller_relation r
             join seller_target st on st.id = r.seller_target_id
             join buyer_intent bi on bi.id = r.buyer_intent_id
@@ -437,6 +482,62 @@ def list_buyer_intent_target_exclusions(
         params,
     ).mappings().all()
     return [dict(row) for row in rows]
+
+
+def _relation_base_where(
+    params: dict[str, Any],
+    *,
+    seller_target_id: UUID | None = None,
+    buyer_intent_id: UUID | None = None,
+    buyer_party_id: UUID | None = None,
+    status_filter: str | None = None,
+    q: str | None = None,
+) -> list[str]:
+    """/relations 与 /relations/board 共用的过滤谓词（不含负责人范围，由调用方追加）。"""
+    where = ["r.team_id = :team_id", "r.workspace_id = :workspace_id", "r.deleted_at is null"]
+    params["team_id"] = DEFAULT_TEAM_ID
+    params["workspace_id"] = DEFAULT_WORKSPACE_ID
+    if seller_target_id:
+        where.append("r.seller_target_id = :seller_target_id")
+        params["seller_target_id"] = seller_target_id
+    if buyer_intent_id:
+        where.append("r.buyer_intent_id = :buyer_intent_id")
+        params["buyer_intent_id"] = buyer_intent_id
+    if buyer_party_id:
+        where.append("r.buyer_party_id = :buyer_party_id")
+        params["buyer_party_id"] = buyer_party_id
+    if status_filter:
+        where.append("r.status = :status")
+        params["status"] = status_filter
+    if q:
+        where.append(
+            """
+            (
+              st.target_name ilike :q or bi.intent_name ilike :q or bp.buyer_name ilike :q
+              or r.last_event_summary ilike :q or r.status_reason ilike :q
+            )
+            """
+        )
+        params["q"] = f"%{q}%"
+    return where
+
+
+def _relation_board_columns() -> str:
+    """看板卡片字段集：8 个展示/分组字段 + 1 个排序用的活动时间，**零关联子查询**。
+
+    刻意不含 last_event_summary/content/next_step/type、deep_progress_elsewhere、
+    metadata_json —— 其中四个各要一个关联子查询，而 4 行卡片一个都不用。
+    last_activity_at 与 order by 的表达式一致，前端排序才不会和后端顺序打架
+    （没有事件的关系 last_event_at 为 null，不能直接拿来排序）。
+    """
+    return """
+      r.id, r.seller_target_id, r.buyer_intent_id, r.status,
+      r.last_event_at::text as last_event_at,
+      coalesce(r.last_event_at, r.updated_at, r.created_at)::text as last_activity_at,
+      st.target_name as seller_target_name,
+      bi.intent_name as buyer_intent_name,
+      bp.buyer_name
+    """
 
 
 def _relation_select_columns() -> str:

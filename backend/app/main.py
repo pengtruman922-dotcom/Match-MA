@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import JSONResponse, Response
 
 from backend.app.api.authn import ADMIN_CONTEXT, resolve_user_context
@@ -83,6 +84,9 @@ def create_app() -> FastAPI:
 
     app.add_middleware(Utf8JsonMiddleware)
     app.add_middleware(AdminAuthMiddleware)
+    # 后加的更外层：CORS > GZip > AdminAuth > Utf8Json。
+    # GZip 必须在 Utf8Json 之外——content-type 先定好，再压缩体。JSON 压缩率约 75%。
+    app.add_middleware(GZipMiddleware, minimum_size=500)
 
     if settings.cors_origin_list:
         allow_credentials = settings.cors_origin_list != ["*"]

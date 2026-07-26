@@ -374,6 +374,44 @@ def relation_visible_sql(alias: str) -> str:
     )"""
 
 
+def relation_sole_owner_sql(alias: str) -> str:
+    """看板「我全权的」视图筛选：标的侧与买家侧都归当前用户。
+
+    与 relation_visible_sql 是 AND / OR 的关系，共用 :scope_user_id。
+    这是**视图筛选**，不是权限收紧——权限地板仍由 relation_visible_sql
+    在 owner_scope_enforced 打开时负责。因为 sole ⊆ involved，两者同时
+    出现时不会互相矛盾。
+    """
+    return f"""(
+        exists (
+          select 1
+          from seller_target sole_st
+          where sole_st.id = {alias}.seller_target_id
+            and sole_st.owner_user_id = :scope_user_id
+            and sole_st.deleted_at is null
+        )
+        and (
+          exists (
+            select 1
+            from buyer_intent sole_bi
+            where sole_bi.id = {alias}.buyer_intent_id
+              and sole_bi.owner_user_id = :scope_user_id
+              and sole_bi.deleted_at is null
+          )
+          or exists (
+            select 1
+            from buyer_party sole_bp
+            where sole_bp.id = coalesce(
+                  {alias}.buyer_party_id,
+                  (select sole_bi2.buyer_party_id from buyer_intent sole_bi2 where sole_bi2.id = {alias}.buyer_intent_id)
+                )
+              and sole_bp.owner_user_id = :scope_user_id
+              and sole_bp.deleted_at is null
+          )
+        )
+    )"""
+
+
 def relation_event_visible_sql(alias: str) -> str:
     return f"""(
         exists (
