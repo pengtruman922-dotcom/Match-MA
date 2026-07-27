@@ -1,5 +1,5 @@
-import { Search } from 'lucide-react';
-import type { BoardOwnership, BoardSort, BoardView } from './boardBuckets';
+import { Info, Search } from 'lucide-react';
+import type { BoardOwnership, BoardView } from './boardBuckets';
 
 const VIEW_TABS: Array<{ value: BoardView; label: string }> = [
   { value: 'target', label: '按标的' },
@@ -13,11 +13,6 @@ const OWNERSHIP_OPTIONS: Array<{ value: BoardOwnership; label: string; hint: str
   { value: 'sole', label: '我全权的', hint: '标的和买家双方都归我；一方归同事的关系不会出现' },
 ];
 
-const SORT_OPTIONS: Array<{ value: BoardSort; label: string; hint: string }> = [
-  { value: 'activity', label: '最近活动', hint: '组内最新活动时间降序' },
-  { value: 'stale', label: '最久无动态', hint: '催办视角：无动态最久的排最前' },
-];
-
 const SELECT_CLASS =
   'border border-gray-200 bg-white px-2 py-2 text-sm text-gray-600 outline-none transition-colors hover:border-brand-300 focus:border-brand-600';
 
@@ -25,23 +20,19 @@ export default function BoardFilters({
   view,
   q,
   ownership,
-  sort,
   hideStale,
   onViewChange,
   onQChange,
   onOwnershipChange,
-  onSortChange,
   onHideStaleChange,
 }: {
   view: BoardView;
   q: string;
   ownership: BoardOwnership;
-  sort: BoardSort;
   hideStale: boolean;
   onViewChange: (value: BoardView) => void;
   onQChange: (value: string) => void;
   onOwnershipChange: (value: BoardOwnership) => void;
-  onSortChange: (value: BoardSort) => void;
   onHideStaleChange: (value: boolean) => void;
 }) {
   return (
@@ -90,34 +81,30 @@ export default function BoardFilters({
         </select>
       </label>
 
-      <label className="flex items-center gap-1.5 text-sm text-gray-500">
-        <span className="shrink-0">排序</span>
-        <select
-          value={sort}
-          onChange={(event) => onSortChange(event.target.value as BoardSort)}
-          className={SELECT_CLASS}
-          title={SORT_OPTIONS.find((option) => option.value === sort)?.hint}
+      <div className="flex items-center gap-1.5 text-sm text-gray-500">
+        <label className="flex cursor-pointer items-center gap-1.5">
+          <input
+            type="checkbox"
+            checked={hideStale}
+            onChange={(event) => onHideStaleChange(event.target.checked)}
+            className="h-3.5 w-3.5 accent-brand-600"
+          />
+          <span>隐藏最近无动态</span>
+        </label>
+        <span
+          className="group relative inline-flex"
+          aria-label="勾选隐藏超过14天无动态的项目"
+          tabIndex={0}
         >
-          {SORT_OPTIONS.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <label
-        className="flex cursor-pointer items-center gap-1.5 text-sm text-gray-500"
-        title="勾选后隐藏已触发「14天无动态」预警的关系"
-      >
-        <input
-          type="checkbox"
-          checked={hideStale}
-          onChange={(event) => onHideStaleChange(event.target.checked)}
-          className="h-3.5 w-3.5 accent-brand-600"
-        />
-        隐藏无动态
-      </label>
+          <Info className="h-3.5 w-3.5 text-gray-400" />
+          <span
+            role="tooltip"
+            className="pointer-events-none invisible absolute right-0 top-[calc(100%+6px)] z-30 w-max max-w-64 bg-gray-900 px-2.5 py-1.5 text-xs leading-5 text-white opacity-0 shadow-lg transition-opacity group-hover:visible group-hover:opacity-100 group-focus:visible group-focus:opacity-100"
+          >
+            勾选隐藏超过14天无动态的项目
+          </span>
+        </span>
+      </div>
     </div>
   );
 }

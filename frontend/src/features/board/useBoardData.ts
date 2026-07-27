@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { relations } from '../../lib/api';
 import type { RelationBoardCard } from '../../types/api';
-import { buildBoard, type BoardModel, type BoardOwnership, type BoardSort, type BoardView } from './boardBuckets';
+import { buildBoard, type BoardModel, type BoardOwnership, type BoardView } from './boardBuckets';
 
 /**
  * 一次拉完整块数据的条数上限。端点自身允许到 5000；这里留在 2000，
@@ -27,16 +27,15 @@ export interface BoardData {
 export function useBoardData(options: {
   ownership: BoardOwnership;
   view: BoardView;
-  sort: BoardSort;
   q: string;
   hideStale: boolean;
 }): BoardData {
-  const { ownership, view, sort, q, hideStale } = options;
+  const { ownership, view, q, hideStale } = options;
   const [cards, setCards] = useState<RelationBoardCard[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // 只有 ownership 变化才重新取数——视角、排序、搜索、隐藏无动态全在内存里做。
+  // 只有 ownership 变化才重新取数——视角、搜索、隐藏无动态全在内存里做。
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -61,8 +60,8 @@ export function useBoardData(options: {
   }, [ownership]);
 
   const model = useMemo(
-    () => buildBoard(cards, { view, sort, q, hideStale }),
-    [cards, view, sort, q, hideStale],
+    () => buildBoard(cards, { view, q, hideStale }),
+    [cards, view, q, hideStale],
   );
 
   return {

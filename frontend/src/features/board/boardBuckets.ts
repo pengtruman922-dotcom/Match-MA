@@ -12,7 +12,6 @@ import type { RelationBoardCard } from '../../types/api';
 import { daysSince, isStaleRelation } from '../relations/relationLabels';
 
 export type BoardView = 'target' | 'intent';
-export type BoardSort = 'activity' | 'stale';
 export type BoardOwnership = 'all' | 'involved' | 'sole';
 export type BoardBucket = 'early' | 'deep' | 'won' | 'closed';
 export type BoardMainBucket = Exclude<BoardBucket, 'closed'>;
@@ -122,7 +121,7 @@ export function cardActivityDays(card: RelationBoardCard): number | null {
 export interface BoardGroup {
   subjectId: string;
   subjectName: string;
-  /** 组内成员：深的在前，同深度按最近活动降序。 */
+  /** 组内成员：固定按最近活动降序。 */
   relations: RelationBoardCard[];
   /** 组内最深状态，用来切尾巴块并给摞头选代表。 */
   deepestStatus: string;
@@ -138,11 +137,12 @@ export interface BoardGroup {
 
 function toGroup(subjectId: string, view: BoardView, members: RelationBoardCard[]): BoardGroup {
   const relations = [...members].sort(
-    (a, b) => depthOf(b.status) - depthOf(a.status) || activityTime(b) - activityTime(a),
+    (a, b) => activityTime(b) - activityTime(a) || depthOf(b.status) - depthOf(a.status),
   );
-  const latestRelation = relations.reduce((latest, card) =>
-    activityTime(card) > activityTime(latest) ? card : latest,
+  const deepestRelation = relations.reduce((deepest, card) =>
+    depthOf(card.status) > depthOf(deepest.status) ? card : deepest,
   );
+  const latestRelation = relations[0];
 
   const counts = new Map<string, number>();
   let staleDays: number | null = null;
@@ -156,7 +156,7 @@ function toGroup(subjectId: string, view: BoardView, members: RelationBoardCard[
     subjectId,
     subjectName: subjectNameOf(relations[0], view),
     relations,
-    deepestStatus: relations[0].status,
+    deepestStatus: deepestRelation.status,
     latestActivityTime: activityTime(latestRelation),
     latestRelation,
     staleDays,
@@ -169,7 +169,6 @@ function toGroup(subjectId: string, view: BoardView, members: RelationBoardCard[
 function groupBySubject(
   cards: RelationBoardCard[],
   view: BoardView,
-  sort: BoardSort,
 ): BoardGroup[] {
   const bySubject = new Map<string, RelationBoardCard[]>();
   for (const card of cards) {
@@ -183,12 +182,7 @@ function groupBySubject(
     toGroup(subjectId, view, members),
   );
 
-  if (sort === 'stale') {
-    // 催办视角：无动态最久的排最前，没有预警的沉到底。
-    groups.sort((a, b) => (b.staleDays ?? -1) - (a.staleDays ?? -1) || b.latestActivityTime - a.latestActivityTime);
-  } else {
-    groups.sort((a, b) => b.latestActivityTime - a.latestActivityTime);
-  }
+  groups.sort((a, b) => b.latestActivityTime - a.latestActivityTime);
   return groups;
 }
 
@@ -243,9 +237,9 @@ export interface BoardModel {
  */
 export function buildBoard(
   cards: RelationBoardCard[],
-  options: { view: BoardView; sort: BoardSort; q?: string; hideStale?: boolean },
+  options: { view: BoardView; q?: string; hideStale?: boolean },
 ): BoardModel {
-  const { view, sort } = options;
+  const { view } = options;
   const needle = (options.q || '').trim().toLowerCase();
   const hideStale = options.hideStale === true;
 
@@ -274,7 +268,7 @@ export function buildBoard(
   }
 
   const columns = BOARD_COLUMNS.map((meta) => {
-    const groups = groupBySubject(visibleByBucket[meta.key], view, sort);
+    const groups = groupBySubject(visibleByBucket[meta.key], view);
     const isEarly = meta.key === 'early';
     return {
       ...meta,
@@ -294,7 +288,7 @@ export function buildBoard(
   ];
   const sections = orderedStatuses.map((status) => {
     const subset = visibleByBucket.closed.filter((card) => card.status === status);
-    return { status, groups: groupBySubject(subset, view, sort), relationCount: subset.length };
+    return { status, groups: groupBySubject(subset, view), relationCount: subset.length };
   });
 
   return {

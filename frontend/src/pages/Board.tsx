@@ -10,7 +10,6 @@ import { useBoardData, BOARD_FETCH_LIMIT } from '../features/board/useBoardData'
 import type {
   BoardModel,
   BoardOwnership,
-  BoardSort,
   BoardView,
 } from '../features/board/boardBuckets';
 
@@ -18,15 +17,24 @@ import type {
  * 全局撮合看板：概览 + 跳转，只读，不做状态编辑也不记动态（D8）。
  *
  * 取数走 /relations/board 瘦端点，一次拉完整块数据；分桶、同主体折叠、
- * 搜索和排序全在前端做（见 features/board/boardBuckets.ts）。
- * 视角 / 责任范围 / 排序 / 搜索都进 URL，刷新和分享保持同一个视图。
+ * 搜索和无动态筛选全在前端做（见 features/board/boardBuckets.ts）。
+ * 视角 / 责任范围 / 搜索 / 无动态筛选都进 URL，刷新和分享保持同一个视图。
  */
 export default function Board() {
   const [searchParams, setSearchParams] = useSearchParams();
   const view = readView(searchParams);
   const ownership = readOwnership(searchParams);
-  const sort = readSort(searchParams);
   const hideStale = searchParams.get('stale') === 'hide';
+
+  // 兼容旧分享链接：排序控件已移除，固定按最近关系动态降序。
+  useEffect(() => {
+    if (!searchParams.has('sort')) return;
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      next.delete('sort');
+      return next;
+    }, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   // 搜索是内存筛选，按键即出结果；URL 同步延后 300ms，免得每敲一个字写一次地址栏。
   // 相等就直接返回——否则「写 URL → searchParams 变 → 再写」会绕成死循环。
@@ -50,7 +58,6 @@ export default function Board() {
   const { model, loading, error, loaded, truncated } = useBoardData({
     ownership,
     view,
-    sort,
     q: qDraft,
     hideStale,
   });
@@ -76,14 +83,12 @@ export default function Board() {
         view={view}
         q={qDraft}
         ownership={ownership}
-        sort={sort}
         hideStale={hideStale}
         onViewChange={(value) => patchParams({ view: value === 'target' ? undefined : value })}
         onQChange={setQDraft}
         onOwnershipChange={(value) =>
           patchParams({ ownership: value === 'involved' ? undefined : value })
         }
-        onSortChange={(value) => patchParams({ sort: value === 'activity' ? undefined : value })}
         onHideStaleChange={(value) => patchParams({ stale: value ? 'hide' : undefined })}
       />
 
@@ -195,8 +200,4 @@ function readView(params: URLSearchParams): BoardView {
 function readOwnership(params: URLSearchParams): BoardOwnership {
   const value = params.get('ownership');
   return value === 'all' || value === 'sole' ? value : 'involved';
-}
-
-function readSort(params: URLSearchParams): BoardSort {
-  return params.get('sort') === 'stale' ? 'stale' : 'activity';
 }

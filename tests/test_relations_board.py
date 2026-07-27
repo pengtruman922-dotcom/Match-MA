@@ -303,7 +303,7 @@ def test_both_routes_call_the_shared_base_where(monkeypatch: pytest.MonkeyPatch)
     ]
 
 
-def test_base_where_matches_the_pre_refactor_logic_for_all_filter_combinations() -> None:
+def test_base_where_builds_active_entity_guards_and_all_filter_combinations() -> None:
     values = {
         "seller_target_id": UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
         "buyer_intent_id": UUID("cccccccc-cccc-cccc-cccc-cccccccccccc"),
@@ -312,8 +312,15 @@ def test_base_where_matches_the_pre_refactor_logic_for_all_filter_combinations()
         "q": "红禾",
     }
 
-    def legacy(params: dict[str, Any], enabled: dict[str, Any]) -> list[str]:
-        where = ["r.team_id = :team_id", "r.workspace_id = :workspace_id", "r.deleted_at is null"]
+    def expected(params: dict[str, Any], enabled: dict[str, Any]) -> list[str]:
+        where = [
+            "r.team_id = :team_id",
+            "r.workspace_id = :workspace_id",
+            "r.deleted_at is null",
+            "st.deleted_at is null",
+            "bi.deleted_at is null",
+            "(r.buyer_party_id is null or bp.deleted_at is null)",
+        ]
         params.update({"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID})
         for key in ("seller_target_id", "buyer_intent_id", "buyer_party_id"):
             if enabled[key]:
@@ -337,16 +344,96 @@ def test_base_where_matches_the_pre_refactor_logic_for_all_filter_combinations()
     keys = tuple(values)
     for switches in product((False, True), repeat=len(keys)):
         enabled = {key: values[key] if switch else None for key, switch in zip(keys, switches)}
-        old_params: dict[str, Any] = {"limit": 50, "offset": 0}
+        expected_params: dict[str, Any] = {"limit": 50, "offset": 0}
         new_params: dict[str, Any] = {"limit": 50, "offset": 0}
 
-        old_where = legacy(old_params, enabled)
+        expected_where = expected(expected_params, enabled)
         new_where = _relation_base_where(new_params, **enabled)
 
         assert [" ".join(clause.split()) for clause in new_where] == [
-            " ".join(clause.split()) for clause in old_where
+            " ".join(clause.split()) for clause in expected_where
         ]
-        assert new_params == old_params
+        assert new_params == expected_params
+
+
+def test_base_where_excludes_relations_with_soft_deleted_entities() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    schema = (
+        "create table seller_target (id text primary key, deleted_at text)",
+        "create table buyer_intent (id text primary key, deleted_at text)",
+        "create table buyer_party (id text primary key, deleted_at text)",
+        "create table buyer_seller_relation ("
+        "id text primary key, team_id text, workspace_id text, deleted_at text, "
+        "seller_target_id text, buyer_intent_id text, buyer_party_id text)",
+    )
+
+    with engine.begin() as connection:
+        for statement in schema:
+            connection.execute(text(statement))
+        connection.execute(
+            text("insert into seller_target values (:id, :deleted_at)"),
+            [
+                {"id": "st-live", "deleted_at": None},
+                {"id": "st-deleted", "deleted_at": "2026-07-27"},
+            ],
+        )
+        connection.execute(
+            text("insert into buyer_intent values (:id, :deleted_at)"),
+            [
+                {"id": "bi-live", "deleted_at": None},
+                {"id": "bi-deleted", "deleted_at": "2026-07-27"},
+            ],
+        )
+        connection.execute(
+            text("insert into buyer_party values (:id, :deleted_at)"),
+            [
+                {"id": "bp-live", "deleted_at": None},
+                {"id": "bp-deleted", "deleted_at": "2026-07-27"},
+            ],
+        )
+        relation_rows = [
+            {"id": "live", "deleted_at": None, "target": "st-live", "intent": "bi-live", "party": "bp-live"},
+            {"id": "live-no-party", "deleted_at": None, "target": "st-live", "intent": "bi-live", "party": None},
+            {"id": "relation-deleted", "deleted_at": "2026-07-27", "target": "st-live", "intent": "bi-live", "party": "bp-live"},
+            {"id": "target-deleted", "deleted_at": None, "target": "st-deleted", "intent": "bi-live", "party": "bp-live"},
+            {"id": "intent-deleted", "deleted_at": None, "target": "st-live", "intent": "bi-deleted", "party": "bp-live"},
+            {"id": "party-deleted", "deleted_at": None, "target": "st-live", "intent": "bi-live", "party": "bp-deleted"},
+        ]
+        connection.execute(
+            text(
+                "insert into buyer_seller_relation values "
+                "(:id, :team_id, :workspace_id, :deleted_at, :target, :intent, :party)"
+            ),
+            [
+                {
+                    **row,
+                    "team_id": str(DEFAULT_TEAM_ID),
+                    "workspace_id": str(DEFAULT_WORKSPACE_ID),
+                }
+                for row in relation_rows
+            ],
+        )
+
+        params: dict[str, Any] = {}
+        where = _relation_base_where(params)
+        params["team_id"] = str(params["team_id"])
+        params["workspace_id"] = str(params["workspace_id"])
+        rows = connection.execute(
+            text(
+                f"""
+                select r.id
+                from buyer_seller_relation r
+                join seller_target st on st.id = r.seller_target_id
+                join buyer_intent bi on bi.id = r.buyer_intent_id
+                left join buyer_party bp on bp.id = r.buyer_party_id
+                where {' and '.join(where)}
+                order by r.id
+                """
+            ),
+            params,
+        )
+
+    assert set(rows.scalars()) == {"live", "live-no-party"}
 
 
 def test_board_activity_alias_and_order_by_are_the_same_expression() -> None:

@@ -494,7 +494,14 @@ def _relation_base_where(
     q: str | None = None,
 ) -> list[str]:
     """/relations 与 /relations/board 共用的过滤谓词（不含负责人范围，由调用方追加）。"""
-    where = ["r.team_id = :team_id", "r.workspace_id = :workspace_id", "r.deleted_at is null"]
+    where = [
+        "r.team_id = :team_id",
+        "r.workspace_id = :workspace_id",
+        "r.deleted_at is null",
+        "st.deleted_at is null",
+        "bi.deleted_at is null",
+        "(r.buyer_party_id is null or bp.deleted_at is null)",
+    ]
     params["team_id"] = DEFAULT_TEAM_ID
     params["workspace_id"] = DEFAULT_WORKSPACE_ID
     if seller_target_id:
