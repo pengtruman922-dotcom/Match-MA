@@ -21,7 +21,7 @@ import type {
 export default function BuyerIntentDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [intent, setIntent] = useState<BuyerIntent | null>(null);
   const [party, setParty] = useState<BuyerParty | null>(null);
   const [parseStatus, setParseStatus] = useState<BuyerIntentParseStatus | null>(null);
@@ -35,6 +35,15 @@ export default function BuyerIntentDetail() {
   const [ownerOptions, setOwnerOptions] = useState<AppUserOption[]>([]);
   const updateWatchRef = useRef(0);
   const admin = isAdmin();
+
+  const clearProgressRelation = () => {
+    if (!searchParams.has('relation')) return;
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      next.delete('relation');
+      return next;
+    }, { replace: true });
+  };
 
   const load = useCallback(async (silent = false) => {
     if (!id) return;
@@ -145,6 +154,8 @@ export default function BuyerIntentDetail() {
         followUps={followUps}
         activeTab={activeTab}
         onTabChange={setActiveTab}
+        progressOpenRelationId={searchParams.get('relation')}
+        onProgressDrawerClose={clearProgressRelation}
         historyRefreshKey={historyRefreshKey}
         onPartySaved={setParty}
         onIntentRefresh={load}

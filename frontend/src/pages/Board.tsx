@@ -1,147 +1,202 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { Loader2, AlertTriangle } from 'lucide-react';
-import { relations } from '../lib/api';
-import type { BuyerSellerRelation } from '../types/api';
-import {
-  daysSince,
-  isRelationEnded,
-  isStaleRelation,
-  relationStatusLabel,
-} from '../features/relations/relationLabels';
-
-// 看板列 = 活跃流水线的状态；终态收进底部归档区。
-const PIPELINE: string[] = ['recommended', 'interested', 'in_discussion', 'due_diligence', 'agreement'];
+import { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
+import { setOrDelete } from '../lib/utils';
+import { relationStatusLabel } from '../features/relations/relationLabels';
+import BoardColumn, { GroupList } from '../features/board/BoardColumn';
+import BoardFilters from '../features/board/BoardFilters';
+import BoardSummary from '../features/board/BoardSummary';
+import { useBoardData, BOARD_FETCH_LIMIT } from '../features/board/useBoardData';
+import type {
+  BoardModel,
+  BoardOwnership,
+  BoardSort,
+  BoardView,
+} from '../features/board/boardBuckets';
 
 /**
- * 全局撮合看板：每张卡是一对「买家意向 × 标的」的关系。
- * 后端 /relations 已按负责人可见性过滤——管理员看全局，顾问只看自己负责的。
+ * 全局撮合看板：概览 + 跳转，只读，不做状态编辑也不记动态（D8）。
+ *
+ * 取数走 /relations/board 瘦端点，一次拉完整块数据；分桶、同主体折叠、
+ * 搜索和排序全在前端做（见 features/board/boardBuckets.ts）。
+ * 视角 / 责任范围 / 排序 / 搜索都进 URL，刷新和分享保持同一个视图。
  */
 export default function Board() {
-  const [items, setItems] = useState<BuyerSellerRelation[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const view = readView(searchParams);
+  const ownership = readOwnership(searchParams);
+  const sort = readSort(searchParams);
+  const hideStale = searchParams.get('stale') === 'hide';
 
+  // 搜索是内存筛选，按键即出结果；URL 同步延后 300ms，免得每敲一个字写一次地址栏。
+  // 相等就直接返回——否则「写 URL → searchParams 变 → 再写」会绕成死循环。
+  const urlQ = searchParams.get('q') || '';
+  const [qDraft, setQDraft] = useState(urlQ);
   useEffect(() => {
-    relations
-      .list({ limit: 200 })
-      .then(setItems)
-      .catch((err) => setError(err instanceof Error ? err.message : '加载失败'))
-      .finally(() => setLoading(false));
-  }, []);
+    if (qDraft === urlQ) return;
+    const timer = window.setTimeout(() => {
+      setSearchParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          setOrDelete(next, 'q', qDraft || undefined);
+          return next;
+        },
+        { replace: true },
+      );
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [qDraft, urlQ, setSearchParams]);
 
-  const byStatus = useMemo(() => {
-    const map: Record<string, BuyerSellerRelation[]> = {};
-    for (const relation of items) {
-      (map[relation.status] ||= []).push(relation);
-    }
-    return map;
-  }, [items]);
+  const { model, loading, error, loaded, truncated } = useBoardData({
+    ownership,
+    view,
+    sort,
+    q: qDraft,
+    hideStale,
+  });
 
-  const ended = items.filter((relation) => isRelationEnded(relation.status));
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-20 text-sm text-gray-400">
-        <Loader2 className="mr-2 h-5 w-5 animate-spin text-brand-600" />
-        正在加载撮合看板
-      </div>
-    );
-  }
-
-  if (error) {
-    return <div className="border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>;
+  function patchParams(patch: Record<string, string | undefined>) {
+    const next = new URLSearchParams(searchParams);
+    for (const [key, value] of Object.entries(patch)) setOrDelete(next, key, value);
+    setSearchParams(next, { replace: true });
   }
 
   return (
-    <div className="space-y-5">
-      <div className="flex items-baseline justify-between">
+    <div className="space-y-4">
+      <div className="flex items-baseline justify-between gap-3">
         <div>
           <h1 className="text-lg font-semibold text-gray-900">撮合看板</h1>
-          <p className="mt-0.5 text-xs text-gray-500">每张卡是一对「买家 × 标的」的推进；管理员看全局，顾问看自己负责的。</p>
+          <p className="mt-0.5 text-xs text-gray-500">
+            每张卡是一对「买家意向 × 标的」的推进。点卡片进对应详情页的「推进」tab 编辑。
+          </p>
         </div>
-        <span className="text-xs text-gray-400">共 {items.length} 条关系</span>
       </div>
 
-      {items.length === 0 ? (
+      <BoardFilters
+        view={view}
+        q={qDraft}
+        ownership={ownership}
+        sort={sort}
+        hideStale={hideStale}
+        onViewChange={(value) => patchParams({ view: value === 'target' ? undefined : value })}
+        onQChange={setQDraft}
+        onOwnershipChange={(value) =>
+          patchParams({ ownership: value === 'involved' ? undefined : value })
+        }
+        onSortChange={(value) => patchParams({ sort: value === 'activity' ? undefined : value })}
+        onHideStaleChange={(value) => patchParams({ stale: value ? 'hide' : undefined })}
+      />
+
+      {error ? (
+        <div className="border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
+      ) : null}
+
+      {loading ? (
+        <div className="flex items-center justify-center py-20 text-sm text-gray-400">
+          <Loader2 className="mr-2 h-5 w-5 animate-spin text-brand-600" />
+          正在加载撮合看板
+        </div>
+      ) : loaded === 0 && !error ? (
         <div className="border border-gray-200 bg-white py-16 text-center">
-          <p className="text-sm text-gray-500">还没有撮合关系</p>
-          <p className="mt-1 text-xs text-gray-400">在智能推荐里点「开始推进」，或在标的/买家详情页关联对手方。</p>
+          <p className="text-sm text-gray-500">
+            {ownership === 'involved'
+              ? '当前责任范围下还没有撮合关系'
+              : ownership === 'sole'
+                ? '没有标的与买家都归你的撮合关系'
+                : '还没有撮合关系'}
+          </p>
+          <p className="mt-1 text-xs text-gray-400">
+            在智能推荐里点「开始推进」，或在标的/买家详情页关联对手方；也可以把责任范围切到「全部」再看。
+          </p>
         </div>
       ) : (
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
-          {PIPELINE.map((status) => (
-            <Column key={status} status={status} relations={byStatus[status] || []} />
-          ))}
-        </div>
-      )}
+        <>
+          <BoardSummary
+            model={model}
+            view={view}
+            truncated={truncated}
+            loaded={loaded}
+            fetchLimit={BOARD_FETCH_LIMIT}
+          />
 
-      {ended.length > 0 && (
-        <section className="border-t border-gray-100 pt-4">
-          <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-gray-400">
-            终态 ({ended.length})
-          </h2>
-          <div className="flex flex-wrap gap-2">
-            {ended.map((relation) => (
-              <Link
-                key={relation.id}
-                to={targetProgressPath(relation)}
-                className="border border-gray-100 bg-gray-50/60 px-2.5 py-1.5 text-xs text-gray-500 hover:border-gray-300"
-              >
-                {relation.seller_target_name} × {relation.buyer_name || relation.buyer_intent_name}
-                <span className="ml-1 text-gray-400">· {relationStatusLabel(relation.status)}</span>
-              </Link>
+          {/* 深度交流和已成交天生比初步接触少得多，列宽跟着让开。 */}
+          <div className="grid grid-cols-1 items-start gap-3 lg:grid-cols-[2fr_1fr_1fr]">
+            {model.columns.map((column) => (
+              <BoardColumn key={column.key} column={column} view={view} />
             ))}
           </div>
-        </section>
+
+          <ClosedDrawer model={model} view={view} />
+        </>
       )}
     </div>
   );
 }
 
-function Column({ status, relations: cards }: { status: string; relations: BuyerSellerRelation[] }) {
+/** 底部抽屉：已关闭的三个状态，默认收起；暂停单独分组排最前（D1）。 */
+function ClosedDrawer({ model, view }: { model: BoardModel; view: BoardView }) {
+  const [open, setOpen] = useState(false);
+  if (model.closed.relationCount === 0 && model.closed.hiddenCount === 0) return null;
+
   return (
-    <div className="flex flex-col border border-gray-200 bg-gray-50/40">
-      <div className="flex items-center justify-between border-b border-gray-100 px-3 py-2">
-        <span className="text-xs font-semibold text-gray-700">{relationStatusLabel(status)}</span>
-        <span className="text-xs text-gray-400">{cards.length}</span>
-      </div>
-      <div className="flex-1 space-y-2 p-2">
-        {cards.length === 0 ? (
-          <p className="px-1 py-3 text-center text-[11px] text-gray-300">—</p>
+    <section className="border border-gray-200 bg-gray-50/40">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        className="flex w-full flex-wrap items-center gap-2 px-3 py-2 text-left hover:bg-gray-50"
+      >
+        {open ? (
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-gray-400" />
         ) : (
-          cards.map((relation) => <Card key={relation.id} relation={relation} />)
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-gray-400" />
         )}
-      </div>
-    </div>
+        <span className="text-xs font-semibold text-gray-700">
+          已关闭 {model.closed.relationCount} 条
+        </span>
+        {model.closed.sections.map((section) => (
+          <span
+            key={section.status}
+            className={`text-[11px] ${section.status === 'paused' ? 'text-amber-600' : 'text-gray-400'}`}
+          >
+            {relationStatusLabel(section.status)} {section.relationCount}
+          </span>
+        ))}
+        {model.closed.hiddenCount > 0 ? (
+          <span className="text-[11px] text-amber-600">筛选中，隐藏 {model.closed.hiddenCount} 条</span>
+        ) : null}
+      </button>
+
+      {open ? (
+        <div className="space-y-4 border-t border-gray-100 p-3">
+          {model.closed.sections.map((section) => (
+            <div key={section.status}>
+              <p
+                className={`mb-2 text-[11px] font-medium ${
+                  section.status === 'paused' ? 'text-amber-600' : 'text-gray-400'
+                }`}
+              >
+                {relationStatusLabel(section.status)} {section.relationCount} 条
+              </p>
+              <div className="grid grid-cols-1 items-start gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                <GroupList groups={section.groups} view={view} />
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </section>
   );
 }
 
-function Card({ relation }: { relation: BuyerSellerRelation }) {
-  const stale = isStaleRelation(relation.status, relation.last_event_at);
-  const staleDays = daysSince(relation.last_event_at);
-  return (
-    <Link
-      to={targetProgressPath(relation)}
-      className="block border border-gray-200 bg-white px-2.5 py-2 hover:border-brand-400"
-    >
-      <p className="truncate text-xs text-gray-500"><span className="mr-1 text-gray-400">标的</span><span className="font-medium text-gray-900">{relation.seller_target_name || '-'}</span></p>
-      <p className="mt-0.5 truncate text-[11px] text-gray-500"><span className="mr-1 text-gray-400">买家</span>{relation.buyer_name || '-'}</p>
-      <p className="mt-0.5 truncate text-[11px] text-gray-500"><span className="mr-1 text-gray-400">意向</span>{relation.buyer_intent_name || '-'}</p>
-      {relation.last_event_summary ? (
-        <p className="mt-1 line-clamp-2 text-[11px] text-gray-400">{relation.last_event_summary}</p>
-      ) : null}
-      {stale ? (
-        <p className="mt-1 inline-flex items-center gap-0.5 text-[11px] text-amber-600">
-          <AlertTriangle className="h-2.5 w-2.5" />
-          {staleDays}天无动态
-        </p>
-      ) : null}
-    </Link>
-  );
+function readView(params: URLSearchParams): BoardView {
+  return params.get('view') === 'intent' ? 'intent' : 'target';
 }
 
-// 看板卡点进标的详情的推进 tab——那里能看到这条关系的完整时间线。
-function targetProgressPath(relation: BuyerSellerRelation): string {
-  return `/targets/${relation.seller_target_id}?tab=progress`;
+function readOwnership(params: URLSearchParams): BoardOwnership {
+  const value = params.get('ownership');
+  return value === 'all' || value === 'sole' ? value : 'involved';
+}
+
+function readSort(params: URLSearchParams): BoardSort {
+  return params.get('sort') === 'stale' ? 'stale' : 'activity';
 }

@@ -30,6 +30,9 @@ interface Props {
   followUps: BuyerIntentFollowUp[];
   activeTab: BuyerWorkspaceTab;
   onTabChange: (tab: BuyerWorkspaceTab) => void;
+  /** 撮合看板 `?relation=` 深链接，透传给「推进」tab 的 ProgressPanel。 */
+  progressOpenRelationId?: string | null;
+  onProgressDrawerClose?: () => void;
   historyRefreshKey?: number;
   onPartySaved?: (party: BuyerParty) => void;
   onIntentRefresh?: () => void | Promise<void>;
@@ -51,6 +54,8 @@ export default function BuyerIntentWorkspace({
   followUps,
   activeTab,
   onTabChange,
+  progressOpenRelationId = null,
+  onProgressDrawerClose,
   historyRefreshKey = 0,
   onPartySaved,
   onIntentRefresh,
@@ -83,7 +88,14 @@ export default function BuyerIntentWorkspace({
             <EmptyState title="当前需求未关联买家" description="可在买家管理中补充关联关系。" />
           )
         ) : null}
-        {activeTab === 'progress' ? <ProgressPanel side="buyer_intent" entityId={intent.id} /> : null}
+        {activeTab === 'progress' ? (
+          <ProgressPanel
+            side="buyer_intent"
+            entityId={intent.id}
+            initialOpenId={progressOpenRelationId}
+            onDrawerClose={onProgressDrawerClose}
+          />
+        ) : null}
         {activeTab === 'attachments' ? <IntentAttachments intentId={intent.id} /> : null}
         {activeTab === 'followups' ? <IntentFollowUps intentId={intent.id} items={followUps} onRefresh={onIntentRefresh} /> : null}
         {activeTab === 'history' ? (

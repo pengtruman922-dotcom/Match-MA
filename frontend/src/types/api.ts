@@ -1001,6 +1001,25 @@ export interface BuyerSellerRelation {
   metadata_json: Record<string, unknown>;
 }
 
+/**
+ * /relations/board 的瘦卡片。刻意只有 9 个字段——看板 4 行卡片用不到
+ * BuyerSellerRelation 里那些靠关联子查询捞出来的事件文本。别往这里加字段，
+ * 加了就把 B-2 的载荷问题重新引回来。
+ */
+export interface RelationBoardCard {
+  id: string;
+  seller_target_id: string;
+  buyer_intent_id: string;
+  status: string;
+  /** 最近一条动态的时间；没有动态时为 null，「N 天无动态」预警看它。 */
+  last_event_at: string | null;
+  /** coalesce(last_event_at, updated_at, created_at)，与后端 order by 同源的排序键。 */
+  last_activity_at: string | null;
+  seller_target_name: string | null;
+  buyer_intent_name: string | null;
+  buyer_name: string | null;
+}
+
 export interface RelationEvent {
   id: string;
   relation_id: string;

@@ -91,6 +91,7 @@ import type {
   ModelProviderConfig,
   PromptTemplateConfig,
   QueueSummary,
+  RelationBoardCard,
   TaskCenterData,
 } from '../../types/api';
 import type { AuthUser, LoginResponse } from '../auth';
@@ -329,6 +330,13 @@ export const relations = {
     limit?: number;
     offset?: number;
   }) => apiRequest<BuyerSellerRelation[]>(`/relations${buildQuery(params || {})}`),
+  /**
+   * 撮合看板专用瘦端点：9 字段、零关联子查询、limit 上限 5000。
+   * 看板一次拉完整块数据在前端分组，所以这里不传 q——搜索在内存里做，
+   * 见 features/board/boardBuckets.ts 的 filter 说明。
+   */
+  board: (params?: { ownership?: 'all' | 'involved' | 'sole'; limit?: number; offset?: number }) =>
+    apiRequest<RelationBoardCard[]>(`/relations/board${buildQuery(params || {})}`),
   get: (id: string) => apiRequest<BuyerSellerRelation>(`/relations/${id}`),
   events: (id: string, params?: { limit?: number; offset?: number }) =>
     apiRequest<RelationEvent[]>(`/relations/${id}/events${buildQuery(params || {})}`),

@@ -37,7 +37,7 @@ type Tab = 'info' | 'progress' | 'attachments' | 'relations' | 'history';
 export default function TargetDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [target, setTarget] = useState<SellerTarget | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<Tab>(() => (['history', 'attachments', 'relations', 'progress'] as const).find((tab) => tab === searchParams.get('tab')) || 'info');
@@ -48,6 +48,15 @@ export default function TargetDetail() {
   const [ownerOptions, setOwnerOptions] = useState<AppUserOption[]>([]);
   const [ownerSaving, setOwnerSaving] = useState(false);
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
+
+  const clearProgressRelation = () => {
+    if (!searchParams.has('relation')) return;
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      next.delete('relation');
+      return next;
+    }, { replace: true });
+  };
 
   useEffect(() => {
     if (!admin) return;
@@ -225,7 +234,14 @@ export default function TargetDetail() {
             </div>
             <div className="p-5">
               {activeTab === 'info' && <TargetInfoPanel target={target} />}
-              {activeTab === 'progress' && <ProgressPanel side="seller_target" entityId={target.id} />}
+              {activeTab === 'progress' && (
+                <ProgressPanel
+                  side="seller_target"
+                  entityId={target.id}
+                  initialOpenId={searchParams.get('relation')}
+                  onDrawerClose={clearProgressRelation}
+                />
+              )}
               {activeTab === 'attachments' && <AttachmentsTab targetId={target.id} />}
               {activeTab === 'relations' && (
                 <FollowUpsTab targetId={target.id} followUps={followUps} onChanged={setFollowUps} />

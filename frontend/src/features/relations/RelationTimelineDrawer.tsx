@@ -62,7 +62,7 @@ export default function RelationTimelineDrawer({ relation, side, statuses, event
   };
 
   return (
-    <div className="fixed inset-0 z-40 flex justify-end">
+    <div className="fixed inset-0 z-[60] flex justify-end">
       <div className="absolute inset-0 bg-black/30" onClick={onClose} />
       <div className="relative z-10 flex h-full w-full max-w-lg flex-col border-l border-gray-200 bg-white shadow-xl">
         <div className="flex items-start justify-between border-b border-gray-100 px-5 py-4">
@@ -77,7 +77,7 @@ export default function RelationTimelineDrawer({ relation, side, statuses, event
               {current.first_recommended_at ? ` · 始于 ${formatDate(current.first_recommended_at)}` : ''}
             </p>
           </div>
-          <button type="button" onClick={onClose} className="p-1 text-gray-400 hover:text-gray-700"><X className="h-4 w-4" /></button>
+          <button type="button" onClick={onClose} aria-label="关闭时间线" className="p-1 text-gray-400 hover:text-gray-700"><X className="h-4 w-4" /></button>
         </div>
 
         <div className="flex-1 overflow-y-auto px-5 py-4">
