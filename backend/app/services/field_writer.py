@@ -33,6 +33,7 @@ from backend.app.api.routes.utils import (
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.registry.indicators import Indicator, indicator_by_column, indicators_for
 from backend.app.services.industry_taxonomy import normalize_industry_pairs, normalize_l2_values, resolve_l1
+from backend.app.services.region_dictionary import NORMALIZERS as REGION_NORMALIZERS
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 
 
@@ -107,6 +108,10 @@ def _normalize_value(db: Session, indicator: Indicator, value: Any) -> Any:
         if notes and not normalized:
             raise FieldWriteError(f"行业不在字典中: {notes[0]}")
         return normalized
+    if indicator.column in REGION_NORMALIZERS:
+        # Province is spelled one way for everyone, so cascading filters match
+        # regardless of whether a value came from the picker or from an LLM.
+        return REGION_NORMALIZERS[indicator.column](value)
     if indicator.kind == "enum":
         if not isinstance(value, str):
             raise FieldWriteError(f"{indicator.column} must be an enum value.")

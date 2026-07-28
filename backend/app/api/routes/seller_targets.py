@@ -39,7 +39,18 @@ from backend.app.services.attachment_storage import (
     read_attachment_bytes,
 )
 from backend.app.services.image_inputs import is_supported_multimodal_image
+from backend.app.services.region_dictionary import (
+    normalize_city,
+    normalize_district,
+    normalize_province,
+)
 from backend.app.services.search_docs import create_search_doc_rebuild_job
+from backend.app.services.seller_target_status import (
+    AIProcessingBusyError,
+    acquire_ai_processing,
+    ai_processing_detail,
+    ai_processing_state,
+)
 
 router = APIRouter(prefix="/seller-targets", tags=["seller-targets"])
 
@@ -50,15 +61,11 @@ class SellerTargetCreate(BaseModel):
     target_subject_name: str | None = Field(default=None, max_length=300)
     owner_user_id: UUID | None = None
     lifecycle_status: Literal["active", "sold", "off_market"] = "active"
-    recommendation_status: Literal["recommendable", "not_recommendable"] = "not_recommendable"
     information_status: Literal[
         "normal",
         "insufficient",
-        "pending_review",
         "parsing",
-        "researching",
-        "parse_failed",
-    ] = "pending_review"
+    ] = "insufficient"
     industry_l1: str | None = None
     industry_l2: str | None = None
     industry_pairs_json: list[dict[str, str]] = Field(default_factory=list)
@@ -87,8 +94,12 @@ class SellerTargetOut(BaseModel):
     target_type: str
     target_subject_name: str | None
     lifecycle_status: str
-    recommendation_status: str
     information_status: str
+    # Phase-A rolling-deploy compatibility only.  This is calculated from the
+    # lifecycle and never reads the retired database column.
+    recommendation_status: str
+    ai_processing_state: str
+    ai_processing_detail: str
     industry_l1: str | None = None
     industry_l2: str | None = None
     industry_pairs_json: list[dict[str, str]] = Field(default_factory=list)
@@ -137,6 +148,7 @@ class SellerTargetOut(BaseModel):
     owner_name: str | None = None
     # 调研节流靠界面二次确认，不靠服务端静默跳过，所以列表也要带上最近调研时间。
     last_research_at: str | None = None
+    last_parse_at: str | None = None
     research_last_outcome: str | None = None
     created_at: str
     updated_at: str
@@ -195,8 +207,6 @@ class SellerTargetUpdate(BaseModel):
     management_retention_possible: str | None = None
     earnout_dependency_status: str | None = None
     lifecycle_status: Literal["active", "sold", "off_market"] | None = None
-    recommendation_status: str | None = None
-    information_status: str | None = None
     business_summary: str | None = None
     transaction_summary: str | None = None
     risk_summary: str | None = None
@@ -240,12 +250,22 @@ class SellerTargetFilterOptionOut(BaseModel):
     count: int
 
 
+class SellerTargetCountedOptionOut(BaseModel):
+    """A cascader level. ``count`` annotates a dictionary entry, it does not
+    define it — the frontend renders the full taxonomy/area dictionary and uses
+    these counts to show how many targets sit behind each choice."""
+
+    value: str
+    count: int
+    children: list["SellerTargetCountedOptionOut"] = []
+
+
 class SellerTargetFilterOptionsOut(BaseModel):
-    industries: list[SellerTargetFilterOptionOut]
-    regions: list[SellerTargetFilterOptionOut]
+    industries: list[SellerTargetCountedOptionOut]
+    regions: list[SellerTargetCountedOptionOut]
     statuses: list[SellerTargetFilterOptionOut]
+    # Old frontend compatibility during the phase-A rolling deploy.
     recommendation_statuses: list[SellerTargetFilterOptionOut] = []
-    parse_statuses: list[SellerTargetFilterOptionOut] = []
     owners: list[SellerTargetFilterOptionOut] = []
 
 
@@ -321,7 +341,9 @@ class TargetFollowUpOut(BaseModel):
 
 
 SELLER_TARGET_OUT_COLUMNS = """
-              id, target_name, target_type, target_subject_name, lifecycle_status, recommendation_status, information_status,
+              id, target_name, target_type, target_subject_name, lifecycle_status, information_status,
+              case when lifecycle_status = 'active' then 'recommendable'
+                   else 'not_recommendable' end as recommendation_status,
               industry_l1, industry_l2, industry_pairs_json, location_province, location_city, location_district,
               listed_status, listing_market_region, market_cap_yuan, current_revenue_yuan, current_net_profit_yuan,
               current_total_profit_yuan, current_assets_yuan, current_debt_ratio,
@@ -335,32 +357,34 @@ SELLER_TARGET_OUT_COLUMNS = """
               earnout_dependency_status, business_summary, transaction_summary, risk_summary, gap_summary,
               owner_user_id,
               (select au.name from app_user au where au.id = seller_target.owner_user_id) as owner_name,
-              last_research_at::text as last_research_at, research_last_outcome,
+              last_research_at::text as last_research_at, last_parse_at::text as last_parse_at,
+              research_last_outcome,
               created_at::text as created_at, updated_at::text as updated_at
 """
 
-# Single user-facing "status" derived from three orthogonal stored statuses:
-# parse lifecycle beats deal lifecycle beats recommendability, so the UI can
-# render one column while the database stays conflict-free.
+# The列表「状态」列 is the trade lifecycle and nothing else. AI progress lives in
+# its own column (services/seller_target_status.py) because mixing the two is
+# what let a parsed target read as "未解析" while being excluded from screening.
 SELLER_TARGET_DISPLAY_STATUS_SQL = """
               case
-                when information_status in ('parsing', 'researching') then 'parsing'
-                when information_status = 'parse_failed' then 'parse_failed'
                 when lifecycle_status = 'sold' then 'sold'
                 when lifecycle_status = 'off_market' then 'off_market'
-                when recommendation_status = 'recommendable' then 'recommendable'
-                else 'not_recommendable'
+                else 'active'
               end
 """
 
 SELLER_TARGET_DISPLAY_STATUS_LABELS = {
-    "parsing": "解析中",
-    "parse_failed": "解析失败",
+    "active": "在售中",
     "sold": "已售出",
     "off_market": "已停售",
-    "recommendable": "可推荐",
-    "not_recommendable": "暂不可推荐",
 }
+
+
+def _seller_target_out(row: Any) -> dict[str, Any]:
+    result = dict(row)
+    result["ai_processing_state"] = ai_processing_state(result)
+    result["ai_processing_detail"] = ai_processing_detail(result)
+    return result
 
 
 @router.post("", response_model=SellerTargetOut, status_code=status.HTTP_201_CREATED)
@@ -380,7 +404,7 @@ def create_seller_target(
             f"""
             insert into seller_target (
               team_id, workspace_id, target_name, target_type, target_subject_name, owner_user_id,
-              lifecycle_status, recommendation_status, information_status,
+              lifecycle_status, information_status,
               industry_l1, industry_l2, industry_pairs_json, location_province, location_city, location_district,
               listed_status, current_revenue_yuan, current_net_profit_yuan,
               valuation_yuan, valuation_date, asking_price_yuan, asking_price_date, pe_ratio,
@@ -390,7 +414,7 @@ def create_seller_target(
             )
             values (
               :team_id, :workspace_id, :target_name, :target_type, :target_subject_name, :owner_user_id,
-              :lifecycle_status, :recommendation_status, :information_status,
+              :lifecycle_status, :information_status,
               :industry_l1, :industry_l2, :industry_pairs_json, :location_province, :location_city, :location_district,
               :listed_status, :current_revenue_yuan, :current_net_profit_yuan,
               :valuation_yuan, :valuation_date, :asking_price_yuan, :asking_price_date, :pe_ratio,
@@ -411,7 +435,7 @@ def create_seller_target(
         source="seller_target_create",
     )
     db.commit()
-    return dict(row)
+    return _seller_target_out(row)
 
 
 def _normalized_create_industry_pairs(db: Session, params: dict[str, Any]) -> list[dict[str, str]]:
@@ -428,11 +452,96 @@ def _normalized_create_industry_pairs(db: Session, params: dict[str, Any]) -> li
     return pairs
 
 
+# Industry is searchable because it is a fact about the target, not just a
+# filter facet: 搜「食品」 must find a 商贸与消费/食品 target whose summary happens
+# to say 预制菜研发生产.
+_INDUSTRY_PAIR_SEARCH_SQL = (
+    "exists (select 1 from jsonb_array_elements(industry_pairs_json) pair "
+    "where pair ->> 'l1' ilike :q or pair ->> 'l2' ilike :q)"
+)
+
 SELLER_TARGET_SEARCH_COLUMNS = {
     "target_name": "target_name",
     "target_subject_name": "target_subject_name",
     "business_summary": "business_summary",
+    "industry": _INDUSTRY_PAIR_SEARCH_SQL,
 }
+
+SellerTargetSearchField = Literal[
+    "target_name", "target_subject_name", "business_summary", "industry"
+]
+
+
+def _search_filter(
+    where: list[str],
+    params: dict[str, Any],
+    *,
+    q: str | None,
+    search_field: str | None,
+) -> None:
+    if not q:
+        return
+    if search_field == "industry":
+        where.append(_INDUSTRY_PAIR_SEARCH_SQL)
+    elif search_field:
+        where.append(f"{SELLER_TARGET_SEARCH_COLUMNS[search_field]} ilike :q")
+    else:
+        where.append(
+            "(target_name ilike :q or target_subject_name ilike :q "
+            f"or business_summary ilike :q or {_INDUSTRY_PAIR_SEARCH_SQL})"
+        )
+    params["q"] = f"%{q}%"
+
+
+def _location_filter(
+    where: list[str],
+    params: dict[str, Any],
+    *,
+    province: str | None,
+    city: str | None,
+    district: str | None,
+) -> None:
+    """Match at whatever level the user picked, independently per column.
+
+    The retired filter compared a flattened "省 市 区" string for equality, so
+    选「广东省」 could only ever match targets whose city and district were both
+    blank. Province is normalized on the way in for the same reason it is
+    normalized on write: a hand-edited URL saying 广东 must still find 广东省.
+    """
+    for column, value, normalizer in (
+        ("location_province", province, normalize_province),
+        ("location_city", city, normalize_city),
+        ("location_district", district, normalize_district),
+    ):
+        normalized = normalizer(value)
+        if normalized is None:
+            continue
+        where.append(f"{column} = :{column}")
+        params[column] = normalized
+
+
+def _industry_filter(
+    where: list[str],
+    params: dict[str, Any],
+    *,
+    industry_l1: str | None,
+    industry_l2: str | None,
+) -> None:
+    """Both levels must hit the *same* pair, so 制造与工业/食品 never satisfies
+    a 商贸与消费 + 食品 filter through two unrelated pairs."""
+    conditions: list[str] = []
+    if industry_l1:
+        conditions.append("pair ->> 'l1' = :industry_l1")
+        params["industry_l1"] = industry_l1
+    if industry_l2:
+        conditions.append("pair ->> 'l2' = :industry_l2")
+        params["industry_l2"] = industry_l2
+    if not conditions:
+        return
+    where.append(
+        "exists (select 1 from jsonb_array_elements(industry_pairs_json) pair "
+        f"where {' and '.join(conditions)})"
+    )
 
 
 @router.get("", response_model=SellerTargetListOut)
@@ -442,19 +551,17 @@ def list_seller_targets(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     q: str | None = Query(default=None, max_length=200),
-    search_field: Literal["target_name", "target_subject_name", "business_summary"] | None = Query(default=None),
-    industry: str | None = Query(default=None, max_length=200),
-    region: str | None = Query(default=None, max_length=200),
-    status: Literal[
-        "recommendable",
-        "not_recommendable",
-        "parsing",
-        "parse_failed",
-        "sold",
-        "off_market",
-    ] | None = Query(default=None),
-    recommendation_status: Literal["recommendable", "sold", "off_market"] | None = Query(default=None),
-    parse_status: Literal["parsing", "parse_failed", "parsed"] | None = Query(default=None),
+    search_field: SellerTargetSearchField | None = Query(default=None),
+    industry_l1: str | None = Query(default=None, max_length=120),
+    industry_l2: str | None = Query(default=None, max_length=120),
+    province: str | None = Query(default=None, max_length=60),
+    city: str | None = Query(default=None, max_length=60),
+    district: str | None = Query(default=None, max_length=60),
+    status: Literal["active", "sold", "off_market"] | None = Query(default=None),
+    recommendation_status: Literal["recommendable", "not_recommendable"] | None = Query(
+        default=None,
+        deprecated=True,
+    ),
     owner: str | None = Query(default=None, max_length=50),
 ) -> dict[str, Any]:
     where = ["team_id = :team_id", "workspace_id = :workspace_id", "deleted_at is null"]
@@ -474,42 +581,19 @@ def list_seller_targets(
         if owner_param is not None:
             params["owner_user_id"] = owner_param
 
-    if q:
-        if search_field:
-            where.append(f"{SELLER_TARGET_SEARCH_COLUMNS[search_field]} ilike :q")
-        else:
-            where.append("(target_name ilike :q or target_subject_name ilike :q or business_summary ilike :q)")
-        params["q"] = f"%{q}%"
-    if industry:
-        industry_l1, separator, industry_l2 = industry.partition(" / ")
-        where.append(
-            "exists (select 1 from jsonb_array_elements(industry_pairs_json) pair "
-            "where pair ->> 'l1' = :industry_l1 "
-            "and (:industry_l2 is null or pair ->> 'l2' = :industry_l2))"
-        )
-        params["industry_l1"] = industry_l1
-        params["industry_l2"] = industry_l2 if separator else None
-    if region:
-        where.append(
-            "concat_ws(' ', nullif(location_province, ''), nullif(location_city, ''), nullif(location_district, '')) = :region"
-        )
-        params["region"] = region
+    _search_filter(where, params, q=q, search_field=search_field)
+    _industry_filter(where, params, industry_l1=industry_l1, industry_l2=industry_l2)
+    _location_filter(where, params, province=province, city=city, district=district)
     if status:
-        where.append(f"({SELLER_TARGET_DISPLAY_STATUS_SQL}) = :status")
+        where.append("lifecycle_status = :status")
         params["status"] = status
-    if recommendation_status:
-        if recommendation_status in {"sold", "off_market"}:
-            where.append("lifecycle_status = :recommendation_status")
+    elif recommendation_status:
+        # Temporary old-client mapping for the phase-A rolling deploy.  This
+        # deliberately maps from lifecycle rather than reading the old column.
+        if recommendation_status == "recommendable":
+            where.append("lifecycle_status = 'active'")
         else:
-            where.append("lifecycle_status = 'active' and recommendation_status = 'recommendable'")
-        params["recommendation_status"] = recommendation_status
-    if parse_status:
-        if parse_status == "parsing":
-            where.append("information_status in ('parsing', 'researching')")
-        elif parse_status == "parse_failed":
-            where.append("information_status = 'parse_failed'")
-        else:
-            where.append("information_status not in ('parsing', 'researching', 'parse_failed')")
+            where.append("lifecycle_status in ('sold', 'off_market')")
 
     where_sql = " and ".join(where)
     total = db.execute(
@@ -546,7 +630,7 @@ def list_seller_targets(
         ),
         params,
     ).mappings().all()
-    return {"items": [dict(row) for row in rows], "total": total, "limit": limit, "offset": offset}
+    return {"items": [_seller_target_out(row) for row in rows], "total": total, "limit": limit, "offset": offset}
 
 
 @router.get("/filter-options", response_model=SellerTargetFilterOptionsOut)
@@ -556,43 +640,61 @@ def seller_target_filter_options(current_user: CurrentUser, db: Session = Depend
     if owner_scope_required(current_user):
         params["scope_user_id"] = current_user.user_id
         scope_clause = "and owner_user_id = :scope_user_id"
-    industries = _filter_options(
-        db,
-        f"""
-        select
-          concat_ws(' / ', pair ->> 'l1', pair ->> 'l2') as value,
-          count(distinct seller_target.id) as count
-        from seller_target
-        cross join lateral jsonb_array_elements(industry_pairs_json) pair
-        where team_id = :team_id
-          and workspace_id = :workspace_id
-          and deleted_at is null
-          {scope_clause}
-          and coalesce(pair ->> 'l1', '') <> ''
-        group by value
-        order by count desc, value asc
-        limit 80
-        """,
+    # Both cascaders render a *dictionary* skeleton (industry taxonomy /
+    # @vant/area-data) and use these counts only as annotation, so a value that
+    # nobody has used yet is still selectable. That is why these are grouped by
+    # level instead of by the flattened leaf string the old filters compared.
+    industry_rows = db.execute(
+        text(
+            f"""
+            with target_pairs as (
+              select distinct
+                seller_target.id as target_id,
+                pair ->> 'l1' as l1,
+                nullif(pair ->> 'l2', '') as l2
+              from seller_target
+              cross join lateral jsonb_array_elements(industry_pairs_json) pair
+              where team_id = :team_id
+                and workspace_id = :workspace_id
+                and deleted_at is null
+                {scope_clause}
+                and coalesce(pair ->> 'l1', '') <> ''
+            ), l1_counts as (
+              select l1, count(distinct target_id) as l1_count
+              from target_pairs
+              group by l1
+            )
+            select
+              target_pairs.l1,
+              target_pairs.l2,
+              count(distinct target_pairs.target_id) as count,
+              l1_counts.l1_count
+            from target_pairs
+            join l1_counts using (l1)
+            group by target_pairs.l1, target_pairs.l2, l1_counts.l1_count
+            """
+        ),
         params,
-    )
-    regions = _filter_options(
-        db,
-        f"""
-        select
-          concat_ws(' ', nullif(location_province, ''), nullif(location_city, ''), nullif(location_district, '')) as value,
-          count(*) as count
-        from seller_target
-        where team_id = :team_id
-          and workspace_id = :workspace_id
-          and deleted_at is null
-          {scope_clause}
-          and concat_ws(' ', nullif(location_province, ''), nullif(location_city, ''), nullif(location_district, '')) <> ''
-        group by value
-        order by count desc, value asc
-        limit 80
-        """,
+    ).mappings().all()
+    region_rows = db.execute(
+        text(
+            f"""
+            select
+              nullif(location_province, '') as province,
+              nullif(location_city, '') as city,
+              nullif(location_district, '') as district,
+              count(*) as count
+            from seller_target
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+              {scope_clause}
+              and nullif(location_province, '') is not null
+            group by province, city, district
+            """
+        ),
         params,
-    )
+    ).mappings().all()
     statuses = _filter_options(
         db,
         f"""
@@ -608,58 +710,95 @@ def seller_target_filter_options(current_user: CurrentUser, db: Session = Depend
         params,
         labels=SELLER_TARGET_DISPLAY_STATUS_LABELS,
     )
-    recommendation_statuses = _filter_options(
-        db,
-        f"""
-        select
-          case
-            when lifecycle_status = 'sold' then 'sold'
-            when lifecycle_status = 'off_market' then 'off_market'
-            when lifecycle_status = 'active' and recommendation_status = 'recommendable' then 'recommendable'
-            else null
-          end as value,
-          count(*) as count
-        from seller_target
-        where team_id = :team_id
-          and workspace_id = :workspace_id
-          and deleted_at is null
-          {scope_clause}
-        group by value
-        order by count desc, value asc
-        """,
-        params,
-        labels={"recommendable": "可推荐", "sold": "已售出", "off_market": "已停售"},
-    )
-    parse_statuses = _filter_options(
-        db,
-        f"""
-        select
-          case
-            when information_status in ('parsing', 'researching') then 'parsing'
-            when information_status = 'parse_failed' then 'parse_failed'
-            else 'parsed'
-          end as value,
-          count(*) as count
-        from seller_target
-        where team_id = :team_id
-          and workspace_id = :workspace_id
-          and deleted_at is null
-          {scope_clause}
-        group by value
-        order by count desc, value asc
-        """,
-        params,
-        labels={"parsing": "解析中", "parse_failed": "解析失败", "parsed": "已解析"},
-    )
     owners = [] if owner_scope_required(current_user) else owner_filter_options(db, "seller_target", params)
     return {
-        "industries": industries,
-        "regions": regions,
+        "industries": _industry_option_tree(industry_rows),
+        "regions": _region_option_tree(region_rows),
         "statuses": statuses,
-        "recommendation_statuses": recommendation_statuses,
-        "parse_statuses": parse_statuses,
+        "recommendation_statuses": [
+            {
+                "value": "recommendable",
+                "label": "可推荐",
+                "count": sum(item["count"] for item in statuses if item["value"] == "active"),
+            },
+            {
+                "value": "not_recommendable",
+                "label": "暂不可推荐",
+                "count": sum(item["count"] for item in statuses if item["value"] != "active"),
+            },
+        ],
         "owners": owners,
     }
+
+
+def _industry_option_tree(rows: list[Any]) -> list[dict[str, Any]]:
+    """Roll (l1, l2, count) rows up into the two levels the cascader renders.
+
+    An L1 count is the number of targets carrying that L1 in *any* pair, so it
+    matches what selecting that L1 alone will return.
+    """
+    by_l1: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        level_one = by_l1.setdefault(
+            row["l1"],
+            {"value": row["l1"], "count": int(row["l1_count"]), "children": {}},
+        )
+        if row["l2"]:
+            child = level_one["children"].setdefault(row["l2"], {"value": row["l2"], "count": 0})
+            child["count"] += int(row["count"])
+    return [
+        {
+            "value": item["value"],
+            "count": item["count"],
+            "children": sorted(
+                item["children"].values(), key=lambda child: (-child["count"], child["value"])
+            ),
+        }
+        for item in sorted(by_l1.values(), key=lambda item: (-item["count"], item["value"]))
+    ]
+
+
+def _region_option_tree(rows: list[Any]) -> list[dict[str, Any]]:
+    provinces: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        province = provinces.setdefault(
+            row["province"], {"value": row["province"], "count": 0, "children": {}}
+        )
+        province["count"] += int(row["count"])
+        if not row["city"]:
+            continue
+        city = province["children"].setdefault(
+            row["city"], {"value": row["city"], "count": 0, "children": {}}
+        )
+        city["count"] += int(row["count"])
+        if row["district"]:
+            district = city["children"].setdefault(
+                row["district"], {"value": row["district"], "count": 0}
+            )
+            district["count"] += int(row["count"])
+    return [
+        {
+            "value": province["value"],
+            "count": province["count"],
+            "children": [
+                {
+                    "value": city["value"],
+                    "count": city["count"],
+                    "children": sorted(
+                        city["children"].values(),
+                        key=lambda item: (-item["count"], item["value"]),
+                    ),
+                }
+                for city in sorted(
+                    province["children"].values(),
+                    key=lambda item: (-item["count"], item["value"]),
+                )
+            ],
+        }
+        for province in sorted(
+            provinces.values(), key=lambda item: (-item["count"], item["value"])
+        )
+    ]
 
 
 @router.get("/suggestions", response_model=list[SellerTargetSuggestionOut])
@@ -950,6 +1089,19 @@ def parse_seller_target(
                 "seller_target_id": existing_job["entity_id"],
             }
 
+    # Mark the target before enqueueing: the list polls information_status to
+    # show 「解析中」, and the failure path only flips to parse_failed for rows
+    # that were in 'parsing' — without this, a re-parse that fails leaves no
+    # trace anywhere the consultant looks.
+    try:
+        acquire_ai_processing(
+            db,
+            seller_target_id=seller_target_id,
+            desired_status="parsing",
+            actor_user_id=current_user.user_id,
+        )
+    except AIProcessingBusyError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     row = db.execute(
         text(
             """
@@ -1259,7 +1411,7 @@ def update_seller_target(
     )
 
     db.commit()
-    return dict(row)
+    return _seller_target_out(row)
 
 
 @router.patch("/{seller_target_id}/fields", response_model=SellerTargetOut)
@@ -1666,7 +1818,7 @@ def _get_seller_target_or_404(db: Session, seller_target_id: UUID) -> dict[str, 
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Seller target not found.")
 
-    return dict(row)
+    return _seller_target_out(row)
 
 
 def _seller_target_params(payload: SellerTargetCreate, current_user: AuthContext) -> dict[str, Any]:
@@ -1683,14 +1835,13 @@ def _seller_target_params(payload: SellerTargetCreate, current_user: AuthContext
         "target_subject_name": target_subject_name,
         "owner_user_id": owner_user_id,
         "lifecycle_status": payload.lifecycle_status,
-        "recommendation_status": payload.recommendation_status,
         "information_status": payload.information_status,
         "industry_l1": _normalize_optional_text(payload.industry_l1),
         "industry_l2": _normalize_optional_text(payload.industry_l2),
         "industry_pairs_json": payload.industry_pairs_json,
-        "location_province": _normalize_optional_text(payload.location_province),
-        "location_city": _normalize_optional_text(payload.location_city),
-        "location_district": _normalize_optional_text(payload.location_district),
+        "location_province": normalize_province(payload.location_province),
+        "location_city": normalize_city(payload.location_city),
+        "location_district": normalize_district(payload.location_district),
         "listed_status": payload.listed_status,
         "current_revenue_yuan": payload.current_revenue_yuan,
         "current_net_profit_yuan": payload.current_net_profit_yuan,

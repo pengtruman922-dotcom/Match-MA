@@ -32,7 +32,13 @@ import { buildInfoGroups, groupFilledCount, type InfoGroup } from './infoGroups'
  * 「硬数据 + 装不下的定性判断」是并排的，字段上的「筛」角标进一步告诉顾问
  * 哪些空缺补了会改变召回。
  */
-export default function TargetInfoPanel({ target }: { target: SellerTarget }) {
+export default function TargetInfoPanel({
+  target,
+  onTargetChanged,
+}: {
+  target: SellerTarget;
+  onTargetChanged?: (target: SellerTarget) => void;
+}) {
   const [currentTarget, setCurrentTarget] = useState(target);
   const [data, setData] = useState<ProfileSectionsResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -67,13 +73,16 @@ export default function TargetInfoPanel({ target }: { target: SellerTarget }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [profileData, proposalData, registryData, sourceData, industryData] = await Promise.all([
+      const [freshTarget, profileData, proposalData, registryData, sourceData, industryData] = await Promise.all([
+        sellerTargets.get(currentTarget.id),
         profileSections.list('seller_target', currentTarget.id),
         research.proposals(currentTarget.id, 'pending_review'),
         indicatorRegistry.list('seller_target'),
         fieldSources.list({ entity_type: 'seller_target', entity_id: currentTarget.id, limit: 200 }),
         meta.industryOptions(),
       ]);
+      setCurrentTarget(freshTarget);
+      onTargetChanged?.(freshTarget);
       setData(profileData);
       setProposals(proposalData);
       setRegistry(registryData);
@@ -85,7 +94,7 @@ export default function TargetInfoPanel({ target }: { target: SellerTarget }) {
     } finally {
       setLoading(false);
     }
-  }, [currentTarget.id]);
+  }, [currentTarget.id, onTargetChanged]);
 
   useEffect(() => {
     void load();
@@ -217,6 +226,11 @@ export default function TargetInfoPanel({ target }: { target: SellerTarget }) {
       </div>
 
       {error && <p className="border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">{error}</p>}
+      {!error && currentTarget.ai_processing_state === 'research_failed' && (
+        <p className="border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">
+          {currentTarget.ai_processing_detail}
+        </p>
+      )}
 
       {proposals.length > 0 && (
         <div className="border border-amber-100 bg-amber-50/50 px-4 py-3">

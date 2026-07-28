@@ -95,7 +95,7 @@ from backend.app.jobs.handlers.seller_target_parse import (
     _mark_seller_targets_parse_failed,
     _normalize_seller_target_industry_changes,
     _normalize_seller_target_parse_changes,
-    _seller_target_changes_with_post_parse_status,
+    _seller_target_changes_with_parse_completion,
     _seller_target_parse_fallback_text,
     _validate_seller_target_parse_output,
 )

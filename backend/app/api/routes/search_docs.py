@@ -200,7 +200,7 @@ def create_seller_target_search_doc_jobs(
             where st.team_id = :team_id
               and st.workspace_id = :workspace_id
               and st.deleted_at is null
-              and st.recommendation_status = 'recommendable'
+              and st.lifecycle_status = 'active'
               {'and (sd.id is null or sd.embedding is null)' if not include_embedded else ''}
             order by st.updated_at desc
             limit :limit

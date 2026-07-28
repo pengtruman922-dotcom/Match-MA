@@ -148,8 +148,8 @@ export default function CreateTargetModal({ onClose, onCreated }: { onClose: () 
         target_name: targetName,
         target_type: form.targetType,
         target_subject_name: normalizeOptional(form.targetSubjectName),
-        recommendation_status: 'not_recommendable',
-        information_status: shouldParse ? 'parsing' : 'normal',
+        // 无材料的新建标的是「未处理」而不是「已完成」——它还没被任何 AI 流水线碰过。
+        information_status: shouldParse ? 'parsing' : 'insufficient',
         industry_l1: normalizeOptional(form.industry),
         industry_pairs_json: normalizeOptional(form.industry) ? [{ l1: normalizeOptional(form.industry)! }] : [],
         location_province: region.province,

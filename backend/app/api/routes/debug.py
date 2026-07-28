@@ -446,7 +446,7 @@ def _debug_summary(entity_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         debug = payload.get("debug", {})
         return {
             "title": f"{entity_type}: {entity.get('name') or entity.get('title') or entity.get('id')}",
-            "status": entity.get("status") or entity.get("recommendation_status"),
+            "status": entity.get("status") or entity.get("lifecycle_status"),
             "job_count": len(payload.get("jobs", [])),
             "trace_count": len(payload.get("traces", [])),
             "update_log_count": len(payload.get("application_logs", [])),
@@ -500,7 +500,7 @@ def _safe_debug_query(
 MINIMAL_BUSINESS_OBJECT_SELECTS = {
     "seller_target": """
         select id, target_name as name, target_name as title,
-               recommendation_status, information_status,
+               lifecycle_status, information_status,
                updated_at::text as updated_at
         from seller_target
         where id = :entity_id
@@ -533,7 +533,7 @@ BUSINESS_OBJECT_SELECTS = {
     "seller_target": """
         select
           id, target_name as name, target_name as title, target_type,
-          recommendation_status, information_status, industry_l1, industry_l2, industry_pairs_json,
+          lifecycle_status, information_status, industry_l1, industry_l2, industry_pairs_json,
           location_province, location_city, location_district, listed_status,
           current_revenue_yuan, current_net_profit_yuan, current_total_profit_yuan,
           valuation_yuan, asking_price_yuan, pe_ratio, is_for_sale,

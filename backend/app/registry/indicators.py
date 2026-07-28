@@ -121,9 +121,10 @@ SELLER_TARGET_INDICATORS: tuple[Indicator, ...] = (
     # 出售诉求
     Indicator("is_for_sale", "是否还卖", "deal_terms", "enum", writable_by=_PARSE_MANUAL, enum_options=_YES_NO_LIKE),
     Indicator("risk_summary", "风险摘要", "deal_terms", "text", writable_by=_PARSE_MANUAL),
-    # 系统状态不是信息页业务事实，不允许手动编辑。
-    Indicator("information_status", "信息状态", None, "enum", writable_by=_PARSE, enum_options=(("normal", "正常"), ("insufficient", "信息不足"), ("pending_review", "待审核"), ("parsing", "解析中"), ("researching", "调研中"), ("parse_failed", "解析失败"))),
-    Indicator("recommendation_status", "推荐状态", None, "enum", writable_by=_PARSE, enum_options=(("recommendable", "可推荐"), ("not_recommendable", "暂不可推荐"))),
+    # 系统状态不是信息页业务事实，不允许手动编辑。交易状态（lifecycle_status）
+    # 由详情页下拉维护，走专用流程，不进注册表。
+    # pending_review 仅在数据库 check 中兼容历史行，不再向任何写入方暴露。
+    Indicator("information_status", "信息状态", None, "enum", writable_by=_PARSE, enum_options=(("normal", "正常"), ("insufficient", "信息不足"), ("parsing", "解析中"), ("researching", "调研中"), ("parse_failed", "解析失败"))),
 )
 
 _BI_PARSE = frozenset({"parse"})

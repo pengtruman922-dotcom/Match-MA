@@ -436,13 +436,13 @@ def _seller_target_deal_closed_changes(target: dict[str, Any]) -> dict[str, Any]
 
     A relation reaching ``deal_closed`` is an explicit transaction fact, not a
     tentative follow-up.  Keep the target list, recommendation pool, and
-    information page coherent by making the target sold and unavailable for
-    future recommendations.  Returning only actual differences keeps the
-    linkage idempotent and makes its audit concise.
+    information page coherent by making the target sold: ``lifecycle_status``
+    is itself the screening gate, so no separate recommendation flag is needed.
+    Returning only actual differences keeps the linkage idempotent and makes
+    its audit concise.
     """
     desired = {
         "lifecycle_status": "sold",
-        "recommendation_status": "not_recommendable",
         "is_for_sale": "no",
     }
     return {field: value for field, value in desired.items() if target.get(field) != value}
@@ -458,7 +458,7 @@ def mark_seller_target_sold_for_deal_closed(
     target_row = db.execute(
         text(
             """
-            select lifecycle_status, recommendation_status, is_for_sale
+            select lifecycle_status, is_for_sale
             from seller_target
             where id = :seller_target_id
               and team_id = :team_id
@@ -486,7 +486,6 @@ def mark_seller_target_sold_for_deal_closed(
             """
             update seller_target
             set lifecycle_status = :lifecycle_status,
-                recommendation_status = :recommendation_status,
                 is_for_sale = :is_for_sale,
                 updated_at = now(),
                 updated_by = :updated_by
@@ -498,7 +497,6 @@ def mark_seller_target_sold_for_deal_closed(
         ),
         {
             "lifecycle_status": changes.get("lifecycle_status", original["lifecycle_status"]),
-            "recommendation_status": changes.get("recommendation_status", original["recommendation_status"]),
             "is_for_sale": changes.get("is_for_sale", original["is_for_sale"]),
             "updated_by": actor_user_id,
             "seller_target_id": seller_target_id,

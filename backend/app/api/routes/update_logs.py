@@ -908,7 +908,8 @@ ROLLBACK_FIELDS_BY_ENTITY = {
         "management_team_summary",
         "management_retention_possible",
         "earnout_dependency_status",
-        "recommendation_status",
+        # recommendation_status 已随 0727 状态合并删除；历史日志里仍有该 field_path，
+        # 不在此白名单意味着它们被标为不可回滚，而不是回滚时炸在缺列上。
         "information_status",
         "business_summary",
         "transaction_summary",

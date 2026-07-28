@@ -24,6 +24,7 @@ from backend.app.jobs.handlers.recommendation import (
 )
 from backend.app.jobs.handlers.research import (
     _handle_seller_target_research,
+    _mark_research_outcome,
 )
 from backend.app.jobs.handlers.search_embedding import (
     _handle_buyer_intent_search_doc_rebuild,
@@ -32,13 +33,26 @@ from backend.app.jobs.handlers.search_embedding import (
 )
 from backend.app.jobs.handlers.seller_target_parse import (
     _handle_seller_target_parse,
+    _mark_seller_target_parse_failed_if_final_attempt,
 )
 
 def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
     if job.job_type == "business_update_extract_actions":
         return _handle_business_update_extract_actions(db, job)
     if job.job_type == "seller_target_parse":
-        return _handle_seller_target_parse(db, job)
+        try:
+            return _handle_seller_target_parse(db, job)
+        except Exception as exc:
+            if job.entity_id is not None:
+                db.rollback()
+                _mark_seller_target_parse_failed_if_final_attempt(
+                    db,
+                    job,
+                    job.entity_id,
+                    str(exc),
+                )
+                db.commit()
+            raise
     if job.job_type == "buyer_intent_parse":
         return _handle_buyer_intent_parse(db, job)
     if job.job_type == "attachment_ocr_parse":
@@ -58,7 +72,17 @@ def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
     if job.job_type == "model_node_test":
         return _handle_model_node_test(db, job)
     if job.job_type == "seller_target_research":
-        return _handle_seller_target_research(db, job)
+        try:
+            return _handle_seller_target_research(db, job)
+        except Exception:
+            # The handler records expected provider/LLM/schema failures itself.
+            # This final boundary also releases `researching` for unexpected
+            # programming/database errors on the last attempt.
+            if job.entity_id is not None and job.attempt_count >= job.max_attempts:
+                db.rollback()
+                _mark_research_outcome(db, job.entity_id, "failed")
+                db.commit()
+            raise
 
     return {
         "handled": False,

@@ -11,8 +11,8 @@ import {
   formatTransferRatio,
   getPreferredPrice,
   getSubjectDisplay,
-  RecommendationStatusBadge,
-  TargetParseStatusBadge,
+  TargetAiProcessingBadge,
+  TargetStatusBadge,
   YesNoBadge,
 } from './presentation';
 
@@ -61,8 +61,8 @@ export default function TargetRow({
         )}
       </td>
       <td className="w-20 max-w-20 px-3 py-3 text-gray-600"><ClampedText value={subject} /></td>
-      <td className="px-4 py-3 text-center"><RecommendationStatusBadge item={item} /></td>
-      <td className="px-4 py-3 text-center"><TargetParseStatusBadge item={item} /></td>
+      <td className="px-4 py-3 text-center"><TargetStatusBadge item={item} /></td>
+      <td className="px-4 py-3 text-center"><TargetAiProcessingBadge item={item} /></td>
       <td className="px-4 py-3 text-gray-600"><ClampedText value={formatTargetType(item.target_type)} /></td>
       <td className="px-4 py-3 text-gray-600"><ClampedText value={formatListedStatus(item.listed_status)} /></td>
       <td className="px-4 py-3 text-gray-600"><ClampedText value={industry} /></td>

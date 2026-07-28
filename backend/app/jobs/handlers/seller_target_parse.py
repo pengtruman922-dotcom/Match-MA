@@ -20,6 +20,7 @@ from backend.app.services.industry_taxonomy import (
     normalize_l2_values,
     resolve_l1,
 )
+from backend.app.services.seller_target_status import mark_parse_completed
 
 from backend.app.jobs.handlers.common import (
     SELLER_TARGET_POST_PARSE_STATUSES,
@@ -153,6 +154,11 @@ def _handle_seller_target_parse(db: Session, job: JobClaim) -> dict[str, object]
                 default_source_label="Seller target parser",
             ),
         )
+    mark_parse_completed(
+        db,
+        seller_target_id=seller_target_id,
+        actor_user_id=SYSTEM_USER_ID,
+    )
 
     return {
         "handled": True,
@@ -171,7 +177,7 @@ def _get_seller_target_for_parse(db: Session, seller_target_id: UUID) -> dict[st
         text(
             """
             select
-              id, target_name, target_type, target_subject_name, recommendation_status, information_status,
+              id, target_name, target_type, target_subject_name, information_status,
               industry_l1, industry_l2, industry_pairs_json, location_province, location_city,
               location_district, listed_status,
               market_cap_yuan, current_revenue_yuan, current_net_profit_yuan,
@@ -351,7 +357,7 @@ def _apply_seller_target_parse_changes(
     normalization_notes: list[str],
     source_context: dict[str, Any],
 ) -> list[str]:
-    changes = _seller_target_changes_with_post_parse_status(seller_target, changes)
+    changes = _seller_target_changes_with_parse_completion(seller_target, changes)
     return write_seller_target_fields(
         db,
         UUID(str(seller_target["id"])),
@@ -374,23 +380,23 @@ def _apply_seller_target_parse_changes(
         search_doc_source="seller_target_parse",
     )
 
-def _seller_target_changes_with_post_parse_status(
+def _seller_target_changes_with_parse_completion(
     seller_target: dict[str, Any],
     changes: dict[str, Any],
 ) -> dict[str, Any]:
+    """Release the target from its in-flight parse state, nothing more.
+
+    This used to also flip a recommendation gate, which meant recommendability
+    depended on *when* a fact happened to be written rather than on the target
+    itself. That gate is gone (施工单 0727); parsing now only reports its own
+    progress.
+    """
     next_changes = dict(changes)
-    original_information_status = seller_target.get("information_status")
     if (
         "information_status" not in next_changes
-        and original_information_status in SELLER_TARGET_POST_PARSE_STATUSES
+        and seller_target.get("information_status") in SELLER_TARGET_POST_PARSE_STATUSES
     ):
         next_changes["information_status"] = "normal"
-    if (
-        "recommendation_status" not in next_changes
-        and seller_target.get("recommendation_status") == "not_recommendable"
-        and original_information_status in SELLER_TARGET_POST_PARSE_STATUSES
-    ):
-        next_changes["recommendation_status"] = "recommendable"
     return next_changes
 
 def _normalize_seller_target_industry_changes(
@@ -451,8 +457,6 @@ def _mark_bound_seller_targets_complete_after_business_update_parse(
     business_update: dict[str, Any],
     auto_apply_results: list[dict[str, Any]],
     job_id: UUID,
-    *,
-    pending_review: bool = False,
 ) -> int:
     seller_target_ids = set(_uuid_list(business_update.get("bound_seller_target_ids_json")))
     if not seller_target_ids:
@@ -465,17 +469,14 @@ def _mark_bound_seller_targets_complete_after_business_update_parse(
     remaining_ids = [item for item in seller_target_ids if item not in auto_applied_target_ids]
     if not remaining_ids:
         return 0
-    information_status = "pending_review" if pending_review else "normal"
-    completion_reason = (
-        "business_update_requires_review"
-        if pending_review
-        else "business_update_parsed_without_field_changes"
-    )
+    information_status = "normal"
+    completion_reason = "business_update_parsed_without_field_changes"
     result = db.execute(
         text(
             """
             update seller_target
             set information_status = :information_status,
+                last_parse_at = now(),
                 updated_at = now(),
                 updated_by = :updated_by,
                 metadata_json = metadata_json || :metadata_patch
@@ -515,6 +516,7 @@ def _mark_seller_targets_parse_failed(
             """
             update seller_target
             set information_status = 'parse_failed',
+                last_parse_at = now(),
                 updated_at = now(),
                 updated_by = :updated_by,
                 metadata_json = metadata_json || :metadata_patch

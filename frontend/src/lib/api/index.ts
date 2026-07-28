@@ -122,11 +122,12 @@ export const sellerTargets = {
   list: (params?: {
     q?: string;
     search_field?: SellerTargetSearchField;
-    industry?: string;
-    region?: string;
+    industry_l1?: string;
+    industry_l2?: string;
+    province?: string;
+    city?: string;
+    district?: string;
     status?: string;
-    recommendation_status?: string;
-    parse_status?: string;
     owner?: string;
     limit?: number;
     offset?: number;

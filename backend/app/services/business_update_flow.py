@@ -484,9 +484,9 @@ def _mark_business_update_processing(db: Session, business_update_id: UUID) -> N
 def _mark_bound_seller_targets_parsing(db: Session, business_update_id: UUID) -> None:
     """Show bound targets as parsing so the list/detail polling picks the run up.
 
-    The extract-actions handler releases them afterwards: field applies flip to
-    normal, follow-up-only applies release to normal, leftovers become
-    pending_review, failures become parse_failed.
+    The extract-actions handler releases them afterwards: field applies and
+    follow-up-only applies return to normal; failures become parse_failed.
+    A target currently owned by research is deliberately left untouched.
     """
     db.execute(
         text(
@@ -502,7 +502,7 @@ def _mark_bound_seller_targets_parsing(db: Session, business_update_id: UUID) ->
               and st.team_id = :team_id
               and st.workspace_id = :workspace_id
               and st.deleted_at is null
-              and st.information_status <> 'parsing'
+              and st.information_status not in ('parsing', 'researching')
               and st.id::text in (
                 select jsonb_array_elements_text(bu.bound_seller_target_ids_json)
               )
@@ -982,7 +982,7 @@ def _seller_targets_by_ids(db: Session, ids: list[UUID]) -> list[dict[str, Any]]
               valuation_yuan, asking_price_yuan, pe_ratio, is_for_sale,
               can_control, can_consolidate, accepts_minority_investment,
               transfer_ratio_min, transfer_ratio_max, transfer_ratio_text,
-              transfer_flexibility_type, recommendation_status, information_status,
+              transfer_flexibility_type, information_status,
               business_summary, transaction_summary, risk_summary, gap_summary,
               updated_at::text as updated_at
             from seller_target

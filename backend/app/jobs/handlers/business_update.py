@@ -231,23 +231,14 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
             attachment_context=attachment_context,
             business_update_id=business_update_id,
         )
-        applied_action_ids = {
-            _optional_uuid(result.get("extracted_action_id")) for result in auto_apply_results
-        }
-        has_pending_bound_action = any(
-            created_action_id not in applied_action_ids
-            and (
-                action.get("action_type") == "unresolved_item"
-                or action.get("target_entity_type") == "seller_target"
-            )
-            for action, created_action_id in zip(actions, created_actions, strict=True)
-        )
+        # Actions that could not be auto-applied stay queryable on
+        # extracted_action; they no longer park the target in a 待复核 state
+        # that had no review UI behind it (施工单 0727).
         completed_target_count = _mark_bound_seller_targets_complete_after_business_update_parse(
             db,
             business_update,
             auto_apply_results,
             job.id,
-            pending_review=has_pending_bound_action,
         )
 
         db.execute(

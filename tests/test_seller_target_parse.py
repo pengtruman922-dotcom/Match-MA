@@ -1,5 +1,5 @@
 from backend.app.api.routes.extracted_actions import (
-    _seller_target_changes_with_post_parse_status as _action_seller_target_changes_with_post_parse_status,
+    _seller_target_changes_with_parse_completion as _action_seller_target_changes_with_parse_completion,
 )
 from backend.app.api.routes.seller_targets import _normalized_create_industry_pairs
 from backend.app.services.extracted_action_apply import _lifecycle_status_from_changes
@@ -7,7 +7,7 @@ from backend.app.jobs.handlers import (
     _normalize_change_fields,
     _normalize_seller_listed_status,
     _normalize_seller_target_parse_changes,
-    _seller_target_changes_with_post_parse_status,
+    _seller_target_changes_with_parse_completion,
     _validate_seller_target_parse_output,
     SELLER_TARGET_CHANGE_FIELDS,
     SELLER_TARGET_ENUM_FIELDS,
@@ -104,31 +104,28 @@ def test_extracted_action_keeps_normalized_industry_fields() -> None:
     assert notes == []
 
 
-def test_seller_target_parse_success_promotes_parsing_target_status() -> None:
-    changes = _seller_target_changes_with_post_parse_status(
-        {"information_status": "parsing", "recommendation_status": "not_recommendable"},
+def test_seller_target_parse_releases_the_in_flight_parse_state() -> None:
+    changes = _seller_target_changes_with_parse_completion(
+        {"information_status": "parsing"},
         {"business_summary": "parsed summary"},
     )
 
-    assert changes["business_summary"] == "parsed summary"
-    assert changes["information_status"] == "normal"
-    assert changes["recommendation_status"] == "recommendable"
+    assert changes == {"business_summary": "parsed summary", "information_status": "normal"}
 
 
-def test_extracted_action_apply_success_promotes_parsing_target_status() -> None:
-    changes = _action_seller_target_changes_with_post_parse_status(
-        {"information_status": "parsing", "recommendation_status": "not_recommendable"},
+def test_extracted_action_apply_releases_the_in_flight_parse_state() -> None:
+    changes = _action_seller_target_changes_with_parse_completion(
+        {"information_status": "parsing"},
         {"business_summary": "parsed summary"},
     )
 
-    assert changes["business_summary"] == "parsed summary"
-    assert changes["information_status"] == "normal"
-    assert changes["recommendation_status"] == "recommendable"
+    assert changes == {"business_summary": "parsed summary", "information_status": "normal"}
 
 
-def test_post_parse_status_does_not_override_manual_recommendability() -> None:
-    changes = _action_seller_target_changes_with_post_parse_status(
-        {"information_status": "normal", "recommendation_status": "not_recommendable"},
+def test_parse_completion_touches_no_other_status() -> None:
+    """写入事实只报告解析自身的进度，不再顺带开关任何推荐闸门。"""
+    changes = _action_seller_target_changes_with_parse_completion(
+        {"information_status": "normal", "lifecycle_status": "active"},
         {"business_summary": "later update"},
     )
 

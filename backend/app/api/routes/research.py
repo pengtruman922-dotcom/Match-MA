@@ -20,6 +20,7 @@ from backend.app.jobs.handlers.research import RESEARCH_NODE_NAME
 from backend.app.services.profile_sections import PROFILE_SECTION_LABELS
 from backend.app.services.research_apply import ResearchApplyError, apply_research_proposal
 from backend.app.services.search_service import get_default_search_provider
+from backend.app.services.seller_target_status import AIProcessingBusyError, acquire_ai_processing
 
 router = APIRouter(prefix="/research", tags=["research"])
 
@@ -316,6 +317,15 @@ def _enqueue_seller_research_job(
     ).mappings().one_or_none()
     if existing:
         return dict(existing), True
+    try:
+        acquire_ai_processing(
+            db,
+            seller_target_id=seller_target_id,
+            desired_status="researching",
+            actor_user_id=user_id,
+        )
+    except AIProcessingBusyError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     row = db.execute(
         text(
             """

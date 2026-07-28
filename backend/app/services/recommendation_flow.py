@@ -1221,7 +1221,6 @@ def _candidate_targets_for_intent(
             where st.team_id = :team_id
               and st.workspace_id = :workspace_id
               and st.deleted_at is null
-              and st.recommendation_status = 'recommendable'
               and st.lifecycle_status = 'active'
             order by st.updated_at desc
             """

@@ -73,18 +73,18 @@ def test_empty_event_reaches_storage_and_gets_a_default_summary() -> None:
         record_relation_event(_RejectingDb(), _uuid(), actor_user_id=_uuid(), event_type="call")
 
 
-def test_deal_closed_marks_the_target_sold_and_unrecommendable() -> None:
+def test_deal_closed_marks_the_target_sold() -> None:
+    """成交后标的退出候选池，靠的是 lifecycle_status 本身就是初筛闸门。"""
     changes = _seller_target_deal_closed_changes(
-        {"lifecycle_status": "active", "recommendation_status": "recommendable", "is_for_sale": "yes"}
+        {"lifecycle_status": "active", "is_for_sale": "yes"}
     )
 
     assert changes == {
         "lifecycle_status": "sold",
-        "recommendation_status": "not_recommendable",
         "is_for_sale": "no",
     }
     assert _seller_target_deal_closed_changes(
-        {"lifecycle_status": "sold", "recommendation_status": "not_recommendable", "is_for_sale": "no"}
+        {"lifecycle_status": "sold", "is_for_sale": "no"}
     ) == {}
 
 

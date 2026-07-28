@@ -4,8 +4,11 @@ export interface SellerTarget {
   target_type: string | null;
   target_subject_name: string | null;
   lifecycle_status: string;
-  recommendation_status: string;
   information_status: string;
+  /** Phase-A compatibility field for older clients; lifecycle_status is authoritative. */
+  recommendation_status?: 'recommendable' | 'not_recommendable';
+  ai_processing_state: 'parsing' | 'researching' | 'parse_failed' | 'research_failed' | 'completed' | 'never';
+  ai_processing_detail: string;
   // L1/L2 是唯一展示与筛选行业维度；原始表述保存在更新/证据审计中。
   industry_l1: string | null;
   industry_l2: string | null;
@@ -58,6 +61,7 @@ export interface SellerTarget {
   latest_follow_up_on?: string | null;
   latest_follow_up_content?: string | null;
   last_research_at?: string | null;
+  last_parse_at?: string | null;
   research_last_outcome?: 'found' | 'no_public_information' | 'failed' | null;
 }
 
@@ -68,7 +72,7 @@ export interface SellerTargetListResponse {
   offset: number;
 }
 
-export type SellerTargetSearchField = 'target_name' | 'target_subject_name' | 'business_summary';
+export type SellerTargetSearchField = 'target_name' | 'target_subject_name' | 'business_summary' | 'industry';
 
 export interface SellerTargetFilterOption {
   value: string;
@@ -76,12 +80,19 @@ export interface SellerTargetFilterOption {
   count: number;
 }
 
+/** A cascader level. `count` annotates a dictionary entry rather than defining
+ * it: the picker renders the full industry taxonomy / area dictionary, and
+ * these counts only say how many targets sit behind each choice. */
+export interface SellerTargetCountedOption {
+  value: string;
+  count: number;
+  children?: SellerTargetCountedOption[];
+}
+
 export interface SellerTargetFilterOptions {
-  industries: SellerTargetFilterOption[];
-  regions: SellerTargetFilterOption[];
+  industries: SellerTargetCountedOption[];
+  regions: SellerTargetCountedOption[];
   statuses: SellerTargetFilterOption[];
-  recommendation_statuses?: SellerTargetFilterOption[];
-  parse_statuses?: SellerTargetFilterOption[];
   owners?: SellerTargetFilterOption[];
 }
 
@@ -128,7 +139,6 @@ export interface SellerTargetCreate {
   target_type?: string;
   target_subject_name?: string;
   lifecycle_status?: string;
-  recommendation_status?: string;
   information_status?: string;
   industry_l1?: string;
   industry_l2?: string;
@@ -155,8 +165,6 @@ export interface SellerTargetUpdate {
   target_type?: string;
   target_subject_name?: string;
   lifecycle_status?: string;
-  recommendation_status?: string;
-  information_status?: string;
   industry_l1?: string;
   industry_l2?: string;
   industry_pairs_json?: Array<{ l1: string; l2?: string }>;

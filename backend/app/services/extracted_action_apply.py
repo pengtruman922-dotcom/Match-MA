@@ -19,6 +19,7 @@ from backend.app.api.routes.utils import (
 from backend.app.services.field_writer import WriteProvenance, write_seller_target_fields
 from backend.app.services.relation_flow import mark_seller_target_sold_for_deal_closed
 from backend.app.services.search_docs import create_search_doc_rebuild_job
+from backend.app.services.seller_target_status import mark_parse_completed
 
 def apply_seller_fact_update_action(
     db: Session,
@@ -48,11 +49,11 @@ def apply_seller_fact_update_action(
     if lifecycle_status in {"sold", "off_market"}:
         # Terminal market evidence is a safe one-way sync. A later in-sale
         # signal never reactivates a sold or off-market target automatically.
+        # lifecycle_status itself is written below and is the screening gate.
         changes["is_for_sale"] = "no"
-        changes["recommendation_status"] = "not_recommendable"
     if not changes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No supported changes to apply.")
-    changes = _seller_target_changes_with_post_parse_status(original, changes)
+    changes = _seller_target_changes_with_parse_completion(original, changes)
     source_context = _action_source_context(action, default_source_label="Business update extracted action")
     applied_fields = write_seller_target_fields(
         db,
@@ -76,6 +77,11 @@ def apply_seller_fact_update_action(
             },
         ),
         search_doc_source="seller_fact_update_apply",
+    )
+    mark_parse_completed(
+        db,
+        seller_target_id=seller_target_id,
+        actor_user_id=SYSTEM_USER_ID,
     )
     if lifecycle_status is not None and lifecycle_status != original.get("lifecycle_status"):
         db.execute(
@@ -407,6 +413,7 @@ def _release_target_from_parsing_after_follow_up(db: Session, seller_target_id: 
             """
             update seller_target
             set information_status = 'normal',
+                last_parse_at = now(),
                 updated_at = now(),
                 updated_by = :updated_by
             where id = :seller_target_id
@@ -788,7 +795,7 @@ def _get_seller_target_snapshot_or_404(db: Session, seller_target_id: UUID) -> d
               is_for_sale, can_control, can_consolidate, accepts_minority_investment,
               transfer_ratio_min, transfer_ratio_max, transfer_ratio_text,
               transfer_flexibility_type,
-              recommendation_status, information_status,
+              information_status,
               business_summary, transaction_summary, risk_summary, gap_summary
             from seller_target
             where id = :seller_target_id
@@ -979,20 +986,22 @@ def _lifecycle_status_from_changes(changes: dict[str, Any]) -> str | None:
     }.get(raw)
 
 
-def _seller_target_changes_with_post_parse_status(
+def _seller_target_changes_with_parse_completion(
     original: dict[str, Any],
     changes: dict[str, Any],
 ) -> dict[str, Any]:
+    """Release the target from its in-flight parse state, nothing more.
+
+    Applying a fact used to double as a recommendation gate release, so whether
+    a target could be recommended depended on the order the consultant clicked
+    through the review list. That gate is gone (施工单 0727).
+    """
     next_changes = dict(changes)
-    original_information_status = original.get("information_status")
-    if "information_status" not in next_changes and original_information_status in _POST_PARSE_INFORMATION_STATUSES:
-        next_changes["information_status"] = "normal"
     if (
-        "recommendation_status" not in next_changes
-        and original.get("recommendation_status") == "not_recommendable"
-        and original_information_status in _POST_PARSE_INFORMATION_STATUSES
+        "information_status" not in next_changes
+        and original.get("information_status") in _POST_PARSE_INFORMATION_STATUSES
     ):
-        next_changes["recommendation_status"] = "recommendable"
+        next_changes["information_status"] = "normal"
     return next_changes
 
 

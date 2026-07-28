@@ -1,58 +1,60 @@
 import { Link } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 import type { SellerTarget } from '../../types/api';
-import { isParsingTarget } from './filters';
+import {
+  AI_PROCESSING_CLASSES,
+  AI_PROCESSING_LABELS,
+  aiProcessingDetail,
+  aiProcessingState,
+  isAiProcessingActive,
+} from './aiProcessing';
 
-export function RecommendationStatusBadge({ item }: { item: SellerTarget }) {
-  let label = '暂不可推荐';
-  let color = 'bg-gray-100 text-gray-600';
-  if (item.lifecycle_status === 'sold') {
-    label = '已售出';
-    color = 'bg-violet-50 text-violet-700';
-  } else if (item.lifecycle_status === 'off_market') {
-    label = '已停售';
-    color = 'bg-amber-50 text-amber-700';
-  } else if (item.recommendation_status === 'recommendable') {
-    label = '可推荐';
-    color = 'bg-emerald-50 text-emerald-700';
-  }
+const TRADE_STATUS_LABELS: Record<string, string> = {
+  active: '在售中',
+  sold: '已售出',
+  off_market: '已停售',
+};
+
+const TRADE_STATUS_CLASSES: Record<string, string> = {
+  active: 'bg-emerald-50 text-emerald-700',
+  sold: 'bg-violet-50 text-violet-700',
+  off_market: 'bg-amber-50 text-amber-700',
+};
+
+/** 交易状态，也是推荐初筛的唯一闸门：只有「在售中」参与筛选。 */
+export function TargetStatusBadge({ item }: { item: SellerTarget }) {
+  const status = item.lifecycle_status || 'active';
   return (
-    <span className={`inline-flex items-center px-2 py-0.5 text-xs font-medium ${color}`}>
-      {label}
+    <span
+      className={`inline-flex items-center px-2 py-0.5 text-xs font-medium ${
+        TRADE_STATUS_CLASSES[status] || 'bg-gray-100 text-gray-600'
+      }`}
+    >
+      {TRADE_STATUS_LABELS[status] || status}
     </span>
   );
 }
 
-export function TargetParseStatusBadge({ item }: { item: SellerTarget }) {
-  const parsing = isParsingTarget(item);
-  const failed = item.information_status === 'parse_failed';
-  const pendingReview = item.information_status === 'pending_review';
-  const parsed = item.recommendation_status === 'recommendable';
-  const label = parsing
-    ? '解析中'
-    : failed
-      ? '解析失败'
-      : pendingReview
-        ? '待复核'
-        : parsed
-          ? '已解析'
-          : '未解析';
-  const color = parsing
-    ? 'bg-blue-50 text-blue-700'
-    : failed
-      ? 'bg-red-50 text-red-700'
-      : pendingReview
-        ? 'bg-amber-50 text-amber-700'
-        : parsed
-          ? 'bg-emerald-50 text-emerald-700'
-          : 'bg-gray-100 text-gray-600';
+/** AI 处理进度：解析与调研两条流水线合成一列。 */
+export function TargetAiProcessingBadge({ item }: { item: SellerTarget }) {
+  const state = aiProcessingState(item);
+  const active = isAiProcessingActive(state);
   const content = (
-    <span className={`inline-flex items-center justify-center gap-1 whitespace-nowrap px-2 py-0.5 text-xs font-medium ${color}`}>
-      {parsing ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-      {label}
+    <span
+      title={aiProcessingDetail(item)}
+      className={`inline-flex items-center justify-center gap-1 whitespace-nowrap px-2 py-0.5 text-xs font-medium ${AI_PROCESSING_CLASSES[state]}`}
+    >
+      {active ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+      {AI_PROCESSING_LABELS[state]}
     </span>
   );
-  return failed || pendingReview ? <Link to={`/targets/${item.id}?tab=history`}>{content}</Link> : content;
+  if (state === 'parse_failed') {
+    return <Link to={`/targets/${item.id}?tab=history`}>{content}</Link>;
+  }
+  if (state === 'research_failed') {
+    return <Link to={`/targets/${item.id}`}>{content}</Link>;
+  }
+  return content;
 }
 
 export function YesNoBadge({ value }: { value: string | null }) {

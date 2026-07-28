@@ -726,7 +726,11 @@ def test_business_update_rejects_empty_actions_instead_of_reporting_success() ->
     }
 
 
-def test_business_update_unapplied_target_action_moves_target_to_pending_review() -> None:
+def test_business_update_releases_targets_without_parking_them_for_review() -> None:
+    """未采纳的动作留在 extracted_action 里，不再把标的挂成「待复核」。
+
+    该状态曾经没有任何复核界面，只会让标的看起来有问题（施工单 0727）。
+    """
     db = _SqlCaptureDb()
 
     changed = _mark_bound_seller_targets_complete_after_business_update_parse(
@@ -734,15 +738,14 @@ def test_business_update_unapplied_target_action_moves_target_to_pending_review(
         {"bound_seller_target_ids_json": [str(SELLER_TARGET_ID)]},
         [],
         JOB_ID,
-        pending_review=True,
     )
 
     assert changed == 1
     assert "set information_status = :information_status" in db.sql_text
-    assert db.params["information_status"] == "pending_review"
+    assert db.params["information_status"] == "normal"
     assert (
         db.params["metadata_patch"]["last_parse_completed_reason"]
-        == "business_update_requires_review"
+        == "business_update_parsed_without_field_changes"
     )
 
 

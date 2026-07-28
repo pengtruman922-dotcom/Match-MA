@@ -4,8 +4,7 @@ const SELLER_TARGET_FIELD_LABELS: Record<string, string> = {
   target_name: '标的名称',
   target_type: '标的类型',
   target_subject_name: '标的主体',
-  lifecycle_status: '交易状态',
-  recommendation_status: '推荐状态',
+  lifecycle_status: '状态',
   information_status: '信息状态',
   industry_l1: '行业大类',
   industry_l2: '细分赛道',
@@ -308,10 +307,6 @@ const VALUE_LABELS: Record<string, Record<string, string>> = {
     active: '在售中',
     sold: '已售出',
     off_market: '已停售',
-  },
-  recommendation_status: {
-    recommendable: '可推荐',
-    not_recommendable: '暂不可推荐',
   },
   information_status: {
     normal: '已更新',

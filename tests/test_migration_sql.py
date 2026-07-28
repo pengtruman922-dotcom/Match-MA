@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 import pytest
 
@@ -98,6 +99,50 @@ def test_alembic_wrappers_route_through_run_migration_sql(version_name: str) -> 
             f"{version_name}: use run_migration_sql instead of load/split + exec_driver_sql "
             "(literal % in SQL breaks psycopg3 placeholder scanning)"
         )
+
+
+_PLPGSQL_FORMAT_STATEMENTS = ("raise ", "format(")
+_DOLLAR_QUOTE_RE = re.compile(r"\$[A-Za-z0-9_]*\$")
+# 002 predates this guard and has already succeeded in fresh-database CI and
+# production.  Keep the immutable historical migration intact; enforce the
+# rule for every subsequent migration instead.
+_HISTORICAL_PERCENT_FORMAT_MIGRATIONS = {"002_target_information_model.sql"}
+
+
+@pytest.mark.parametrize(
+    "migration_name",
+    sorted(path.name for path in MIGRATIONS_DIR.glob("*.sql")),
+)
+def test_no_plpgsql_percent_format_specifiers(migration_name: str) -> None:
+    """RAISE/format() placeholders cannot survive the psycopg percent doubling.
+
+    run_migration_sql doubles every '%' so psycopg3 does not read literal ones
+    as bound placeholders. Inside a dollar-quoted PL/pgSQL body that turns a
+    format specifier into an escaped literal '%%', leaving RAISE with arguments
+    and no placeholders — PostgreSQL then rejects the block with "too many
+    parameters specified for RAISE" and the preDeploy migration takes the whole
+    deploy down with it.
+    """
+    if migration_name in _HISTORICAL_PERCENT_FORMAT_MIGRATIONS:
+        return
+    sql = load_migration_sql(migration_name)
+    for statement in split_sql_statements(sql):
+        lowered = statement.lower()
+        if _DOLLAR_QUOTE_RE.search(lowered) is None:
+            continue
+        for line in statement.splitlines():
+            stripped = line.strip().lower()
+            if not any(stripped.startswith(keyword) for keyword in _PLPGSQL_FORMAT_STATEMENTS):
+                continue
+            assert "%" not in line, (
+                f"{migration_name}: PL/pgSQL 里的 % 占位符会被 run_migration_sql 加倍破坏，"
+                f"改用字符串拼接或去掉该语句：{line.strip()[:120]!r}"
+            )
+
+
+def test_plpgsql_guard_recognizes_arbitrary_dollar_tags() -> None:
+    statement = "do $migration$ begin raise notice 'rows: %', 1; end $migration$"
+    assert _DOLLAR_QUOTE_RE.search(statement)
 
 
 @pytest.mark.parametrize(

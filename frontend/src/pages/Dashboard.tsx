@@ -12,11 +12,9 @@ const ROLE_LABELS: Record<string, string> = {
 };
 
 const STATUS_LABELS: Record<string, string> = {
-  recommendable: '可推荐',
-  not_recommendable: '不可推荐',
-  parsing: '解析中',
-  pending_review: '待复核',
-  parse_failed: '解析失败',
+  active: '在售中',
+  sold: '已售出',
+  off_market: '已停售',
   unknown: '未知',
 };
 

@@ -18,12 +18,16 @@ import SearchSuggestionList from '../components/SearchSuggestionList';
 import { setOrDelete } from '../lib/utils';
 import CreateTargetModal from '../features/targets/CreateTargetModal';
 import TargetRow from '../features/targets/TargetRow';
+import IndustryFilter from '../features/targets/IndustryFilter';
+import RegionFilter from '../features/targets/RegionFilter';
 import {
+  activeTargetFilterCount,
   isParsingTarget,
   PAGE_SIZE,
   PARSE_POLL_INTERVAL_MS,
   readTargetFilters,
   SEARCH_FIELD_LABELS,
+  SEARCH_FIELD_OPTIONS,
   type TargetFilters,
 } from '../features/targets/filters';
 
@@ -38,8 +42,6 @@ export default function Targets() {
     industries: [],
     regions: [],
     statuses: [],
-    recommendation_statuses: [],
-    parse_statuses: [],
   });
   const [suggestions, setSuggestions] = useState<SellerTargetSuggestion[]>([]);
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
@@ -60,23 +62,18 @@ export default function Targets() {
   const visibleIds = useMemo(() => items.map((item) => item.id), [items]);
   const selectedCount = selectedIds.size;
   const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
-  const activeFilterCount = [
-    filters.q,
-    filters.industry,
-    filters.region,
-    filters.recommendationStatus,
-    filters.parseStatus,
-    filters.owner,
-  ].filter(Boolean).length;
+  const activeFilterCount = activeTargetFilterCount(filters);
 
   const updateFilters = useCallback((patch: Partial<TargetFilters>, options?: { replace?: boolean }) => {
     const next = new URLSearchParams(searchParams);
     if ('q' in patch) setOrDelete(next, 'q', patch.q);
     if ('searchField' in patch) setOrDelete(next, 'searchField', patch.searchField);
-    if ('industry' in patch) setOrDelete(next, 'industry', patch.industry);
-    if ('region' in patch) setOrDelete(next, 'region', patch.region);
-    if ('recommendationStatus' in patch) setOrDelete(next, 'recommendationStatus', patch.recommendationStatus);
-    if ('parseStatus' in patch) setOrDelete(next, 'parseStatus', patch.parseStatus);
+    if ('industryL1' in patch) setOrDelete(next, 'industryL1', patch.industryL1);
+    if ('industryL2' in patch) setOrDelete(next, 'industryL2', patch.industryL2);
+    if ('province' in patch) setOrDelete(next, 'province', patch.province);
+    if ('city' in patch) setOrDelete(next, 'city', patch.city);
+    if ('district' in patch) setOrDelete(next, 'district', patch.district);
+    if ('status' in patch) setOrDelete(next, 'status', patch.status);
     if ('owner' in patch) setOrDelete(next, 'owner', patch.owner);
     if (patch.page !== undefined) {
       if (patch.page <= 1) next.delete('page');
@@ -91,10 +88,12 @@ export default function Targets() {
       .list({
         q: filters.q || undefined,
         search_field: filters.searchField,
-        industry: filters.industry || undefined,
-        region: filters.region || undefined,
-        recommendation_status: filters.recommendationStatus || undefined,
-        parse_status: filters.parseStatus || undefined,
+        industry_l1: filters.industryL1 || undefined,
+        industry_l2: filters.industryL2 || undefined,
+        province: filters.province || undefined,
+        city: filters.city || undefined,
+        district: filters.district || undefined,
+        status: filters.status || undefined,
         owner: filters.owner || undefined,
         limit: PAGE_SIZE,
         offset: (filters.page - 1) * PAGE_SIZE,
@@ -324,54 +323,72 @@ export default function Targets() {
       </div>
 
       <div className="flex items-center gap-2 flex-wrap">
-        <div className="relative flex-1 min-w-[280px] max-w-md">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(event) => {
-              setSearchQuery(event.target.value);
-              setShowSuggestions(true);
-            }}
-            onFocus={() => setShowSuggestions(true)}
-            onBlur={() => window.setTimeout(() => setShowSuggestions(false), 120)}
-            onKeyDown={(event) => event.key === 'Enter' && handleSearch()}
-            placeholder="搜索标的名称、主体或摘要..."
-            className="w-full pl-9 pr-4 py-2 border border-gray-200 text-sm outline-none focus:border-brand-600 transition-colors bg-white"
-          />
-          <SearchSuggestionList
-            open={showSuggestions && searchQuery.trim().length > 0}
-            loading={suggestionsLoading}
-            suggestions={suggestions}
-            onSelect={handleSuggestionSelect}
-            subtitle={(suggestion) =>
-              suggestion.match_type === 'summary' ? suggestion.target_name : suggestion.snippet || suggestion.target_subject_name || '点击按该字段检索'
+        <div className="flex flex-1 min-w-[340px] max-w-lg items-stretch">
+          {/* 字段选择器显性化：按业务摘要或行业检索原本只能通过建议列表触发。 */}
+          <select
+            value={filters.searchField || ''}
+            onChange={(event) =>
+              updateFilters({
+                searchField: (event.target.value || undefined) as TargetFilters['searchField'],
+                page: 1,
+              })
             }
-          />
+            className="shrink-0 border border-r-0 border-gray-200 bg-white px-2 py-2 text-sm text-gray-600 outline-none focus:border-brand-600"
+          >
+            {SEARCH_FIELD_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(event) => {
+                setSearchQuery(event.target.value);
+                setShowSuggestions(true);
+              }}
+              onFocus={() => setShowSuggestions(true)}
+              onBlur={() => window.setTimeout(() => setShowSuggestions(false), 120)}
+              onKeyDown={(event) => event.key === 'Enter' && handleSearch()}
+              placeholder="搜索标的名称、主体、行业或摘要..."
+              className="w-full pl-9 pr-4 py-2 border border-gray-200 text-sm outline-none focus:border-brand-600 transition-colors bg-white"
+            />
+            <SearchSuggestionList
+              open={showSuggestions && searchQuery.trim().length > 0}
+              loading={suggestionsLoading}
+              suggestions={suggestions}
+              onSelect={handleSuggestionSelect}
+              subtitle={(suggestion) =>
+                suggestion.match_type === 'summary' ? suggestion.target_name : suggestion.snippet || suggestion.target_subject_name || '点击按该字段检索'
+              }
+            />
+          </div>
         </div>
-        <FilterSelect
-          label="行业"
-          value={filters.industry}
+        <IndustryFilter
+          value={{ l1: filters.industryL1, l2: filters.industryL2 }}
           options={filterOptions.industries}
-          onChange={(value) => updateFilters({ industry: value, page: 1 })}
+          onChange={(next) => updateFilters({ industryL1: next.l1, industryL2: next.l2, page: 1 })}
         />
-        <FilterSelect
-          label="地区"
-          value={filters.region}
+        <RegionFilter
+          value={{ province: filters.province, city: filters.city, district: filters.district }}
           options={filterOptions.regions}
-          onChange={(value) => updateFilters({ region: value, page: 1 })}
+          onChange={(next) =>
+            updateFilters({
+              province: next.province,
+              city: next.city,
+              district: next.district,
+              page: 1,
+            })
+          }
         />
         <FilterSelect
-          label="推荐状态"
-          value={filters.recommendationStatus}
-          options={filterOptions.recommendation_statuses || []}
-          onChange={(value) => updateFilters({ recommendationStatus: value, page: 1 })}
-        />
-        <FilterSelect
-          label="解析状态"
-          value={filters.parseStatus}
-          options={filterOptions.parse_statuses || []}
-          onChange={(value) => updateFilters({ parseStatus: value, page: 1 })}
+          label="状态"
+          value={filters.status}
+          options={filterOptions.statuses || []}
+          onChange={(value) => updateFilters({ status: value, page: 1 })}
         />
         {admin && (
           <FilterSelect
@@ -391,10 +408,12 @@ export default function Targets() {
               updateFilters({
                 q: '',
                 searchField: undefined,
-                industry: '',
-                region: '',
-                recommendationStatus: '',
-                parseStatus: '',
+                industryL1: '',
+                industryL2: '',
+                province: '',
+                city: '',
+                district: '',
+                status: '',
                 owner: '',
                 page: 1,
               });
@@ -446,8 +465,8 @@ export default function Targets() {
                 </th>
                 <th className="sticky left-12 z-20 w-[220px] bg-gray-50 text-left px-4 py-3 font-medium text-gray-600">标的名称</th>
                 <th className="w-20 max-w-20 text-left px-3 py-3 font-medium text-gray-600">标的主体</th>
-                <th className="w-[110px] text-center px-4 py-3 font-medium text-gray-600">推荐状态</th>
-                <th className="w-[100px] text-center px-4 py-3 font-medium text-gray-600">解析状态</th>
+                <th className="w-[100px] text-center px-4 py-3 font-medium text-gray-600">状态</th>
+                <th className="w-[100px] text-center px-4 py-3 font-medium text-gray-600">AI 处理</th>
                 <th className="w-[92px] text-left px-4 py-3 font-medium text-gray-600">类型</th>
                 <th className="w-[96px] text-left px-4 py-3 font-medium text-gray-600">上市状态</th>
                 <th className="w-[150px] text-left px-4 py-3 font-medium text-gray-600">行业</th>

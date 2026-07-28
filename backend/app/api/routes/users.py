@@ -149,10 +149,10 @@ def list_user_activity_summary(
               coalesce((
                 select jsonb_object_agg(status_key, status_count)
                 from (
-                  select coalesce(st.recommendation_status, 'unknown') as status_key, count(*)::int as status_count
+                  select coalesce(st.lifecycle_status, 'unknown') as status_key, count(*)::int as status_count
                   from seller_target st
                   where st.owner_user_id = u.id and st.deleted_at is null
-                  group by coalesce(st.recommendation_status, 'unknown')
+                  group by coalesce(st.lifecycle_status, 'unknown')
                 ) status_rows
               ), '{}'::jsonb) as seller_target_status_counts,
               (select count(*)::int from seller_target st, week_boundary wb

@@ -43,7 +43,7 @@ from backend.app.services.extracted_action_apply import (  # noqa: F401 - re-exp
     _relation_event_content,
     _release_target_from_parsing_after_follow_up,
     _required_uuid,
-    _seller_target_changes_with_post_parse_status,
+    _seller_target_changes_with_parse_completion,
     apply_buyer_intent_follow_up_action,
     apply_buyer_intent_target_exclusion_action,
     apply_buyer_intent_update_action,
@@ -309,8 +309,7 @@ def apply_extracted_action(
 
 
 # Transient statuses a follow-up-only parse should release the target from.
-# Only the parse-lifecycle statuses set by this flow; a follow-up note never
-# changes recommendation_status.
+# Only the parse-lifecycle statuses set by this flow.
 
 
 def _ensure_extracted_action_visible(db: Session, current_user: CurrentUser, extracted_action_id: UUID) -> None:

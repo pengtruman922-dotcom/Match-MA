@@ -28,9 +28,8 @@ import {
   sellerTargetDisplayStatus,
   sellerTargetDisplayStatusClass,
   sellerTargetDisplayStatusLabel,
-  sellerTargetStatusClass,
-  sellerTargetStatusLabel,
 } from '../lib/sellerTargetStatus';
+import { TargetAiProcessingBadge } from '../features/targets/presentation';
 
 type Tab = 'info' | 'progress' | 'attachments' | 'relations' | 'history';
 
@@ -157,7 +156,7 @@ export default function TargetDetail() {
               {target.current_net_profit_yuan && <span>· 利润{formatYuan(target.current_net_profit_yuan)}</span>}
               {target.asking_price_yuan && <span>· 报价{formatYuan(target.asking_price_yuan)}*</span>}
               <DisplayStatusBadge target={target} />
-              <StatusBadge status={target.information_status} type="information" />
+              <TargetAiProcessingBadge item={target} />
               <span className="inline-flex items-center gap-1 text-gray-500">
                 <UserRound className="w-3 h-3" />
                 负责人：{target.owner_name || '未指派'}
@@ -233,7 +232,7 @@ export default function TargetDetail() {
               ))}
             </div>
             <div className="p-5">
-              {activeTab === 'info' && <TargetInfoPanel target={target} />}
+              {activeTab === 'info' && <TargetInfoPanel target={target} onTargetChanged={setTarget} />}
               {activeTab === 'progress' && (
                 <ProgressPanel
                   side="seller_target"
@@ -661,13 +660,6 @@ function firstString(value: unknown): string {
   if (!Array.isArray(value)) return '';
   const found = value.find((item) => typeof item === 'string' && item.trim());
   return found || '';
-}
-
-function StatusBadge({ status, type }: { status: string; type: 'recommendation' | 'information' }) {
-  const colors = sellerTargetStatusClass(status, type);
-  const label = sellerTargetStatusLabel(status, type);
-
-  return <span className={`text-xs px-1.5 py-0.5 font-medium ${colors}`}>{label}</span>;
 }
 
 function DisplayStatusBadge({ target }: { target: SellerTarget }) {

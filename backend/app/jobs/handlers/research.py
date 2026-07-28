@@ -650,12 +650,24 @@ def _current_profiles_for_prompt(
 
 
 def _mark_research_outcome(db: Session, target_id: UUID, outcome: str) -> None:
+    """Record the run's result and release the 'researching' display state.
+
+    Every exit from the research handler — provider missing, key error, LLM
+    failure, bad output, success — routes through here, so this is the one
+    place that has to hand the target back. A concurrent parse owns
+    information_status while it runs, so 'researching' is only cleared when it
+    is still the current value.
+    """
     db.execute(
         text(
             """
             update seller_target
             set last_research_at = now(),
                 research_last_outcome = :outcome,
+                information_status = case
+                  when information_status = 'researching' then 'normal'
+                  else information_status
+                end,
                 updated_at = now()
             where id = :target_id
               and team_id = :team_id
