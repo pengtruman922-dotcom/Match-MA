@@ -5,8 +5,6 @@ export interface SellerTarget {
   target_subject_name: string | null;
   lifecycle_status: string;
   information_status: string;
-  /** Phase-A compatibility field for older clients; lifecycle_status is authoritative. */
-  recommendation_status?: 'recommendable' | 'not_recommendable';
   ai_processing_state: 'parsing' | 'researching' | 'parse_failed' | 'research_failed' | 'completed' | 'never';
   ai_processing_detail: string;
   // L1/L2 是唯一展示与筛选行业维度；原始表述保存在更新/证据审计中。

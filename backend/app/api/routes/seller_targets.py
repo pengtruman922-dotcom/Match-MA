@@ -95,9 +95,6 @@ class SellerTargetOut(BaseModel):
     target_subject_name: str | None
     lifecycle_status: str
     information_status: str
-    # Phase-A rolling-deploy compatibility only.  This is calculated from the
-    # lifecycle and never reads the retired database column.
-    recommendation_status: str
     ai_processing_state: str
     ai_processing_detail: str
     industry_l1: str | None = None
@@ -264,8 +261,6 @@ class SellerTargetFilterOptionsOut(BaseModel):
     industries: list[SellerTargetCountedOptionOut]
     regions: list[SellerTargetCountedOptionOut]
     statuses: list[SellerTargetFilterOptionOut]
-    # Old frontend compatibility during the phase-A rolling deploy.
-    recommendation_statuses: list[SellerTargetFilterOptionOut] = []
     owners: list[SellerTargetFilterOptionOut] = []
 
 
@@ -342,8 +337,6 @@ class TargetFollowUpOut(BaseModel):
 
 SELLER_TARGET_OUT_COLUMNS = """
               id, target_name, target_type, target_subject_name, lifecycle_status, information_status,
-              case when lifecycle_status = 'active' then 'recommendable'
-                   else 'not_recommendable' end as recommendation_status,
               industry_l1, industry_l2, industry_pairs_json, location_province, location_city, location_district,
               listed_status, listing_market_region, market_cap_yuan, current_revenue_yuan, current_net_profit_yuan,
               current_total_profit_yuan, current_assets_yuan, current_debt_ratio,
@@ -558,10 +551,6 @@ def list_seller_targets(
     city: str | None = Query(default=None, max_length=60),
     district: str | None = Query(default=None, max_length=60),
     status: Literal["active", "sold", "off_market"] | None = Query(default=None),
-    recommendation_status: Literal["recommendable", "not_recommendable"] | None = Query(
-        default=None,
-        deprecated=True,
-    ),
     owner: str | None = Query(default=None, max_length=50),
 ) -> dict[str, Any]:
     where = ["team_id = :team_id", "workspace_id = :workspace_id", "deleted_at is null"]
@@ -587,13 +576,6 @@ def list_seller_targets(
     if status:
         where.append("lifecycle_status = :status")
         params["status"] = status
-    elif recommendation_status:
-        # Temporary old-client mapping for the phase-A rolling deploy.  This
-        # deliberately maps from lifecycle rather than reading the old column.
-        if recommendation_status == "recommendable":
-            where.append("lifecycle_status = 'active'")
-        else:
-            where.append("lifecycle_status in ('sold', 'off_market')")
 
     where_sql = " and ".join(where)
     total = db.execute(
@@ -715,18 +697,6 @@ def seller_target_filter_options(current_user: CurrentUser, db: Session = Depend
         "industries": _industry_option_tree(industry_rows),
         "regions": _region_option_tree(region_rows),
         "statuses": statuses,
-        "recommendation_statuses": [
-            {
-                "value": "recommendable",
-                "label": "可推荐",
-                "count": sum(item["count"] for item in statuses if item["value"] == "active"),
-            },
-            {
-                "value": "not_recommendable",
-                "label": "暂不可推荐",
-                "count": sum(item["count"] for item in statuses if item["value"] != "active"),
-            },
-        ],
         "owners": owners,
     }
 

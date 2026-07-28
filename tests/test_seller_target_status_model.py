@@ -23,6 +23,7 @@ SEARCH_DOCS_ROUTE = REPO / "backend/app/api/routes/search_docs.py"
 PARSE_HANDLER = REPO / "backend/app/jobs/handlers/seller_target_parse.py"
 ACTION_APPLY = REPO / "backend/app/services/extracted_action_apply.py"
 STATUS_MIGRATION = REPO / "database/migrations/005_target_status_consolidation.sql"
+DROP_STATUS_MIGRATION = REPO / "database/migrations/006_drop_target_recommendation_status.sql"
 
 # 只有 baseline 允许保留历史列名（它是地板，不可改）。
 SOURCE_ROOTS = ("backend/app", "frontend/src")
@@ -105,7 +106,7 @@ def _strip_prose(source: str, suffix: str) -> str:
     return source
 
 
-def test_only_phase_a_compatibility_references_recommendation_status() -> None:
+def test_runtime_has_no_recommendation_status_references() -> None:
     offenders: list[str] = []
     for root in SOURCE_ROOTS:
         for path in (REPO / root).rglob("*"):
@@ -114,13 +115,7 @@ def test_only_phase_a_compatibility_references_recommendation_status() -> None:
             code = _strip_prose(path.read_text(encoding="utf-8"), path.suffix)
             if "recommendation_status" in code:
                 offenders.append(path.relative_to(REPO).as_posix())
-    assert sorted(offenders) == [
-        "backend/app/api/routes/seller_targets.py",
-        "frontend/src/types/api.ts",
-    ], (
-        "阶段 A 仅允许 seller-target API 计算返回旧字段并在前端类型声明兼容字段，"
-        f"其他运行时代码不得依赖旧列：{sorted(offenders)}"
-    )
+    assert offenders == [], f"阶段 B 后运行时代码不得再引用旧列：{sorted(offenders)}"
 
 
 def test_phase_a_migration_keeps_column_and_adds_new_scope_index() -> None:
@@ -137,3 +132,31 @@ def test_migration_backfills_pending_review() -> None:
     sql = STATUS_MIGRATION.read_text(encoding="utf-8").lower()
     assert "information_status = 'pending_review'" in sql
     assert "set information_status = 'normal'" in sql
+
+
+def test_phase_b_migration_drops_legacy_objects_before_column() -> None:
+    sql = DROP_STATUS_MIGRATION.read_text(encoding="utf-8").lower()
+    drop_index = sql.index("drop index if exists idx_seller_target_scope")
+    drop_check = sql.index(
+        "drop constraint if exists seller_target_recommendation_status_check"
+    )
+    drop_column = sql.index("drop column if exists recommendation_status")
+    rename_index = sql.index(
+        "alter index if exists idx_seller_target_lifecycle_scope"
+    )
+    assert drop_index < drop_column
+    assert drop_check < drop_column
+    assert drop_column < rename_index
+    assert "rename to idx_seller_target_scope" in sql
+
+
+def test_phase_b_alembic_revision_follows_phase_a() -> None:
+    source = (
+        REPO / "alembic/versions/20260727_0053_drop_target_recommendation_status.py"
+    ).read_text(encoding="utf-8")
+    assert 'revision: str = "20260727_0053"' in source
+    assert 'down_revision: str | None = "20260727_0052"' in source
+    assert (
+        'run_migration_sql(op.get_bind(), "006_drop_target_recommendation_status.sql")'
+        in source
+    )
