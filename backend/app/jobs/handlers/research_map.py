@@ -35,7 +35,6 @@ from backend.app.jobs.handlers.common import (
 )
 from backend.app.jobs.handlers.research import (
     RESEARCH_MAPPER_NODE_NAME,
-    _get_research_target,
     _mark_research_outcome,
     apply_research_claims,
     normalize_research_output,
@@ -139,13 +138,15 @@ def _handle_seller_target_research_map(db: Session, job: JobClaim) -> dict[str, 
     # a mapper retry should update the same proposal set, not look like a new
     # web-research run.
     research_job = _research_job_for_proposals(job, research_job_id)
-    target = _get_research_target(db, target_id)
     applied_count, apply_errors = apply_research_claims(
         db,
         job=research_job,
         target_id=target_id,
         claims=claims,
-        target_website=target.get("website"),
+        # seller_target has no official-website column. The source remains
+        # public_web unless it is a regulatory/government domain; do not infer
+        # an official domain from the company name.
+        target_website=None,
     )
     proposal_count = len([claim for claim in claims if claim["proposal_kind"] != "not_found"])
     # 调研 job 给的是暂定结论（agent 有没有产出），最终结论由这里覆写：
