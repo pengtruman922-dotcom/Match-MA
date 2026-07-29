@@ -1,3 +1,4 @@
+import re
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 from uuid import UUID
@@ -75,6 +76,7 @@ class UpdateBatchChangeOut(BaseModel):
     new_value: Any
     applied_at: str
     rollback_at: str | None = None
+    research_evidence: dict[str, Any] | None = None
 
 
 class UpdateBatchOut(BaseModel):
@@ -446,7 +448,13 @@ def _update_batch_logs(db: Session, *, entity_type: str, entity_id: UUID) -> lis
               al.edited_before_apply, al.can_rollback,
               al.rollback_at::text as rollback_at, al.metadata_json,
               applied_user.name as applied_by_name,
-              rp.job_id as research_job_id
+              rp.job_id as research_job_id,
+              rp.source_type as research_source_type,
+              rp.source_url as research_source_url,
+              rp.source_title as research_source_title,
+              rp.source_excerpt as research_source_excerpt,
+              rp.period_label as research_period_label,
+              rp.as_of_date::text as research_as_of_date
             from action_application_log al
             left join app_user applied_user on applied_user.id = al.applied_by
             left join research_proposal rp
@@ -738,6 +746,7 @@ def _batch_record(
             "new_value": row.get("new_value_json"),
             "applied_at": row["applied_at"],
             "rollback_at": row.get("rollback_at"),
+            "research_evidence": _research_evidence_for_log(row),
         }
         for row in visible_logs
     ]
@@ -765,6 +774,21 @@ def _batch_record(
         "can_rollback": False,
         "rollback_block_reason": None,
         "_active_logs": active_logs,
+    }
+
+
+def _research_evidence_for_log(row: dict[str, Any]) -> dict[str, Any] | None:
+    if row.get("source_type") != "research_proposal":
+        return None
+    return {
+        "proposal_id": str(row.get("source_id") or "") or None,
+        "job_id": str(row.get("research_job_id") or "") or None,
+        "source_type": row.get("research_source_type"),
+        "source_url": row.get("research_source_url"),
+        "source_title": row.get("research_source_title"),
+        "source_excerpt": row.get("research_source_excerpt"),
+        "period_label": row.get("research_period_label"),
+        "as_of_date": row.get("research_as_of_date"),
     }
 
 
@@ -1427,7 +1451,47 @@ def _enqueue_rebuild_after_rollback(db: Session, *, entity_type: str, entity_id:
 
 
 def _values_match_for_rollback(current_value: Any, logged_new_value: Any) -> bool:
+    if isinstance(current_value, bool) or isinstance(logged_new_value, bool):
+        return type(current_value) is type(logged_new_value) and current_value == logged_new_value
+    if isinstance(current_value, dict) and isinstance(logged_new_value, dict):
+        if set(current_value) != set(logged_new_value):
+            return False
+        return all(
+            _values_match_for_rollback(current_value[key], logged_new_value[key])
+            for key in current_value
+        )
+    if isinstance(current_value, list) and isinstance(logged_new_value, list):
+        return len(current_value) == len(logged_new_value) and all(
+            _values_match_for_rollback(current, logged)
+            for current, logged in zip(current_value, logged_new_value, strict=True)
+        )
+    current_number = _rollback_number(current_value)
+    logged_number = _rollback_number(logged_new_value)
+    if current_number is not None and logged_number is not None and (
+        _is_number_value(current_value) or _is_number_value(logged_new_value)
+    ):
+        return current_number == logged_number
     return _rollback_comparable(current_value) == _rollback_comparable(logged_new_value)
+
+
+def _is_number_value(value: Any) -> bool:
+    return isinstance(value, (Decimal, int, float)) and not isinstance(value, bool)
+
+
+def _rollback_number(value: Any) -> Decimal | None:
+    if _is_number_value(value):
+        raw = str(value)
+    elif isinstance(value, str) and re.fullmatch(
+        r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?",
+        value.strip(),
+    ):
+        raw = value.strip()
+    else:
+        return None
+    try:
+        return Decimal(raw).normalize()
+    except InvalidOperation:
+        return None
 
 
 def _rollback_comparable(value: Any) -> Any:

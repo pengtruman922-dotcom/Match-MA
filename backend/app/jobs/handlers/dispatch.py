@@ -80,9 +80,17 @@ def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
     if job.job_type == "model_node_test":
         return _handle_model_node_test(db, job)
     if job.job_type == "seller_target_research_map":
-        # 映射失败不该把标的留在「调研中」：调研 job 已经释放过状态，
-        # 这里只是让结论停在调研给的暂定值，重试映射即可覆写。
-        return _handle_seller_target_research_map(db, job)
+        try:
+            return _handle_seller_target_research_map(db, job)
+        except Exception:
+            # The mapper is the second half of the same user-visible research
+            # operation. Keep the target busy while retries remain, then
+            # release it with a truthful failure state after the final attempt.
+            if job.entity_id is not None and job.attempt_count >= job.max_attempts:
+                db.rollback()
+                _mark_research_outcome(db, job.entity_id, "failed")
+                db.commit()
+            raise
     if job.job_type == "seller_target_research":
         try:
             return _handle_seller_target_research(db, job)

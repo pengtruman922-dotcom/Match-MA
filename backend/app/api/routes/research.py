@@ -201,6 +201,10 @@ def list_research_proposals(
         "entity_type = :entity_type",
         "entity_id = :entity_id",
         "deleted_at is null",
+        # Historical runs used to create one pending card per missing module.
+        # Missing public information is report coverage, not an actionable
+        # field change, so keep those legacy rows out of the review surface.
+        "coalesce(proposed_value_json ->> 'info_status', '') <> 'not_found'",
     ]
     params: dict[str, Any] = {
         "team_id": DEFAULT_TEAM_ID,
@@ -314,7 +318,7 @@ def _enqueue_seller_research_job(
             select id, status, queue_name
             from background_job
             where team_id = :team_id and workspace_id = :workspace_id
-              and job_type = 'seller_target_research'
+              and job_type in ('seller_target_research', 'seller_target_research_map')
               and entity_type = 'seller_target' and entity_id = :target_id
               and status in ('queued', 'running', 'retry_waiting')
             order by created_at desc limit 1

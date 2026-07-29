@@ -10,8 +10,9 @@ import {
   X,
 } from 'lucide-react';
 import { attachments, backgroundJobs, updateLogs } from '../lib/api';
-import type { BackgroundJob, UpdateBatch } from '../types/api';
+import type { BackgroundJob, FieldValueSource, UpdateBatch, UpdateBatchChange } from '../types/api';
 import { fieldLabel, sourceTypeLabel, valueLabel } from '../lib/fieldLabels';
+import ResearchEvidenceDrawer from '../features/targets/ResearchEvidenceDrawer';
 import ResearchReportDrawer from '../features/targets/ResearchReportDrawer';
 
 type EntityType = 'seller_target' | 'buyer_intent';
@@ -41,6 +42,7 @@ export default function UpdateHistory({
   const [rollbackLoading, setRollbackLoading] = useState(false);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [reportJob, setReportJob] = useState<Pick<BackgroundJob, 'id' | 'result_json' | 'created_at' | 'finished_at'> | null>(null);
+  const [selectedEvidence, setSelectedEvidence] = useState<FieldValueSource | null>(null);
   const wasParsingRef = useRef(false);
   const processingSettledRef = useRef(onProcessingSettled);
 
@@ -127,6 +129,7 @@ export default function UpdateHistory({
 
   const openResearchReport = async (jobId: string) => {
     try {
+      setSelectedEvidence(null);
       setReportJob(await backgroundJobs.get(jobId));
     } catch (err) {
       alert(err instanceof Error ? err.message : '读取调研报告失败');
@@ -261,7 +264,7 @@ export default function UpdateHistory({
                 </div>
               </div>
 
-              {expanded ? <BatchDetails item={item} /> : null}
+              {expanded ? <BatchDetails item={item} onOpenEvidence={(change) => setSelectedEvidence(evidenceSource(item, change))} /> : null}
             </article>
           );
         })}
@@ -276,11 +279,18 @@ export default function UpdateHistory({
         />
       ) : null}
       {reportJob ? <ResearchReportDrawer job={reportJob} onClose={() => setReportJob(null)} /> : null}
+      {selectedEvidence ? (
+        <ResearchEvidenceDrawer
+          source={selectedEvidence}
+          onClose={() => setSelectedEvidence(null)}
+          onOpenReport={(jobId) => void openResearchReport(jobId)}
+        />
+      ) : null}
     </>
   );
 }
 
-function BatchDetails({ item }: { item: UpdateBatch }) {
+function BatchDetails({ item, onOpenEvidence }: { item: UpdateBatch; onOpenEvidence: (change: UpdateBatchChange) => void }) {
   return (
     <div className="mt-4 border-t border-gray-100 pt-4">
       {item.raw_input ? (
@@ -302,6 +312,7 @@ function BatchDetails({ item }: { item: UpdateBatch }) {
                   <th className="w-40 px-3 py-2 font-medium">字段</th>
                   <th className="px-3 py-2 font-medium">原值</th>
                   <th className="px-3 py-2 font-medium">新值</th>
+                  <th className="w-24 px-3 py-2 font-medium">来源</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
@@ -310,6 +321,19 @@ function BatchDetails({ item }: { item: UpdateBatch }) {
                     <td className="px-3 py-2 text-gray-600">{fieldLabel(item.entity_type, change.field_path)}</td>
                     <td className="max-w-[320px] px-3 py-2 text-gray-500">{valueLabel(change.field_path, change.old_value)}</td>
                     <td className="max-w-[320px] px-3 py-2 text-gray-900">{valueLabel(change.field_path, change.new_value)}</td>
+                    <td className="px-3 py-2">
+                      {change.research_evidence ? (
+                        <button
+                          type="button"
+                          onClick={() => onOpenEvidence(change)}
+                          className="text-xs text-brand-700 hover:underline"
+                        >
+                          查看证据
+                        </button>
+                      ) : (
+                        <span className="text-xs text-gray-300">-</span>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -324,6 +348,23 @@ function BatchDetails({ item }: { item: UpdateBatch }) {
       )}
     </div>
   );
+}
+
+function evidenceSource(batch: UpdateBatch, change: UpdateBatchChange): FieldValueSource {
+  return {
+    id: change.log_id,
+    entity_type: batch.entity_type,
+    entity_id: batch.entity_id,
+    field_path: change.field_path,
+    value_snapshot_json: { value: change.new_value },
+    source_type: 'research_proposal',
+    source_label: change.research_evidence?.source_title || '公开调研',
+    review_status: 'accepted',
+    created_at: change.applied_at,
+    created_by: null,
+    created_by_name: null,
+    research_evidence: change.research_evidence || null,
+  };
 }
 
 function RollbackDialog({

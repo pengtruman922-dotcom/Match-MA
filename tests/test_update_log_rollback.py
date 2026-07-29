@@ -107,7 +107,40 @@ def test_rollback_value_match_treats_database_decimals_as_json_numbers() -> None
     assert _values_match_for_rollback(Decimal("12.0000"), 12.0)
     assert _values_match_for_rollback({"ratio": Decimal("0.1200")}, {"ratio": 0.12})
     assert not _values_match_for_rollback(Decimal("12.0001"), 12)
-    assert not _values_match_for_rollback("12.0000", 12)
+    assert _values_match_for_rollback(Decimal("12.0000"), "12.0000")
+    assert _values_match_for_rollback({"amount": Decimal("550000000.00")}, {"amount": "550000000.00"})
+    assert _values_match_for_rollback("12.0000", 12)
+    assert _values_match_for_rollback(Decimal("5.5E+8"), "5.5E+8")
+    assert not _values_match_for_rollback("12万元", 12)
+    assert not _values_match_for_rollback("普通文本", 0)
+    assert not _values_match_for_rollback(True, 1)
+
+
+def test_research_batch_changes_include_field_level_evidence() -> None:
+    log = _batch_log(
+        log_id="00000000-0000-0000-0000-000000000209",
+        applied_at="2026-07-12T12:00:00+00:00",
+        source_type="research_proposal",
+    )
+    log.update(
+        {
+            "source_id": UUID("00000000-0000-0000-0000-000000000210"),
+            "research_job_id": UUID("00000000-0000-0000-0000-000000000211"),
+            "research_source_type": "public_web",
+            "research_source_url": "https://example.com/report",
+            "research_source_title": "2025 年年度报告",
+            "research_source_excerpt": "营业收入为 5.5 亿元。",
+            "research_period_label": "2025年度",
+            "research_as_of_date": "2025-12-31",
+        }
+    )
+
+    batch = _batch("research-job-test", log)
+    evidence = batch["changes"][0]["research_evidence"]
+
+    assert evidence["job_id"] == "00000000-0000-0000-0000-000000000211"
+    assert evidence["source_url"] == "https://example.com/report"
+    assert evidence["source_excerpt"] == "营业收入为 5.5 亿元。"
 
 
 def _batch_log(*, log_id: str, applied_at: str, source_type: str = "direct_api", rollback_at: str | None = None) -> dict:

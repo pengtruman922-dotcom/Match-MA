@@ -232,7 +232,7 @@ def ai_processing_detail(target: Mapping[str, Any]) -> str:
     if research_at is not None:
         outcome = str(target.get("research_last_outcome") or "")
         suffix = {
-            "no_public_information": "未找到公开信息",
+            "no_public_information": "调研完成，未找到可补充的公开信息",
             # 查到了却一条都没落库，和真的查不到必须分开说，否则又是一次静默空转。
             "found_but_rejected": "找到了公开信息，但没有一条能写入标的信息，请查看调研任务",
         }.get(outcome, "已补充公开信息")

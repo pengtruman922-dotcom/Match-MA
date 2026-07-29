@@ -13,6 +13,8 @@ from backend.app.jobs.handlers.research import (
     ResearchTools,
     _current_profiles_for_prompt,
     _financial_period_from_label,
+    _chat_caller,
+    _omit_fetched_page_text,
     _prepare_research_claims,
     _should_auto_accept_research_proposal,
     _structured_fact_relation,
@@ -27,6 +29,7 @@ def _profile_claim(**overrides) -> dict:
         "section_code": "business_product",
         "content_text": "核心产品为偏光膜，供货给面板厂",
         "sources": ["https://www.szse.cn/disclosure/a"],
+        "source_excerpt": "公告显示核心产品为偏光膜。",
         "relation": "supplement",
         "confidence": 0.9,
     }
@@ -88,18 +91,21 @@ def test_structured_relation_uses_financial_period_before_value() -> None:
     ) == "same_period_conflict"
 
 
-def test_auto_accept_boundary_requires_trusted_primary_source() -> None:
+def test_auto_accept_boundary_requires_traceable_evidence_not_a_specific_domain() -> None:
     assert _should_auto_accept_research_proposal(
-        {"conflict_kind": "consistent", "source_type": "public_web"}
+        {"conflict_kind": "consistent", "source_type": "public_web", "source_url": "https://a.com", "source_excerpt": "原文"}
     ) is True
     assert _should_auto_accept_research_proposal(
-        {"conflict_kind": "supplement", "source_type": "regulatory_disclosure"}
+        {"conflict_kind": "supplement", "source_type": "regulatory_disclosure", "source_url": "https://a.com", "source_excerpt": "原文"}
     ) is True
     assert _should_auto_accept_research_proposal(
-        {"conflict_kind": "supplement", "source_type": "public_web"}
+        {"conflict_kind": "supplement", "source_type": "public_web", "source_url": "https://a.com", "source_excerpt": "原文"}
+    ) is True
+    assert _should_auto_accept_research_proposal(
+        {"conflict_kind": "same_period_conflict", "source_type": "regulatory_disclosure", "source_url": "https://a.com", "source_excerpt": "原文"}
     ) is False
     assert _should_auto_accept_research_proposal(
-        {"conflict_kind": "same_period_conflict", "source_type": "regulatory_disclosure"}
+        {"conflict_kind": "supplement", "source_type": "public_web", "source_url": "https://a.com", "source_excerpt": ""}
     ) is False
 
 
@@ -245,37 +251,40 @@ def test_relation_is_decided_by_code_against_the_current_revision() -> None:
     ]
 
 
-def test_coverage_list_separates_searched_without_result_from_never_searched() -> None:
-    """未检索到的内容 agent 不再输出，所以覆盖清单是唯一的区分依据。"""
-    claims, _ = normalize_research_output(
+def test_coverage_without_result_stays_in_the_report_and_creates_no_proposal() -> None:
+    claims, notes = normalize_research_output(
         {"coverage": {"covered": ["identity"], "no_public_information": ["ops_quality"]}}
     )
 
-    assert [(claim["proposal_kind"], claim["section_code"]) for claim in claims] == [
-        ("not_found", "ops_quality")
-    ]
-    # 只在覆盖清单里被点名的栏目才变 not_found，没提到的保持 missing。
-    assert all(claim["section_code"] != "identity" for claim in claims)
+    assert claims == []
+    assert "not_found:ops_quality:report_only" in notes
 
 
-def test_not_found_sections_become_confirmed_gaps() -> None:
-    """「查过但没有」和「从未查过」在推荐里不是一回事。"""
-    claims, _ = normalize_research_output({"not_found": ["ops_quality", "ops_quality", "沒這欄"]})
+def test_legacy_not_found_output_is_report_only() -> None:
+    claims, notes = normalize_research_output({"not_found": ["ops_quality", "ops_quality", "沒這欄"]})
 
-    assert [(claim["proposal_kind"], claim["section_code"]) for claim in claims] == [
-        ("not_found", "ops_quality")
-    ]
-    assert claims[0]["info_status"] == "not_found"
+    assert claims == []
+    assert "not_found:ops_quality:report_only" in notes
+    assert any("unknown_section" in note for note in notes)
 
 
-def test_not_found_never_erases_a_section_that_already_has_content() -> None:
+def test_report_only_not_found_never_erases_a_section_that_already_has_content() -> None:
     claims, notes = normalize_research_output(
         {"not_found": ["business_product"]},
         current_profiles={"business_product": {"info_status": "filled", "content_text": "已有内容"}},
     )
 
     assert claims == []
-    assert any("already_filled" in note for note in notes)
+    assert "not_found:business_product:report_only" in notes
+
+
+def test_claim_without_field_level_excerpt_is_retained_as_invalid_not_pending() -> None:
+    claims, _ = normalize_research_output(
+        {"profile_sections": [_profile_claim(source_excerpt=None)]}
+    )
+
+    assert len(claims) == 1
+    assert "原文摘录" in claims[0]["validation_error"]
 
 
 def test_claims_stay_json_serialisable_when_current_profiles_carry_dates() -> None:
@@ -408,6 +417,87 @@ def test_search_result_count_is_capped(monkeypatch) -> None:
     tools(_FakeCall("web_search", {"query": "q", "max_results": 500}))
 
     assert seen["max_results"] == MAX_SEARCH_RESULTS_PER_CALL
+
+
+def test_subject_mismatch_blocks_page_fetch_and_stops_after_four_empty_searches(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "backend.app.jobs.handlers.research.run_search",
+        lambda *args, **kwargs: [
+            SearchHit(
+                url="https://example.com/wrong",
+                title="嘉兴智谷食品有限公司",
+                snippet="智谷食品项目介绍",
+                raw_content="不应进入模型的正文",
+                published_at=None,
+            )
+        ],
+    )
+    tools = ResearchTools(
+        {"model_name": "tavily"},
+        "key",
+        subject_names=["嘉兴禾谷食品有限公司"],
+    )
+
+    for index in range(4):
+        result = tools(_FakeCall("web_search", {"query": f"嘉兴禾谷 {index}"}))
+
+    assert result["matched_result_count"] == 0
+    assert result["stop_research"] is True
+    assert tools.stop_instruction() is not None
+    fetched = tools(_FakeCall("fetch_page", {"url": "https://example.com/wrong"}))
+    assert "主体名称" in fetched["error"]
+    assert tools.skipped_urls == [{"url": "https://example.com/wrong", "reason": "subject_mismatch"}]
+
+
+def test_content_inspection_retry_omits_page_body_but_keeps_url(monkeypatch) -> None:
+    messages = [
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "content": json.dumps({"url": "https://example.com/page", "text": "触发检查的正文", "source": "direct_fetch"}),
+        }
+    ]
+    calls = []
+
+    def fake_call(**kwargs):
+        calls.append(kwargs["messages"][-1]["content"])
+        if len(calls) == 1:
+            from backend.app.ai.llm_client import LlmCallError
+
+            raise LlmCallError("DataInspectionFailed: Input text data may contain inappropriate content")
+        return object()
+
+    monkeypatch.setattr("backend.app.jobs.handlers.research.call_openai_compatible_chat", fake_call)
+    tools = ResearchTools({"model_name": "tavily"}, "key")
+    node = {
+        "base_url": "https://example.com/v1",
+        "api_key_secret_ref": None,
+        "api_key_encrypted": None,
+        "model_name": "qwen",
+        "temperature": None,
+        "top_p": None,
+        "max_tokens": 100,
+        "timeout_seconds": 10,
+        "response_format": "json_object",
+    }
+
+    result = _chat_caller(node, research_tools=tools)(messages=messages, tools=[])
+
+    assert result is not None
+    assert "触发检查的正文" not in messages[-1]["content"]
+    assert "https://example.com/page" in messages[-1]["content"]
+    assert tools.content_inspection_retry_count == 1
+
+
+def test_omit_fetched_page_text_can_scrub_all_fetched_pages() -> None:
+    messages = [
+        {"role": "tool", "content": json.dumps({"url": "https://a.com", "text": "a"})},
+        {"role": "tool", "content": json.dumps({"query": "q", "results": [{"snippet": "保留摘要"}]})},
+        {"role": "tool", "content": json.dumps({"url": "https://b.com", "text": "b"})},
+    ]
+
+    assert _omit_fetched_page_text(messages, only_last=False) == ["https://a.com", "https://b.com"]
+    assert json.loads(messages[1]["content"])["results"][0]["snippet"] == "保留摘要"
 
 
 def test_tool_schemas_declare_both_tools() -> None:

@@ -174,6 +174,29 @@ def test_research_outcome_releases_researching() -> None:
     assert "researching" in source, "调研收尾未把 researching 释放回 normal"
 
 
+def test_research_stays_busy_until_mapper_finishes() -> None:
+    research_source = (REPO / "backend/app/jobs/handlers/research.py").read_text(encoding="utf-8")
+    mapper_branch = research_source.split("if _research_mapper_available(db):", 1)[1].split(
+        "# 未配置映射节点时", 1
+    )[0]
+    dispatch_source = (REPO / "backend/app/jobs/handlers/dispatch.py").read_text(encoding="utf-8")
+    route_source = (REPO / "backend/app/api/routes/research.py").read_text(encoding="utf-8")
+
+    assert "_mark_research_outcome" not in mapper_branch
+    assert "seller_target_research_map" in dispatch_source
+    assert '_mark_research_outcome(db, job.entity_id, "failed")' in dispatch_source
+    assert "job_type in ('seller_target_research', 'seller_target_research_map')" in route_source
+
+
+def test_batch_research_dialog_shows_all_groups_without_outcome_details() -> None:
+    source = (REPO / "frontend/src/features/targets/BatchResearchDialog.tsx").read_text(encoding="utf-8")
+
+    for label in ("即将调研", "正在调研", "天内已经调研过"):
+        assert label in source
+    assert "OUTCOME_LABELS" not in source
+    assert "research_last_outcome === 'failed'" in source
+
+
 def test_business_update_no_longer_parks_targets_in_pending_review() -> None:
     source = (REPO / "backend/app/jobs/handlers/business_update.py").read_text(encoding="utf-8")
     assert "has_pending_bound_action" not in source

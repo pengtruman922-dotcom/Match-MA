@@ -212,6 +212,29 @@ def test_iteration_limit_forces_a_final_answer_without_tools() -> None:
     assert outcome.result.raw_output_text == '{"not_found": []}'
 
 
+def test_early_stop_condition_forces_a_final_answer_without_using_full_budget() -> None:
+    chat = _ScriptedChat(
+        [
+            _reply(tool_calls=(_tool_call("web_search", {"query": "q"}),)),
+            _reply('{"coverage": {"no_public_information": ["identity"]}}'),
+        ]
+    )
+
+    outcome = run_tool_loop(
+        chat=chat,
+        messages=[],
+        tools=[{"type": "function", "function": {"name": "web_search"}}],
+        execute_tool=lambda call: {"results": [], "stop_research": True},
+        max_iterations=12,
+        early_stop_instruction=lambda: "主体无法确认，立即输出 JSON。",
+    )
+
+    assert outcome.hit_iteration_limit is False
+    assert outcome.usage.llm_calls == 2
+    assert chat.calls[-1]["tools"] is None
+    assert chat.calls[-1]["messages"][-1]["content"] == "主体无法确认，立即输出 JSON。"
+
+
 def test_client_reads_tool_calls_out_of_an_assistant_message() -> None:
     calls = _parse_tool_calls(
         [

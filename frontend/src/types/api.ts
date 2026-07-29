@@ -920,6 +920,7 @@ export interface UpdateBatchChange {
   new_value: unknown;
   applied_at: string;
   rollback_at: string | null;
+  research_evidence?: FieldValueSource['research_evidence'];
 }
 
 export interface UpdateBatch {

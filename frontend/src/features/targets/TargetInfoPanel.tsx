@@ -54,6 +54,7 @@ export default function TargetInfoPanel({
   const [researchJobId, setResearchJobId] = useState<string | null>(null);
   const [proposals, setProposals] = useState<ResearchProposal[]>([]);
   const [reviewingProposalId, setReviewingProposalId] = useState<string | null>(null);
+  const [showResearchConflicts, setShowResearchConflicts] = useState(false);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [error, setError] = useState<string | null>(null);
   const [registry, setRegistry] = useState<IndicatorRegistryResponse | null>(null);
@@ -62,6 +63,7 @@ export default function TargetInfoPanel({
   const [latestResearchJob, setLatestResearchJob] = useState<SellerResearchStatus['latest_job']>(null);
   const [reportJob, setReportJob] = useState<Pick<BackgroundJob, 'id' | 'result_json' | 'created_at' | 'finished_at'> | null>(null);
   const [industryOptions, setIndustryOptions] = useState<IndustryOptionsResponse>({ l1: [], l2: [] });
+  const researchBusy = researching || currentTarget.ai_processing_state === 'researching';
 
   const groups = useMemo(
     () =>
@@ -74,6 +76,14 @@ export default function TargetInfoPanel({
           })
         : [],
     [currentTarget, registry],
+  );
+  const conflictProposals = useMemo(
+    () => proposals.filter((item) => item.conflict_kind === 'same_period_conflict'),
+    [proposals],
+  );
+  const otherPendingProposals = useMemo(
+    () => proposals.filter((item) => item.conflict_kind !== 'same_period_conflict'),
+    [proposals],
   );
 
   useEffect(() => setCurrentTarget(target), [target]);
@@ -93,7 +103,7 @@ export default function TargetInfoPanel({
       setCurrentTarget(freshTarget);
       onTargetChanged?.(freshTarget);
       setData(profileData);
-      setProposals(proposalData);
+      setProposals(proposalData.filter((item) => item.proposed_value_json.info_status !== 'not_found'));
       setRegistry(registryData);
       setSources(sourceData);
       setIndustryOptions(industryData);
@@ -246,12 +256,13 @@ export default function TargetInfoPanel({
           )}
           <button
             type="button"
-            disabled={researching}
+            disabled={researchBusy}
             onClick={() => void startResearch()}
+            title={researchBusy ? '该标的正在调研中，请等待当前任务完成' : '发起 AI 调研'}
             className="inline-flex items-center gap-1 border border-brand-200 px-2.5 py-1 text-xs text-brand-700 disabled:opacity-50"
           >
-            {researching ? <Loader2 className="h-3 w-3 animate-spin" /> : <Search className="h-3 w-3" />}
-            {researching ? '调研中' : 'AI调研'}
+            {researchBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Search className="h-3 w-3" />}
+            {researchBusy ? '调研中' : 'AI调研'}
           </button>
         </div>
       </div>
@@ -263,11 +274,43 @@ export default function TargetInfoPanel({
         </p>
       )}
 
-      {proposals.length > 0 && (
+      {conflictProposals.length > 0 && (
         <div className="border border-amber-100 bg-amber-50/50 px-4 py-3">
-          <p className="text-xs font-medium text-amber-800">待确认调研建议（{proposals.length}）</p>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="text-xs font-medium text-amber-800">调研发现 {conflictProposals.length} 个与当前信息冲突的字段</p>
+              <p className="mt-1 text-xs text-amber-700">系统没有自动覆盖，请集中核对后再决定是否采纳。</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowResearchConflicts((value) => !value)}
+              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-amber-800 hover:bg-amber-100"
+            >
+              {showResearchConflicts ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+              {showResearchConflicts ? '收起冲突' : '查看冲突'}
+            </button>
+          </div>
+          {showResearchConflicts ? (
+            <div className="mt-2 space-y-2">
+              {conflictProposals.map((proposal) => (
+                <ProposalCard
+                  key={proposal.id}
+                  proposal={proposal}
+                  busy={reviewingProposalId === proposal.id}
+                  onReview={reviewProposal}
+                />
+              ))}
+            </div>
+          ) : null}
+        </div>
+      )}
+
+      {otherPendingProposals.length > 0 && (
+        <div className="border border-amber-100 bg-amber-50/50 px-4 py-3">
+          <p className="text-xs font-medium text-amber-800">待确认调研建议（{otherPendingProposals.length}）</p>
+          <p className="mt-1 text-xs text-amber-700">这些是旧批次或非冲突建议，新调研的可追溯补充信息会自动写入。</p>
           <div className="mt-2 space-y-2">
-            {proposals.map((proposal) => (
+            {otherPendingProposals.map((proposal) => (
               <ProposalCard
                 key={proposal.id}
                 proposal={proposal}

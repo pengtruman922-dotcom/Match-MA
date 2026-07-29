@@ -12,6 +12,7 @@ carrying the URLs it came from.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from dataclasses import dataclass, field
@@ -68,10 +69,10 @@ SEARCH_RESULTS_PER_CALL = 6
 MAX_SEARCH_RESULTS_PER_CALL = 10
 FETCH_TEXT_LIMIT = 8000
 SNIPPET_LIMIT = 600
+MAX_CONSECUTIVE_SUBJECT_MISSES = 4
 
 RELATION_KINDS = {"consistent", "supplement", "temporal_update", "same_period_conflict"}
 DEFAULT_RELATION = "supplement"
-TRUSTED_RESEARCH_SOURCE_TYPES = {"company_website", "government", "regulatory_disclosure"}
 
 
 @dataclass
@@ -80,6 +81,10 @@ class ResearchClaimApplySummary:
     pending_review_count: int = 0
     ignored_count: int = 0
     errors: list[str] = field(default_factory=list)
+
+
+class ResearchContentInspectionError(LlmCallError):
+    """The model rejected retrieved page text even after safe degradation."""
 
 PROFILE_SECTION_CATALOG: list[dict[str, str]] = [
     {"code": code, "label": label} for code, label in PROFILE_SECTION_LABELS.items()
@@ -131,12 +136,24 @@ class ResearchTools:
     here and served to fetch_page when the model asks.
     """
 
-    def __init__(self, provider: dict[str, Any], api_key: str) -> None:
+    def __init__(
+        self,
+        provider: dict[str, Any],
+        api_key: str,
+        *,
+        subject_names: list[str] | None = None,
+    ) -> None:
         self._provider = provider
         self._api_key = api_key
         self._page_text_by_url: dict[str, str] = {}
+        self._subject_anchors = _subject_anchors(subject_names or [])
+        self._low_relevance_urls: set[str] = set()
         self.searched_queries: list[str] = []
         self.fetched_urls: list[str] = []
+        self.skipped_urls: list[dict[str, str]] = []
+        self.consecutive_subject_misses = 0
+        self.early_stop_reason: str | None = None
+        self.content_inspection_retry_count = 0
 
     def __call__(self, call: ToolCall) -> Any:
         if call.name == "web_search":
@@ -149,6 +166,8 @@ class ResearchTools:
         query = query.strip()
         if not query:
             return {"error": "query 不能为空"}
+        if self.early_stop_reason:
+            return {"error": self.early_stop_reason, "stop_research": True}
         try:
             count = int(max_results)
         except (TypeError, ValueError):
@@ -160,8 +179,14 @@ class ResearchTools:
         except SearchError as exc:
             return {"error": f"搜索失败：{exc}"}
         results = []
+        matched_count = 0
         for hit in hits:
-            if hit.raw_content:
+            subject_match = self._matches_subject(hit.title, hit.snippet)
+            if subject_match:
+                matched_count += 1
+            elif self._subject_anchors:
+                self._low_relevance_urls.add(hit.url)
+            if hit.raw_content and subject_match:
                 self._page_text_by_url[hit.url] = hit.raw_content
             results.append(
                 {
@@ -169,15 +194,33 @@ class ResearchTools:
                     "title": hit.title,
                     "snippet": (hit.snippet or "")[:SNIPPET_LIMIT],
                     "published_at": hit.published_at,
-                    "full_text_available": bool(hit.raw_content),
+                    "full_text_available": bool(hit.raw_content and subject_match),
+                    "subject_match": subject_match,
                 }
             )
-        return {"query": query, "results": results}
+        if self._subject_anchors and matched_count == 0:
+            self.consecutive_subject_misses += 1
+        elif matched_count:
+            self.consecutive_subject_misses = 0
+        if self.consecutive_subject_misses >= MAX_CONSECUTIVE_SUBJECT_MISSES:
+            self.early_stop_reason = (
+                f"已连续 {self.consecutive_subject_misses} 次检索未找到与标的主体名称准确匹配的结果，"
+                "为避免混入同名或近似主体的信息，本次调研停止继续检索。"
+            )
+        return {
+            "query": query,
+            "results": results,
+            "matched_result_count": matched_count,
+            "stop_research": bool(self.early_stop_reason),
+        }
 
     def fetch_page(self, url: str) -> Any:
         url = url.strip()
         if not url:
             return {"error": "url 不能为空"}
+        if url in self._low_relevance_urls:
+            self._record_skipped_url(url, "subject_mismatch")
+            return {"url": url, "error": "该搜索结果未匹配标的主体名称，已跳过正文抓取以避免主体混淆。"}
         self.fetched_urls.append(url)
         cached = self._page_text_by_url.get(url)
         if cached:
@@ -187,6 +230,30 @@ class ResearchTools:
             return {"url": url, "error": "无法抓取该页面正文，可只依据搜索摘要判断或换一个来源。"}
         self._page_text_by_url[url] = text_value
         return {"url": url, "text": text_value[:FETCH_TEXT_LIMIT], "source": "direct_fetch"}
+
+    def _matches_subject(self, title: str | None, snippet: str | None) -> bool:
+        if not self._subject_anchors:
+            return True
+        haystack = _normalize_subject_text(f"{title or ''} {snippet or ''}")
+        return any(anchor in haystack for anchor in self._subject_anchors)
+
+    def _record_skipped_url(self, url: str, reason: str) -> None:
+        item = {"url": url, "reason": reason}
+        if item not in self.skipped_urls:
+            self.skipped_urls.append(item)
+
+    def record_content_inspection_skip(self, urls: list[str], reason: str) -> None:
+        self.content_inspection_retry_count += 1
+        for url in urls:
+            self._record_skipped_url(url, reason)
+
+    def stop_instruction(self) -> str | None:
+        if not self.early_stop_reason:
+            return None
+        return (
+            f"{self.early_stop_reason} 请立即基于已经确认的信息输出最终 JSON；"
+            "没有准确主体证据的模块放入 coverage.no_public_information，不要再调用工具。"
+        )
 
 
 def _handle_seller_target_research(db: Session, job: JobClaim) -> dict[str, object]:
@@ -224,16 +291,24 @@ def _handle_seller_target_research(db: Session, job: JobClaim) -> dict[str, obje
         db.commit()
         raise ValueError(str(exc)) from exc
 
-    tools = ResearchTools(provider, api_key)
+    tools = ResearchTools(
+        provider,
+        api_key,
+        subject_names=[
+            str(target.get("target_subject_name") or ""),
+            str(target.get("target_name") or ""),
+        ],
+    )
     started = time.perf_counter()
     try:
         loop = run_tool_loop(
-            chat=_chat_caller(node_config),
+            chat=_chat_caller(node_config, research_tools=tools),
             messages=messages,
             tools=RESEARCH_TOOLS,
             execute_tool=tools,
             max_iterations=MAX_TOOL_ITERATIONS,
             tool_result_limit=FETCH_TEXT_LIMIT,
+            early_stop_instruction=tools.stop_instruction,
         )
     except LlmCallError as exc:
         _insert_research_trace(
@@ -248,7 +323,11 @@ def _handle_seller_target_research(db: Session, job: JobClaim) -> dict[str, obje
             schema_validation_json={"valid": False, "error": str(exc)},
             latency_ms=int((time.perf_counter() - started) * 1000),
             tools=tools,
-            error_code="llm_call_failed",
+            error_code=(
+                "research_content_inspection_failed"
+                if isinstance(exc, ResearchContentInspectionError)
+                else "llm_call_failed"
+            ),
             error_message=str(exc),
         )
         _mark_research_outcome(db, target_id, "failed")
@@ -305,7 +384,10 @@ def _handle_seller_target_research(db: Session, job: JobClaim) -> dict[str, obje
         map_job_id = _enqueue_research_map_job(db, job=job, target_id=target_id)
         has_content = _agent_output_has_content(loop.result.parsed_output_json)
         outcome = "found" if has_content else "no_public_information"
-        _mark_research_outcome(db, target_id, outcome)
+        # The mapper is part of the same user-visible operation.  Keep the
+        # target reserved as ``researching`` until mapping and writeback finish;
+        # otherwise a page refresh re-enables the button while the second half
+        # of the pipeline is still running.
         db.commit()
         return {
             "handled": True,
@@ -357,9 +439,10 @@ def apply_research_claims(
     """Turn normalized claims into proposals and accept them.
 
     Shared by the research handler's inline fallback and the mapping job, so
-    both write the same audit trail.  Only consistent facts and evidence from a
-    trusted primary source are auto-accepted. Conflicts stay pending; malformed
-    facts are retained as ignored audit records and never shown as actionable.
+    both write the same audit trail.  Traceable supplements and newer-period
+    updates are accepted automatically; same-period conflicts stay pending.
+    Malformed facts are retained as ignored audit records and never shown as
+    actionable.
     """
     summary = ResearchClaimApplySummary()
     prepared_claims = _prepare_research_claims(db, target_id=target_id, claims=claims)
@@ -524,11 +607,10 @@ def _structured_fact_relation(
 
 def _should_auto_accept_research_proposal(proposal: dict[str, Any]) -> bool:
     relation = str(proposal.get("conflict_kind") or "")
-    if relation == "consistent":
-        return True
     return (
-        relation in {"supplement", "temporal_update"}
-        and proposal.get("source_type") in TRUSTED_RESEARCH_SOURCE_TYPES
+        relation in {"consistent", "supplement", "temporal_update"}
+        and bool(str(proposal.get("source_url") or "").strip())
+        and bool(str(proposal.get("source_excerpt") or "").strip())
     )
 
 
@@ -587,7 +669,11 @@ def _enqueue_research_map_job(db: Session, *, job: JobClaim, target_id: UUID) ->
     ).scalar_one()
 
 
-def _chat_caller(node_config: dict[str, Any]):
+def _chat_caller(
+    node_config: dict[str, Any],
+    *,
+    research_tools: ResearchTools | None = None,
+):
     """Bind the node config so the loop only has to pass messages and tools.
 
     response_format is attached only on turns that carry no tools: several
@@ -595,7 +681,7 @@ def _chat_caller(node_config: dict[str, Any]):
     turn that produces the answer is the one that needs the JSON guarantee.
     """
 
-    def chat(*, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None):
+    def call(messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None):
         return call_openai_compatible_chat(
             base_url=node_config["base_url"],
             api_key_secret_ref=node_config["api_key_secret_ref"],
@@ -610,7 +696,92 @@ def _chat_caller(node_config: dict[str, Any]):
             tools=tools,
         )
 
+    def chat(*, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None):
+        try:
+            return call(messages, tools)
+        except LlmCallError as exc:
+            if not _is_data_inspection_error(exc):
+                raise
+
+        omitted = _omit_fetched_page_text(messages, only_last=True)
+        if omitted:
+            research_tools and research_tools.record_content_inspection_skip(
+                omitted, "content_inspection_last_page_omitted"
+            )
+            try:
+                return call(messages, tools)
+            except LlmCallError as exc:
+                if not _is_data_inspection_error(exc):
+                    raise
+
+        omitted = _omit_fetched_page_text(messages, only_last=False)
+        if omitted:
+            research_tools and research_tools.record_content_inspection_skip(
+                omitted, "content_inspection_all_pages_omitted"
+            )
+            try:
+                return call(messages, tools)
+            except LlmCallError as exc:
+                if not _is_data_inspection_error(exc):
+                    raise
+
+        raise ResearchContentInspectionError(
+            "模型内容安全检查拦截了检索网页；系统已自动省略可疑网页正文并重试，仍未能完成。"
+            "请稍后重试，系统会保留搜索摘要但不会写入未经确认的信息。"
+        )
+
     return chat
+
+
+def _is_data_inspection_error(exc: BaseException) -> bool:
+    message = str(exc).lower().replace("_", "")
+    return "datainspectionfailed" in message or "inappropriate content" in message
+
+
+def _omit_fetched_page_text(messages: list[dict[str, Any]], *, only_last: bool) -> list[str]:
+    """Remove fetched page bodies while preserving URLs and search snippets."""
+    omitted_urls: list[str] = []
+    indexes = range(len(messages) - 1, -1, -1) if only_last else range(len(messages))
+    for index in indexes:
+        message = messages[index]
+        if message.get("role") != "tool" or not isinstance(message.get("content"), str):
+            continue
+        try:
+            payload = json.loads(message["content"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict) or not payload.get("text"):
+            continue
+        url = str(payload.get("url") or "")
+        payload.pop("text", None)
+        payload["content_omitted"] = "网页正文触发模型内容检查，已省略；请仅依据 URL 和搜索摘要。"
+        message["content"] = json.dumps(payload, ensure_ascii=False)
+        if url:
+            omitted_urls.append(url)
+        if only_last:
+            break
+    return omitted_urls
+
+
+def _normalize_subject_text(value: str) -> str:
+    return re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", value).lower()
+
+
+def _subject_anchors(values: list[str]) -> list[str]:
+    suffixes = ("股份有限公司", "有限责任公司", "集团有限公司", "有限公司", "股份公司", "公司")
+    anchors: list[str] = []
+    for value in values:
+        normalized = _normalize_subject_text(value)
+        if len(normalized) >= 4 and normalized not in anchors:
+            anchors.append(normalized)
+        for suffix in suffixes:
+            normalized_suffix = _normalize_subject_text(suffix)
+            if normalized.endswith(normalized_suffix):
+                core = normalized[: -len(normalized_suffix)]
+                if len(core) >= 4 and core not in anchors:
+                    anchors.append(core)
+                break
+    return anchors
 
 
 def normalize_research_output(
@@ -644,6 +815,7 @@ def normalize_research_output(
         if not sources:
             notes.append(f"profile_sections:{item['section_code']}:missing_sources")
             continue
+        source_excerpt = _short_text(raw.get("source_excerpt"), 2000)
         current = current_profiles.get(item["section_code"]) or {}
         claims.append(
             {
@@ -662,7 +834,8 @@ def normalize_research_output(
                 "as_of_date": item.get("as_of_date"),
                 "sources": sources,
                 "source_title": _short_text(raw.get("source_title"), 300),
-                "source_excerpt": _short_text(raw.get("source_excerpt"), 2000),
+                "source_excerpt": source_excerpt,
+                "validation_error": None if source_excerpt else "缺少字段级原文摘录，无法自动写入。",
             }
         )
 
@@ -685,6 +858,7 @@ def normalize_research_output(
         if not sources:
             notes.append(f"structured_facts[{index}]:missing_sources:{field_path}")
             continue
+        source_excerpt = _short_text(raw.get("source_excerpt"), 2000)
         claims.append(
             {
                 "proposal_kind": "structured_fact",
@@ -700,31 +874,16 @@ def normalize_research_output(
                 "as_of_date": _valid_date(raw.get("as_of_date")),
                 "sources": sources,
                 "source_title": _short_text(raw.get("source_title"), 300),
-                "source_excerpt": _short_text(raw.get("source_excerpt"), 2000),
+                "source_excerpt": source_excerpt,
+                "validation_error": None if source_excerpt else "缺少字段级原文摘录，无法自动写入。",
             }
         )
 
     for code in _coverage_not_found_codes(parsed_output_json, notes=notes):
-        # 「查过但没有」和「从未查过」在推荐里不是一回事：前者是确认的缺口。
-        if (current_profiles.get(code) or {}).get("info_status") == "filled":
-            notes.append(f"not_found:{code}:already_filled")
-            continue
-        claims.append(
-            {
-                "proposal_kind": "not_found",
-                "section_code": code,
-                "field_path": None,
-                "value": None,
-                "info_status": "not_found",
-                "current_value_json": _json_safe_value(current_profiles.get(code) or {}),
-                "relation": "supplement",
-                "period_label": None,
-                "as_of_date": None,
-                "sources": [],
-                "source_title": None,
-                "source_excerpt": None,
-            }
-        )
+        # Coverage belongs to the stored research report.  "Nothing public was
+        # found" is not a field update and must not become a proposal, a profile
+        # row, or a confirmation card.
+        notes.append(f"not_found:{code}:report_only")
     return claims, notes
 
 
@@ -788,12 +947,7 @@ def _relation_of(
 
 
 def _coverage_not_found_codes(payload: dict[str, Any], *, notes: list[str]) -> list[str]:
-    """「查过但确实没有」的栏目。
-
-    未检索到的内容 agent 不再输出，所以报告末尾的覆盖清单是唯一能区分
-    `not_found`（查了没有）和 `missing`（根本没查）的依据 —— 而这个区分是
-    30 天二次确认和下一轮调研的判断材料。
-    """
+    """Read report-only coverage codes without turning them into writes."""
     coverage = payload.get("coverage")
     values: Any = payload.get("not_found")
     if isinstance(coverage, dict):
@@ -999,13 +1153,12 @@ def _current_profiles_for_prompt(
 
 
 def _mark_research_outcome(db: Session, target_id: UUID, outcome: str) -> None:
-    """Record the run's result and release the 'researching' display state.
+    """Record the complete pipeline result and release ``researching``.
 
-    Every exit from the research handler — provider missing, key error, LLM
-    failure, bad output, success — routes through here, so this is the one
-    place that has to hand the target back. A concurrent parse owns
-    information_status while it runs, so 'researching' is only cleared when it
-    is still the current value.
+    With a mapper configured, successful web research deliberately does not
+    call this function.  The mapping job owns the final outcome and releases
+    the target only after its writeback has committed.  Failures from either
+    job still route through here at their final-attempt boundary.
     """
     db.execute(
         text(
@@ -1123,6 +1276,9 @@ def _insert_research_trace(
                 "tool_calls": usage.tool_calls_by_name if usage else {},
                 "searched_queries": tools.searched_queries,
                 "fetched_urls": tools.fetched_urls,
+                "skipped_urls": tools.skipped_urls,
+                "content_inspection_retry_count": tools.content_inspection_retry_count,
+                "early_stop_reason": tools.early_stop_reason,
                 "hit_iteration_limit": bool(loop and loop.hit_iteration_limit),
             },
         },

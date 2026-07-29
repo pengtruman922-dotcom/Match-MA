@@ -65,6 +65,7 @@ def run_tool_loop(
     max_iterations: int = 12,
     tool_result_limit: int = DEFAULT_TOOL_RESULT_LIMIT,
     final_turn_instruction: str = "已达到工具调用上限。请立即基于已获得的信息输出最终结果，不要再调用任何工具。",
+    early_stop_instruction: Callable[[], str | None] | None = None,
 ) -> ToolLoopResult:
     """Drive `chat` until it answers instead of asking for tools.
 
@@ -118,6 +119,19 @@ def run_tool_loop(
                     "content": _tool_result_content(call, execute_tool, tool_result_limit),
                 }
             )
+        if early_stop_instruction is not None:
+            instruction = early_stop_instruction()
+            if instruction:
+                conversation.append({"role": "user", "content": instruction})
+                result = chat(messages=conversation, tools=None)
+                usage.record_llm(result)
+                return ToolLoopResult(
+                    result=result,
+                    messages=conversation,
+                    usage=usage,
+                    hit_iteration_limit=False,
+                    json_finalization_attempted=True,
+                )
 
     # 用光预算：不带工具再要一轮，保证总有结构化产出而不是半截对话。
     conversation.append({"role": "user", "content": final_turn_instruction})
