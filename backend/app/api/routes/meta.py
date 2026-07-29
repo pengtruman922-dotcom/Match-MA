@@ -175,7 +175,7 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
     default_llm_nodes = _count_by_query(
         db,
         """
-        select count(*)
+        select count(distinct node_name)
         from model_node_config
         where node_name in (
             'business_update_extractor',
@@ -183,10 +183,11 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
             'seller_target_update_parser',
             'buyer_intent_parser',
             'buyer_intent_update_parser',
+            'relation_followup_draft_parser',
             'recommendation_deep_eval',
             'recommendation_report_writer'
           )
-          and node_type = 'llm'
+          and node_type in ('llm', 'parser')
           and is_default = true
           and is_active = true
         """,
@@ -233,7 +234,7 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
     default_prompts = _count_by_query(
         db,
         """
-        select count(*)
+        select count(distinct node_name)
         from prompt_template
         where node_name in (
             'business_update_extractor',
@@ -241,6 +242,7 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
             'seller_target_update_parser',
             'buyer_intent_parser',
             'buyer_intent_update_parser',
+            'relation_followup_draft_parser',
             'recommendation_deep_eval',
             'recommendation_report_writer'
           )
@@ -269,11 +271,11 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
     checks = {
         "tables": table_checks,
         "default_provider": default_provider,
-        "required_llm_nodes": default_llm_nodes >= 7,
+        "required_llm_nodes": default_llm_nodes >= 8,
         "default_deep_eval_node": default_deep_eval_nodes >= 1,
         "default_ocr_nodes": default_ocr_nodes >= 1,
         "retired_recommendation_nodes_inactive": active_retired_recommendation_nodes == 0,
-        "required_prompts": default_prompts >= 7,
+        "required_prompts": default_prompts >= 8,
         "real_business_update_prompt": real_business_update_prompt,
         "buyer_intent_update_allowed": buyer_intent_update_allowed,
         "buyer_intent_suggestion_removed": not buyer_intent_suggestion_allowed,
@@ -282,11 +284,11 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
     ok = (
         all(table_checks.values())
         and default_provider
-        and default_llm_nodes >= 7
+        and default_llm_nodes >= 8
         and default_deep_eval_nodes >= 1
         and default_ocr_nodes >= 1
         and active_retired_recommendation_nodes == 0
-        and default_prompts >= 7
+        and default_prompts >= 8
         and real_business_update_prompt
         and buyer_intent_update_allowed
         and not buyer_intent_suggestion_allowed

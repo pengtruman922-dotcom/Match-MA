@@ -1,4 +1,3 @@
-from datetime import date
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -23,7 +22,6 @@ from backend.app.api.routes.utils import (
 from backend.app.db import get_db
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 from backend.app.services.extracted_action_apply import (  # noqa: F401 - re-exported for compatibility
-    TARGET_FOLLOW_UP_PARSING_STATUSES,
     _POST_PARSE_INFORMATION_STATUSES,
     _action_source_context,
     _allowed_buyer_intent_changes,
@@ -36,20 +34,15 @@ from backend.app.services.extracted_action_apply import (  # noqa: F401 - re-exp
     _get_seller_target_snapshot_or_404,
     _insert_relation_event,
     _mark_action_applied,
-    _match_buyer_party_ids,
     _optional_uuid,
-    _parse_follow_up_occurred_on,
     _refresh_business_update_status,
     _relation_event_content,
-    _release_target_from_parsing_after_follow_up,
     _required_uuid,
     _seller_target_changes_with_parse_completion,
-    apply_buyer_intent_follow_up_action,
     apply_buyer_intent_target_exclusion_action,
     apply_buyer_intent_update_action,
     apply_buyer_seller_relation_update_action,
     apply_seller_fact_update_action,
-    apply_target_follow_up_action,
 )
 
 router = APIRouter(tags=["extracted-actions"])
@@ -295,10 +288,6 @@ def apply_extracted_action(
         result = apply_buyer_seller_relation_update_action(db, action, require_accepted=True)
     elif action["action_type"] == "buyer_intent_target_exclusion":
         result = apply_buyer_intent_target_exclusion_action(db, action, require_accepted=True)
-    elif action["action_type"] == "target_follow_up":
-        result = apply_target_follow_up_action(db, action, require_accepted=True)
-    elif action["action_type"] == "buyer_intent_follow_up":
-        result = apply_buyer_intent_follow_up_action(db, action, require_accepted=True)
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -524,5 +513,4 @@ def _get_extracted_action_or_404(db: Session, extracted_action_id: UUID) -> dict
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Extracted action not found.")
 
     return dict(row)
-
 

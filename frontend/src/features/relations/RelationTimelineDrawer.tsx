@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Loader2, X, ArrowRight, UserRound, Building2, Pencil, Trash2, Check } from 'lucide-react';
+import { Loader2, X, ArrowRight, UserRound, Building2, Pencil, Trash2, Check, MessageSquarePlus } from 'lucide-react';
 import { relations } from '../../lib/api';
 import type { BuyerSellerRelation, RelationEvent, RelationEventType } from '../../types/api';
 import { relationStatusClass, relationStatusLabel } from './relationLabels';
+import BusinessUpdateDrawer from '../../components/BusinessUpdateDrawer';
 
 interface Props {
   relation: BuyerSellerRelation;
@@ -24,6 +25,7 @@ export default function RelationTimelineDrawer({ relation, side, statuses, event
   const [loading, setLoading] = useState(true);
   const [savingStatus, setSavingStatus] = useState(false);
   const [current, setCurrent] = useState(relation);
+  const [composerOpen, setComposerOpen] = useState(false);
   const labels = useMemo(() => Object.fromEntries(eventTypes.map((item) => [item.value, item.label])), [eventTypes]);
 
   const counterpartyName = side === 'seller_target'
@@ -93,7 +95,12 @@ export default function RelationTimelineDrawer({ relation, side, statuses, event
             </div>
           </section>
 
-          <RecordEventForm relationId={current.id} eventTypes={eventTypes} labels={labels} onRecorded={async () => { await refreshRelation(); await loadEvents(); }} />
+          <section className="border border-gray-100 bg-gray-50/60 p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div><h4 className="text-xs font-semibold uppercase tracking-wider text-gray-500">记录跟进</h4><p className="mt-1 text-xs text-gray-400">上传或粘贴原始记录，AI 整理草稿后再确认。</p></div>
+              <button type="button" onClick={() => setComposerOpen(true)} className="inline-flex items-center gap-1.5 bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"><MessageSquarePlus className="h-3.5 w-3.5" />录入</button>
+            </div>
+          </section>
 
           <section className="mt-6">
             <h4 className="mb-3 text-xs font-semibold uppercase tracking-wider text-gray-500">时间线</h4>
@@ -106,6 +113,18 @@ export default function RelationTimelineDrawer({ relation, side, statuses, event
           </section>
         </div>
       </div>
+      <BusinessUpdateDrawer
+        open={composerOpen}
+        initialScope="follow_up"
+        defaultRelationId={current.id}
+        defaultTargetId={side === 'seller_target' ? current.seller_target_id : undefined}
+        defaultTargetName={current.seller_target_name || undefined}
+        defaultIntentId={side === 'buyer_intent' ? current.buyer_intent_id : undefined}
+        defaultIntentName={current.buyer_intent_name || undefined}
+        defaultBuyerPartyName={current.buyer_name || undefined}
+        onClose={() => setComposerOpen(false)}
+        onSuccess={() => { void refreshRelation(); void loadEvents(); }}
+      />
     </div>
   );
 }
@@ -159,29 +178,6 @@ function TimelineEvent({ event, relationId, eventTypes, labels, onChanged }: {
       </>}
     </li>
   );
-}
-
-function RecordEventForm({ relationId, eventTypes, labels, onRecorded }: { relationId: string; eventTypes: RelationEventType[]; labels: Record<string, string>; onRecorded: () => Promise<void> }) {
-  const manualTypes = eventTypes.filter((item) => !STATUS_SYSTEM_EVENT_TYPES.has(item.value));
-  const [eventType, setEventType] = useState('meeting');
-  const [content, setContent] = useState('');
-  const [nextStep, setNextStep] = useState('');
-  const [saving, setSaving] = useState(false);
-  const submit = async () => {
-    setSaving(true);
-    try {
-      await relations.createEvent(relationId, { event_type: eventType, content: content.trim() || null, next_step: nextStep.trim() || null });
-      setContent(''); setNextStep(''); await onRecorded();
-    } catch (err) { alert(err instanceof Error ? err.message : '记录动态失败'); } finally { setSaving(false); }
-  };
-  return <section className="border border-gray-100 bg-gray-50/60 p-3">
-    <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">记录动态</h4>
-    <div className="space-y-2"><select value={eventType} onChange={(event) => setEventType(event.target.value)} className="w-full border border-gray-200 bg-white px-2 py-1.5 text-sm text-gray-700 outline-none focus:border-brand-500">
-      {manualTypes.map((type) => <option key={type.value} value={type.value}>{labels[type.value] || type.label}</option>)}
-    </select><textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="沟通内容（选填；不填将自动生成记录）" className="min-h-16 w-full resize-y border border-gray-200 bg-white px-2 py-1.5 text-sm text-gray-800 outline-none focus:border-brand-500" />
-    <input value={nextStep} onChange={(event) => setNextStep(event.target.value)} placeholder="下一步（选填）" className="w-full border border-gray-200 bg-white px-2 py-1.5 text-sm text-gray-800 outline-none focus:border-brand-500" />
-    <div className="flex justify-end"><button type="button" onClick={() => void submit()} disabled={saving || !eventType} className="inline-flex items-center gap-1.5 bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50">{saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}记录</button></div></div>
-  </section>;
 }
 
 function formatDate(value: string | null): string { if (!value) return '-'; const date = new Date(value); return Number.isNaN(date.getTime()) ? '-' : date.toLocaleDateString('zh-CN', { year: '2-digit', month: '2-digit', day: '2-digit' }); }

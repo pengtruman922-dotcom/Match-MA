@@ -1,4 +1,3 @@
-from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID, uuid4
@@ -219,29 +218,6 @@ class BuyerIntentParseStatusOut(BaseModel):
     latest_trace: dict[str, Any] | None
     recent_update_logs: list[dict[str, Any]]
     debug_ref: dict[str, Any]
-
-
-class BuyerIntentFollowUpCreate(BaseModel):
-    occurred_at: datetime | None = None
-    contact_name: str | None = Field(default=None, max_length=200)
-    content: str = Field(min_length=1, max_length=10000)
-    next_step: str | None = Field(default=None, max_length=2000)
-    next_follow_up_at: datetime | None = None
-
-
-class BuyerIntentFollowUpOut(BaseModel):
-    id: UUID
-    buyer_intent_id: UUID
-    occurred_at: str
-    contact_name: str | None
-    content: str
-    next_step: str | None
-    next_follow_up_at: str | None
-    business_update_id: UUID | None
-    extracted_action_id: UUID | None
-    created_by: UUID | None
-    created_by_name: str | None = None
-    created_at: str
 
 
 class BuyerIntentFilterOptionOut(BaseModel):
@@ -889,125 +865,6 @@ def get_buyer_intent_parse_status(
     }
 
 
-@router.get("/{buyer_intent_id}/follow-ups", response_model=list[BuyerIntentFollowUpOut])
-def list_buyer_intent_follow_ups(
-    buyer_intent_id: UUID,
-    current_user: CurrentUser,
-    db: Session = Depends(get_db),
-    limit: int = Query(default=100, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
-) -> list[dict[str, Any]]:
-    _get_buyer_intent_or_404(db, buyer_intent_id)
-    ensure_entity_visible(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
-    rows = db.execute(
-        text(
-            """
-            select
-              f.id, f.buyer_intent_id, f.occurred_at::text as occurred_at,
-              f.contact_name, f.content, f.next_step,
-              f.next_follow_up_at::text as next_follow_up_at,
-              f.business_update_id, f.extracted_action_id, f.created_by,
-              au.name as created_by_name, f.created_at::text as created_at
-            from buyer_intent_follow_up f
-            left join app_user au on au.id = f.created_by
-            where f.buyer_intent_id = :buyer_intent_id
-              and f.team_id = :team_id
-              and f.workspace_id = :workspace_id
-              and f.deleted_at is null
-            order by f.occurred_at desc, f.created_at desc
-            limit :limit offset :offset
-            """
-        ),
-        {
-            "buyer_intent_id": buyer_intent_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "limit": limit,
-            "offset": offset,
-        },
-    ).mappings().all()
-    return [dict(row) for row in rows]
-
-
-@router.post(
-    "/{buyer_intent_id}/follow-ups",
-    response_model=BuyerIntentFollowUpOut,
-    status_code=status.HTTP_201_CREATED,
-)
-def create_buyer_intent_follow_up(
-    buyer_intent_id: UUID,
-    payload: BuyerIntentFollowUpCreate,
-    current_user: CurrentUser,
-    db: Session = Depends(get_db),
-) -> dict[str, Any]:
-    _get_buyer_intent_or_404(db, buyer_intent_id)
-    ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
-    row = db.execute(
-        text(
-            """
-            insert into buyer_intent_follow_up (
-              team_id, workspace_id, buyer_intent_id, occurred_at,
-              contact_name, content, next_step, next_follow_up_at, created_by
-            )
-            values (
-              :team_id, :workspace_id, :buyer_intent_id, coalesce(:occurred_at, now()),
-              :contact_name, :content, :next_step, :next_follow_up_at, :created_by
-            )
-            returning id
-            """
-        ),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "buyer_intent_id": buyer_intent_id,
-            "occurred_at": payload.occurred_at,
-            "contact_name": payload.contact_name,
-            "content": payload.content.strip(),
-            "next_step": payload.next_step,
-            "next_follow_up_at": payload.next_follow_up_at,
-            "created_by": current_user.user_id,
-        },
-    ).mappings().one()
-    db.commit()
-    return _get_buyer_intent_follow_up(db, row["id"])
-
-
-@router.delete("/{buyer_intent_id}/follow-ups/{follow_up_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_buyer_intent_follow_up(
-    buyer_intent_id: UUID,
-    follow_up_id: UUID,
-    current_user: CurrentUser,
-    db: Session = Depends(get_db),
-) -> None:
-    _get_buyer_intent_or_404(db, buyer_intent_id)
-    ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
-    changed = db.execute(
-        text(
-            """
-            update buyer_intent_follow_up
-            set deleted_at = now(), deleted_by = :deleted_by
-            where id = :follow_up_id
-              and buyer_intent_id = :buyer_intent_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
-              and deleted_at is null
-            returning id
-            """
-        ),
-        {
-            "follow_up_id": follow_up_id,
-            "buyer_intent_id": buyer_intent_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "deleted_by": current_user.user_id,
-        },
-    ).first()
-    if changed is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Buyer intent follow-up not found.")
-    db.commit()
-    return None
-
-
 @router.patch("/{buyer_intent_id}", response_model=BuyerIntentOut)
 def update_buyer_intent(
     buyer_intent_id: UUID,
@@ -1193,35 +1050,6 @@ def _get_buyer_intent_or_404(db: Session, buyer_intent_id: UUID) -> dict[str, An
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Buyer intent not found.")
 
-    return dict(row)
-
-
-def _get_buyer_intent_follow_up(db: Session, follow_up_id: UUID) -> dict[str, Any]:
-    row = db.execute(
-        text(
-            """
-            select
-              f.id, f.buyer_intent_id, f.occurred_at::text as occurred_at,
-              f.contact_name, f.content, f.next_step,
-              f.next_follow_up_at::text as next_follow_up_at,
-              f.business_update_id, f.extracted_action_id, f.created_by,
-              au.name as created_by_name, f.created_at::text as created_at
-            from buyer_intent_follow_up f
-            left join app_user au on au.id = f.created_by
-            where f.id = :follow_up_id
-              and f.team_id = :team_id
-              and f.workspace_id = :workspace_id
-              and f.deleted_at is null
-            """
-        ),
-        {
-            "follow_up_id": follow_up_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
-    ).mappings().one_or_none()
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Buyer intent follow-up not found.")
     return dict(row)
 
 

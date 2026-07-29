@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, Loader2, MessageSquarePlus, Sparkles, UserRound } from 'lucide-react';
+import { ArrowLeft, Loader2, Sparkles, UserRound } from 'lucide-react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import BuyerIntentWorkspace, {
   IntentParseBadge,
@@ -7,15 +7,16 @@ import BuyerIntentWorkspace, {
 } from '../components/BuyerIntentWorkspace';
 import type { BuyerWorkspaceTab } from '../components/BuyerIntentWorkspace';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
+import UpdateEntryMenu from '../components/UpdateEntryMenu';
 import { businessUpdates, buyerIntents, buyerParties, users } from '../lib/api';
 import { isAdmin } from '../lib/auth';
 import { valueLabel } from '../lib/fieldLabels';
 import type {
   AppUserOption,
   BuyerIntent,
-  BuyerIntentFollowUp,
   BuyerIntentParseStatus,
   BuyerParty,
+  BusinessUpdateProcessingScope,
 } from '../types/api';
 
 export default function BuyerIntentDetail() {
@@ -25,10 +26,9 @@ export default function BuyerIntentDetail() {
   const [intent, setIntent] = useState<BuyerIntent | null>(null);
   const [party, setParty] = useState<BuyerParty | null>(null);
   const [parseStatus, setParseStatus] = useState<BuyerIntentParseStatus | null>(null);
-  const [followUps, setFollowUps] = useState<BuyerIntentFollowUp[]>([]);
   const [activeTab, setActiveTab] = useState<BuyerWorkspaceTab>(() => workspaceTab(searchParams.get('tab')));
   const [loading, setLoading] = useState(true);
-  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [updateDrawer, setUpdateDrawer] = useState<{ open: boolean; scope: BusinessUpdateProcessingScope }>({ open: false, scope: 'basic_info' });
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
   const [statusSaving, setStatusSaving] = useState(false);
   const [ownerSaving, setOwnerSaving] = useState(false);
@@ -50,15 +50,13 @@ export default function BuyerIntentDetail() {
     if (!silent) setLoading(true);
     try {
       const nextIntent = await buyerIntents.get(id);
-      const [nextParty, nextParseStatus, nextFollowUps] = await Promise.all([
+      const [nextParty, nextParseStatus] = await Promise.all([
         nextIntent.buyer_party_id ? buyerParties.get(nextIntent.buyer_party_id).catch(() => null) : Promise.resolve(null),
         buyerIntents.parseStatus(id).catch(() => null),
-        buyerIntents.followUps(id).catch(() => []),
       ]);
       setIntent(nextIntent);
       setParty(nextParty);
       setParseStatus(nextParseStatus);
-      setFollowUps(nextFollowUps);
     } catch {
       navigate('/buyers');
     } finally {
@@ -142,7 +140,7 @@ export default function BuyerIntentDetail() {
         <div className="flex flex-wrap items-center justify-end gap-2">
           {admin ? <label className="flex items-center gap-1 text-xs text-gray-500">负责人<select value={intent.owner_user_id || ''} onChange={(event) => void changeOwner(event.target.value)} disabled={ownerSaving} className="border border-gray-200 bg-white px-2 py-1.5 text-sm text-gray-700 disabled:opacity-50"><option value="">未指派</option>{ownerOptions.filter((option) => option.status === 'active').map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}</select></label> : null}
           <select value={intent.status} onChange={(event) => void changeStatus(event.target.value)} disabled={statusSaving} className="border border-gray-200 bg-white px-2 py-1.5 text-sm text-gray-700 disabled:opacity-50"><option value="active">持续推荐</option><option value="paused">暂停推荐</option><option value="closed">已结束</option></select>
-          <button type="button" onClick={() => setDrawerOpen(true)} className="inline-flex items-center gap-1.5 border border-gray-200 px-3 py-1.5 text-sm text-gray-700 hover:border-brand-500 hover:text-brand-700"><MessageSquarePlus className="h-3.5 w-3.5" />录入更新</button>
+          <UpdateEntryMenu primaryScope={activeTab === 'progress' ? 'follow_up' : 'basic_info'} onSelect={(scope) => setUpdateDrawer({ open: true, scope })} />
           <Link to={`/recommendations?mode=buyer-to-target&intentId=${intent.id}`} className="inline-flex items-center gap-1.5 bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"><Sparkles className="h-3.5 w-3.5" />推荐标的</Link>
         </div>
       </header>
@@ -151,7 +149,6 @@ export default function BuyerIntentDetail() {
         intent={intent}
         party={party}
         parseStatus={parseStatus}
-        followUps={followUps}
         activeTab={activeTab}
         onTabChange={setActiveTab}
         progressOpenRelationId={searchParams.get('relation')}
@@ -162,15 +159,17 @@ export default function BuyerIntentDetail() {
       />
 
       <BusinessUpdateDrawer
-        open={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
+        open={updateDrawer.open}
+        initialScope={updateDrawer.scope}
+        onClose={() => setUpdateDrawer({ open: false, scope: 'basic_info' })}
         defaultIntentId={intent.id}
         defaultIntentName={intent.intent_name}
+        defaultBuyerPartyName={party?.buyer_name || intent.buyer_name || undefined}
         onSuccess={(businessUpdateId) => { void watchBusinessUpdate(businessUpdateId); }}
       />
     </div>
   );
 }
 
-function workspaceTab(value: string | null): BuyerWorkspaceTab { return value === 'buyer' || value === 'progress' || value === 'attachments' || value === 'followups' || value === 'history' ? value : 'intent'; }
+function workspaceTab(value: string | null): BuyerWorkspaceTab { return value === 'buyer' || value === 'progress' || value === 'attachments' || value === 'history' ? value : 'intent'; }
 function formatDateTime(value: string): string { const date = new Date(value); return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); }

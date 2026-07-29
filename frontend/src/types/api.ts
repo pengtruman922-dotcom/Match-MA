@@ -56,8 +56,8 @@ export interface SellerTarget {
   owner_name?: string | null;
   created_at: string;
   updated_at: string;
-  latest_follow_up_on?: string | null;
-  latest_follow_up_content?: string | null;
+  latest_progress_at?: string | null;
+  latest_progress_content?: string | null;
   last_research_at?: string | null;
   last_parse_at?: string | null;
   research_last_outcome?: 'found' | 'no_public_information' | 'failed' | null;
@@ -110,26 +110,6 @@ export interface SellerTargetBulkDeleteResponse {
   deleted_count: number;
   deleted_ids: string[];
   skipped_ids: string[];
-}
-
-export interface TargetFollowUpBuyerRef {
-  id: string;
-  buyer_name: string;
-}
-
-export interface TargetFollowUp {
-  id: string;
-  seller_target_id: string;
-  occurred_on: string;
-  content: string;
-  related_buyer_parties: TargetFollowUpBuyerRef[];
-  created_at: string;
-}
-
-export interface TargetFollowUpCreate {
-  content: string;
-  occurred_on?: string;
-  related_buyer_party_ids?: string[];
 }
 
 export interface SellerTargetCreate {
@@ -349,29 +329,6 @@ export interface BuyerIntentListResponse {
   offset: number;
 }
 
-export interface BuyerIntentFollowUp {
-  id: string;
-  buyer_intent_id: string;
-  occurred_at: string;
-  contact_name: string | null;
-  content: string;
-  next_step: string | null;
-  next_follow_up_at: string | null;
-  business_update_id: string | null;
-  extracted_action_id: string | null;
-  created_by: string | null;
-  created_by_name: string | null;
-  created_at: string;
-}
-
-export interface BuyerIntentFollowUpCreate {
-  occurred_at?: string;
-  contact_name?: string;
-  content: string;
-  next_step?: string;
-  next_follow_up_at?: string;
-}
-
 export interface ModelProviderConfig {
   id: string;
   provider_name: string;
@@ -540,7 +497,7 @@ export interface AppUserActivitySummary {
   weekly_new_buyer_parties: number;
   weekly_new_buyer_intents: number;
   weekly_business_updates: number;
-  weekly_follow_ups: number;
+  weekly_relation_events: number;
   weekly_application_logs: number;
   latest_activity_at: string | null;
 }
@@ -728,7 +685,25 @@ export interface BusinessUpdateCreate {
   bound_seller_target_ids?: string[];
   bound_buyer_party_ids?: string[];
   bound_buyer_intent_ids?: string[];
+  processing_scope?: BusinessUpdateProcessingScope;
+  bound_relation_id?: string;
   metadata_json?: Record<string, unknown>;
+}
+
+export type BusinessUpdateProcessingScope = 'basic_info' | 'follow_up' | 'both';
+
+export interface RelationFollowUpDraft {
+  content: string;
+  next_step: string | null;
+}
+
+export interface BusinessUpdateProcessResponse {
+  job_id: string;
+  job_type: string;
+  status: string;
+  queue_name: string;
+  business_update_id: string;
+  jobs: Array<Record<string, unknown>>;
 }
 
 export interface BusinessUpdateUploadResponse {

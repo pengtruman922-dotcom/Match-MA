@@ -109,3 +109,17 @@ def test_multimodal_prompt_trace_redacts_data_url() -> None:
     assert isinstance(updated[0]["content"], list)
     assert safe[0]["content"][-1]["image_url"]["url"].startswith("<redacted data url")
     assert "base64" not in safe[0]["content"][-1]["image_url"]["url"]
+
+
+def test_multimodal_prompt_supports_node_specific_instruction() -> None:
+    messages = [{"role": "user", "content": "整理跟进"}]
+    instruction = "Only return content and next_step; never return raw_evidence_text."
+
+    updated = _attach_multimodal_images(
+        messages,
+        [{"attachment_id": "a1", "file_name": "chat.jpg", "data_url": "data:image/jpeg;base64,YQ=="}],
+        instruction=instruction,
+    )
+
+    assert updated[0]["content"][1] == {"type": "text", "text": instruction}
+    assert updated[0]["content"][2]["type"] == "image_url"

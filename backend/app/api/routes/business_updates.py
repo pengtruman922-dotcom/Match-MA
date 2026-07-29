@@ -1,6 +1,6 @@
 import json
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
@@ -14,6 +14,7 @@ from backend.app.api.routes.utils import (
     business_update_visible_sql,
     ensure_business_update_visible,
     ensure_entity_writable,
+    ensure_relation_visible,
     owner_scope_required,
 )
 from backend.app.config import get_settings
@@ -31,6 +32,7 @@ from backend.app.services.business_update_flow import (  # noqa: F401 - re-expor
     ATTACHMENT_PARSE_ENTITY_TYPES,
     ATTACHMENT_VISIBILITY_VALUES,
     BUSINESS_UPDATE_INPUT_TYPES,
+    BUSINESS_UPDATE_PROCESSING_SCOPES,
     REVIEW_GROUP_LABELS,
     REVIEW_STATUS_LABELS,
     _action_change_preview,
@@ -128,6 +130,8 @@ class BusinessUpdateCreate(BaseModel):
     bound_seller_target_ids: list[UUID] = Field(default_factory=list)
     bound_buyer_party_ids: list[UUID] = Field(default_factory=list)
     bound_buyer_intent_ids: list[UUID] = Field(default_factory=list)
+    processing_scope: Literal["basic_info", "follow_up", "both"] = "basic_info"
+    bound_relation_id: UUID | None = None
     attachment_ids: list[UUID] = Field(default_factory=list)
     attachments: list[BusinessUpdateAttachmentCreate] = Field(default_factory=list)
     auto_start_ocr: bool = False
@@ -159,10 +163,12 @@ class BusinessUpdateProcessOut(BaseModel):
     status: str
     queue_name: str
     business_update_id: UUID
+    jobs: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class BusinessUpdateProcessRequest(BaseModel):
     include_attachment_text: bool = True
+    branch: Literal["all", "basic_info", "follow_up"] = "all"
 
 
 class BusinessUpdateAttachmentIngest(BaseModel):
@@ -218,6 +224,62 @@ class BusinessUpdateSampleRunsOut(BaseModel):
     debug_ref: dict[str, Any]
 
 
+def _validated_processing_scope_metadata(
+    db: Session,
+    current_user: CurrentUser,
+    *,
+    processing_scope: str,
+    bound_relation_id: UUID | None,
+    seller_target_ids: list[UUID],
+    buyer_intent_ids: list[UUID],
+) -> dict[str, Any]:
+    if processing_scope not in BUSINESS_UPDATE_PROCESSING_SCOPES:
+        raise HTTPException(status_code=422, detail="processing_scope must be basic_info, follow_up, or both.")
+    needs_relation = processing_scope in {"follow_up", "both"}
+    if needs_relation and bound_relation_id is None:
+        raise HTTPException(status_code=422, detail="记录跟进时必须选择推进关系。")
+    if not needs_relation and bound_relation_id is not None:
+        raise HTTPException(status_code=422, detail="仅更新基本信息时不能绑定推进关系。")
+
+    metadata: dict[str, Any] = {
+        "processing_scope": processing_scope,
+        "bound_relation_id": str(bound_relation_id) if bound_relation_id else None,
+        "followup_draft_status": "pending" if needs_relation else "not_requested",
+    }
+    if bound_relation_id is None:
+        return metadata
+
+    ensure_relation_visible(db, current_user, bound_relation_id)
+    relation = db.execute(
+        text(
+            """
+            select seller_target_id, buyer_intent_id
+            from buyer_seller_relation
+            where id = :relation_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ),
+        {
+            "relation_id": bound_relation_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    if relation is None:
+        raise HTTPException(status_code=404, detail="推进关系不存在。")
+    if seller_target_ids and any(item != relation["seller_target_id"] for item in seller_target_ids):
+        raise HTTPException(status_code=422, detail="所选推进关系不属于当前标的。")
+    if buyer_intent_ids and any(item != relation["buyer_intent_id"] for item in buyer_intent_ids):
+        raise HTTPException(status_code=422, detail="所选推进关系不属于当前买家意向。")
+    if not seller_target_ids and not buyer_intent_ids:
+        raise HTTPException(status_code=422, detail="记录跟进必须绑定当前标的或买家意向。")
+    metadata["relation_seller_target_id"] = str(relation["seller_target_id"])
+    metadata["relation_buyer_intent_id"] = str(relation["buyer_intent_id"])
+    return metadata
+
+
 @router.post("", response_model=BusinessUpdateOut, status_code=status.HTTP_201_CREATED)
 def create_business_update(
     payload: BusinessUpdateCreate,
@@ -230,6 +292,14 @@ def create_business_update(
         current_user,
         seller_target_ids=payload.bound_seller_target_ids,
         buyer_party_ids=payload.bound_buyer_party_ids,
+        buyer_intent_ids=payload.bound_buyer_intent_ids,
+    )
+    scope_metadata = _validated_processing_scope_metadata(
+        db,
+        current_user,
+        processing_scope=payload.processing_scope,
+        bound_relation_id=payload.bound_relation_id,
+        seller_target_ids=payload.bound_seller_target_ids,
         buyer_intent_ids=payload.bound_buyer_intent_ids,
     )
     statement = text(
@@ -268,7 +338,7 @@ def create_business_update(
             "bound_buyer_party_ids_json": [str(item) for item in payload.bound_buyer_party_ids],
             "bound_buyer_intent_ids_json": [str(item) for item in payload.bound_buyer_intent_ids],
             "created_by": current_user.user_id,
-            "metadata_json": payload.metadata_json,
+            "metadata_json": {**payload.metadata_json, **scope_metadata},
         },
     ).mappings().one()
     follow_up = _ingest_business_update_attachments(
@@ -309,6 +379,8 @@ def upload_business_update(
     bound_seller_target_ids: str | None = Form(default=None),
     bound_buyer_party_ids: str | None = Form(default=None),
     bound_buyer_intent_ids: str | None = Form(default=None),
+    processing_scope: str = Form(default="basic_info"),
+    bound_relation_id: UUID | None = Form(default=None),
     auto_process: bool = Form(default=True),
     process_after_ocr: bool = Form(default=True),
     include_attachment_text: bool = Form(default=True),
@@ -330,6 +402,14 @@ def upload_business_update(
         buyer_party_ids=buyer_party_ids,
         buyer_intent_ids=buyer_intent_ids,
     )
+    scope_metadata = _validated_processing_scope_metadata(
+        db,
+        current_user,
+        processing_scope=processing_scope,
+        bound_relation_id=bound_relation_id,
+        seller_target_ids=seller_target_ids,
+        buyer_intent_ids=buyer_intent_ids,
+    )
     form_metadata = _parse_metadata_json_form(metadata_json)
     settings = get_settings()
 
@@ -342,6 +422,7 @@ def upload_business_update(
         bound_buyer_intent_ids=buyer_intent_ids,
         metadata_json={
             **form_metadata,
+            **scope_metadata,
             "source": "business_update_multipart_upload",
             "upload_mode": "mixed",
         },
@@ -424,8 +505,10 @@ def process_business_update(
         business_update_id=business_update_id,
         include_attachment_text=request.include_attachment_text,
         source="api_process_endpoint",
+        branch=request.branch,
     )
-    _mark_business_update_processing(db, business_update_id)
+    if request.branch != "follow_up" or job.get("processing_scope") == "follow_up":
+        _mark_business_update_processing(db, business_update_id)
     db.commit()
     return {
         "job_id": job["id"],
@@ -433,6 +516,7 @@ def process_business_update(
         "status": job["status"],
         "queue_name": job["queue_name"],
         "business_update_id": job["entity_id"],
+        "jobs": job.get("jobs") or [job],
     }
 
 
@@ -922,5 +1006,3 @@ def _create_attachment_for_business_update(db: Session, payload: BusinessUpdateA
         },
     ).mappings().one()
     return row["id"]
-
-

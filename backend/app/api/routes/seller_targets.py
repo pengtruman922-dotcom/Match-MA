@@ -1,4 +1,3 @@
-from datetime import date
 from decimal import Decimal
 from typing import Any, Literal
 from urllib.parse import quote
@@ -149,8 +148,8 @@ class SellerTargetOut(BaseModel):
     research_last_outcome: str | None = None
     created_at: str
     updated_at: str
-    latest_follow_up_on: str | None = None
-    latest_follow_up_content: str | None = None
+    latest_progress_at: str | None = None
+    latest_progress_content: str | None = None
 
 
 class SellerTargetListOut(BaseModel):
@@ -313,26 +312,6 @@ class SellerTargetAttachmentItemOut(BaseModel):
 class SellerTargetAttachmentListOut(BaseModel):
     seller_target_id: UUID
     items: list[SellerTargetAttachmentItemOut]
-
-
-class TargetFollowUpCreate(BaseModel):
-    content: str = Field(min_length=1, max_length=4000)
-    occurred_on: date | None = None
-    related_buyer_party_ids: list[UUID] = Field(default_factory=list, max_length=20)
-
-
-class TargetFollowUpBuyerRef(BaseModel):
-    id: UUID
-    buyer_name: str
-
-
-class TargetFollowUpOut(BaseModel):
-    id: UUID
-    seller_target_id: UUID
-    occurred_on: str
-    content: str
-    related_buyer_parties: list[TargetFollowUpBuyerRef]
-    created_at: str
 
 
 SELLER_TARGET_OUT_COLUMNS = """
@@ -594,17 +573,27 @@ def list_seller_targets(
             f"""
             select
 {SELLER_TARGET_OUT_COLUMNS},
-              lf.occurred_on::text as latest_follow_up_on,
-              lf.content as latest_follow_up_content
+              lp.event_time::text as latest_progress_at,
+              coalesce(lp.content, lp.title, lp.next_step) as latest_progress_content
             from seller_target
             left join lateral (
-              select f.occurred_on, f.content
-              from target_follow_up f
-              where f.seller_target_id = seller_target.id
-                and f.deleted_at is null
-              order by f.occurred_on desc, f.created_at desc
+              select e.event_time, e.content, e.title, e.next_step
+              from buyer_seller_relation r
+              join relation_event e
+                on e.relation_id = r.id
+               and e.team_id = r.team_id
+               and e.workspace_id = r.workspace_id
+               and e.deleted_at is null
+              join buyer_intent bi on bi.id = r.buyer_intent_id and bi.deleted_at is null
+              left join buyer_party bp on bp.id = r.buyer_party_id and bp.deleted_at is null
+              where r.seller_target_id = seller_target.id
+                and r.team_id = seller_target.team_id
+                and r.workspace_id = seller_target.workspace_id
+                and r.deleted_at is null
+                and (r.buyer_party_id is null or bp.id is not null)
+              order by e.event_time desc, e.created_at desc
               limit 1
-            ) lf on true
+            ) lp on true
             where {where_sql}
             order by updated_at desc
             limit :limit offset :offset
@@ -1131,173 +1120,6 @@ def get_seller_target_parse_status(
         "recent_update_logs": _recent_parse_update_logs(db, seller_target_id),
         "debug_ref": _debug_ref("seller_target", seller_target_id),
     }
-
-
-@router.get("/{seller_target_id}/follow-ups", response_model=list[TargetFollowUpOut])
-def list_target_follow_ups(
-    seller_target_id: UUID,
-    current_user: CurrentUser,
-    db: Session = Depends(get_db),
-    limit: int = Query(default=100, ge=1, le=500),
-) -> list[dict[str, Any]]:
-    _get_seller_target_or_404(db, seller_target_id)
-    ensure_entity_visible(db, current_user, entity_type="seller_target", entity_id=seller_target_id)
-    rows = db.execute(
-        text(
-            """
-            select
-              id, seller_target_id, occurred_on::text as occurred_on, content,
-              related_buyer_party_ids_json, created_at::text as created_at
-            from target_follow_up
-            where team_id = :team_id
-              and workspace_id = :workspace_id
-              and seller_target_id = :seller_target_id
-              and deleted_at is null
-            order by occurred_on desc, created_at desc
-            limit :limit
-            """
-        ),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "seller_target_id": seller_target_id,
-            "limit": limit,
-        },
-    ).mappings().all()
-    return _follow_ups_with_buyer_refs(db, [dict(row) for row in rows])
-
-
-@router.post(
-    "/{seller_target_id}/follow-ups",
-    response_model=TargetFollowUpOut,
-    status_code=status.HTTP_201_CREATED,
-)
-def create_target_follow_up(
-    seller_target_id: UUID,
-    payload: TargetFollowUpCreate,
-    current_user: CurrentUser,
-    db: Session = Depends(get_db),
-) -> dict[str, Any]:
-    _get_seller_target_or_404(db, seller_target_id)
-    ensure_entity_writable(db, current_user, entity_type="seller_target", entity_id=seller_target_id)
-    content = payload.content.strip()
-    if not content:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="content is required.")
-    related_ids = [str(party_id) for party_id in dict.fromkeys(payload.related_buyer_party_ids)]
-    row = db.execute(
-        text(
-            """
-            insert into target_follow_up (
-              team_id, workspace_id, seller_target_id, occurred_on, content,
-              related_buyer_party_ids_json, created_by
-            )
-            values (
-              :team_id, :workspace_id, :seller_target_id,
-              coalesce(:occurred_on, current_date), :content,
-              :related_buyer_party_ids_json, :created_by
-            )
-            returning
-              id, seller_target_id, occurred_on::text as occurred_on, content,
-              related_buyer_party_ids_json, created_at::text as created_at
-            """
-        ).bindparams(bindparam("related_buyer_party_ids_json", type_=JSONB)),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "seller_target_id": seller_target_id,
-            "occurred_on": payload.occurred_on,
-            "content": content,
-            "related_buyer_party_ids_json": related_ids,
-            "created_by": current_user.user_id,
-        },
-    ).mappings().one()
-    db.commit()
-    return _follow_ups_with_buyer_refs(db, [dict(row)])[0]
-
-
-@router.delete("/{seller_target_id}/follow-ups/{follow_up_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_target_follow_up(
-    seller_target_id: UUID,
-    follow_up_id: UUID,
-    current_user: CurrentUser,
-    db: Session = Depends(get_db),
-) -> None:
-    # 跟进记录允许"管理员或标的负责人"删除（软删除，仅影响这一条记录）。
-    target = _get_seller_target_or_404(db, seller_target_id)
-    if not current_user.is_admin and target.get("owner_user_id") != current_user.user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员或标的负责人可删除跟进记录。")
-    result = db.execute(
-        text(
-            """
-            update target_follow_up
-            set deleted_at = now(), deleted_by = :deleted_by
-            where id = :follow_up_id
-              and seller_target_id = :seller_target_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
-              and deleted_at is null
-            """
-        ),
-        {
-            "follow_up_id": follow_up_id,
-            "seller_target_id": seller_target_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "deleted_by": current_user.user_id,
-        },
-    )
-    if not result.rowcount:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Follow-up not found.")
-    db.commit()
-    return None
-
-
-def _follow_ups_with_buyer_refs(db: Session, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    party_ids: list[UUID] = []
-    for row in rows:
-        for raw_id in row.get("related_buyer_party_ids_json") or []:
-            try:
-                party_ids.append(UUID(str(raw_id)))
-            except (TypeError, ValueError):
-                continue
-    name_map: dict[str, str] = {}
-    if party_ids:
-        buyer_rows = db.execute(
-            text(
-                """
-                select id, buyer_name
-                from buyer_party
-                where team_id = :team_id
-                  and workspace_id = :workspace_id
-                  and id = any(:party_ids)
-                """
-            ),
-            {
-                "team_id": DEFAULT_TEAM_ID,
-                "workspace_id": DEFAULT_WORKSPACE_ID,
-                "party_ids": list(dict.fromkeys(party_ids)),
-            },
-        ).mappings().all()
-        name_map = {str(buyer["id"]): buyer["buyer_name"] for buyer in buyer_rows}
-
-    results: list[dict[str, Any]] = []
-    for row in rows:
-        related = [
-            {"id": raw_id, "buyer_name": name_map[str(raw_id)]}
-            for raw_id in (row.get("related_buyer_party_ids_json") or [])
-            if str(raw_id) in name_map
-        ]
-        results.append(
-            {
-                "id": row["id"],
-                "seller_target_id": row["seller_target_id"],
-                "occurred_on": row["occurred_on"],
-                "content": row["content"],
-                "related_buyer_parties": related,
-                "created_at": row["created_at"],
-            }
-        )
-    return results
 
 
 @router.patch("/{seller_target_id}", response_model=SellerTargetOut)

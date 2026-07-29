@@ -902,7 +902,7 @@ def _update_job_metadata(db: Session, job_id: UUID, metadata_json: dict[str, Any
 
 
 def _mark_related_business_update_retrying(db: Session, job: dict[str, Any]) -> None:
-    if job.get("job_type") != "business_update_extract_actions" or job.get("entity_type") != "business_update":
+    if job.get("job_type") not in {"business_update_extract_actions", "relation_followup_draft_parse"} or job.get("entity_type") != "business_update":
         return
     business_update_id = job.get("entity_id")
     if not business_update_id:
@@ -911,11 +911,22 @@ def _mark_related_business_update_retrying(db: Session, job: dict[str, Any]) -> 
         "last_retry_job_id": str(job["id"]),
         "last_retry_at": _utc_now_text(),
     }
+    if job.get("job_type") == "relation_followup_draft_parse":
+        metadata_patch.update({
+            "followup_draft_status": "pending",
+            "followup_draft_error": None,
+            "followup_draft_job_id": str(job["id"]),
+        })
     db.execute(
         text(
             """
             update business_update
-            set processing_status = 'processing',
+            set processing_status = case
+                  when :job_type = 'business_update_extract_actions'
+                    or metadata_json ->> 'processing_scope' = 'follow_up'
+                  then 'processing'
+                  else processing_status
+                end,
                 metadata_json = metadata_json || :metadata_patch
             where id = :business_update_id
               and team_id = :team_id
@@ -927,6 +938,7 @@ def _mark_related_business_update_retrying(db: Session, job: dict[str, Any]) -> 
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
             "metadata_patch": metadata_patch,
+            "job_type": job.get("job_type"),
         },
     )
 
@@ -1463,6 +1475,7 @@ def _task_center_item(row: dict[str, Any]) -> dict[str, Any]:
 def _task_display_name(job_type: Any) -> str:
     labels = {
         "business_update_extract_actions": "业务更新解析",
+        "relation_followup_draft_parse": "推进跟进草稿整理",
         "seller_target_parse": "标的解析",
         "buyer_intent_parse": "买家意向解析",
         "attachment_ocr_parse": "附件 OCR 解析",

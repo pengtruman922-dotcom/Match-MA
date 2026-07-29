@@ -2,7 +2,6 @@ from decimal import Decimal
 from uuid import UUID
 
 from backend.app.api.routes.update_logs import (
-    _apply_field_rollback,
     _batch_key_for_log,
     _batch_category,
     _batch_record,
@@ -225,35 +224,3 @@ def test_rollback_logs_form_a_separate_batch_from_business_update() -> None:
 
     assert _batch_key_for_log(original, keys) == f"business-update-{original['business_update_id']}"
     assert _batch_key_for_log(rollback, keys).startswith("rollback-")
-
-
-def test_follow_up_rollback_soft_deletes_the_record() -> None:
-    class _Result:
-        rowcount = 1
-
-    class _Db:
-        statement = ""
-        params = {}
-
-        def execute(self, statement, params):
-            self.statement = str(statement)
-            self.params = params
-            return _Result()
-
-    follow_up_id = UUID("00000000-0000-0000-0000-000000000401")
-    actor_id = UUID("00000000-0000-0000-0000-000000000402")
-    db = _Db()
-
-    _apply_field_rollback(
-        db,
-        {
-            "entity_type": "buyer_intent",
-            "field_path": "follow_up_record",
-            "metadata_json": {"follow_up_id": str(follow_up_id)},
-        },
-        actor_user_id=actor_id,
-    )
-
-    assert "update buyer_intent_follow_up" in db.statement
-    assert "deleted_at = now()" in db.statement
-    assert db.params == {"follow_up_id": str(follow_up_id), "deleted_by": actor_id}

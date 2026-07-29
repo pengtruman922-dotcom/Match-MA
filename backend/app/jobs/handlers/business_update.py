@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 import time
-from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -15,12 +14,10 @@ from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
 from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
 from backend.app.services.extracted_action_apply import (
-    apply_buyer_intent_follow_up_action,
     apply_buyer_intent_target_exclusion_action,
     apply_buyer_intent_update_action,
     apply_buyer_seller_relation_update_action,
     apply_seller_fact_update_action,
-    apply_target_follow_up_action,
 )
 from backend.app.jobs.queue import JobClaim
 from backend.app.services.image_inputs import (
@@ -753,8 +750,6 @@ def _normalize_proposed_changes(
             aliases=BUYER_INTENT_FIELD_ALIASES,
             enum_fields=BUYER_INTENT_ENUM_FIELDS,
         )
-    if action_type == "buyer_intent_follow_up":
-        return _normalize_buyer_intent_follow_up_changes(proposed_changes)
     if action_type == "buyer_seller_relation_update":
         return _normalize_change_fields(
             proposed_changes,
@@ -762,102 +757,7 @@ def _normalize_proposed_changes(
             aliases=BUYER_SELLER_RELATION_FIELD_ALIASES,
             enum_fields=BUYER_SELLER_RELATION_ENUM_FIELDS,
         )
-    if action_type == "target_follow_up":
-        return _normalize_target_follow_up_changes(proposed_changes)
     return proposed_changes, []
-
-TARGET_FOLLOW_UP_DATE_PATTERNS = (
-    ("%Y-%m-%d", re.compile(r"^\d{4}-\d{1,2}-\d{1,2}$")),
-    ("%Y/%m/%d", re.compile(r"^\d{4}/\d{1,2}/\d{1,2}$")),
-    ("%Y.%m.%d", re.compile(r"^\d{4}\.\d{1,2}\.\d{1,2}$")),
-    ("%Y%m%d", re.compile(r"^\d{8}$")),
-)
-
-def _normalize_target_follow_up_changes(
-    proposed_changes: dict[str, Any],
-) -> tuple[dict[str, Any], list[str]]:
-    notes: list[str] = []
-    content = str(proposed_changes.get("content") or "").strip()
-    if len(content) > 2000:
-        content = content[:2000]
-        notes.append("content_truncated_to_2000")
-
-    occurred_on: str | None = None
-    raw_date = str(proposed_changes.get("occurred_on") or "").strip()
-    if raw_date:
-        parsed = _parse_follow_up_date(raw_date)
-        if parsed is None:
-            notes.append(f"occurred_on_unparseable:{raw_date[:40]}")
-        else:
-            if parsed > date.today():
-                # Year-less dates resolved into the future are almost always
-                # last year's follow-ups.
-                parsed = _minus_one_year(parsed)
-                notes.append("occurred_on_future_shifted_back_one_year")
-            occurred_on = parsed.isoformat()
-
-    buyer_names: list[str] = []
-    raw_names = proposed_changes.get("buyer_names")
-    if isinstance(raw_names, list):
-        for raw_name in raw_names:
-            name = str(raw_name or "").strip()
-            if name and name not in buyer_names:
-                buyer_names.append(name)
-        if len(buyer_names) > 10:
-            buyer_names = buyer_names[:10]
-            notes.append("buyer_names_truncated_to_10")
-
-    for key in proposed_changes:
-        if key not in {"occurred_on", "content", "buyer_names"}:
-            notes.append(f"ignored_unsupported_field:{key}")
-
-    changes: dict[str, Any] = {"content": content, "buyer_names": buyer_names}
-    if occurred_on:
-        changes["occurred_on"] = occurred_on
-    return changes, notes
-
-def _normalize_buyer_intent_follow_up_changes(
-    proposed_changes: dict[str, Any],
-) -> tuple[dict[str, Any], list[str]]:
-    allowed = {
-        "occurred_at",
-        "occurred_on",
-        "contact_name",
-        "content",
-        "next_step",
-        "next_follow_up_at",
-        "next_follow_up_on",
-    }
-    notes = [f"ignored_unsupported_field:{key}" for key in proposed_changes if key not in allowed]
-    content = str(proposed_changes.get("content") or "").strip()
-    normalized: dict[str, Any] = {"content": content[:10000]}
-    if len(content) > 10000:
-        notes.append("content_truncated_to_10000")
-    contact_name = str(proposed_changes.get("contact_name") or "").strip()
-    if contact_name:
-        normalized["contact_name"] = contact_name[:200]
-        if len(contact_name) > 200:
-            notes.append("contact_name_truncated_to_200")
-    next_step = str(proposed_changes.get("next_step") or "").strip()
-    if next_step:
-        normalized["next_step"] = next_step[:2000]
-        if len(next_step) > 2000:
-            notes.append("next_step_truncated_to_2000")
-    occurred_at = _normalize_follow_up_datetime(
-        proposed_changes.get("occurred_at") or proposed_changes.get("occurred_on"),
-        field_name="occurred_at",
-        notes=notes,
-    )
-    if occurred_at:
-        normalized["occurred_at"] = occurred_at
-    next_follow_up_at = _normalize_follow_up_datetime(
-        proposed_changes.get("next_follow_up_at") or proposed_changes.get("next_follow_up_on"),
-        field_name="next_follow_up_at",
-        notes=notes,
-    )
-    if next_follow_up_at:
-        normalized["next_follow_up_at"] = next_follow_up_at
-    return normalized, notes
 
 def _normalize_buyer_intent_action_changes(changes: dict[str, Any], *, evidence_text: str) -> list[str]:
     notes: list[str] = []
@@ -897,34 +797,6 @@ def _normalize_buyer_intent_action_changes(changes: dict[str, Any], *, evidence_
                 notes.append(f"dropped_{field}:source_mentions_valuation_not_market_cap")
     return notes
 
-def _normalize_follow_up_datetime(value: Any, *, field_name: str, notes: list[str]) -> str | None:
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00")).isoformat()
-    except ValueError:
-        pass
-
-    today = date.today()
-    patterns = (
-        (r"^(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?$", True),
-        (r"^(\d{1,2})[-/.月](\d{1,2})日?$", False),
-        (r"^(\d{2})(\d{2})$", False),
-    )
-    for pattern, includes_year in patterns:
-        match = re.match(pattern, raw)
-        if not match:
-            continue
-        values = [int(item) for item in match.groups()]
-        year, month, day = values if includes_year else [today.year, *values]
-        try:
-            return date(year, month, day).isoformat()
-        except ValueError:
-            break
-    notes.append(f"{field_name}_unparseable:{raw[:40]}")
-    return None
-
 def _business_update_parser_node_name(business_update: dict[str, Any]) -> str:
     seller_ids = _uuid_list(business_update.get("bound_seller_target_ids_json"))
     intent_ids = _uuid_list(business_update.get("bound_buyer_intent_ids_json"))
@@ -933,23 +805,6 @@ def _business_update_parser_node_name(business_update: dict[str, Any]) -> str:
     if len(seller_ids) == 1 and not intent_ids:
         return "seller_target_update_parser"
     return "business_update_extractor"
-
-def _parse_follow_up_date(raw: str) -> date | None:
-    from datetime import datetime as _datetime
-
-    for fmt, pattern in TARGET_FOLLOW_UP_DATE_PATTERNS:
-        if pattern.match(raw):
-            try:
-                return _datetime.strptime(raw, fmt).date()
-            except ValueError:
-                return None
-    return None
-
-def _minus_one_year(value: date) -> date:
-    try:
-        return value.replace(year=value.year - 1)
-    except ValueError:
-        return value - timedelta(days=366)
 
 def _normalize_money_fields_from_action_evidence(
     changes: dict[str, Any],
@@ -1149,12 +1004,12 @@ def _normalize_action_target(
     if target_entity_id is not None:
         return target_entity_type, target_entity_id, []
 
-    if action_type in {"seller_fact_update", "target_follow_up"}:
+    if action_type == "seller_fact_update":
         bound_ids = _uuid_list(business_update["bound_seller_target_ids_json"])
         if len(bound_ids) == 1:
             return "seller_target", bound_ids[0], ["target_entity_id<-single_bound_seller_target"]
 
-    if action_type in {"buyer_intent_update", "buyer_intent_follow_up"}:
+    if action_type == "buyer_intent_update":
         bound_ids = _uuid_list(business_update["bound_buyer_intent_ids_json"])
         if len(bound_ids) == 1:
             return "buyer_intent", bound_ids[0], ["target_entity_id<-single_bound_buyer_intent"]
@@ -1374,12 +1229,8 @@ def _verified_document_excerpt(
 AUTO_APPLY_ACTION_TYPE_ORDER = {
     "seller_fact_update": 0,
     "buyer_intent_update": 1,
-    "buyer_intent_follow_up": 2,
-    "buyer_seller_relation_update": 3,
-    "buyer_intent_target_exclusion": 4,
-    # Follow-ups apply last: fact updates must run the post-parse status flip
-    # while the target is still in 'parsing'.
-    "target_follow_up": 5,
+    "buyer_seller_relation_update": 2,
+    "buyer_intent_target_exclusion": 3,
 }
 
 def _auto_apply_safe_actions(db: Session, action_ids: list[UUID]) -> list[dict[str, Any]]:
@@ -1425,14 +1276,10 @@ def _apply_auto_action(db: Session, action: dict[str, Any]) -> dict[str, Any] | 
         return apply_seller_fact_update_action(db, action, require_accepted=False)
     if action["action_type"] == "buyer_intent_update":
         return apply_buyer_intent_update_action(db, action, require_accepted=False)
-    if action["action_type"] == "buyer_intent_follow_up":
-        return apply_buyer_intent_follow_up_action(db, action, require_accepted=False)
     if action["action_type"] == "buyer_seller_relation_update":
         return apply_buyer_seller_relation_update_action(db, action, require_accepted=False)
     if action["action_type"] == "buyer_intent_target_exclusion":
         return apply_buyer_intent_target_exclusion_action(db, action, require_accepted=False)
-    if action["action_type"] == "target_follow_up":
-        return apply_target_follow_up_action(db, action, require_accepted=False)
     return None
 
 def _is_safe_auto_apply_action(action: dict[str, Any]) -> bool:
@@ -1449,14 +1296,6 @@ def _is_safe_auto_apply_action(action: dict[str, Any]) -> bool:
     if action["action_type"] == "buyer_intent_update":
         return action["target_entity_type"] == "buyer_intent" and action["target_entity_id"] is not None
 
-    if action["action_type"] == "buyer_intent_follow_up":
-        changes = action["proposed_changes_json"]
-        return (
-            action["target_entity_type"] == "buyer_intent"
-            and action["target_entity_id"] is not None
-            and bool(str(changes.get("content") or "").strip())
-        )
-
     if action["action_type"] == "buyer_seller_relation_update":
         changes = action["proposed_changes_json"]
         return bool(changes.get("buyer_intent_id") and changes.get("seller_target_id"))
@@ -1464,14 +1303,6 @@ def _is_safe_auto_apply_action(action: dict[str, Any]) -> bool:
     if action["action_type"] == "buyer_intent_target_exclusion":
         changes = action["proposed_changes_json"]
         return bool((changes.get("buyer_intent_id") or action["target_entity_id"]) and changes.get("seller_target_id"))
-
-    if action["action_type"] == "target_follow_up":
-        changes = action["proposed_changes_json"]
-        return (
-            action["target_entity_type"] == "seller_target"
-            and action["target_entity_id"] is not None
-            and bool(str(changes.get("content") or "").strip())
-        )
 
     return False
 

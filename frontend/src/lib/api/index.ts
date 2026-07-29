@@ -17,14 +17,13 @@ import type {
   SellerTargetSuggestion,
   SellerTargetUpdate,
   TargetAttachmentListResponse,
-  TargetFollowUp,
-  TargetFollowUpCreate,
   AttachmentUploadPolicy,
   AttachmentItem,
   BackgroundJob,
   BackgroundJobRetryPreview,
   BusinessUpdate,
   BusinessUpdateCreate,
+  BusinessUpdateProcessResponse,
   BusinessUpdateReviewPage,
   BusinessUpdateUploadResponse,
   BuyerBulkDeleteResponse,
@@ -34,8 +33,6 @@ import type {
   BuyerIntentSuggestion,
   BuyerIntent,
   BuyerIntentCreate,
-  BuyerIntentFollowUp,
-  BuyerIntentFollowUpCreate,
   BuyerIntentTargetExclusion,
   BuyerIntentUpdate,
   BuyerIntentParseJob,
@@ -162,14 +159,6 @@ export const sellerTargets = {
       method: 'POST',
       body: JSON.stringify({ ids, owner_user_id: ownerUserId }),
     }),
-  followUps: (id: string) => apiRequest<TargetFollowUp[]>(`/seller-targets/${id}/follow-ups`),
-  createFollowUp: (id: string, data: TargetFollowUpCreate) =>
-    apiRequest<TargetFollowUp>(`/seller-targets/${id}/follow-ups`, {
-      method: 'POST',
-      body: JSON.stringify(data),
-    }),
-  deleteFollowUp: (id: string, followUpId: string) =>
-    apiRequest<{ status: string }>(`/seller-targets/${id}/follow-ups/${followUpId}`, { method: 'DELETE' }),
   attachments: (id: string) => apiRequest<TargetAttachmentListResponse>(`/seller-targets/${id}/attachments`),
   downloadAttachment: (id: string, attachmentId: string) =>
     apiBlobResponse(`/seller-targets/${id}/attachments/${attachmentId}/download`),
@@ -239,14 +228,6 @@ export const buyerIntents = {
       body: JSON.stringify(data || {}),
     }),
   parseStatus: (id: string) => apiRequest<BuyerIntentParseStatus>(`/buyer-intents/${id}/parse-status`),
-  followUps: (id: string) => apiRequest<BuyerIntentFollowUp[]>(`/buyer-intents/${id}/follow-ups`),
-  createFollowUp: (id: string, data: BuyerIntentFollowUpCreate) =>
-    apiRequest<BuyerIntentFollowUp>(`/buyer-intents/${id}/follow-ups`, {
-      method: 'POST',
-      body: JSON.stringify(data),
-    }),
-  deleteFollowUp: (id: string, followUpId: string) =>
-    apiRequest<void>(`/buyer-intents/${id}/follow-ups/${followUpId}`, { method: 'DELETE' }),
   update: (id: string, data: BuyerIntentUpdate) =>
     apiRequest<BuyerIntent>(`/buyer-intents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   delete: (id: string) => apiRequest<{ status: string }>(`/buyer-intents/${id}`, { method: 'DELETE' }),
@@ -276,10 +257,10 @@ export const businessUpdates = {
   upload: (data: FormData) =>
     apiRequest<BusinessUpdateUploadResponse>('/business-updates/upload', { method: 'POST', body: data }),
   reviewPage: (id: string) => apiRequest<BusinessUpdateReviewPage>(`/business-updates/${id}/review-page`),
-  process: (id: string) =>
-    apiRequest<{ job_id: string; job_type: string; status: string; queue_name: string; business_update_id: string }>(
+  process: (id: string, data?: { branch?: 'all' | 'basic_info' | 'follow_up'; include_attachment_text?: boolean }) =>
+    apiRequest<BusinessUpdateProcessResponse>(
       `/business-updates/${id}/process`,
-      { method: 'POST' }
+      { method: 'POST', body: JSON.stringify(data || {}) }
     ),
 };
 

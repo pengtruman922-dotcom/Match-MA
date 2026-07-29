@@ -30,6 +30,10 @@ ATTACHMENT_PARSE_ENTITY_TYPES = {"seller_target", "buyer_intent"}
 
 BUSINESS_UPDATE_INPUT_TYPES = {"text", "screenshot", "attachment", "mixed"}
 
+BUSINESS_UPDATE_PROCESSING_SCOPES = {"basic_info", "follow_up", "both"}
+BUSINESS_UPDATE_BASIC_JOB_TYPE = "business_update_extract_actions"
+BUSINESS_UPDATE_FOLLOWUP_JOB_TYPE = "relation_followup_draft_parse"
+
 
 def _ensure_business_update_exists(db: Session, business_update_id: UUID) -> None:
     row = db.execute(
@@ -367,8 +371,45 @@ def _enqueue_business_update_process_job(
     business_update_id: UUID,
     include_attachment_text: bool,
     source: str,
+    branch: str = "all",
 ) -> dict[str, Any]:
-    existing_job = _latest_active_business_update_process_job(db, business_update_id)
+    scope = _business_update_processing_scope(db, business_update_id)
+    if branch not in {"all", "basic_info", "follow_up"}:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid processing branch.")
+    if branch == "basic_info" and scope == "follow_up":
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Basic-info processing was not requested.")
+    if branch == "follow_up" and scope == "basic_info":
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Follow-up processing was not requested.")
+
+    job_types: list[str] = []
+    if scope in {"basic_info", "both"} and branch in {"all", "basic_info"}:
+        job_types.append(BUSINESS_UPDATE_BASIC_JOB_TYPE)
+    if scope in {"follow_up", "both"} and branch in {"all", "follow_up"}:
+        job_types.append(BUSINESS_UPDATE_FOLLOWUP_JOB_TYPE)
+
+    jobs = [
+        _enqueue_business_update_process_job_type(
+            db,
+            business_update_id=business_update_id,
+            include_attachment_text=include_attachment_text,
+            source=source,
+            job_type=job_type,
+        )
+        for job_type in job_types
+    ]
+    primary = jobs[0]
+    return {**primary, "jobs": jobs, "processing_scope": scope, "branch": branch}
+
+
+def _enqueue_business_update_process_job_type(
+    db: Session,
+    *,
+    business_update_id: UUID,
+    include_attachment_text: bool,
+    source: str,
+    job_type: str,
+) -> dict[str, Any]:
+    existing_job = _latest_active_business_update_process_job_type(db, business_update_id, job_type)
     if existing_job:
         return {**existing_job, "reused_existing": True}
 
@@ -381,7 +422,7 @@ def _enqueue_business_update_process_job(
               correlation_id, created_by, metadata_json
             )
             values (
-              :team_id, :workspace_id, 'business_update_extract_actions', 100, 'llm',
+              :team_id, :workspace_id, :job_type, 100, 'llm',
               'business_update', :business_update_id, :idempotency_key, :payload_json,
               :correlation_id, :created_by, :metadata_json
             )
@@ -394,8 +435,9 @@ def _enqueue_business_update_process_job(
         {
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
+            "job_type": job_type,
             "business_update_id": business_update_id,
-            "idempotency_key": f"business_update_extract_actions:{business_update_id}:{uuid4()}",
+            "idempotency_key": f"{job_type}:{business_update_id}:{uuid4()}",
             "payload_json": {
                 "business_update_id": str(business_update_id),
                 "include_attachment_text": include_attachment_text,
@@ -405,10 +447,69 @@ def _enqueue_business_update_process_job(
             "metadata_json": {"source": source},
         },
     ).mappings().one()
+    if job_type == BUSINESS_UPDATE_FOLLOWUP_JOB_TYPE:
+        db.execute(
+            text(
+                """
+                update business_update
+                set metadata_json = metadata_json || :metadata_patch
+                where id = :business_update_id
+                  and team_id = :team_id
+                  and workspace_id = :workspace_id
+                """
+            ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+            {
+                "business_update_id": business_update_id,
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+                "metadata_patch": {
+                    "followup_draft_status": "pending",
+                    "followup_draft_error": None,
+                    "followup_draft_job_id": str(row["id"]),
+                },
+            },
+        )
     return {**dict(row), "reused_existing": False}
 
 
+def _business_update_processing_scope(db: Session, business_update_id: UUID) -> str:
+    metadata = db.execute(
+        text(
+            """
+            select metadata_json
+            from business_update
+            where id = :business_update_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {
+            "business_update_id": business_update_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).scalar_one_or_none()
+    if metadata is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Business update not found.")
+    scope = str((metadata or {}).get("processing_scope") or "basic_info")
+    if scope not in BUSINESS_UPDATE_PROCESSING_SCOPES:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid processing_scope.")
+    return scope
+
+
 def _latest_active_business_update_process_job(db: Session, business_update_id: UUID) -> dict[str, Any] | None:
+    for job_type in (BUSINESS_UPDATE_BASIC_JOB_TYPE, BUSINESS_UPDATE_FOLLOWUP_JOB_TYPE):
+        row = _latest_active_business_update_process_job_type(db, business_update_id, job_type)
+        if row:
+            return row
+    return None
+
+
+def _latest_active_business_update_process_job_type(
+    db: Session,
+    business_update_id: UUID,
+    job_type: str,
+) -> dict[str, Any] | None:
     row = db.execute(
         text(
             """
@@ -416,7 +517,7 @@ def _latest_active_business_update_process_job(db: Session, business_update_id: 
             from background_job
             where team_id = :team_id
               and workspace_id = :workspace_id
-              and job_type = 'business_update_extract_actions'
+              and job_type = :job_type
               and entity_type = 'business_update'
               and entity_id = :business_update_id
               and status in ('queued', 'running', 'retry_waiting')
@@ -427,6 +528,7 @@ def _latest_active_business_update_process_job(db: Session, business_update_id: 
         {
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
+            "job_type": job_type,
             "business_update_id": business_update_id,
         },
     ).mappings().one_or_none()
@@ -1129,9 +1231,6 @@ REVIEW_GROUP_LABELS = {
 
 ACTION_LABELS = {
     "seller_fact_update": "标的字段更新",
-    "seller_event": "标的事件",
-    "target_follow_up": "标的跟进记录",
-    "buyer_intent_follow_up": "买家意向跟进记录",
     "buyer_intent_update": "买家意向更新",
     "buyer_seller_relation_update": "关系进展更新",
     "buyer_intent_target_exclusion": "买家排除标的",
@@ -1155,8 +1254,6 @@ APPLY_SUPPORTED_ACTION_TYPES = {
     "buyer_intent_update",
     "buyer_seller_relation_update",
     "buyer_intent_target_exclusion",
-    "target_follow_up",
-    "buyer_intent_follow_up",
 }
 
 
@@ -1199,7 +1296,7 @@ def _enrich_review_action(
 def _review_action_group_key(action: dict[str, Any]) -> str:
     action_type = action.get("action_type")
     target_type = action.get("target_entity_type")
-    if action_type in {"seller_fact_update", "seller_event"} or target_type == "seller_target":
+    if action_type == "seller_fact_update" or target_type == "seller_target":
         return "seller_update"
     if action_type == "buyer_intent_update" or target_type == "buyer_intent":
         return "buyer_intent_update"

@@ -124,7 +124,6 @@ from backend.app.jobs.handlers.buyer_intent_parse import (
 )
 from backend.app.jobs.handlers.business_update import (
     AUTO_APPLY_ACTION_TYPE_ORDER,
-    TARGET_FOLLOW_UP_DATE_PATTERNS,
     _action_money_evidence_text,
     _apply_auto_action,
     _attach_image_evidence_to_actions,
@@ -148,17 +147,12 @@ from backend.app.jobs.handlers.business_update import (
     _mark_business_update_failed,
     _mark_business_update_failed_if_final_attempt,
     _match_image_evidence_attachment,
-    _minus_one_year,
     _money_amounts_from_chinese_units,
     _normalize_action_target,
     _normalize_actions,
     _normalize_buyer_intent_action_changes,
-    _normalize_buyer_intent_follow_up_changes,
-    _normalize_follow_up_datetime,
     _normalize_money_fields_from_action_evidence,
     _normalize_proposed_changes,
-    _normalize_target_follow_up_changes,
-    _parse_follow_up_date,
     _relation_context_changes,
     _resolve_business_update_id,
     _validate_extractor_output,
@@ -185,6 +179,14 @@ from backend.app.jobs.handlers.attachment_ocr import (
     _touch_seller_targets_linked_to_attachment,
     _update_attachment_parse_terminal,
     _update_attachment_parse_terminal_without_document,
+)
+from backend.app.jobs.handlers.relation_followup import (
+    FOLLOWUP_NODE_NAME,
+    _handle_relation_followup_draft_parse,
+    _normalize_relation_followup_draft,
+    _relation_followup_context,
+    _store_relation_followup_draft,
+    _store_relation_followup_failure,
 )
 from backend.app.jobs.handlers.search_embedding import (
     _get_search_doc_for_embedding,

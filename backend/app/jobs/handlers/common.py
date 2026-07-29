@@ -22,9 +22,6 @@ from backend.app.services.attachment_storage import (
 
 ALLOWED_ACTION_TYPES = {
     "seller_fact_update",
-    "seller_event",
-    "target_follow_up",
-    "buyer_intent_follow_up",
     "buyer_seller_relation_update",
     "buyer_intent_target_exclusion",
     "buyer_intent_update",
@@ -557,6 +554,8 @@ def _render_prompt_messages(
 def _attach_multimodal_images(
     messages: list[dict[str, Any]],
     images: list[dict[str, Any]],
+    *,
+    instruction: str | None = None,
 ) -> list[dict[str, Any]]:
     if not messages or not images:
         return messages
@@ -572,7 +571,7 @@ def _attach_multimodal_images(
     parts.append(
         {
             "type": "text",
-            "text": (
+            "text": instruction or (
                 "The following images are business update attachments. "
                 "Read them directly, extract only business facts visible in the images, "
                 "and cite the attachment id in raw_evidence_text when relevant."

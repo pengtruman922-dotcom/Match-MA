@@ -18,9 +18,9 @@ from backend.app.services.attachment_storage import (
 )
 from backend.app.services.office_inspection import inspect_office_text, office_document_kind
 from backend.app.services.pdf_inspection import inspect_pdf_text_layer
+from backend.app.services.business_update_flow import _enqueue_business_update_process_job
 
 from backend.app.jobs.handlers.business_update import (
-    _latest_active_business_update_process_job,
     _latest_active_child_parse_job,
 )
 from backend.app.jobs.handlers.common import (
@@ -1399,50 +1399,12 @@ def _enqueue_business_update_process_after_ocr(
     ):
         return None
 
-    existing = _latest_active_business_update_process_job(db, business_update_id)
-    if existing:
-        return {**_json_safe_dict(existing), "reused_existing": True}
-
-    row = db.execute(
-        text(
-            """
-            insert into background_job (
-              team_id, workspace_id, job_type, priority, queue_name,
-              entity_type, entity_id, idempotency_key, payload_json,
-              parent_job_id, correlation_id, created_by, metadata_json
-            )
-            values (
-              :team_id, :workspace_id, 'business_update_extract_actions', 110, 'llm',
-              'business_update', :business_update_id, :idempotency_key, :payload_json,
-              :parent_job_id, :correlation_id, :created_by, :metadata_json
-            )
-            returning id, job_type, status, queue_name, entity_type, entity_id
-            """
-        ).bindparams(
-            bindparam("payload_json", type_=JSONB),
-            bindparam("metadata_json", type_=JSONB),
-        ),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "business_update_id": business_update_id,
-            "idempotency_key": f"business_update_extract_actions:attachment_ocr:{business_update_id}:{job.id}",
-            "payload_json": {
-                "business_update_id": str(business_update_id),
-                "include_attachment_text": bool(job.payload_json.get("include_attachment_text", True)),
-                "trigger_attachment_id": str(attachment_id),
-                "trigger_evidence_id": str(evidence_id) if evidence_id else None,
-            },
-            "parent_job_id": job.id,
-            "correlation_id": job.correlation_id or business_update_id,
-            "created_by": SYSTEM_USER_ID,
-            "metadata_json": {
-                "source": "attachment_ocr_auto_business_update_process",
-                "attachment_id": str(attachment_id),
-                "evidence_id": str(evidence_id) if evidence_id else None,
-            },
-        },
-    ).mappings().one()
+    row = _enqueue_business_update_process_job(
+        db,
+        business_update_id=business_update_id,
+        include_attachment_text=bool(job.payload_json.get("include_attachment_text", True)),
+        source="attachment_ocr_auto_business_update_process",
+    )
     db.execute(
         text(
             """
@@ -1467,4 +1429,4 @@ def _enqueue_business_update_process_after_ocr(
             },
         },
     )
-    return {**_json_safe_dict(row), "reused_existing": False}
+    return row

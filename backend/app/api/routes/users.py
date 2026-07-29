@@ -64,7 +64,7 @@ class UserActivitySummaryOut(BaseModel):
     weekly_new_buyer_parties: int
     weekly_new_buyer_intents: int
     weekly_business_updates: int
-    weekly_follow_ups: int
+    weekly_relation_events: int
     weekly_application_logs: int
     latest_activity_at: str | None
 
@@ -167,9 +167,9 @@ def list_user_activity_summary(
               (select count(*)::int from business_update bu, week_boundary wb
                where bu.created_by = u.id and bu.created_at >= wb.week_start)
                 as weekly_business_updates,
-              (select count(*)::int from target_follow_up tfu, week_boundary wb
-               where tfu.created_by = u.id and tfu.deleted_at is null and tfu.created_at >= wb.week_start)
-                as weekly_follow_ups,
+              (select count(*)::int from relation_event re, week_boundary wb
+               where re.created_by = u.id and re.deleted_at is null and re.created_at >= wb.week_start)
+                as weekly_relation_events,
               (select count(*)::int from action_application_log log, week_boundary wb
                where log.applied_by = u.id and log.applied_at >= wb.week_start)
                 as weekly_application_logs,
@@ -182,8 +182,8 @@ def list_user_activity_summary(
                           where bi.owner_user_id = u.id and bi.deleted_at is null), '-infinity'::timestamptz),
                 coalesce((select max(bu.created_at) from business_update bu
                           where bu.created_by = u.id), '-infinity'::timestamptz),
-                coalesce((select max(tfu.created_at) from target_follow_up tfu
-                          where tfu.created_by = u.id and tfu.deleted_at is null), '-infinity'::timestamptz),
+                coalesce((select max(re.created_at) from relation_event re
+                          where re.created_by = u.id and re.deleted_at is null), '-infinity'::timestamptz),
                 coalesce((select max(log.applied_at) from action_application_log log
                           where log.applied_by = u.id), '-infinity'::timestamptz),
                 coalesce((select max(msg.created_at) from recommendation_message msg
@@ -220,7 +220,7 @@ def list_user_activity_summary(
                 "weekly_new_buyer_parties": int(item["weekly_new_buyer_parties"] or 0),
                 "weekly_new_buyer_intents": int(item["weekly_new_buyer_intents"] or 0),
                 "weekly_business_updates": int(item["weekly_business_updates"] or 0),
-                "weekly_follow_ups": int(item["weekly_follow_ups"] or 0),
+                "weekly_relation_events": int(item["weekly_relation_events"] or 0),
                 "weekly_application_logs": int(item["weekly_application_logs"] or 0),
                 "latest_activity_at": latest_activity_at,
             }

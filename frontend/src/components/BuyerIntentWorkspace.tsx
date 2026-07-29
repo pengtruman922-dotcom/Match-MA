@@ -8,11 +8,10 @@ import {
   RefreshCw,
   Search,
 } from 'lucide-react';
-import { attachments, buyerIntents, buyerParties } from '../lib/api';
+import { attachments, buyerParties } from '../lib/api';
 import type {
   AttachmentItem,
   BuyerIntent,
-  BuyerIntentFollowUp,
   BuyerIntentParseStatus,
   BuyerParty,
   BuyerPartyCreate,
@@ -21,13 +20,12 @@ import { valueLabel } from '../lib/fieldLabels';
 import UpdateHistory from './UpdateHistory';
 import ProgressPanel from '../features/relations/ProgressPanel';
 
-export type BuyerWorkspaceTab = 'intent' | 'buyer' | 'progress' | 'attachments' | 'followups' | 'history';
+export type BuyerWorkspaceTab = 'intent' | 'buyer' | 'progress' | 'attachments' | 'history';
 
 interface Props {
   intent: BuyerIntent;
   party: BuyerParty | null;
   parseStatus: BuyerIntentParseStatus | null;
-  followUps: BuyerIntentFollowUp[];
   activeTab: BuyerWorkspaceTab;
   onTabChange: (tab: BuyerWorkspaceTab) => void;
   /** 撮合看板 `?relation=` 深链接，透传给「推进」tab 的 ProgressPanel。 */
@@ -43,7 +41,6 @@ const TABS: Array<{ key: BuyerWorkspaceTab; label: string }> = [
   { key: 'buyer', label: '买家资料' },
   { key: 'progress', label: '推进' },
   { key: 'attachments', label: '附件与证据' },
-  { key: 'followups', label: '跟进记录' },
   { key: 'history', label: '更新记录' },
 ];
 
@@ -51,7 +48,6 @@ export default function BuyerIntentWorkspace({
   intent,
   party,
   parseStatus,
-  followUps,
   activeTab,
   onTabChange,
   progressOpenRelationId = null,
@@ -97,7 +93,6 @@ export default function BuyerIntentWorkspace({
           />
         ) : null}
         {activeTab === 'attachments' ? <IntentAttachments intentId={intent.id} /> : null}
-        {activeTab === 'followups' ? <IntentFollowUps intentId={intent.id} items={followUps} onRefresh={onIntentRefresh} /> : null}
         {activeTab === 'history' ? (
           <UpdateHistory
             entityType="buyer_intent"
@@ -353,38 +348,6 @@ function IntentAttachments({ intentId }: { intentId: string }) {
           </div>
         ))}
       </div>
-    </div>
-  );
-}
-
-function IntentFollowUps({ intentId, items, onRefresh }: { intentId: string; items: BuyerIntentFollowUp[]; onRefresh?: () => void | Promise<void> }) {
-  const remove = async (followUpId: string) => {
-    if (!window.confirm('确认删除这条跟进记录？')) return;
-    try {
-      await buyerIntents.deleteFollowUp(intentId, followUpId);
-      await onRefresh?.();
-    } catch (error) {
-      alert(error instanceof Error ? error.message : '删除跟进记录失败');
-    }
-  };
-  if (!items.length) return <EmptyState title="暂无跟进记录" description="录入当前需求的沟通、推荐、反馈或下一步后，会自动沉淀在这里。" />;
-  return (
-    <div className="divide-y divide-gray-100">
-      {items.map((item) => (
-        <article key={item.id} className="flex items-start gap-4 py-4">
-          <span className="w-32 shrink-0 font-mono text-xs text-gray-400">{formatDateTime(item.occurred_at)}</span>
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
-              {item.contact_name ? <span>联系人：{item.contact_name}</span> : null}
-              <span>录入人：{item.created_by_name || '-'}</span>
-            </div>
-            <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-gray-800">{item.content}</p>
-            {item.next_step ? <p className="mt-2 text-xs text-brand-700">下一步：{item.next_step}</p> : null}
-            {item.next_follow_up_at ? <p className="mt-1 text-xs text-gray-500">下次跟进：{formatDateTime(item.next_follow_up_at)}</p> : null}
-          </div>
-          <button type="button" onClick={() => void remove(item.id)} className="shrink-0 text-xs text-gray-400 hover:text-red-600">删除</button>
-        </article>
-      ))}
     </div>
   );
 }

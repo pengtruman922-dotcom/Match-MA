@@ -9,12 +9,15 @@ import type {
   BuyerIntentFilterOptions,
   BuyerIntentParseStatus,
   BuyerIntentSuggestion,
+  BusinessUpdateProcessingScope,
 } from '../../types/api';
 import { shortDate } from '../../lib/format';
 import BulkActionBar from '../../components/BulkActionBar';
 import PaginationFooter from '../../components/PaginationFooter';
 import ListToolbar from './ListToolbar';
 import CreateIntentModal from './CreateIntentModal';
+import BusinessUpdateDrawer from '../../components/BusinessUpdateDrawer';
+import UpdateEntryMenu from '../../components/UpdateEntryMenu';
 import {
   EMPTY_INTENT_FILTER_OPTIONS,
   INTENT_FILTERS,
@@ -60,6 +63,7 @@ export default function IntentsList({
   const [ownerOptions, setOwnerOptions] = useState<AppUserOption[]>([]);
   const [assignOwnerId, setAssignOwnerId] = useState('');
   const [assigning, setAssigning] = useState(false);
+  const [updateDrawer, setUpdateDrawer] = useState<{ item: BuyerIntent; scope: BusinessUpdateProcessingScope } | null>(null);
 
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const visibleIds = useMemo(() => items.map((item) => item.id), [items]);
@@ -352,6 +356,7 @@ export default function IntentsList({
                 parseStatus={parseStatuses[item.id]}
                 selected={selectedIds.has(item.id)}
                 onSelectedChange={(checked) => toggleSelected(item.id, checked)}
+                onRecord={(scope) => setUpdateDrawer({ item, scope })}
               />
             ))}
           </tbody>
@@ -361,6 +366,15 @@ export default function IntentsList({
       <PaginationFooter page={filters.page} pageCount={pageCount} pageSize={PAGE_SIZE} loading={loading} onPageChange={(page) => updateFilters({ page })} />
 
       {externalShowCreate && <CreateIntentModal onClose={onExternalCreateClose} onCreated={() => { onExternalCreateClose(); onCreated(); fetchData(); }} />}
+      {updateDrawer ? <BusinessUpdateDrawer
+        open
+        initialScope={updateDrawer.scope}
+        defaultIntentId={updateDrawer.item.id}
+        defaultIntentName={updateDrawer.item.intent_name}
+        defaultBuyerPartyName={updateDrawer.item.buyer_name || undefined}
+        onClose={() => setUpdateDrawer(null)}
+        onSuccess={() => fetchData()}
+      /> : null}
     </>
   );
 }
@@ -370,11 +384,13 @@ function IntentRow({
   parseStatus,
   selected,
   onSelectedChange,
+  onRecord,
 }: {
   item: BuyerIntent;
   parseStatus?: BuyerIntentParseStatus;
   selected: boolean;
   onSelectedChange: (checked: boolean) => void;
+  onRecord: (scope: BusinessUpdateProcessingScope) => void;
 }) {
   return (
     <tr className="h-[72px] transition-colors hover:bg-brand-50/30">
@@ -388,7 +404,7 @@ function IntentRow({
       <td className="px-4 py-3 text-center align-middle"><IntentStatusBadge status={item.status} /></td>
       <td className="px-4 py-3 align-middle text-gray-600"><p className="line-clamp-2" title={item.owner_name || '未指派'}>{item.owner_name || <span className="text-gray-300">未指派</span>}</p></td>
       <td className="whitespace-nowrap px-4 py-3 align-middle text-gray-500">{shortDate(item.updated_at)}</td>
-      <td className="px-4 py-3 align-middle"><Link to={`/recommendations?mode=buyer-to-target&intentId=${item.id}`} className="mx-auto inline-flex items-center gap-1 px-2 py-1 text-xs text-brand-600 transition-colors hover:bg-brand-50"><Sparkles className="h-3 w-3" />推荐标的</Link></td>
+      <td className="px-4 py-3 align-middle"><div className="flex items-center justify-center gap-1"><UpdateEntryMenu compact onSelect={onRecord} /><Link to={`/recommendations?mode=buyer-to-target&intentId=${item.id}`} className="inline-flex items-center gap-1 px-2 py-1 text-xs text-brand-600 transition-colors hover:bg-brand-50"><Sparkles className="h-3 w-3" />推荐标的</Link></div></td>
     </tr>
   );
 }

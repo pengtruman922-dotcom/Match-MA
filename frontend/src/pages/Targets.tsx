@@ -9,6 +9,7 @@ import type {
   SellerTarget,
   SellerTargetFilterOptions,
   SellerTargetSuggestion,
+  BusinessUpdateProcessingScope,
 } from '../types/api';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
 import BulkActionBar from '../components/BulkActionBar';
@@ -47,7 +48,7 @@ export default function Targets() {
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [updateDrawer, setUpdateDrawer] = useState<{ open: boolean; targetId?: string; targetName?: string }>({ open: false });
+  const [updateDrawer, setUpdateDrawer] = useState<{ open: boolean; scope: BusinessUpdateProcessingScope; targetId?: string; targetName?: string }>({ open: false, scope: 'basic_info' });
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
@@ -135,11 +136,11 @@ export default function Targets() {
             if (!fresh) return item;
             if (fresh.updated_at === item.updated_at && fresh.information_status === item.information_status) return item;
             changed = true;
-            // The detail endpoint does not aggregate follow-ups; keep the list values.
+            // The detail endpoint does not aggregate relation events; keep the list values.
             return {
               ...fresh,
-              latest_follow_up_on: item.latest_follow_up_on,
-              latest_follow_up_content: item.latest_follow_up_content,
+              latest_progress_at: item.latest_progress_at,
+              latest_progress_content: item.latest_progress_content,
             };
           });
           return changed ? next : prev;
@@ -479,7 +480,7 @@ export default function Targets() {
                 <th className="w-[120px] text-left px-4 py-3 font-medium text-gray-600">出售比例</th>
                 <th className="w-[76px] text-center px-4 py-3 font-medium text-gray-600">控股</th>
                 <th className="w-[76px] text-center px-4 py-3 font-medium text-gray-600">并表</th>
-                <th className="w-[200px] text-left px-4 py-3 font-medium text-gray-600">最近跟进</th>
+                <th className="w-[200px] text-left px-4 py-3 font-medium text-gray-600">最近推进</th>
                 <th className="w-[100px] text-left px-4 py-3 font-medium text-gray-600">负责人</th>
                 <th className="sticky right-0 z-20 w-[210px] bg-gray-50 text-left px-4 py-3 font-medium text-gray-600">操作</th>
               </tr>
@@ -502,7 +503,7 @@ export default function Targets() {
                     item={item}
                     selected={selectedIds.has(item.id)}
                     onSelectedChange={(checked) => toggleSelected(item.id, checked)}
-                    onOpenUpdateDrawer={() => setUpdateDrawer({ open: true, targetId: item.id, targetName: item.target_name })}
+                    onOpenUpdateDrawer={(scope) => setUpdateDrawer({ open: true, scope, targetId: item.id, targetName: item.target_name })}
                     onDelete={() => handleDelete(item)}
                     deleting={deletingId === item.id}
                   />
@@ -523,7 +524,8 @@ export default function Targets() {
 
       <BusinessUpdateDrawer
         open={updateDrawer.open}
-        onClose={() => setUpdateDrawer({ open: false })}
+        onClose={() => setUpdateDrawer({ open: false, scope: 'basic_info' })}
+        initialScope={updateDrawer.scope}
         defaultTargetId={updateDrawer.targetId}
         defaultTargetName={updateDrawer.targetName}
         onSuccess={fetchTargets}

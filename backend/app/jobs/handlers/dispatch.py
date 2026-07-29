@@ -22,6 +22,9 @@ from backend.app.jobs.handlers.recommendation import (
     _handle_recommendation_report_generate,
     _handle_recommendation_rerank,
 )
+from backend.app.jobs.handlers.relation_followup import (
+    _handle_relation_followup_draft_parse,
+)
 from backend.app.jobs.handlers.research import (
     _handle_seller_target_research,
     _mark_research_outcome,
@@ -39,6 +42,8 @@ from backend.app.jobs.handlers.seller_target_parse import (
 def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
     if job.job_type == "business_update_extract_actions":
         return _handle_business_update_extract_actions(db, job)
+    if job.job_type == "relation_followup_draft_parse":
+        return _handle_relation_followup_draft_parse(db, job)
     if job.job_type == "seller_target_parse":
         try:
             return _handle_seller_target_parse(db, job)

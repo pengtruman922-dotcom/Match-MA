@@ -1,10 +1,12 @@
 import { Link } from 'react-router-dom';
-import { Loader2, MessageSquarePlus, Sparkles, Trash2 } from 'lucide-react';
+import { Loader2, Sparkles, Trash2 } from 'lucide-react';
 import { isAdmin } from '../../lib/auth';
 import type { SellerTarget } from '../../types/api';
 import { ClampedLink, ClampedText } from '../../components/Clamped';
 import { formatPercent, formatYuan } from '../../lib/format';
 import { isParsingTarget } from './filters';
+import UpdateEntryMenu from '../../components/UpdateEntryMenu';
+import type { BusinessUpdateProcessingScope } from '../../types/api';
 import {
   formatListedStatus,
   formatTargetType,
@@ -27,7 +29,7 @@ export default function TargetRow({
   item: SellerTarget;
   selected: boolean;
   onSelectedChange: (checked: boolean) => void;
-  onOpenUpdateDrawer: () => void;
+  onOpenUpdateDrawer: (scope: BusinessUpdateProcessingScope) => void;
   onDelete: () => void;
   deleting: boolean;
 }) {
@@ -78,10 +80,10 @@ export default function TargetRow({
       <td className="px-4 py-3 text-center"><YesNoBadge value={item.can_control} /></td>
       <td className="px-4 py-3 text-center"><YesNoBadge value={item.can_consolidate} /></td>
       <td className="px-4 py-3 text-gray-600">
-        {item.latest_follow_up_on ? (
+        {item.latest_progress_at ? (
           <div>
-            <p className="text-[11px] font-mono text-gray-400">{item.latest_follow_up_on}</p>
-            <ClampedText value={item.latest_follow_up_content || ''} className="mt-0.5 text-xs" />
+            <p className="text-[11px] font-mono text-gray-400">{formatProgressTime(item.latest_progress_at)}</p>
+            <ClampedText value={item.latest_progress_content || ''} className="mt-0.5 text-xs" />
           </div>
         ) : (
           '-'
@@ -92,13 +94,7 @@ export default function TargetRow({
       </td>
       <td className="sticky right-0 z-10 bg-white px-4 py-3 group-hover:bg-brand-50">
         <div className="flex items-center gap-1 whitespace-nowrap">
-          <button
-            onClick={onOpenUpdateDrawer}
-            className="inline-flex items-center gap-1 px-2 py-1 text-xs text-brand-600 hover:bg-white transition-colors"
-          >
-            <MessageSquarePlus className="w-3 h-3" />
-            更新
-          </button>
+          <UpdateEntryMenu compact onSelect={onOpenUpdateDrawer} />
           <Link
             to={`/recommendations?mode=target-to-buyer&targetId=${item.id}`}
             className="inline-flex items-center gap-1 px-2 py-1 text-xs text-brand-600 hover:bg-white transition-colors"
@@ -121,4 +117,9 @@ export default function TargetRow({
       </td>
     </tr>
   );
+}
+
+function formatProgressTime(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 }

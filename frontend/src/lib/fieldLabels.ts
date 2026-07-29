@@ -132,7 +132,6 @@ const BUYER_INTENT_FIELD_LABELS: Record<string, string> = {
   priority_summary: '优先级',
   preference_summary: '偏好说明',
   unknown_summary: '待确认事项',
-  follow_up_record: '跟进记录',
   deleted_at: '删除时间',
 };
 
@@ -228,7 +227,6 @@ Object.assign(BUYER_INTENT_FIELD_LABELS, {
   priority_summary: '优先级',
   preference_summary: '偏好说明',
   unknown_summary: '待确认事项',
-  follow_up_record: '跟进记录',
   deleted_at: '删除时间',
 });
 
@@ -438,6 +436,7 @@ const SOURCE_TYPE_LABELS: Record<string, string> = {
   direct_api: '手动编辑',
   seller_target_parse: '标的解析',
   business_update_extractor: '业务更新解析',
+  relation_followup_draft_parser: '推进跟进整理',
   update_log_rollback: '更新回滚',
   rollback: '回滚',
 };

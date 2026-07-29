@@ -1,9 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft,
   Sparkles,
-  MessageSquarePlus,
   UserRound,
   FileText,
   Loader2,
@@ -18,9 +17,10 @@ import type {
   AppUserOption,
   SellerTarget,
   TargetAttachmentItem,
-  TargetFollowUp,
+  BusinessUpdateProcessingScope,
 } from '../types/api';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
+import UpdateEntryMenu from '../components/UpdateEntryMenu';
 import UpdateHistory from '../components/UpdateHistory';
 import TargetInfoPanel from '../features/targets/TargetInfoPanel';
 import ProgressPanel from '../features/relations/ProgressPanel';
@@ -31,7 +31,7 @@ import {
 } from '../lib/sellerTargetStatus';
 import { TargetAiProcessingBadge } from '../features/targets/presentation';
 
-type Tab = 'info' | 'progress' | 'attachments' | 'relations' | 'history';
+type Tab = 'info' | 'progress' | 'attachments' | 'history';
 
 export default function TargetDetail() {
   const { id } = useParams<{ id: string }>();
@@ -39,9 +39,8 @@ export default function TargetDetail() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [target, setTarget] = useState<SellerTarget | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<Tab>(() => (['history', 'attachments', 'relations', 'progress'] as const).find((tab) => tab === searchParams.get('tab')) || 'info');
-  const [followUps, setFollowUps] = useState<TargetFollowUp[]>([]);
-  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<Tab>(() => (['history', 'attachments', 'progress'] as const).find((tab) => tab === searchParams.get('tab')) || 'info');
+  const [updateDrawer, setUpdateDrawer] = useState<{ open: boolean; scope: BusinessUpdateProcessingScope }>({ open: false, scope: 'basic_info' });
   const [lifecycleSaving, setLifecycleSaving] = useState(false);
   const admin = isAdmin();
   const [ownerOptions, setOwnerOptions] = useState<AppUserOption[]>([]);
@@ -69,10 +68,9 @@ export default function TargetDetail() {
       .then(setTarget)
       .catch(() => navigate('/targets'))
       .finally(() => setLoading(false));
-    sellerTargets.followUps(id).then(setFollowUps).catch(() => {});
   }, [id, navigate]);
 
-  // Poll while a business-update parse is running so status/summary/follow-up
+  // Poll while a business-update parse is running so status and summary
   // changes show up without a manual refresh.
   const parsing = target?.information_status === 'parsing' || target?.information_status === 'researching';
   useEffect(() => {
@@ -83,12 +81,7 @@ export default function TargetDetail() {
         .then((fresh) => {
           setTarget(fresh);
           if (fresh.information_status !== 'parsing' && fresh.information_status !== 'researching') {
-            sellerTargets.followUps(id)
-              .then((nextFollowUps) => {
-                setFollowUps(nextFollowUps);
-                setHistoryRefreshKey((value) => value + 1);
-              })
-              .catch(() => {});
+            setHistoryRefreshKey((value) => value + 1);
           }
         })
         .catch(() => {});
@@ -136,7 +129,6 @@ export default function TargetDetail() {
     { key: 'info', label: '标的信息' },
     { key: 'progress', label: '推进' },
     { key: 'attachments', label: '附件与证据' },
-    { key: 'relations', label: '跟进记录' },
     { key: 'history', label: '更新记录' },
   ];
 
@@ -194,13 +186,10 @@ export default function TargetDetail() {
             <option value="sold">已售出</option>
             <option value="off_market">已停售</option>
           </select>
-          <button
-            onClick={() => setDrawerOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border border-gray-200 text-gray-700 hover:border-brand-500 hover:text-brand-600 transition-colors"
-          >
-            <MessageSquarePlus className="w-3.5 h-3.5" />
-            录入更新
-          </button>
+          <UpdateEntryMenu
+            primaryScope={activeTab === 'progress' ? 'follow_up' : 'basic_info'}
+            onSelect={(scope) => setUpdateDrawer({ open: true, scope })}
+          />
           <Link
             to={`/recommendations?mode=target-to-buyer&targetId=${target.id}`}
             className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-brand-600 text-white hover:bg-brand-700 transition-colors"
@@ -242,9 +231,6 @@ export default function TargetDetail() {
                 />
               )}
               {activeTab === 'attachments' && <AttachmentsTab targetId={target.id} />}
-              {activeTab === 'relations' && (
-                <FollowUpsTab targetId={target.id} followUps={followUps} onChanged={setFollowUps} />
-              )}
               {activeTab === 'history' && id && (
                 <UpdateHistory
                   entityType="seller_target"
@@ -285,8 +271,9 @@ export default function TargetDetail() {
       </div>
 
       <BusinessUpdateDrawer
-        open={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
+        open={updateDrawer.open}
+        initialScope={updateDrawer.scope}
+        onClose={() => setUpdateDrawer({ open: false, scope: 'basic_info' })}
         defaultTargetId={target.id}
         defaultTargetName={target.target_name}
         onSuccess={() => {
@@ -306,7 +293,7 @@ function AttachmentsTab({ targetId }: { targetId: string }) {
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  const refresh = () => {
+  const refresh = useCallback(() => {
     setLoading(true);
     setError(null);
     sellerTargets
@@ -314,11 +301,11 @@ function AttachmentsTab({ targetId }: { targetId: string }) {
       .then((data) => setItems(data.items))
       .catch((err) => setError(err instanceof Error ? err.message : '附件读取失败'))
       .finally(() => setLoading(false));
-  };
+  }, [targetId]);
 
   useEffect(() => {
     refresh();
-  }, [targetId]);
+  }, [refresh]);
 
   const handleDownload = async (item: TargetAttachmentItem) => {
     setDownloadingId(item.id);
@@ -504,94 +491,6 @@ function AttachmentCard({
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-/*
-function LegacyAttachmentsTab() {
-  return (
-    <div className="text-center py-10">
-      <FileText className="w-8 h-8 text-gray-300 mx-auto mb-2" />
-      <p className="text-sm text-gray-400">附件解析功能后端开发中</p>
-    </div>
-  );
-}
-
-*/
-function FollowUpsTab({
-  targetId,
-  followUps,
-  onChanged,
-}: {
-  targetId: string;
-  followUps: TargetFollowUp[];
-  onChanged: (next: TargetFollowUp[]) => void;
-}) {
-  const [deletingId, setDeletingId] = useState<string | null>(null);
-
-  const refresh = () => sellerTargets.followUps(targetId).then(onChanged).catch(() => {});
-
-  const handleDelete = async (followUp: TargetFollowUp) => {
-    if (!window.confirm('确认删除这条跟进记录？')) return;
-    setDeletingId(followUp.id);
-    try {
-      await sellerTargets.deleteFollowUp(targetId, followUp.id);
-      await refresh();
-    } catch (err) {
-      alert(err instanceof Error ? err.message : '删除失败');
-    } finally {
-      setDeletingId(null);
-    }
-  };
-
-  return (
-    <div className="space-y-6">
-      <section>
-        <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">跟进记录</h4>
-        <p className="mb-3 text-xs text-gray-400">
-          在「录入更新」里输入跟进动态（如：0730 推给广州工业投资控股集团，等待反馈），AI 解析后会自动按日期落到这里。
-        </p>
-        {followUps.length === 0 ? (
-          <p className="text-sm text-gray-400">暂无跟进记录</p>
-        ) : (
-          <div className="space-y-2">
-            {followUps.map((followUp) => (
-              <div key={followUp.id} className="group flex items-start gap-3 border border-gray-100 px-3 py-2.5">
-                <span className="text-xs text-gray-400 font-mono w-24 shrink-0 pt-0.5">{followUp.occurred_on}</span>
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm text-gray-800 whitespace-pre-wrap">{followUp.content}</p>
-                  {followUp.related_buyer_parties.length > 0 && (
-                    <p className="mt-1 flex flex-wrap gap-1">
-                      {followUp.related_buyer_parties.map((buyer) => (
-                        <Link
-                          key={buyer.id}
-                          to={`/buyers/${buyer.id}`}
-                          className="inline-flex items-center gap-1 bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-600 hover:bg-brand-50 hover:text-brand-700"
-                        >
-                          <UserRound className="w-2.5 h-2.5" />
-                          {buyer.buyer_name}
-                        </Link>
-                      ))}
-                    </p>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => handleDelete(followUp)}
-                  disabled={deletingId === followUp.id}
-                  className="shrink-0 p-1 text-gray-300 hover:text-red-600 opacity-0 group-hover:opacity-100 transition-opacity disabled:opacity-50"
-                  title="删除跟进记录"
-                >
-                  {deletingId === followUp.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
-
-      <p className="text-xs text-gray-400">买卖双方的推进（推荐、接触、尽调、成交等）在「推进」tab 里管理。</p>
     </div>
   );
 }

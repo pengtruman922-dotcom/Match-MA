@@ -979,7 +979,6 @@ ROLLBACK_FIELDS_BY_ENTITY = {
         "priority_summary",
         "preference_summary",
         "unknown_summary",
-        "follow_up_record",
     },
     "buyer_party": {
         "buyer_name",
@@ -1220,19 +1219,6 @@ def _get_current_field_value(db: Session, log: dict[str, Any]) -> Any:
             {"section_id": (log.get("metadata_json") or {}).get("profile_section_id")},
         ).mappings().one_or_none()
         return dict(row) if row else None
-    if entity_type == "buyer_intent" and field_path == "follow_up_record":
-        follow_up_id = (log.get("metadata_json") or {}).get("follow_up_id")
-        row = db.execute(
-            text(
-                """
-                select id
-                from buyer_intent_follow_up
-                where id = cast(:follow_up_id as uuid) and deleted_at is null
-                """
-            ),
-            {"follow_up_id": follow_up_id},
-        ).mappings().one_or_none()
-        return log.get("new_value_json") if row else None
     table_name = ROLLBACK_TABLE_BY_ENTITY[entity_type]
     row = db.execute(
         text(
@@ -1261,21 +1247,6 @@ def _apply_field_rollback(db: Session, log: dict[str, Any], *, actor_user_id: UU
     field_path = log["field_path"]
     if _profile_section_code(field_path):
         _rollback_profile_section(db, log, actor_user_id=actor_user_id)
-        return
-    if entity_type == "buyer_intent" and field_path == "follow_up_record":
-        follow_up_id = (log.get("metadata_json") or {}).get("follow_up_id")
-        result = db.execute(
-            text(
-                """
-                update buyer_intent_follow_up
-                set deleted_at = now(), deleted_by = :deleted_by
-                where id = cast(:follow_up_id as uuid) and deleted_at is null
-                """
-            ),
-            {"follow_up_id": follow_up_id, "deleted_by": actor_user_id},
-        )
-        if result.rowcount != 1:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Follow-up record not found.")
         return
     table_name = ROLLBACK_TABLE_BY_ENTITY[entity_type]
     statement = text(

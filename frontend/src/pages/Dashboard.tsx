@@ -46,7 +46,7 @@ export default function Dashboard() {
         acc.buyerIntents += item.owned_buyer_intents;
         acc.weeklyNew +=
           item.weekly_new_seller_targets + item.weekly_new_buyer_parties + item.weekly_new_buyer_intents;
-        acc.weeklyUpdates += item.weekly_business_updates + item.weekly_follow_ups + item.weekly_application_logs;
+        acc.weeklyUpdates += item.weekly_business_updates + item.weekly_relation_events + item.weekly_application_logs;
         return acc;
       },
       { sellerTargets: 0, buyerParties: 0, buyerIntents: 0, weeklyNew: 0, weeklyUpdates: 0 },
@@ -70,7 +70,7 @@ export default function Dashboard() {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold text-gray-900">数据看板</h1>
-          <p className="mt-1 text-sm text-gray-500">按账号查看录入、负责对象和本周跟进情况。</p>
+          <p className="mt-1 text-sm text-gray-500">按账号查看录入、负责对象和本周推进情况。</p>
         </div>
         <button
           type="button"
@@ -148,7 +148,7 @@ export default function Dashboard() {
                   <td className="px-4 py-3">
                     <div className="min-w-40 text-xs text-gray-600">
                       <div>业务更新 {item.weekly_business_updates}</div>
-                      <div>跟进记录 {item.weekly_follow_ups}</div>
+                      <div>推进动态 {item.weekly_relation_events}</div>
                       <div>字段应用 {item.weekly_application_logs}</div>
                     </div>
                   </td>

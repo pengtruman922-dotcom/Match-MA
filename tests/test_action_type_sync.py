@@ -22,7 +22,6 @@ APPLY_ROUTE_SOURCE = Path("backend/app/api/routes/extracted_actions.py")
 # audit/diagnosis only and never write entity fields. Adding a new type here
 # is an explicit product decision, not a default.
 NON_APPLYABLE_ACTION_TYPES = {
-    "seller_event",
     "buyer_level_blacklist_suggestion",
     "internal_note",
     "unresolved_item",

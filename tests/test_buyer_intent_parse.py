@@ -1,4 +1,3 @@
-from datetime import date
 from uuid import UUID
 
 from backend.app.api.routes.buyer_intents import _compact_parse_trace
@@ -6,7 +5,6 @@ from backend.app.api.routes.extracted_actions import _allowed_buyer_intent_chang
 from backend.app.jobs.handlers import (
     _build_buyer_profile_context,
     _business_update_parser_node_name,
-    _is_safe_auto_apply_action,
     _normalize_actions,
     _normalize_buyer_party_parse_changes,
     _normalize_buyer_intent_industry_changes,
@@ -132,46 +130,6 @@ def test_buyer_intent_parse_separates_valuation_from_market_cap_and_keeps_focus_
     assert "market_cap_range_summary" not in changes
     assert industry_notes == []
     assert any(note.startswith("dropped_min_market_cap_yuan") for note in notes)
-
-
-def test_buyer_intent_follow_up_action_binds_to_single_intent_and_normalizes_short_date() -> None:
-    intent_id = UUID("00000000-0000-0000-0000-000000000321")
-    business_update = {
-        "bound_seller_target_ids_json": [],
-        "bound_buyer_intent_ids_json": [str(intent_id)],
-        "bound_buyer_party_ids_json": [],
-        "attachment_evidence_ids": [],
-        "image_evidence_attachment_ids": [],
-    }
-    actions = _normalize_actions(
-        {
-            "actions": [
-                {
-                    "action_type": "buyer_intent_follow_up",
-                    "target_entity_type": "buyer_intent",
-                    "target_entity_id": None,
-                    "proposed_changes_json": {
-                        "occurred_at": "0714",
-                        "contact_name": "杨总",
-                        "content": "推荐了标的A、B、C，下周和A面谈",
-                        "seller_target_ids": ["should-not-bind"],
-                    },
-                }
-            ]
-        },
-        business_update,
-    )
-
-    assert len(actions) == 1
-    action = actions[0]
-    assert action["target_entity_id"] == intent_id
-    assert action["proposed_changes_json"]["occurred_at"] == f"{date.today().year}-07-14"
-    assert action["proposed_changes_json"]["content"] == "推荐了标的A、B、C，下周和A面谈"
-    assert "seller_target_ids" not in action["proposed_changes_json"]
-    assert any(note.startswith("ignored_unsupported_field:seller_target_ids") for note in action["normalization_notes"])
-    assert _is_safe_auto_apply_action(
-        {**action, "applied_at": None, "review_status": "pending_review"}
-    ) is True
 
 
 def test_business_update_uses_entity_specific_parser_nodes() -> None:
