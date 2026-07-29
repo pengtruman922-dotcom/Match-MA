@@ -281,13 +281,21 @@ def apply_extracted_action(
     action = _get_extracted_action_or_404(db, extracted_action_id)
     _ensure_extracted_action_writable(db, current_user, action)
     if action["action_type"] == "seller_fact_update":
-        result = apply_seller_fact_update_action(db, action, require_accepted=True)
+        result = apply_seller_fact_update_action(
+            db, action, require_accepted=True, actor_user_id=current_user.user_id
+        )
     elif action["action_type"] == "buyer_intent_update":
-        result = apply_buyer_intent_update_action(db, action, require_accepted=True)
+        result = apply_buyer_intent_update_action(
+            db, action, require_accepted=True, actor_user_id=current_user.user_id
+        )
     elif action["action_type"] == "buyer_seller_relation_update":
-        result = apply_buyer_seller_relation_update_action(db, action, require_accepted=True)
+        result = apply_buyer_seller_relation_update_action(
+            db, action, require_accepted=True, actor_user_id=current_user.user_id
+        )
     elif action["action_type"] == "buyer_intent_target_exclusion":
-        result = apply_buyer_intent_target_exclusion_action(db, action, require_accepted=True)
+        result = apply_buyer_intent_target_exclusion_action(
+            db, action, require_accepted=True, actor_user_id=current_user.user_id
+        )
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -513,4 +521,3 @@ def _get_extracted_action_or_404(db: Session, extracted_action_id: UUID) -> dict
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Extracted action not found.")
 
     return dict(row)
-

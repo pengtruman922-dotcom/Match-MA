@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 import re
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,13 @@ from backend.app.api.routes.users import (
     UserOut,
     _latest_activity_sql,
     _user_row,
+)
+from backend.app.constants import SYSTEM_USER_ID
+from backend.app.services.extracted_action_apply import (
+    apply_buyer_intent_target_exclusion_action,
+    apply_buyer_intent_update_action,
+    apply_buyer_seller_relation_update_action,
+    apply_seller_fact_update_action,
 )
 
 REPO = Path(__file__).resolve().parents[1]
@@ -67,7 +75,38 @@ def test_automatic_parse_and_research_logs_are_attributed_to_system_user() -> No
     assert audit_calls
     for call in audit_calls:
         applied_by = next((kw.value for kw in call.keywords if kw.arg == "applied_by"), None)
-        assert isinstance(applied_by, ast.Name) and applied_by.id == "SYSTEM_USER_ID"
+        assert isinstance(applied_by, ast.Name) and applied_by.id == "actor_user_id"
+
+
+def test_manual_extracted_action_apply_is_attributed_to_current_user() -> None:
+    route_tree = ast.parse(
+        (REPO / "backend/app/api/routes/extracted_actions.py").read_text(encoding="utf-8")
+    )
+    apply_calls = [
+        node
+        for node in ast.walk(route_tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id.startswith("apply_")
+        and node.func.id.endswith("_action")
+    ]
+
+    assert len(apply_calls) == 4
+    for call in apply_calls:
+        actor = next((kw.value for kw in call.keywords if kw.arg == "actor_user_id"), None)
+        assert isinstance(actor, ast.Attribute)
+        assert isinstance(actor.value, ast.Name) and actor.value.id == "current_user"
+        assert actor.attr == "user_id"
+
+
+def test_automatic_extracted_action_apply_defaults_to_system_user() -> None:
+    for apply_action in (
+        apply_seller_fact_update_action,
+        apply_buyer_intent_update_action,
+        apply_buyer_seller_relation_update_action,
+        apply_buyer_intent_target_exclusion_action,
+    ):
+        assert inspect.signature(apply_action).parameters["actor_user_id"].default == SYSTEM_USER_ID
 
 
 def test_owned_object_updated_at_is_not_an_activity_signal() -> None:

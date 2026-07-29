@@ -25,6 +25,7 @@ def apply_seller_fact_update_action(
     action: dict[str, Any],
     *,
     require_accepted: bool = True,
+    actor_user_id: UUID = SYSTEM_USER_ID,
 ) -> dict[str, Any]:
     if action["action_type"] != "seller_fact_update" or action["target_entity_type"] != "seller_target":
         raise HTTPException(
@@ -60,7 +61,7 @@ def apply_seller_fact_update_action(
         changes,
         provenance=WriteProvenance(
             source_type="extracted_action",
-            actor_user_id=SYSTEM_USER_ID,
+            actor_user_id=actor_user_id,
             source_id=action["id"],
             evidence_id=source_context["evidence_id"],
             business_update_id=action["business_update_id"],
@@ -80,7 +81,7 @@ def apply_seller_fact_update_action(
     mark_parse_completed(
         db,
         seller_target_id=seller_target_id,
-        actor_user_id=SYSTEM_USER_ID,
+        actor_user_id=actor_user_id,
     )
     if lifecycle_status is not None and lifecycle_status != original.get("lifecycle_status"):
         db.execute(
@@ -95,7 +96,7 @@ def apply_seller_fact_update_action(
             ),
             {
                 "lifecycle_status": lifecycle_status,
-                "updated_by": SYSTEM_USER_ID,
+                "updated_by": actor_user_id,
                 "seller_target_id": seller_target_id,
                 "team_id": DEFAULT_TEAM_ID,
                 "workspace_id": DEFAULT_WORKSPACE_ID,
@@ -112,7 +113,7 @@ def apply_seller_fact_update_action(
             business_update_id=action["business_update_id"],
             extracted_action_id=action["id"],
             metadata_json={"source": "seller_fact_update_lifecycle_sync"},
-            applied_by=SYSTEM_USER_ID,
+            applied_by=actor_user_id,
         )
         applied_fields.append("lifecycle_status")
     if not applied_fields:
@@ -145,6 +146,7 @@ def apply_buyer_intent_update_action(
     action: dict[str, Any],
     *,
     require_accepted: bool = True,
+    actor_user_id: UUID = SYSTEM_USER_ID,
 ) -> dict[str, Any]:
     if action["action_type"] != "buyer_intent_update" or action["target_entity_type"] != "buyer_intent":
         raise HTTPException(
@@ -215,7 +217,7 @@ def apply_buyer_intent_update_action(
         update_statement,
         {
             **{field: changes[field] for field in diff},
-            "updated_by": SYSTEM_USER_ID,
+            "updated_by": actor_user_id,
             "buyer_intent_id": buyer_intent_id,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
@@ -238,7 +240,7 @@ def apply_buyer_intent_update_action(
             "action_type": action["action_type"],
             "field_value_source": source_context,
         },
-        applied_by=SYSTEM_USER_ID,
+        applied_by=actor_user_id,
     )
     write_field_value_sources_for_diff(
         db,
@@ -253,6 +255,7 @@ def apply_buyer_intent_update_action(
         confidence=action.get("confidence"),
         review_status="auto_accepted",
         source_context=source_context,
+        created_by=actor_user_id,
     )
     create_search_doc_rebuild_job(
         db,
@@ -278,6 +281,7 @@ def apply_buyer_seller_relation_update_action(
     action: dict[str, Any],
     *,
     require_accepted: bool = True,
+    actor_user_id: UUID = SYSTEM_USER_ID,
 ) -> dict[str, Any]:
     if action["action_type"] != "buyer_seller_relation_update":
         raise HTTPException(
@@ -299,7 +303,13 @@ def apply_buyer_seller_relation_update_action(
         db,
         buyer_intent_id,
     )
-    relation = _get_or_create_relation(db, buyer_intent_id, seller_target_id, buyer_party_id)
+    relation = _get_or_create_relation(
+        db,
+        buyer_intent_id,
+        seller_target_id,
+        buyer_party_id,
+        actor_user_id=actor_user_id,
+    )
 
     relation_updates = _allowed_relation_changes(changes)
     relation_updates.setdefault("last_event_summary", _relation_event_content(changes, action))
@@ -314,7 +324,7 @@ def apply_buyer_seller_relation_update_action(
             "relation_id": relation["id"],
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
-            "updated_by": SYSTEM_USER_ID,
+            "updated_by": actor_user_id,
         }
         for field in diff:
             if field in {"last_event_at", "first_recommended_at"} and relation_updates[field] == "now()":
@@ -352,7 +362,7 @@ def apply_buyer_seller_relation_update_action(
                 "action_type": action["action_type"],
                 "field_value_source": source_context,
             },
-            applied_by=SYSTEM_USER_ID,
+            applied_by=actor_user_id,
         )
         write_field_value_sources_for_diff(
             db,
@@ -367,6 +377,7 @@ def apply_buyer_seller_relation_update_action(
             confidence=action.get("confidence"),
             review_status="auto_accepted",
             source_context=source_context,
+            created_by=actor_user_id,
         )
     if relation_updates.get("status") == "deal_closed":
         # AI-extracted and manually changed relation statuses share the same
@@ -376,10 +387,19 @@ def apply_buyer_seller_relation_update_action(
             db,
             seller_target_id=seller_target_id,
             relation_id=relation["id"],
-            actor_user_id=SYSTEM_USER_ID,
+            actor_user_id=actor_user_id,
         )
 
-    _insert_relation_event(db, action, relation["id"], buyer_intent_id, seller_target_id, buyer_party_id, changes)
+    _insert_relation_event(
+        db,
+        action,
+        relation["id"],
+        buyer_intent_id,
+        seller_target_id,
+        buyer_party_id,
+        changes,
+        actor_user_id=actor_user_id,
+    )
     _mark_action_applied(db, action["id"], review_status=None if require_accepted else "auto_accepted")
     _refresh_business_update_status(db, action["business_update_id"])
 
@@ -398,6 +418,7 @@ def apply_buyer_intent_target_exclusion_action(
     action: dict[str, Any],
     *,
     require_accepted: bool = True,
+    actor_user_id: UUID = SYSTEM_USER_ID,
 ) -> dict[str, Any]:
     if action["action_type"] != "buyer_intent_target_exclusion":
         raise HTTPException(
@@ -457,7 +478,7 @@ def apply_buyer_intent_target_exclusion_action(
             "reason": reason,
             "source_relation_id": relation_id,
             "source_update_id": action["business_update_id"],
-            "created_by": SYSTEM_USER_ID,
+            "created_by": actor_user_id,
         },
     ).mappings().one()
 
@@ -476,7 +497,12 @@ def apply_buyer_intent_target_exclusion_action(
         "applied_at": None,
         "review_status": "auto_accepted",
     }
-    apply_buyer_seller_relation_update_action(db, relation_action, require_accepted=True)
+    apply_buyer_seller_relation_update_action(
+        db,
+        relation_action,
+        require_accepted=True,
+        actor_user_id=actor_user_id,
+    )
     _mark_action_applied(db, action["id"], review_status=None if require_accepted else "auto_accepted")
     _refresh_business_update_status(db, action["business_update_id"])
 
@@ -594,6 +620,8 @@ def _get_or_create_relation(
     buyer_intent_id: UUID,
     seller_target_id: UUID,
     buyer_party_id: UUID | None,
+    *,
+    actor_user_id: UUID,
 ) -> dict[str, Any]:
     existing = db.execute(
         text(
@@ -641,7 +669,7 @@ def _get_or_create_relation(
             "buyer_intent_id": buyer_intent_id,
             "buyer_party_id": buyer_party_id,
             "seller_target_id": seller_target_id,
-            "created_by": SYSTEM_USER_ID,
+            "created_by": actor_user_id,
         },
     ).mappings().one()
     return dict(row)
@@ -805,6 +833,8 @@ def _insert_relation_event(
     seller_target_id: UUID,
     buyer_party_id: UUID | None,
     changes: dict[str, Any],
+    *,
+    actor_user_id: UUID,
 ) -> None:
     event_type = changes.get("event_type") or _event_type_from_relation_status(changes.get("status"))
     db.execute(
@@ -838,8 +868,8 @@ def _insert_relation_event(
                 "business_update_id": str(action["business_update_id"]),
                 "raw_evidence_text": action.get("raw_evidence_text"),
             },
-            "created_by": SYSTEM_USER_ID,
-            "updated_by": SYSTEM_USER_ID,
+            "created_by": actor_user_id,
+            "updated_by": actor_user_id,
         },
     )
 
