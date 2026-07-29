@@ -247,6 +247,7 @@ def _handle_seller_target_research(db: Session, job: JobClaim) -> dict[str, obje
         "claim_count": len(claims),
         "normalization_notes": notes,
         "hit_iteration_limit": loop.hit_iteration_limit,
+        "json_finalization_attempted": loop.json_finalization_attempted,
         "error": None if parsed_ok else "Research output is not a JSON object.",
     }
     _insert_research_trace(

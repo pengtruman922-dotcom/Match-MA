@@ -19,6 +19,13 @@ from backend.app.ai.llm_client import ChatCompletionResult, ToolCall
 # 每个工具返回给模型的字符数上限。一次网页抓取可能是几万字，几轮就撑爆上下文。
 DEFAULT_TOOL_RESULT_LIMIT = 8000
 
+DEFAULT_JSON_FINALIZATION_INSTRUCTION = (
+    "The previous assistant response was not a valid JSON object. "
+    "Return the same findings as one complete valid JSON object. "
+    "Output JSON only, with no Markdown fences or explanatory text. "
+    "Escape quotation marks inside string values. Do not call tools."
+)
+
 
 @dataclass
 class ToolLoopUsage:
@@ -46,6 +53,7 @@ class ToolLoopResult:
     messages: list[dict[str, Any]]
     usage: ToolLoopUsage
     hit_iteration_limit: bool
+    json_finalization_attempted: bool
 
 
 def run_tool_loop(
@@ -73,11 +81,31 @@ def run_tool_loop(
         result = chat(messages=conversation, tools=tools)
         usage.record_llm(result)
         if not result.tool_calls:
+            if result.parsed_output_json is None:
+                # Tool-enabled calls cannot always request json_object. Keep
+                # the invalid draft and make one tool-free finalization call,
+                # which lets the caller enforce structured output. If that
+                # response is still invalid, downstream validation fails it;
+                # this loop never guesses how to repair malformed JSON.
+                conversation.append(result.assistant_message or _assistant_message_from(result))
+                conversation.append(
+                    {"role": "user", "content": DEFAULT_JSON_FINALIZATION_INSTRUCTION}
+                )
+                result = chat(messages=conversation, tools=None)
+                usage.record_llm(result)
+                return ToolLoopResult(
+                    result=result,
+                    messages=conversation,
+                    usage=usage,
+                    hit_iteration_limit=False,
+                    json_finalization_attempted=True,
+                )
             return ToolLoopResult(
                 result=result,
                 messages=conversation,
                 usage=usage,
                 hit_iteration_limit=False,
+                json_finalization_attempted=False,
             )
 
         conversation.append(result.assistant_message or _assistant_message_from(result))
@@ -100,6 +128,7 @@ def run_tool_loop(
         messages=conversation,
         usage=usage,
         hit_iteration_limit=True,
+        json_finalization_attempted=True,
     )
 
 

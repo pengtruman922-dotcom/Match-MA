@@ -23,9 +23,17 @@ def _tool_call(name: str, arguments: dict, call_id: str = "call_1") -> ToolCall:
 
 
 def _reply(text: str = "", *, tool_calls: tuple[ToolCall, ...] = ()) -> ChatCompletionResult:
+    parsed = None
+    if text:
+        try:
+            candidate = json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        else:
+            parsed = candidate if isinstance(candidate, dict) else None
     return ChatCompletionResult(
         raw_output_text=text,
-        parsed_output_json=None,
+        parsed_output_json=parsed,
         prompt_tokens=10,
         completion_tokens=5,
         total_tokens=15,
@@ -62,6 +70,28 @@ def test_loop_returns_immediately_when_the_model_answers() -> None:
     assert outcome.hit_iteration_limit is False
     assert outcome.usage.llm_calls == 1
     assert outcome.usage.tool_calls_by_name == {}
+    assert outcome.json_finalization_attempted is False
+
+
+def test_loop_finalizes_invalid_answer_without_tools() -> None:
+    invalid = 'Explanation before ```json\n{"summary": "an "unescaped" quote"}\n```'
+    chat = _ScriptedChat([_reply(invalid), _reply('{"profile_sections": []}')])
+
+    outcome = run_tool_loop(
+        chat=chat,
+        messages=[{"role": "user", "content": "research this company"}],
+        tools=[{"type": "function", "function": {"name": "web_search"}}],
+        execute_tool=lambda call: pytest.fail("should not call a tool"),
+    )
+
+    assert outcome.result.parsed_output_json == {"profile_sections": []}
+    assert outcome.usage.llm_calls == 2
+    assert outcome.hit_iteration_limit is False
+    assert outcome.json_finalization_attempted is True
+    assert chat.calls[-1]["tools"] is None
+    assert chat.calls[-1]["messages"][-2]["role"] == "assistant"
+    assert chat.calls[-1]["messages"][-2]["content"] == invalid
+    assert "valid JSON object" in chat.calls[-1]["messages"][-1]["content"]
 
 
 def test_loop_feeds_tool_results_back_and_continues() -> None:
@@ -173,6 +203,7 @@ def test_iteration_limit_forces_a_final_answer_without_tools() -> None:
     )
 
     assert outcome.hit_iteration_limit is True
+    assert outcome.json_finalization_attempted is True
     assert outcome.usage.llm_calls == 4
     assert outcome.usage.tool_calls_by_name == {"web_search": 3}
     # 收尾那轮不带工具，否则模型可能继续要求调用
