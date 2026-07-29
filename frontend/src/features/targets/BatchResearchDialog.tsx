@@ -5,6 +5,7 @@ import { RECENT_RESEARCH_DAYS } from './researchWindow';
 
 const OUTCOME_LABELS: Record<string, string> = {
   found: '找到公开信息',
+  found_but_rejected: '查到信息但未入库',
   no_public_information: '未找到公开信息',
   failed: '调研失败',
 };
@@ -59,7 +60,7 @@ export default function BatchResearchDialog({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4">
       <div className="max-h-[80vh] w-full max-w-2xl overflow-y-auto bg-white shadow-lg">
         <div className="border-b border-gray-100 px-5 py-3">
-          <h2 className="text-sm font-semibold text-gray-900">批量公开信息调研</h2>
+          <h2 className="text-sm font-semibold text-gray-900">批量 AI 调研</h2>
           <p className="mt-1 text-xs text-gray-500">
             共选择 {targets.length} 个标的，其中 {fresh.length} 个将立即调研。
           </p>

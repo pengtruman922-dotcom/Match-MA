@@ -60,7 +60,7 @@ export interface SellerTarget {
   latest_progress_content?: string | null;
   last_research_at?: string | null;
   last_parse_at?: string | null;
-  research_last_outcome?: 'found' | 'no_public_information' | 'failed' | null;
+  research_last_outcome?: 'found' | 'found_but_rejected' | 'no_public_information' | 'failed' | null;
 }
 
 export interface SellerTargetListResponse {
@@ -1931,7 +1931,7 @@ export interface ResearchProposal {
 export interface SellerResearchStatus {
   seller_target_id: string;
   last_research_at: string | null;
-  research_last_outcome: 'found' | 'no_public_information' | 'failed' | null;
+  research_last_outcome: 'found' | 'found_but_rejected' | 'no_public_information' | 'failed' | null;
   latest_job: Pick<BackgroundJob, 'id' | 'status' | 'result_json' | 'error_code' | 'error_message' | 'created_at' | 'finished_at'> | null;
 }
 

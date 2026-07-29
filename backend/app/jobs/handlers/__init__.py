@@ -232,13 +232,18 @@ from backend.app.jobs.handlers.model_node_test import (
     _redact_test_messages,
 )
 from backend.app.jobs.handlers.research import (
+    RESEARCH_MAPPER_NODE_NAME,
     RESEARCH_NODE_NAME,
     RESEARCH_STRUCTURED_FIELDS,
     RESEARCH_TOOLS,
     ResearchTools,
     _handle_seller_target_research,
+    apply_research_claims,
     normalize_research_output,
     research_source_type,
+)
+from backend.app.jobs.handlers.research_map import (
+    _handle_seller_target_research_map,
 )
 from backend.app.jobs.handlers.dispatch import (
     execute_job,

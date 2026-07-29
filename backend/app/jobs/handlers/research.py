@@ -52,6 +52,10 @@ from backend.app.services.search_service import (
 )
 
 RESEARCH_NODE_NAME = "seller_target_researcher"
+# 规范化节点：把 agent 的报告翻译成本系统的契约（单位、字典、白名单、枚举）。
+# 它必须留在有数据库的这一侧 —— 行业字典和可写字段是活的库状态，
+# 写进调研提示词就会随着字典更新而过期。
+RESEARCH_MAPPER_NODE_NAME = "seller_target_research_mapper"
 
 # 工具调用预算。这是成本刹车，不是质量控制 —— 限额内 agent 完全自主。
 MAX_TOOL_ITERATIONS = 12
@@ -247,7 +251,6 @@ def _handle_seller_target_research(db: Session, job: JobClaim) -> dict[str, obje
         "claim_count": len(claims),
         "normalization_notes": notes,
         "hit_iteration_limit": loop.hit_iteration_limit,
-        "json_finalization_attempted": loop.json_finalization_attempted,
         "error": None if parsed_ok else "Research output is not a JSON object.",
     }
     _insert_research_trace(
@@ -268,31 +271,47 @@ def _handle_seller_target_research(db: Session, job: JobClaim) -> dict[str, obje
         db.commit()
         raise ValueError(str(schema_validation["error"]))
 
-    applied_count = 0
-    apply_errors: list[str] = []
-    for claim in claims:
-        proposal = _insert_research_proposal(
-            db,
-            job=job,
-            target_id=target_id,
-            claim=claim,
-            target_website=target.get("website"),
-        )
-        # 自动采纳：变更进更新记录且可回滚，兜底靠审计而不是事前拦截。
-        try:
-            apply_research_proposal(
-                db,
-                proposal,
-                user_id=SYSTEM_USER_ID,
-                review_status="auto_accepted",
-            )
-        except ResearchApplyError as exc:
-            # 校验不过的留在待复核，不阻断这一轮其他建议。
-            apply_errors.append(f"{proposal.get('section_code') or proposal.get('field_path')}: {exc}")
-            continue
-        _mark_proposal_auto_accepted(db, proposal["id"])
-        applied_count += 1
+    usage_summary = {
+        "llm_calls": loop.usage.llm_calls,
+        "tool_calls": loop.usage.tool_calls_by_name,
+        "hit_iteration_limit": loop.hit_iteration_limit,
+        "prompt_version": node_config["prompt_version"],
+        # B-7 的判据：一次跑完六个模块到底吃掉多少上下文，只能靠实测。
+        "prompt_tokens": loop.usage.prompt_tokens,
+        "completion_tokens": loop.usage.completion_tokens,
+    }
+    # 报告先落库，映射才可以重跑 —— 检索 5~15 分钟很贵，映射几秒很便宜，
+    # 改了映射提示词不该逼着重新联网。
+    report = {
+        "report_text": loop.result.raw_output_text,
+        "agent_output_json": loop.result.parsed_output_json,
+    }
 
+    if _research_mapper_available(db):
+        map_job_id = _enqueue_research_map_job(db, job=job, target_id=target_id)
+        has_content = _agent_output_has_content(loop.result.parsed_output_json)
+        outcome = "found" if has_content else "no_public_information"
+        _mark_research_outcome(db, target_id, outcome)
+        db.commit()
+        return {
+            "handled": True,
+            "job_type": job.job_type,
+            "seller_target_id": str(target_id),
+            # provisional：字段和画像要等映射 job 落地，它会覆写这个结论。
+            "research_outcome": outcome,
+            "mapping_job_id": str(map_job_id),
+            **report,
+            **usage_summary,
+        }
+
+    # 未配置映射节点时退回内联采纳，让修复批次可以独立发版验证。
+    applied_count, apply_errors = apply_research_claims(
+        db,
+        job=job,
+        target_id=target_id,
+        claims=claims,
+        target_website=target.get("website"),
+    )
     proposal_count = len([claim for claim in claims if claim["proposal_kind"] != "not_found"])
     outcome = "found" if proposal_count else "no_public_information"
     _mark_research_outcome(db, target_id, outcome)
@@ -302,15 +321,106 @@ def _handle_seller_target_research(db: Session, job: JobClaim) -> dict[str, obje
         "job_type": job.job_type,
         "seller_target_id": str(target_id),
         "research_outcome": outcome,
+        "mapper_configured": False,
         "proposal_count": len(claims),
         "auto_accepted_count": applied_count,
         "pending_review_count": len(apply_errors),
         "apply_errors": apply_errors,
-        "llm_calls": loop.usage.llm_calls,
-        "tool_calls": loop.usage.tool_calls_by_name,
-        "hit_iteration_limit": loop.hit_iteration_limit,
-        "prompt_version": node_config["prompt_version"],
+        **report,
+        **usage_summary,
     }
+
+
+def apply_research_claims(
+    db: Session,
+    *,
+    job: JobClaim,
+    target_id: UUID,
+    claims: list[dict[str, Any]],
+    target_website: str | None,
+) -> tuple[int, list[str]]:
+    """Turn normalized claims into proposals and accept them.
+
+    Shared by the research handler's inline fallback and the mapping job, so
+    both write the same audit trail. Auto-accepting is safe because every write
+    lands in the update log and can be rolled back; a claim that fails
+    validation stays pending_review instead of aborting the rest of the run.
+    """
+    applied_count = 0
+    apply_errors: list[str] = []
+    for claim in claims:
+        proposal = _insert_research_proposal(
+            db,
+            job=job,
+            target_id=target_id,
+            claim=claim,
+            target_website=target_website,
+        )
+        try:
+            apply_research_proposal(
+                db,
+                proposal,
+                user_id=SYSTEM_USER_ID,
+                review_status="auto_accepted",
+            )
+        except ResearchApplyError as exc:
+            apply_errors.append(f"{proposal.get('section_code') or proposal.get('field_path')}: {exc}")
+            continue
+        _mark_proposal_auto_accepted(db, proposal["id"])
+        applied_count += 1
+    return applied_count, apply_errors
+
+
+def _agent_output_has_content(parsed: Any) -> bool:
+    if not isinstance(parsed, dict):
+        return False
+    return any(bool(parsed.get(key)) for key in ("profile_sections", "structured_facts"))
+
+
+def _research_mapper_available(db: Session) -> bool:
+    """Whether the normalization node is configured yet.
+
+    Without it the handler accepts its own claims exactly as before, so the
+    fix batch can ship and be verified before the mapping node exists.
+    """
+    try:
+        _get_default_node_config(db, RESEARCH_MAPPER_NODE_NAME)
+    except ValueError:
+        return False
+    return True
+
+
+def _enqueue_research_map_job(db: Session, *, job: JobClaim, target_id: UUID) -> UUID:
+    return db.execute(
+        text(
+            """
+            insert into background_job (
+              team_id, workspace_id, job_type, priority, queue_name,
+              entity_type, entity_id, idempotency_key, payload_json,
+              max_attempts, parent_job_id, correlation_id, created_by, metadata_json
+            ) values (
+              :team_id, :workspace_id, 'seller_target_research_map', 40, :queue_name,
+              'seller_target', :target_id, :idempotency_key, :payload_json,
+              3, :parent_job_id, :correlation_id, :created_by, :metadata_json
+            ) returning id
+            """
+        ).bindparams(
+            bindparam("payload_json", type_=JSONB),
+            bindparam("metadata_json", type_=JSONB),
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "queue_name": job.queue_name,
+            "target_id": target_id,
+            "idempotency_key": f"seller_target_research_map:{job.id}",
+            "payload_json": {"seller_target_id": str(target_id), "research_job_id": str(job.id)},
+            "parent_job_id": job.id,
+            "correlation_id": job.correlation_id,
+            "created_by": SYSTEM_USER_ID,
+            "metadata_json": {"source": RESEARCH_MAPPER_NODE_NAME},
+        },
+    ).scalar_one()
 
 
 def _chat_caller(node_config: dict[str, Any]):
@@ -379,7 +489,11 @@ def normalize_research_output(
                 "value": item["content_text"],
                 "info_status": "filled",
                 "current_value_json": _json_safe_value(current),
-                "relation": _relation_of(raw, notes=notes, label=item["section_code"]),
+                "relation": _relation_of(
+                    current=current,
+                    new_content=item["content_text"],
+                    new_as_of_date=item.get("as_of_date"),
+                ),
                 "period_label": _short_text(raw.get("period_label"), 100),
                 "as_of_date": item.get("as_of_date"),
                 "sources": sources,
@@ -412,15 +526,17 @@ def normalize_research_output(
                 "field_path": field_path,
                 "value": value.strip()[:2000] if isinstance(value, str) else value,
                 "info_status": None,
+                # 结构化字段的当前值不在这里加载（field_writer 落库时才读），
+                # 所以没有可比对的旧值，一律记为补充。
                 "current_value_json": {},
-                "relation": _relation_of(raw, notes=notes, label=field_path),
+                "relation": "supplement",
                 "period_label": _short_text(raw.get("period_label"), 100),
                 "as_of_date": _valid_date(raw.get("as_of_date")),
                 "sources": sources,
             }
         )
 
-    for code in _not_found_codes(parsed_output_json.get("not_found"), notes=notes):
+    for code in _coverage_not_found_codes(parsed_output_json, notes=notes):
         # 「查过但没有」和「从未查过」在推荐里不是一回事：前者是确认的缺口。
         if (current_profiles.get(code) or {}).get("info_status") == "filled":
             notes.append(f"not_found:{code}:already_filled")
@@ -473,13 +589,52 @@ def _claim_sources(raw: dict[str, Any]) -> list[str]:
     return sources[:5]
 
 
-def _relation_of(raw: dict[str, Any], *, notes: list[str], label: str) -> str:
-    value = str(raw.get("relation") or "").strip()
-    if value in RELATION_KINDS:
-        return value
-    if value:
-        notes.append(f"claim:{label}:unknown_relation:{value[:50]}")
-    return DEFAULT_RELATION
+def _relation_of(
+    *,
+    current: dict[str, Any] | None,
+    new_content: str,
+    new_as_of_date: str | None,
+) -> str:
+    """Classify a claim against what is already on file — in code, not by asking.
+
+    The prompt never asked for `relation`, so every proposal came back
+    `supplement` and the UI could only ever say 「补充信息」. Whether two
+    statements describe the same period is a comparison, not a judgement call:
+    the model supplies the fact and its date, and this decides what that means
+    relative to the current revision.
+    """
+    current_content = str((current or {}).get("content_text") or "").strip()
+    if not current_content:
+        return "supplement"
+    if current_content == new_content.strip():
+        return "consistent"
+    current_as_of = str((current or {}).get("as_of_date") or "").strip()
+    new_as_of = str(new_as_of_date or "").strip()
+    if new_as_of and new_as_of != current_as_of:
+        # 新的一期覆盖旧的一期；没有旧日期时新日期同样算推进。
+        return "temporal_update" if new_as_of > current_as_of else "same_period_conflict"
+    # 同期（或都没标期间）却说得不一样 —— 这才是需要人看一眼的冲突。
+    return "same_period_conflict"
+
+
+def _coverage_not_found_codes(payload: dict[str, Any], *, notes: list[str]) -> list[str]:
+    """「查过但确实没有」的栏目。
+
+    未检索到的内容 agent 不再输出，所以报告末尾的覆盖清单是唯一能区分
+    `not_found`（查了没有）和 `missing`（根本没查）的依据 —— 而这个区分是
+    30 天二次确认和下一轮调研的判断材料。
+    """
+    coverage = payload.get("coverage")
+    values: Any = payload.get("not_found")
+    if isinstance(coverage, dict):
+        values = (
+            coverage.get("no_public_information")
+            or coverage.get("searched_without_result")
+            or values
+        )
+    elif coverage is not None:
+        notes.append("coverage:not_an_object")
+    return _not_found_codes(values, notes=notes)
 
 
 def _short_text(value: Any, limit: int) -> str | None:
@@ -637,6 +792,7 @@ def _current_profiles_for_prompt(
                 "label": label,
                 "info_status": "filled",
                 "content_text": str(section.get("content_text") or "").strip(),
+                # 这份 dict 直接进 ai_trace 的 JSONB 绑定，日期必须已经是字符串。
                 "as_of_date": _json_safe_value(section.get("as_of_date")),
                 "sources": _json_safe_value(section.get("sources") or []),
             })
@@ -754,6 +910,8 @@ def _insert_research_trace(
             "model_name": node_config["model_name"],
             "prompt_version": node_config["prompt_version"],
             "status": status,
+            # 最后一道防线：这一行是整次运行的收口，任何一个漏网的日期对象
+            # 都会让 JSONB 绑定抛错并回滚掉几分钟的检索成果。
             "input_json": _json_safe_value(input_json),
             "prompt_messages_json": _safe_prompt_messages_for_trace(conversation),
             "raw_output_text": loop.result.raw_output_text if loop else None,

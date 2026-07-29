@@ -449,7 +449,7 @@ Object.assign(SOURCE_TYPE_LABELS, {
   buyer_intent_parse: '买家意向解析',
   business_update_extractor: '业务更新解析',
   user_attachment: '附件解析',
-  research_proposal: '公开信息调研',
+  research_proposal: 'AI调研',
   update_log_rollback: '更新回滚',
   rollback: '回滚',
 });

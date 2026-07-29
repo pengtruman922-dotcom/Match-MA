@@ -124,11 +124,13 @@ def test_writer_rejects_a_registry_field_when_the_source_is_not_authorized() -> 
         def execute(self, *a, **k):
             raise AssertionError("authorization must reject before reading the db")
 
+    # 报价是卖方私下向顾问表达的诉求，公开渠道不存在，调研永远不该写它 ——
+    # 财务数字自 0728 起对调研开放，这里换一个仍然关闭的字段守同一个边界。
     with pytest.raises(FieldWriteError, match="research may not write"):
         write_seller_target_fields(
             _Boom(),
             uuid4(),
-            {"current_revenue_yuan": 100},
+            {"asking_price_yuan": 100},
             provenance=_prov(),
             search_doc_source="t",
         )

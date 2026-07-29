@@ -221,7 +221,7 @@ export default function TargetInfoPanel({
           className="inline-flex items-center gap-1 border border-brand-200 px-2.5 py-1 text-xs text-brand-700 disabled:opacity-50"
         >
           {researching ? <Loader2 className="h-3 w-3 animate-spin" /> : <Search className="h-3 w-3" />}
-          {researching ? '调研中' : '公开信息调研'}
+          {researching ? '调研中' : 'AI调研'}
         </button>
       </div>
 
@@ -466,7 +466,7 @@ function LocationField({ field, editing, saving, source, onStart, onCancel, targ
 
 function fieldSourceLabel(source: FieldValueSource): string {
   if (['direct_api', 'manual', 'manual_edit'].includes(source.source_type || '')) return '手动编辑';
-  if (source.source_type === 'research_proposal') return '公开信息调研';
+  if (source.source_type === 'research_proposal') return 'AI调研';
   if (['update_log_rollback', 'rollback'].includes(source.source_type || '')) return '更新回滚';
   if (source.evidence_span?.attachment_id) return '文字+附件更新';
   return '文字更新';
@@ -567,7 +567,7 @@ function ProfileBlock({
 
 function profileSourceLabel(sourceType: string | null): string {
   if (['manual_edit', 'manual', 'direct_api'].includes(sourceType || '')) return '手动编辑';
-  if (sourceType === 'research_proposal') return '公开信息调研';
+  if (sourceType === 'research_proposal') return 'AI调研';
   if (['rollback', 'update_log_rollback'].includes(sourceType || '')) return '更新回滚';
   return '文字更新';
 }

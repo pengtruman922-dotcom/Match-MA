@@ -2,6 +2,7 @@
 
 import json
 from datetime import date, datetime
+from decimal import Decimal
 from uuid import UUID
 
 import pytest
@@ -46,34 +47,70 @@ def test_claims_without_a_source_url_are_dropped() -> None:
 
 
 def test_structured_facts_are_limited_to_the_whitelist() -> None:
-    """数值字段本轮不开放：写错的代价和纠错难度都高一档。"""
+    """0728 起财务数字对调研开放；报价这类只存在于卖方私下诉求的字段仍然关闭。
+
+    公开渠道根本查不到报价，放开它等于逼 agent 编一个。
+    """
     claims, notes = normalize_research_output(
         {
             "structured_facts": [
                 {"field_path": "industry_pairs_json", "value": [{"l1": "信息技术与通信", "l2": "偏光膜"}], "sources": ["https://a.com/x"]},
                 {"field_path": "current_revenue_yuan", "value": 100, "sources": ["https://a.com/x"]},
+                {"field_path": "asking_price_yuan", "value": 100, "sources": ["https://a.com/x"]},
             ]
         }
     )
 
-    assert [claim["field_path"] for claim in claims] == ["industry_pairs_json"]
-    assert any("unsupported_field:current_revenue_yuan" in note for note in notes)
+    assert [claim["field_path"] for claim in claims] == ["industry_pairs_json", "current_revenue_yuan"]
+    assert any("unsupported_field:asking_price_yuan" in note for note in notes)
 
 
-def test_relation_comes_from_the_model_and_falls_back_when_unusable() -> None:
-    """时效与冲突由 LLM 判断；代码只校验取值在闭集内。"""
-    claims, notes = normalize_research_output(
+def test_relation_is_decided_by_code_against_the_current_revision() -> None:
+    """判断两段话说的是不是同一期，是比较不是判断。
+
+    提示词从来没要求过 relation，于是每条建议都回落成 supplement，
+    界面上永远只会显示「补充信息」，「与当前信息冲突」不可能出现。
+    """
+    current = {
+        "business_product": {"content_text": "旧的业务描述", "as_of_date": "2024-12-31"},
+        "tech_team": {"content_text": "团队自研", "as_of_date": None},
+        "ops_quality": {"content_text": "旧的经营描述", "as_of_date": "2024-12-31"},
+    }
+    claims, _ = normalize_research_output(
         {
             "profile_sections": [
-                _profile_claim(relation="temporal_update"),
-                _profile_claim(section_code="tech_team", content_text="团队自研", relation="有点像"),
-                _profile_claim(section_code="ops_quality", content_text="客户集中", relation=None),
+                # 新一期 → 时效更新
+                _profile_claim(content_text="新的业务描述", as_of_date="2025-12-31"),
+                # 内容与在档的一字不差 → 一致
+                _profile_claim(section_code="tech_team", content_text="团队自研"),
+                # 同一期却说得不一样 → 冲突，需要人看一眼
+                _profile_claim(section_code="ops_quality", content_text="客户集中", as_of_date="2024-12-31"),
+                # 在档没有内容 → 补充
+                _profile_claim(section_code="deal_terms", content_text="控股权可让"),
             ]
-        }
+        },
+        current_profiles=current,
     )
 
-    assert [claim["relation"] for claim in claims] == ["temporal_update", "supplement", "supplement"]
-    assert any("unknown_relation" in note for note in notes)
+    assert [(claim["section_code"], claim["relation"]) for claim in claims] == [
+        ("business_product", "temporal_update"),
+        ("tech_team", "consistent"),
+        ("ops_quality", "same_period_conflict"),
+        ("deal_terms", "supplement"),
+    ]
+
+
+def test_coverage_list_separates_searched_without_result_from_never_searched() -> None:
+    """未检索到的内容 agent 不再输出，所以覆盖清单是唯一的区分依据。"""
+    claims, _ = normalize_research_output(
+        {"coverage": {"covered": ["identity"], "no_public_information": ["ops_quality"]}}
+    )
+
+    assert [(claim["proposal_kind"], claim["section_code"]) for claim in claims] == [
+        ("not_found", "ops_quality")
+    ]
+    # 只在覆盖清单里被点名的栏目才变 not_found，没提到的保持 missing。
+    assert all(claim["section_code"] != "identity" for claim in claims)
 
 
 def test_not_found_sections_become_confirmed_gaps() -> None:
@@ -97,6 +134,11 @@ def test_not_found_never_erases_a_section_that_already_has_content() -> None:
 
 
 def test_claims_stay_json_serialisable_when_current_profiles_carry_dates() -> None:
+    """生产事故回归：画像行里的 date/datetime 会被原样塞进 JSONB 绑定。
+
+    `Object of type date is not JSON serializable` 在 agent 跑完之后才抛，
+    整个事务连同证据、建议和 last_research_at 一起回滚 —— 表现是"点了没反应"。
+    """
     current = {
         "business_product": {
             "entity_id": UUID("11111111-1111-1111-1111-111111111111"),
@@ -113,6 +155,7 @@ def test_claims_stay_json_serialisable_when_current_profiles_carry_dates() -> No
     )
 
     assert len(claims) == 1
+    # 落库前 proposal 的 current_value_json 走 JSONB 绑定，用默认 encoder 才算数。
     json.dumps(claims[0]["current_value_json"])
     json.dumps(_current_profiles_for_prompt(current))
 
@@ -238,7 +281,28 @@ def test_structured_fact_validation_raises_a_plain_error_for_the_worker() -> Non
     with pytest.raises(ResearchApplyError):
         normalize_structured_fact(None, "business_summary", "   ")
     assert normalize_structured_fact(None, "listed_status", "listed") == "listed"
-    assert len(normalize_structured_fact(None, "registered_city", "城" * 500)) == 120
+
+
+def test_money_units_are_converted_by_code_not_by_the_model() -> None:
+    """agent 交出原文数字和单位，换算在这里做。
+
+    差一个数量级是一万倍，而且进了筛选完全看不出来 —— 这种确定性转换
+    交给模型算是没有理由的。
+    """
+    from backend.app.services.research_apply import ResearchApplyError, normalize_structured_fact
+
+    assert normalize_structured_fact(None, "current_revenue_yuan", {"value": "83,200.00", "unit": "万元"}) == 832000000
+    assert normalize_structured_fact(None, "market_cap_yuan", {"value": "12.5", "unit": "亿元"}) == 1250000000
+    # 不带单位视同元，裸数字也认 —— 规范化节点可能已经折算过。
+    assert normalize_structured_fact(None, "valuation_yuan", 832000000) == 832000000
+    # 比率有自己的量纲，单位只可能是 % 或倍，绝不能拿来做乘数。
+    assert normalize_structured_fact(None, "current_debt_ratio", {"value": "45%", "unit": "%"}) == 45
+    assert normalize_structured_fact(None, "pe_ratio", "17.5") == Decimal("17.5")
+
+    with pytest.raises(ResearchApplyError):
+        normalize_structured_fact(None, "current_revenue_yuan", {"value": "8.32", "unit": "斤"})
+    with pytest.raises(ResearchApplyError):
+        normalize_structured_fact(None, "current_revenue_yuan", {"value": "去年三个亿", "unit": "元"})
 
 
 def test_a_rejected_fact_leaves_the_rest_of_the_run_intact() -> None:
@@ -253,7 +317,34 @@ def test_a_rejected_fact_leaves_the_rest_of_the_run_intact() -> None:
                 "entity_id": "e1",
                 "proposal_kind": "structured_fact",
                 "field_path": "current_revenue_yuan",
-                "proposed_value_json": {"value": 100},
+                "proposed_value_json": {"value": "不是数字"},
+            },
+            user_id="u1",
+        )
+
+
+def test_field_writer_rejection_is_translated_so_one_bad_value_cannot_abort_the_run() -> None:
+    """FieldWriteError 和 ResearchApplyError 是兄弟类。
+
+    不翻译的话它会越过调用方的 per-claim 捕获，一个越界的负债率
+    就能把整轮调研连同其他已通过的建议一起回滚。
+    """
+    from backend.app.services.research_apply import ResearchApplyError, apply_research_proposal
+
+    class _NeverReached:
+        def execute(self, *a, **k):
+            raise AssertionError("授权校验应该在读库之前就拒绝")
+
+    with pytest.raises(ResearchApplyError):
+        apply_research_proposal(
+            _NeverReached(),
+            {
+                "id": "p1",
+                "entity_id": "e1",
+                "proposal_kind": "structured_fact",
+                # 负债率 150% 越界，field_writer 会抛 FieldWriteError
+                "field_path": "current_debt_ratio",
+                "proposed_value_json": {"value": 150},
             },
             user_id="u1",
         )

@@ -29,6 +29,9 @@ from backend.app.jobs.handlers.research import (
     _handle_seller_target_research,
     _mark_research_outcome,
 )
+from backend.app.jobs.handlers.research_map import (
+    _handle_seller_target_research_map,
+)
 from backend.app.jobs.handlers.search_embedding import (
     _handle_buyer_intent_search_doc_rebuild,
     _handle_embedding_generate,
@@ -76,6 +79,10 @@ def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
         return _handle_recommendation_rerank(db, job)
     if job.job_type == "model_node_test":
         return _handle_model_node_test(db, job)
+    if job.job_type == "seller_target_research_map":
+        # 映射失败不该把标的留在「调研中」：调研 job 已经释放过状态，
+        # 这里只是让结论停在调研给的暂定值，重试映射即可覆写。
+        return _handle_seller_target_research_map(db, job)
     if job.job_type == "seller_target_research":
         try:
             return _handle_seller_target_research(db, job)
