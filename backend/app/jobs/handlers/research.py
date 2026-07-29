@@ -741,6 +741,7 @@ def _get_research_target(db: Session, target_id: UUID) -> dict[str, Any]:
             """
             select
               st.id, st.target_name, st.target_subject_name,
+              st.website,
               st.industry_l1, st.industry_l2, st.industry_pairs_json,
               st.location_province, st.location_city, st.location_district,
               st.listed_status, st.financial_period_label, st.business_summary

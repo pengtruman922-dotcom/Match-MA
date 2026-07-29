@@ -38,6 +38,8 @@ const NODE_LABELS: Record<string, string> = {
   buyer_intent_parser: '买家新建解析',
   buyer_intent_update_parser: '买家基本信息更新解析',
   relation_followup_draft_parser: '推进跟进整理',
+  seller_target_researcher: '标的 AI 调研',
+  seller_target_research_mapper: '调研结果规范化',
   recommendation_deep_eval: '推荐深度评估',
   recommendation_report_writer: '推荐报告生成',
   ocr_attachment_parser: '附件 OCR',
