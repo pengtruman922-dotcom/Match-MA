@@ -1,5 +1,6 @@
 """Research output handling and the two tools the agent drives."""
 
+import inspect
 import json
 from datetime import date, datetime
 from decimal import Decimal
@@ -11,6 +12,7 @@ from backend.app.jobs.handlers.research import (
     RESEARCH_TOOLS,
     MAX_SEARCH_RESULTS_PER_CALL,
     ResearchTools,
+    _handle_seller_target_research,
     _current_profiles_for_prompt,
     _financial_period_from_label,
     _chat_caller,
@@ -360,6 +362,20 @@ def test_search_returns_snippets_so_the_model_chooses_what_to_read(monkeypatch) 
     assert len(entry["snippet"]) <= 600
     assert entry["full_text_available"] is True
     assert tools.searched_queries == ["星海新材料 主营业务"]
+    assert tools.search_observations == [
+        {
+            "query": "星海新材料 主营业务",
+            "returned_count": 1,
+            "matched_result_count": 1,
+            "candidates": [
+                {
+                    "title": "星海新材料简介",
+                    "url": "https://a.com/1",
+                    "subject_match": True,
+                }
+            ],
+        }
+    ]
 
 
 def test_fetch_reuses_page_text_the_search_already_paid_for(monkeypatch) -> None:
@@ -402,6 +418,36 @@ def test_search_failure_is_returned_to_the_model_not_raised(monkeypatch) -> None
     tools = ResearchTools({"model_name": "tavily"}, "key")
 
     assert "配额用尽" in tools(_FakeCall("web_search", {"query": "q"}))["error"]
+
+
+def test_all_transient_search_failures_request_a_safe_whole_job_retry(monkeypatch) -> None:
+    def boom(*args, **kwargs):
+        raise SearchError("Tavily HTTP 429: rate limit")
+
+    monkeypatch.setattr("backend.app.jobs.handlers.research.run_search", boom)
+    tools = ResearchTools({"model_name": "tavily"}, "key")
+    tools(_FakeCall("web_search", {"query": "q1"}))
+    tools(_FakeCall("web_search", {"query": "q2"}))
+
+    assert tools.transient_search_failure() is not None
+
+
+def test_one_successful_search_prevents_replaying_the_whole_run(monkeypatch) -> None:
+    calls = 0
+
+    def sometimes(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise SearchError("Tavily HTTP 503: unavailable")
+        return []
+
+    monkeypatch.setattr("backend.app.jobs.handlers.research.run_search", sometimes)
+    tools = ResearchTools({"model_name": "tavily"}, "key")
+    tools(_FakeCall("web_search", {"query": "q1"}))
+    tools(_FakeCall("web_search", {"query": "q2"}))
+
+    assert tools.transient_search_failure() is None
 
 
 def test_search_result_count_is_capped(monkeypatch) -> None:
@@ -543,6 +589,16 @@ def test_mapping_job_always_uses_the_research_queue() -> None:
     )
 
     assert captured["queue_name"] == "research"
+
+
+def test_report_is_stored_before_parallel_mapper_can_claim_the_job() -> None:
+    source = inspect.getsource(_handle_seller_target_research)
+    mapper_branch = source.split("if _research_mapper_available(db):", 1)[1].split(
+        "# 未配置映射节点时", 1
+    )[0]
+
+    assert mapper_branch.index("_store_research_job_result") < mapper_branch.index("db.commit()")
+    assert mapper_branch.index("db.commit()") < mapper_branch.index("return result_payload")
 
 
 def test_structured_fact_validation_raises_a_plain_error_for_the_worker() -> None:

@@ -52,6 +52,19 @@ class ResearchBatchOut(BaseModel):
     reused_count: int
 
 
+class ResearchReportOut(BaseModel):
+    job_id: UUID
+    seller_target_id: UUID
+    status: str
+    created_at: str
+    finished_at: str | None = None
+    raw_output_text: str | None = None
+    agent_output_json: dict[str, Any] | None = None
+    prompt_version: str | None = None
+    mapper_status: str | None = None
+    execution_trace: dict[str, Any] = Field(default_factory=dict)
+
+
 class ResearchProposalOut(BaseModel):
     id: UUID
     entity_type: str
@@ -182,6 +195,102 @@ def get_seller_research_status(
         "seller_target_id": str(seller_target_id),
         **dict(target or {}),
         "latest_job": dict(latest_job) if latest_job else None,
+    }
+
+
+@router.get("/jobs/{job_id}/report", response_model=ResearchReportOut)
+def get_research_report(
+    job_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Return the exact researcher output plus a separate execution trace.
+
+    ``raw_output_text`` is the payload handed to the mapper.  The API never
+    rewrites it into a second report, so audit and mapper replay inspect the
+    same source material.
+    """
+    row = db.execute(
+        text(
+            """
+            select
+              job.id, job.entity_id as seller_target_id, job.status,
+              job.result_json, job.created_at::text as created_at,
+              job.finished_at::text as finished_at,
+              trace.raw_output_text, trace.parsed_output_json,
+              trace.prompt_version, trace.metadata_json as trace_metadata_json,
+              mapper.status as mapper_status
+            from background_job job
+            left join lateral (
+              select raw_output_text, parsed_output_json, prompt_version, metadata_json
+              from ai_trace
+              where job_id = job.id and node_name = :node_name
+              order by created_at desc
+              limit 1
+            ) trace on true
+            left join lateral (
+              select status
+              from background_job child
+              where child.parent_job_id = job.id
+                and child.job_type = 'seller_target_research_map'
+              order by child.created_at desc
+              limit 1
+            ) mapper on true
+            where job.id = :job_id
+              and job.team_id = :team_id
+              and job.workspace_id = :workspace_id
+              and job.job_type = 'seller_target_research'
+              and job.entity_type = 'seller_target'
+            """
+        ),
+        {
+            "job_id": job_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "node_name": RESEARCH_NODE_NAME,
+        },
+    ).mappings().one_or_none()
+    if row is None or row.get("seller_target_id") is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Research report not found.")
+    ensure_entity_visible(
+        db,
+        current_user,
+        entity_type="seller_target",
+        entity_id=row["seller_target_id"],
+    )
+    return _research_report_output(dict(row))
+
+
+def _research_report_output(row: dict[str, Any]) -> dict[str, Any]:
+    result = dict(row.get("result_json") or {})
+    raw_output_text = row.get("raw_output_text") or result.get("report_text")
+    agent_output_json = row.get("parsed_output_json") or result.get("agent_output_json")
+    trace = dict(row.get("trace_metadata_json") or {})
+    return {
+        "job_id": row["id"],
+        "seller_target_id": row["seller_target_id"],
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "finished_at": row.get("finished_at"),
+        "raw_output_text": str(raw_output_text) if raw_output_text is not None else None,
+        "agent_output_json": agent_output_json if isinstance(agent_output_json, dict) else None,
+        "prompt_version": row.get("prompt_version") or result.get("prompt_version"),
+        "mapper_status": row.get("mapper_status"),
+        "execution_trace": {
+            key: trace.get(key)
+            for key in (
+                "searched_queries",
+                "search_observations",
+                "fetched_urls",
+                "skipped_urls",
+                "early_stop_reason",
+                "llm_calls",
+                "tool_calls",
+                "content_inspection_retry_count",
+                "hit_iteration_limit",
+            )
+            if trace.get(key) not in (None, [], {})
+        },
     }
 
 
@@ -351,7 +460,7 @@ def _enqueue_seller_research_job(
             ) values (
               :team_id, :workspace_id, 'seller_target_research', 45, :queue_name,
               'seller_target', :target_id, :idempotency_key, :payload_json,
-              1, :created_by, :metadata_json
+              3, :created_by, :metadata_json
             ) returning id, status, queue_name
             """
         ).bindparams(

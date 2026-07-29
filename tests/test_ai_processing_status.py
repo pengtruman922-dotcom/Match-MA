@@ -20,7 +20,9 @@ from backend.app.services.seller_target_status import (
     AI_PROCESSING_NEVER,
     AI_PROCESSING_PARSE_FAILED,
     AI_PROCESSING_PARSING,
+    AI_PROCESSING_RESEARCH_MAPPING,
     AI_PROCESSING_RESEARCH_FAILED,
+    AI_PROCESSING_RESEARCH_QUEUED,
     AI_PROCESSING_RESEARCHING,
     ai_processing_state,
     acquire_ai_processing,
@@ -57,6 +59,33 @@ CASES: tuple[tuple[str, dict[str, object], str], ...] = (
             "research_last_outcome": "found",
         },
         AI_PROCESSING_RESEARCHING,
+    ),
+    (
+        "queued_research_is_not_running",
+        {
+            "information_status": "researching",
+            "research_job_type": "seller_target_research",
+            "research_job_status": "queued",
+        },
+        AI_PROCESSING_RESEARCH_QUEUED,
+    ),
+    (
+        "running_research_uses_running_phase",
+        {
+            "information_status": "researching",
+            "research_job_type": "seller_target_research",
+            "research_job_status": "running",
+        },
+        AI_PROCESSING_RESEARCHING,
+    ),
+    (
+        "mapper_phase_is_visible",
+        {
+            "information_status": "researching",
+            "research_job_type": "seller_target_research_map",
+            "research_job_status": "queued",
+        },
+        AI_PROCESSING_RESEARCH_MAPPING,
     ),
     (
         "parse_failed",
@@ -151,7 +180,9 @@ def test_frontend_renders_server_state_without_reimplementing_decision_table() -
     source = FRONTEND_MODULE.read_text(encoding="utf-8")
     for state in (
         AI_PROCESSING_PARSING,
+        AI_PROCESSING_RESEARCH_QUEUED,
         AI_PROCESSING_RESEARCHING,
+        AI_PROCESSING_RESEARCH_MAPPING,
         AI_PROCESSING_PARSE_FAILED,
         AI_PROCESSING_RESEARCH_FAILED,
         AI_PROCESSING_COMPLETED,
@@ -195,6 +226,16 @@ def test_batch_research_dialog_shows_all_groups_without_outcome_details() -> Non
         assert label in source
     assert "OUTCOME_LABELS" not in source
     assert "research_last_outcome === 'failed'" in source
+    assert "new Set(ready.map((item) => item.id))" in source
+    assert "checked={selectedIds.has(item.id)}" in source
+
+
+def test_target_api_reads_the_active_research_job_phase() -> None:
+    source = (REPO / "backend/app/api/routes/seller_targets.py").read_text(encoding="utf-8")
+
+    assert "ACTIVE_RESEARCH_JOB_LATERAL_SQL" in source
+    assert "active_research_job.job_type as research_job_type" in source
+    assert "active_research_job.status as research_job_status" in source
 
 
 def test_business_update_no_longer_parks_targets_in_pending_review() -> None:

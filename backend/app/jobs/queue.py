@@ -163,23 +163,24 @@ def mark_job_failed(
     error_message: str,
     error_code: str = "job_failed",
     error_detail_json: dict[str, Any] | None = None,
+    retry_allowed: bool = True,
 ) -> None:
     db.execute(
         text(
             """
             update background_job
             set status = case
-                  when attempt_count < max_attempts then 'retry_waiting'
+                  when :retry_allowed and attempt_count < max_attempts then 'retry_waiting'
                   else 'failed'
                 end,
                 run_after = case
-                  when attempt_count < max_attempts then now() + interval '60 seconds'
+                  when :retry_allowed and attempt_count < max_attempts then now() + interval '60 seconds'
                   else run_after
                 end,
                 locked_by = null,
                 locked_at = null,
                 finished_at = case
-                  when attempt_count < max_attempts then null
+                  when :retry_allowed and attempt_count < max_attempts then null
                   else now()
                 end,
                 updated_at = now(),
@@ -194,6 +195,7 @@ def mark_job_failed(
             "error_code": error_code,
             "error_message": error_message,
             "error_detail_json": error_detail_json or {},
+            "retry_allowed": retry_allowed,
         },
     )
     db.commit()

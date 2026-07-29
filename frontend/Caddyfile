@@ -1,6 +1,16 @@
 :{$PORT:8080} {
   root * /app/dist
   encode gzip
-  try_files {path} /index.html
-  file_server
+
+  @assets path /assets/*
+  handle @assets {
+    header Cache-Control "public, max-age=31536000, immutable"
+    file_server
+  }
+
+  handle {
+    try_files {path} /index.html
+    header Cache-Control "no-cache, no-store, must-revalidate"
+    file_server
+  }
 }

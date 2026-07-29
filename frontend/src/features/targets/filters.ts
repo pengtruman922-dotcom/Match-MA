@@ -4,7 +4,7 @@ export const PAGE_SIZE = 20;
 export const PARSE_POLL_INTERVAL_MS = 4000;
 
 export function isParsingTarget(item: SellerTarget): boolean {
-  return item.information_status === 'parsing' || item.information_status === 'researching';
+  return ['parsing', 'research_queued', 'researching', 'research_mapping'].includes(item.ai_processing_state);
 }
 
 export const SEARCH_FIELD_LABELS: Record<SellerTargetSearchField | 'all', string> = {

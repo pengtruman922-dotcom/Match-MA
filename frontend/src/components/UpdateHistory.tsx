@@ -9,8 +9,8 @@ import {
   RotateCcw,
   X,
 } from 'lucide-react';
-import { attachments, backgroundJobs, updateLogs } from '../lib/api';
-import type { BackgroundJob, FieldValueSource, UpdateBatch, UpdateBatchChange } from '../types/api';
+import { attachments, research, updateLogs } from '../lib/api';
+import type { FieldValueSource, ResearchReport, UpdateBatch, UpdateBatchChange } from '../types/api';
 import { fieldLabel, sourceTypeLabel, valueLabel } from '../lib/fieldLabels';
 import ResearchEvidenceDrawer from '../features/targets/ResearchEvidenceDrawer';
 import ResearchReportDrawer from '../features/targets/ResearchReportDrawer';
@@ -41,7 +41,7 @@ export default function UpdateHistory({
   const [rollbackBatch, setRollbackBatch] = useState<UpdateBatch | null>(null);
   const [rollbackLoading, setRollbackLoading] = useState(false);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
-  const [reportJob, setReportJob] = useState<Pick<BackgroundJob, 'id' | 'result_json' | 'created_at' | 'finished_at'> | null>(null);
+  const [researchReport, setResearchReport] = useState<ResearchReport | null>(null);
   const [selectedEvidence, setSelectedEvidence] = useState<FieldValueSource | null>(null);
   const wasParsingRef = useRef(false);
   const processingSettledRef = useRef(onProcessingSettled);
@@ -54,7 +54,7 @@ export default function UpdateHistory({
     if (showLoading) setLoading(true);
     try {
       const response = await updateLogs.batches({ entity_type: entityType, entity_id: entityId, limit: 50 });
-      const nextHasParsing = response.items.some((item) => item.status === 'parsing');
+      const nextHasParsing = response.items.some((item) => ['parsing', 'queued', 'researching', 'mapping'].includes(item.status));
       if (wasParsingRef.current && !nextHasParsing) {
         await processingSettledRef.current?.();
       }
@@ -72,7 +72,10 @@ export default function UpdateHistory({
     void load(true);
   }, [load, refreshKey]);
 
-  const hasParsing = useMemo(() => items.some((item) => item.status === 'parsing'), [items]);
+  const hasParsing = useMemo(
+    () => items.some((item) => ['parsing', 'queued', 'researching', 'mapping'].includes(item.status)),
+    [items],
+  );
   useEffect(() => {
     if (!hasParsing) return;
     const timer = window.setInterval(() => void load(false), POLL_INTERVAL_MS);
@@ -130,7 +133,7 @@ export default function UpdateHistory({
   const openResearchReport = async (jobId: string) => {
     try {
       setSelectedEvidence(null);
-      setReportJob(await backgroundJobs.get(jobId));
+      setResearchReport(await research.report(jobId));
     } catch (err) {
       alert(err instanceof Error ? err.message : '读取调研报告失败');
     }
@@ -169,7 +172,7 @@ export default function UpdateHistory({
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-mono text-xs text-gray-500">{formatDateTime(item.submitted_at)}</span>
                     <span className="text-sm font-medium text-gray-900">{item.operator_name}</span>
-                    <BatchStatusBadge status={item.status} />
+                    <BatchStatusBadge status={item.status} sourceType={item.source_type} />
                     {item.batch_category === 'management_operation' ? (
                       <span className="bg-sky-50 px-1.5 py-0.5 text-[11px] text-sky-700">管理操作</span>
                     ) : null}
@@ -179,7 +182,11 @@ export default function UpdateHistory({
                   </div>
                   <p className="mt-1 text-xs text-gray-500">
                     来源：{batchSourceLabel(item)}
-                    {item.changed_field_count > 0 ? ` · 最终写入 ${item.changed_field_count} 个字段` : ''}
+                    {item.changed_field_count > 0
+                      ? ` · 最终写入 ${item.changed_field_count} 个字段`
+                      : item.source_type === 'research_proposal' && item.status === 'applied'
+                        ? ' · 未写入字段'
+                        : ''}
                   </p>
                   {item.input_summary ? (
                     <p className="mt-2 line-clamp-2 text-sm leading-6 text-gray-700" title={item.raw_input || item.input_summary}>
@@ -211,13 +218,15 @@ export default function UpdateHistory({
                   {item.status === 'failed' ? (
                     <div className="mt-2 flex items-start gap-1.5 text-xs text-red-700">
                       <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                      本次解析失败，未写入字段。请重新录入更新，或联系管理员在任务中心处理。
+                      {item.source_type === 'research_proposal'
+                        ? '本次调研失败，未写入字段。请在任务中心查看错误后重试。'
+                        : '本次解析失败，未写入字段。请重新录入更新，或联系管理员在任务中心处理。'}
                     </div>
                   ) : null}
                 </div>
 
                 <div className="flex shrink-0 items-center gap-2">
-                  {item.source_type === 'research_proposal' && item.source_id ? (
+                  {item.source_type === 'research_proposal' && item.source_id && item.report_available ? (
                     <button
                       type="button"
                       onClick={() => void openResearchReport(item.source_id as string)}
@@ -278,7 +287,7 @@ export default function UpdateHistory({
           onConfirm={() => void handleRollback()}
         />
       ) : null}
-      {reportJob ? <ResearchReportDrawer job={reportJob} onClose={() => setReportJob(null)} /> : null}
+      {researchReport ? <ResearchReportDrawer report={researchReport} onClose={() => setResearchReport(null)} /> : null}
       {selectedEvidence ? (
         <ResearchEvidenceDrawer
           source={selectedEvidence}
@@ -414,14 +423,21 @@ function RollbackDialog({
   );
 }
 
-function BatchStatusBadge({ status }: { status: string }) {
+function BatchStatusBadge({ status, sourceType }: { status: string; sourceType: string }) {
   const config: Record<string, { label: string; className: string; spinning?: boolean }> = {
     parsing: { label: '解析中', className: 'bg-blue-50 text-blue-700', spinning: true },
+    queued: { label: '排队中', className: 'bg-sky-50 text-sky-700', spinning: true },
+    researching: { label: '调研中', className: 'bg-indigo-50 text-indigo-700', spinning: true },
+    mapping: { label: '整理结果中', className: 'bg-violet-50 text-violet-700', spinning: true },
     failed: { label: '解析失败', className: 'bg-red-50 text-red-700' },
     applied: { label: '已写入', className: 'bg-emerald-50 text-emerald-700' },
     rolled_back: { label: '已撤回', className: 'bg-gray-100 text-gray-600' },
   };
-  const item = config[status] || { label: status, className: 'bg-gray-100 text-gray-600' };
+  const item = sourceType === 'research_proposal' && status === 'applied'
+    ? { label: '调研完成', className: 'bg-emerald-50 text-emerald-700' }
+    : sourceType === 'research_proposal' && status === 'failed'
+      ? { label: '调研失败', className: 'bg-red-50 text-red-700' }
+      : config[status] || { label: status, className: 'bg-gray-100 text-gray-600' };
   return (
     <span className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium ${item.className}`}>
       {item.spinning ? <Loader2 className="h-3 w-3 animate-spin" /> : null}

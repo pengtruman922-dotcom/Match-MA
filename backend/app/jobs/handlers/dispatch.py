@@ -4,6 +4,7 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from backend.app.jobs.queue import JobClaim
+from backend.app.jobs.retry_policy import research_failure_is_final
 
 from backend.app.jobs.handlers.attachment_ocr import (
     _handle_attachment_ocr_parse,
@@ -82,11 +83,11 @@ def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
     if job.job_type == "seller_target_research_map":
         try:
             return _handle_seller_target_research_map(db, job)
-        except Exception:
+        except Exception as exc:
             # The mapper is the second half of the same user-visible research
             # operation. Keep the target busy while retries remain, then
             # release it with a truthful failure state after the final attempt.
-            if job.entity_id is not None and job.attempt_count >= job.max_attempts:
+            if job.entity_id is not None and research_failure_is_final(job, exc):
                 db.rollback()
                 _mark_research_outcome(db, job.entity_id, "failed")
                 db.commit()
@@ -94,11 +95,11 @@ def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
     if job.job_type == "seller_target_research":
         try:
             return _handle_seller_target_research(db, job)
-        except Exception:
+        except Exception as exc:
             # The handler records expected provider/LLM/schema failures itself.
             # This final boundary also releases `researching` for unexpected
             # programming/database errors on the last attempt.
-            if job.entity_id is not None and job.attempt_count >= job.max_attempts:
+            if job.entity_id is not None and research_failure_is_final(job, exc):
                 db.rollback()
                 _mark_research_outcome(db, job.entity_id, "failed")
                 db.commit()

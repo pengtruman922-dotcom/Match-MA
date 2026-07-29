@@ -2,8 +2,9 @@
 builder = "NIXPACKS"
 
 [deploy]
-# 调研任务单次 5~15 分钟，stale 窗口必须大于它：回收一个还在跑的任务，
-# 在 max_attempts=1 下等于直接判死。副本数在 Railway 面板配（目标 5）。
+# 调研任务单次 5~15 分钟，stale 窗口必须大于它。任务最多尝试 3 次，
+# 但代码只允许限流、超时和临时网络故障重试，业务/配置错误会立即终止。
+# 并发通过 Railway 面板将本服务 Replicas 配为 5；每个副本仍只跑一个任务。
 startCommand = "python -m backend.app.worker --queue research --sleep 5 --stale-after 1800"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3

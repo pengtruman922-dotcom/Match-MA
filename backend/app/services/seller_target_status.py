@@ -27,7 +27,9 @@ from sqlalchemy.orm import Session
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 
 AI_PROCESSING_PARSING = "parsing"
+AI_PROCESSING_RESEARCH_QUEUED = "research_queued"
 AI_PROCESSING_RESEARCHING = "researching"
+AI_PROCESSING_RESEARCH_MAPPING = "research_mapping"
 AI_PROCESSING_PARSE_FAILED = "parse_failed"
 AI_PROCESSING_RESEARCH_FAILED = "research_failed"
 AI_PROCESSING_COMPLETED = "completed"
@@ -35,7 +37,9 @@ AI_PROCESSING_NEVER = "never"
 
 AI_PROCESSING_STATES: tuple[str, ...] = (
     AI_PROCESSING_PARSING,
+    AI_PROCESSING_RESEARCH_QUEUED,
     AI_PROCESSING_RESEARCHING,
+    AI_PROCESSING_RESEARCH_MAPPING,
     AI_PROCESSING_PARSE_FAILED,
     AI_PROCESSING_RESEARCH_FAILED,
     AI_PROCESSING_COMPLETED,
@@ -174,6 +178,17 @@ def ai_processing_state(target: Mapping[str, Any]) -> str:
     effect — reporting it as a failure would send them to retry for nothing.
     """
     information_status = str(target.get("information_status") or "")
+    research_job_type = str(target.get("research_job_type") or "")
+    research_job_status = str(target.get("research_job_status") or "")
+    if research_job_status in {"queued", "running", "retry_waiting"}:
+        if research_job_type == "seller_target_research_map":
+            return AI_PROCESSING_RESEARCH_MAPPING
+        if research_job_type == "seller_target_research":
+            return (
+                AI_PROCESSING_RESEARCHING
+                if research_job_status == "running"
+                else AI_PROCESSING_RESEARCH_QUEUED
+            )
     in_flight = _IN_FLIGHT.get(information_status)
     if in_flight:
         return in_flight
@@ -213,7 +228,9 @@ def ai_processing_state(target: Mapping[str, Any]) -> str:
 
 _AI_PROCESSING_LABELS = {
     AI_PROCESSING_PARSING: "正在解析录入材料",
+    AI_PROCESSING_RESEARCH_QUEUED: "调研任务已提交，正在等待可用的调研资源",
     AI_PROCESSING_RESEARCHING: "正在检索公开信息",
+    AI_PROCESSING_RESEARCH_MAPPING: "公开信息检索已完成，正在规范化并写入结果",
     AI_PROCESSING_PARSE_FAILED: "最近一次解析失败，请查看更新记录或失败任务",
     AI_PROCESSING_RESEARCH_FAILED: "最近一次调研失败，请查看调研任务错误后重试",
     AI_PROCESSING_NEVER: "尚未解析材料，也未发起调研",

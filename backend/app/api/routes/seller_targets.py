@@ -96,6 +96,8 @@ class SellerTargetOut(BaseModel):
     information_status: str
     ai_processing_state: str
     ai_processing_detail: str
+    research_job_type: str | None = None
+    research_job_status: str | None = None
     industry_l1: str | None = None
     industry_l2: str | None = None
     industry_pairs_json: list[dict[str, str]] = Field(default_factory=list)
@@ -332,6 +334,21 @@ SELLER_TARGET_OUT_COLUMNS = """
               last_research_at::text as last_research_at, last_parse_at::text as last_parse_at,
               research_last_outcome,
               created_at::text as created_at, updated_at::text as updated_at
+"""
+
+ACTIVE_RESEARCH_JOB_LATERAL_SQL = """
+            left join lateral (
+              select job.job_type, job.status
+              from background_job job
+              where job.team_id = seller_target.team_id
+                and job.workspace_id = seller_target.workspace_id
+                and job.entity_type = 'seller_target'
+                and job.entity_id = seller_target.id
+                and job.job_type in ('seller_target_research', 'seller_target_research_map')
+                and job.status in ('queued', 'running', 'retry_waiting')
+              order by job.created_at desc
+              limit 1
+            ) active_research_job on true
 """
 
 # The列表「状态」列 is the trade lifecycle and nothing else. AI progress lives in
@@ -573,6 +590,8 @@ def list_seller_targets(
             f"""
             select
 {SELLER_TARGET_OUT_COLUMNS},
+              active_research_job.job_type as research_job_type,
+              active_research_job.status as research_job_status,
               lp.event_time::text as latest_progress_at,
               coalesce(lp.content, lp.title, lp.next_step) as latest_progress_content
             from seller_target
@@ -594,6 +613,7 @@ def list_seller_targets(
               order by e.event_time desc, e.created_at desc
               limit 1
             ) lp on true
+{ACTIVE_RESEARCH_JOB_LATERAL_SQL}
             where {where_sql}
             order by updated_at desc
             limit :limit offset :offset
@@ -1592,8 +1612,11 @@ def _get_seller_target_or_404(db: Session, seller_target_id: UUID) -> dict[str, 
         text(
             f"""
             select
-{SELLER_TARGET_OUT_COLUMNS}
+{SELLER_TARGET_OUT_COLUMNS},
+              active_research_job.job_type as research_job_type,
+              active_research_job.status as research_job_status
             from seller_target
+{ACTIVE_RESEARCH_JOB_LATERAL_SQL}
             where id = :seller_target_id
               and team_id = :team_id
               and workspace_id = :workspace_id

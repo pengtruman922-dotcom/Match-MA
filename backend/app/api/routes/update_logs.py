@@ -86,6 +86,7 @@ class UpdateBatchOut(BaseModel):
     source_type: str
     batch_category: Literal["business_update", "management_operation", "rollback"]
     source_id: UUID | None = None
+    report_available: bool = False
     input_type: str | None = None
     input_summary: str | None = None
     raw_input: str | None = None
@@ -352,6 +353,7 @@ def _build_update_batches(
     attachments_by_update = _business_update_attachments(db, [row["id"] for row in business_updates])
     parse_jobs = _entity_parse_jobs(db, entity_type=entity_type, entity_id=entity_id)
     parse_jobs_by_id = {str(row["id"]): row for row in parse_jobs}
+    research_jobs = _entity_research_jobs(db, entity_type=entity_type, entity_id=entity_id)
 
     grouped_logs: dict[str, list[dict[str, Any]]] = {}
     manual_key_by_signature: dict[tuple[str, str, str], str] = {}
@@ -384,6 +386,19 @@ def _build_update_batches(
         batch_key = f"parse-job-{job_id}"
         batches.append(
             _parse_job_batch(
+                job,
+                grouped_logs.get(batch_key, []),
+                entity_type=entity_type,
+                entity_id=entity_id,
+            )
+        )
+        consumed_keys.add(batch_key)
+
+    for job in research_jobs:
+        job_id = str(job["id"])
+        batch_key = f"research-job-{job_id}"
+        batches.append(
+            _research_job_batch(
                 job,
                 grouped_logs.get(batch_key, []),
                 entity_type=entity_type,
@@ -594,6 +609,50 @@ def _entity_parse_jobs(db: Session, *, entity_type: str, entity_id: UUID) -> lis
     return [dict(row) for row in rows]
 
 
+def _entity_research_jobs(db: Session, *, entity_type: str, entity_id: UUID) -> list[dict[str, Any]]:
+    if entity_type != "seller_target":
+        return []
+    rows = db.execute(
+        text(
+            """
+            select
+              job.id, job.status, job.result_json,
+              job.created_by, job.created_at::text as created_at,
+              job.finished_at::text as finished_at,
+              creator.name as created_by_name,
+              mapper.status as mapper_status,
+              (
+                coalesce(nullif(job.result_json ->> 'report_text', ''), '') <> ''
+                or job.result_json ? 'agent_output_json'
+              ) as report_available
+            from background_job job
+            left join app_user creator on creator.id = job.created_by
+            left join lateral (
+              select child.status
+              from background_job child
+              where child.parent_job_id = job.id
+                and child.job_type = 'seller_target_research_map'
+              order by child.created_at desc
+              limit 1
+            ) mapper on true
+            where job.team_id = :team_id
+              and job.workspace_id = :workspace_id
+              and job.job_type = 'seller_target_research'
+              and job.entity_type = 'seller_target'
+              and job.entity_id = :entity_id
+            order by job.created_at desc
+            limit 100
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "entity_id": entity_id,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
 def _batch_key_for_log(
     row: dict[str, Any],
     manual_key_by_signature: dict[tuple[str, str, str], str],
@@ -693,6 +752,48 @@ def _parse_job_batch(
     )
 
 
+def _research_job_batch(
+    job: dict[str, Any],
+    logs: list[dict[str, Any]],
+    *,
+    entity_type: str,
+    entity_id: UUID,
+) -> dict[str, Any]:
+    parent_status = str(job.get("status") or "queued")
+    mapper_status = str(job.get("mapper_status") or "")
+    if parent_status in {"queued", "retry_waiting"}:
+        batch_status = "queued"
+    elif parent_status == "running":
+        batch_status = "researching"
+    elif parent_status in {"failed", "canceled"}:
+        batch_status = "failed"
+    elif mapper_status in {"queued", "running", "retry_waiting"}:
+        batch_status = "mapping"
+    elif mapper_status in {"failed", "canceled"}:
+        batch_status = "failed"
+    elif logs and not _active_batch_logs(logs):
+        batch_status = "rolled_back"
+    else:
+        # A successful zero-write run is still a completed research operation.
+        batch_status = "applied"
+    return _batch_record(
+        batch_key=f"research-job-{job['id']}",
+        entity_type=entity_type,
+        entity_id=entity_id,
+        source_type="research_proposal",
+        source_id=job["id"],
+        input_type="research",
+        raw_input=None,
+        attachments=[],
+        operator_user_id=job.get("created_by"),
+        operator_name=job.get("created_by_name"),
+        submitted_at=job["created_at"],
+        status_value=batch_status,
+        logs=logs,
+        report_available=bool(job.get("report_available")),
+    )
+
+
 def _log_only_batch(
     batch_key: str,
     logs: list[dict[str, Any]],
@@ -735,6 +836,7 @@ def _batch_record(
     submitted_at: str,
     status_value: str,
     logs: list[dict[str, Any]],
+    report_available: bool = False,
 ) -> dict[str, Any]:
     active_logs = _active_batch_logs(logs)
     visible_logs = logs if source_type == "rollback" else [row for row in logs if row.get("source_type") != "rollback"]
@@ -759,6 +861,7 @@ def _batch_record(
         "source_type": source_type,
         "batch_category": _batch_category(source_type, logs),
         "source_id": source_id,
+        "report_available": report_available,
         "input_type": input_type,
         "input_summary": _truncate_text(raw_input_text, 180),
         "raw_input": raw_input_text,
@@ -831,8 +934,8 @@ def _batch_rollback_block_reason(
         return "本次更新已撤回"
     if batch.get("status") == "failed":
         return "本次更新未写入字段"
-    if batch.get("status") == "parsing":
-        return "本次更新仍在解析中"
+    if batch.get("status") in {"parsing", "queued", "researching", "mapping"}:
+        return "本次更新仍在处理中"
     if not active_logs:
         if batch.get("status") == "rolled_back":
             return "本次更新已撤回"

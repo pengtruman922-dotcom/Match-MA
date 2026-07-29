@@ -5,8 +5,10 @@ export interface SellerTarget {
   target_subject_name: string | null;
   lifecycle_status: string;
   information_status: string;
-  ai_processing_state: 'parsing' | 'researching' | 'parse_failed' | 'research_failed' | 'completed' | 'never';
+  ai_processing_state: 'parsing' | 'research_queued' | 'researching' | 'research_mapping' | 'parse_failed' | 'research_failed' | 'completed' | 'never';
   ai_processing_detail: string;
+  research_job_type?: 'seller_target_research' | 'seller_target_research_map' | null;
+  research_job_status?: 'queued' | 'running' | 'retry_waiting' | null;
   // L1/L2 是唯一展示与筛选行业维度；原始表述保存在更新/证据审计中。
   industry_l1: string | null;
   industry_l2: string | null;
@@ -917,6 +919,7 @@ export interface UpdateBatch {
   source_type: string;
   batch_category: 'business_update' | 'management_operation' | 'rollback';
   source_id: string | null;
+  report_available: boolean;
   input_type: string | null;
   input_summary: string | null;
   raw_input: string | null;
@@ -1901,6 +1904,41 @@ export interface ResearchBatchResponse {
   jobs: ResearchJob[];
   queued_count: number;
   reused_count: number;
+}
+
+export interface ResearchSearchObservation {
+  query: string;
+  returned_count: number;
+  matched_result_count: number;
+  error?: string;
+  candidates?: Array<{
+    title: string | null;
+    url: string;
+    subject_match: boolean;
+  }>;
+}
+
+export interface ResearchReport {
+  job_id: string;
+  seller_target_id: string;
+  status: string;
+  created_at: string;
+  finished_at: string | null;
+  raw_output_text: string | null;
+  agent_output_json: Record<string, unknown> | null;
+  prompt_version: string | null;
+  mapper_status: string | null;
+  execution_trace: {
+    searched_queries?: string[];
+    search_observations?: ResearchSearchObservation[];
+    fetched_urls?: string[];
+    skipped_urls?: Array<{ url: string; reason: string }>;
+    early_stop_reason?: string;
+    llm_calls?: number;
+    tool_calls?: Record<string, number>;
+    content_inspection_retry_count?: number;
+    hit_iteration_limit?: boolean;
+  };
 }
 
 export interface ResearchProposal {

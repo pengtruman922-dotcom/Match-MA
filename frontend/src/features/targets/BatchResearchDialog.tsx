@@ -12,7 +12,8 @@ function isRecentlyCompleted(target: SellerTarget, now = Date.now()): boolean {
 }
 
 function isResearching(target: SellerTarget): boolean {
-  return target.ai_processing_state === 'researching' || target.information_status === 'researching';
+  return ['research_queued', 'researching', 'research_mapping'].includes(target.ai_processing_state)
+    || target.information_status === 'researching';
 }
 
 /**
@@ -42,12 +43,12 @@ export default function BatchResearchDialog({
     };
   }, [targets]);
 
-  const [includeRecent, setIncludeRecent] = useState<Set<string>>(new Set());
-
-  const selectedIds = [...ready.map((item) => item.id), ...Array.from(includeRecent)];
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(
+    () => new Set(ready.map((item) => item.id)),
+  );
 
   const toggle = (id: string) => {
-    setIncludeRecent((prev) => {
+    setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
@@ -61,18 +62,29 @@ export default function BatchResearchDialog({
         <div className="border-b border-gray-100 px-5 py-3">
           <h2 className="text-sm font-semibold text-gray-900">批量 AI 调研</h2>
           <p className="mt-1 text-xs text-gray-500">
-            共选择 {targets.length} 个标的，当前将提交 {selectedIds.length} 个调研任务。
+            共选择 {targets.length} 个标的，当前将提交 {selectedIds.size} 个调研任务。
           </p>
         </div>
 
         <div className="space-y-4 px-5 py-4">
           <section>
-            <h3 className="text-xs font-medium text-gray-700">即将调研（{ready.length}）</h3>
+            <h3 className="text-xs font-medium text-gray-700">本次选择（{targets.length}）</h3>
             <p className="mt-1 text-xs text-gray-400">包含从未调研、超过 30 天，以及最近一次调研失败的标的。</p>
             {ready.length > 0 ? (
               <ul className="mt-2 max-h-44 divide-y divide-gray-100 overflow-y-auto border border-gray-200">
                 {ready.map((item) => (
-                  <li key={item.id} className="px-3 py-2 text-xs text-gray-800">{item.target_name}</li>
+                  <li key={item.id} className="flex items-center gap-2 px-3 py-2 text-xs">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(item.id)}
+                      onChange={() => toggle(item.id)}
+                      className="h-3.5 w-3.5"
+                    />
+                    <span className="min-w-0 flex-1 truncate text-gray-800">{item.target_name}</span>
+                    <span className="shrink-0 text-emerald-600">
+                      {item.research_last_outcome === 'failed' ? '上次失败，可重试' : '即将调研'}
+                    </span>
+                  </li>
                 ))}
               </ul>
             ) : (
@@ -90,7 +102,13 @@ export default function BatchResearchDialog({
                 {researching.map((item) => (
                   <li key={item.id} className="flex items-center justify-between gap-2 px-3 py-2 text-xs">
                     <span className="truncate text-gray-700">{item.target_name}</span>
-                    <span className="shrink-0 text-blue-600">调研中</span>
+                    <span className="shrink-0 text-blue-600">
+                      {item.ai_processing_state === 'research_queued'
+                        ? '排队中'
+                        : item.ai_processing_state === 'research_mapping'
+                          ? '整理结果中'
+                          : '调研中'}
+                    </span>
                   </li>
                 ))}
               </ul>
@@ -111,7 +129,7 @@ export default function BatchResearchDialog({
                   <li key={item.id} className="flex items-center gap-2 px-3 py-2 text-xs">
                     <input
                       type="checkbox"
-                      checked={includeRecent.has(item.id)}
+                      checked={selectedIds.has(item.id)}
                       onChange={() => toggle(item.id)}
                       className="h-3.5 w-3.5"
                     />
@@ -132,12 +150,12 @@ export default function BatchResearchDialog({
           </button>
           <button
             type="button"
-            disabled={submitting || selectedIds.length === 0}
-            onClick={() => onConfirm(selectedIds)}
-            className="inline-flex items-center gap-1.5 bg-brand-600 px-3 py-1.5 text-sm text-white disabled:opacity-40"
+            disabled={submitting || selectedIds.size === 0}
+            onClick={() => onConfirm(Array.from(selectedIds))}
+            className="inline-flex cursor-pointer items-center gap-1.5 bg-brand-600 px-3 py-1.5 text-sm text-white disabled:cursor-not-allowed disabled:opacity-40"
           >
             {submitting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-            调研 {selectedIds.length} 个标的
+            调研 {selectedIds.size} 个标的
           </button>
         </div>
       </div>

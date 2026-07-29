@@ -16,11 +16,11 @@ import { formatYuan } from '../../lib/format';
 import type {
   IndicatorRegistryResponse,
   IndustryOptionsResponse,
-  BackgroundJob,
   FieldValueSource,
   ProfileSection,
   ProfileSectionsResponse,
   ResearchProposal,
+  ResearchReport,
   SellerTarget,
   SellerResearchStatus,
 } from '../../types/api';
@@ -28,6 +28,23 @@ import { formatListedStatus, formatTransferRatio, getSubjectDisplay } from './pr
 import { buildInfoGroups, groupFilledCount, type InfoGroup } from './infoGroups';
 import ResearchEvidenceDrawer from './ResearchEvidenceDrawer';
 import ResearchReportDrawer from './ResearchReportDrawer';
+
+const ACTIVE_RESEARCH_STATES = new Set([
+  'research_queued',
+  'researching',
+  'research_mapping',
+]);
+
+function isResearchBusy(target: SellerTarget): boolean {
+  return target.information_status === 'researching'
+    || ACTIVE_RESEARCH_STATES.has(target.ai_processing_state);
+}
+
+function researchButtonLabel(target: SellerTarget): string {
+  if (target.ai_processing_state === 'research_queued') return '排队中';
+  if (target.ai_processing_state === 'research_mapping') return '整理结果中';
+  return '调研中';
+}
 
 /**
  * 标的信息：结构化字段和匹配画像放在同一页，按业务大类分组。
@@ -61,9 +78,9 @@ export default function TargetInfoPanel({
   const [sources, setSources] = useState<FieldValueSource[]>([]);
   const [selectedEvidence, setSelectedEvidence] = useState<FieldValueSource | null>(null);
   const [latestResearchJob, setLatestResearchJob] = useState<SellerResearchStatus['latest_job']>(null);
-  const [reportJob, setReportJob] = useState<Pick<BackgroundJob, 'id' | 'result_json' | 'created_at' | 'finished_at'> | null>(null);
+  const [researchReport, setResearchReport] = useState<ResearchReport | null>(null);
   const [industryOptions, setIndustryOptions] = useState<IndustryOptionsResponse>({ l1: [], l2: [] });
-  const researchBusy = researching || currentTarget.ai_processing_state === 'researching';
+  const researchBusy = researching || isResearchBusy(currentTarget);
 
   const groups = useMemo(
     () =>
@@ -88,8 +105,8 @@ export default function TargetInfoPanel({
 
   useEffect(() => setCurrentTarget(target), [target]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (showLoading = true) => {
+    if (showLoading) setLoading(true);
     try {
       const [freshTarget, profileData, proposalData, registryData, sourceData, industryData, researchStatus] = await Promise.all([
         sellerTargets.get(currentTarget.id),
@@ -112,7 +129,7 @@ export default function TargetInfoPanel({
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载标的信息失败');
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   }, [currentTarget.id, onTargetChanged]);
 
@@ -143,6 +160,36 @@ export default function TargetInfoPanel({
     }, 3000);
     return () => window.clearInterval(timer);
   }, [load, researchJobId]);
+
+  // 调研可能从列表页或另一个浏览器标签发起，不能只依赖本页面保存的 job id。
+  const refreshResearchState = useCallback(async () => {
+    try {
+      const freshTarget = await sellerTargets.get(currentTarget.id);
+      setCurrentTarget(freshTarget);
+      onTargetChanged?.(freshTarget);
+      if (researchBusy && !isResearchBusy(freshTarget)) {
+        setResearching(false);
+        setResearchJobId(null);
+        await load(false);
+      }
+    } catch {
+      // 短暂网络失败不应重新启用按钮；下一轮或下一次聚焦继续同步。
+    }
+  }, [currentTarget.id, load, onTargetChanged, researchBusy]);
+
+  // 活跃期间每 4 秒同步排队/运行/整理阶段。
+  useEffect(() => {
+    if (!researchBusy) return;
+    const timer = window.setInterval(() => void refreshResearchState(), 4000);
+    return () => window.clearInterval(timer);
+  }, [refreshResearchState, researchBusy]);
+
+  // 即使当前页面看起来空闲，重新聚焦也要检查是否从别处发起了任务。
+  useEffect(() => {
+    const onFocus = () => void refreshResearchState();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [refreshResearchState]);
 
   const sectionByCode = new Map<string, ProfileSection>();
   for (const section of data?.sections || []) {
@@ -215,8 +262,7 @@ export default function TargetInfoPanel({
 
   const openResearchReport = async (jobId: string) => {
     try {
-      const job = await backgroundJobs.get(jobId);
-      setReportJob(job);
+      setResearchReport(await research.report(jobId));
       setSelectedEvidence(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : '读取调研报告失败');
@@ -248,7 +294,7 @@ export default function TargetInfoPanel({
           {Boolean(latestResearchJob?.result_json?.report_text) && latestResearchJob && (
             <button
               type="button"
-              onClick={() => setReportJob(latestResearchJob)}
+              onClick={() => void openResearchReport(latestResearchJob.id)}
               className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-gray-500 hover:bg-gray-50 hover:text-brand-700"
             >
               <FileSearch className="h-3 w-3" />查看调研报告
@@ -258,11 +304,11 @@ export default function TargetInfoPanel({
             type="button"
             disabled={researchBusy}
             onClick={() => void startResearch()}
-            title={researchBusy ? '该标的正在调研中，请等待当前任务完成' : '发起 AI 调研'}
-            className="inline-flex items-center gap-1 border border-brand-200 px-2.5 py-1 text-xs text-brand-700 disabled:opacity-50"
+            title={researchBusy ? '该标的已有调研任务在排队或执行中，请等待完成' : '发起 AI 调研'}
+            className="inline-flex cursor-pointer items-center gap-1 border border-brand-200 px-2.5 py-1 text-xs text-brand-700 disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-gray-100 disabled:text-gray-400 disabled:opacity-100"
           >
             {researchBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Search className="h-3 w-3" />}
-            {researchBusy ? '调研中' : 'AI调研'}
+            {researchBusy ? researchButtonLabel(currentTarget) : 'AI调研'}
           </button>
         </div>
       </div>
@@ -404,7 +450,7 @@ export default function TargetInfoPanel({
           onOpenReport={(jobId) => void openResearchReport(jobId)}
         />
       )}
-      {reportJob && <ResearchReportDrawer job={reportJob} onClose={() => setReportJob(null)} />}
+      {researchReport && <ResearchReportDrawer report={researchReport} onClose={() => setResearchReport(null)} />}
     </div>
   );
 }

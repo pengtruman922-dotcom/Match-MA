@@ -35,6 +35,7 @@ from backend.app.jobs.handlers.common import (
     _safe_prompt_messages_for_trace,
 )
 from backend.app.jobs.queue import JobClaim
+from backend.app.jobs.retry_policy import is_transient_research_error, research_failure_is_final
 from backend.app.services.profile_sections import (
     PROFILE_SECTION_CODES,
     PROFILE_SECTION_LABELS,
@@ -149,6 +150,8 @@ class ResearchTools:
         self._subject_anchors = _subject_anchors(subject_names or [])
         self._low_relevance_urls: set[str] = set()
         self.searched_queries: list[str] = []
+        self.search_observations: list[dict[str, Any]] = []
+        self._search_errors: list[SearchError] = []
         self.fetched_urls: list[str] = []
         self.skipped_urls: list[dict[str, str]] = []
         self.consecutive_subject_misses = 0
@@ -177,6 +180,10 @@ class ResearchTools:
         try:
             hits = run_search(self._provider, query, max_results=count, api_key=self._api_key)
         except SearchError as exc:
+            self._search_errors.append(exc)
+            self.search_observations.append(
+                {"query": query, "returned_count": 0, "matched_result_count": 0, "error": str(exc)}
+            )
             return {"error": f"搜索失败：{exc}"}
         results = []
         matched_count = 0
@@ -207,6 +214,22 @@ class ResearchTools:
                 f"已连续 {self.consecutive_subject_misses} 次检索未找到与标的主体名称准确匹配的结果，"
                 "为避免混入同名或近似主体的信息，本次调研停止继续检索。"
             )
+        self.search_observations.append(
+            {
+                "query": query,
+                "returned_count": len(results),
+                "matched_result_count": matched_count,
+                # 只保存足以复盘主体匹配的有限候选，不保存网页正文。
+                "candidates": [
+                    {
+                        "title": item["title"],
+                        "url": item["url"],
+                        "subject_match": item["subject_match"],
+                    }
+                    for item in results[:5]
+                ],
+            }
+        )
         return {
             "query": query,
             "results": results,
@@ -255,6 +278,14 @@ class ResearchTools:
             "没有准确主体证据的模块放入 coverage.no_public_information，不要再调用工具。"
         )
 
+    def transient_search_failure(self) -> SearchError | None:
+        """Retry only when every attempted search failed transiently."""
+        if not self.search_observations or len(self._search_errors) != len(self.search_observations):
+            return None
+        if not all(is_transient_research_error(exc) for exc in self._search_errors):
+            return None
+        return self._search_errors[0]
+
 
 def _handle_seller_target_research(db: Session, job: JobClaim) -> dict[str, object]:
     target_id = job.entity_id
@@ -287,7 +318,8 @@ def _handle_seller_target_research(db: Session, job: JobClaim) -> dict[str, obje
     try:
         api_key = resolve_search_api_key(provider)
     except SearchError as exc:
-        _mark_research_outcome(db, target_id, "failed")
+        if research_failure_is_final(job, exc):
+            _mark_research_outcome(db, target_id, "failed")
         db.commit()
         raise ValueError(str(exc)) from exc
 
@@ -330,9 +362,32 @@ def _handle_seller_target_research(db: Session, job: JobClaim) -> dict[str, obje
             ),
             error_message=str(exc),
         )
-        _mark_research_outcome(db, target_id, "failed")
+        if research_failure_is_final(job, exc):
+            _mark_research_outcome(db, target_id, "failed")
         db.commit()
         raise
+
+    transient_search_failure = tools.transient_search_failure()
+    if transient_search_failure is not None:
+        _insert_research_trace(
+            db,
+            job=job,
+            target_id=target_id,
+            node_config=node_config,
+            status="failed",
+            input_json=research_context,
+            conversation=loop.messages + [{"role": "assistant", "content": loop.result.raw_output_text}],
+            loop=loop,
+            schema_validation_json={"valid": False, "error": str(transient_search_failure)},
+            latency_ms=loop.usage.latency_ms,
+            tools=tools,
+            error_code="search_provider_temporarily_unavailable",
+            error_message=str(transient_search_failure),
+        )
+        if research_failure_is_final(job, transient_search_failure):
+            _mark_research_outcome(db, target_id, "failed")
+        db.commit()
+        raise transient_search_failure
 
     claims, notes = normalize_research_output(
         loop.result.parsed_output_json,
@@ -388,8 +443,7 @@ def _handle_seller_target_research(db: Session, job: JobClaim) -> dict[str, obje
         # target reserved as ``researching`` until mapping and writeback finish;
         # otherwise a page refresh re-enables the button while the second half
         # of the pipeline is still running.
-        db.commit()
-        return {
+        result_payload = {
             "handled": True,
             "job_type": job.job_type,
             "seller_target_id": str(target_id),
@@ -399,6 +453,12 @@ def _handle_seller_target_research(db: Session, job: JobClaim) -> dict[str, obje
             **report,
             **usage_summary,
         }
+        # 多副本下 mapper 可能在本 worker 返回、mark_job_succeeded 执行前
+        # 就抢到任务。父任务报告和 mapper 入队必须在同一事务内可见，
+        # 否则 mapper 会把瞬时空 result_json 当成永久坏数据。
+        _store_research_job_result(db, job_id=job.id, result_payload=result_payload)
+        db.commit()
+        return result_payload
 
     # 未配置映射节点时退回内联采纳，让修复批次可以独立发版验证。
     apply_summary = apply_research_claims(
@@ -667,6 +727,32 @@ def _enqueue_research_map_job(db: Session, *, job: JobClaim, target_id: UUID) ->
             "metadata_json": {"source": RESEARCH_MAPPER_NODE_NAME},
         },
     ).scalar_one()
+
+
+def _store_research_job_result(
+    db: Session,
+    *,
+    job_id: UUID,
+    result_payload: dict[str, Any],
+) -> None:
+    db.execute(
+        text(
+            """
+            update background_job
+            set result_json = :result_json,
+                updated_at = now()
+            where id = :job_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ).bindparams(bindparam("result_json", type_=JSONB)),
+        {
+            "job_id": job_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "result_json": _json_safe_value(result_payload),
+        },
+    )
 
 
 def _chat_caller(
@@ -1275,6 +1361,7 @@ def _insert_research_trace(
                 "llm_calls": usage.llm_calls if usage else 0,
                 "tool_calls": usage.tool_calls_by_name if usage else {},
                 "searched_queries": tools.searched_queries,
+                "search_observations": tools.search_observations,
                 "fetched_urls": tools.fetched_urls,
                 "skipped_urls": tools.skipped_urls,
                 "content_inspection_retry_count": tools.content_inspection_retry_count,

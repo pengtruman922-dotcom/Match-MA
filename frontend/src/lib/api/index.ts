@@ -6,6 +6,7 @@ import type {
   ProfileSectionWrite,
   ResearchBatchResponse,
   ResearchJob,
+  ResearchReport,
   ResearchProposal,
   SellerResearchStatus,
   SellerTarget,
@@ -455,6 +456,8 @@ export const research = {
     }),
   sellerTargetStatus: (sellerTargetId: string) =>
     apiRequest<SellerResearchStatus>(`/research/seller-targets/${sellerTargetId}/status`),
+  report: (jobId: string) =>
+    apiRequest<ResearchReport>(`/research/jobs/${jobId}/report`),
   proposals: (entityId: string, reviewStatus?: string) =>
     apiRequest<ResearchProposal[]>(`/research/proposals${buildQuery({
       entity_type: 'seller_target',

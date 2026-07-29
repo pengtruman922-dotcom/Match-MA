@@ -14,7 +14,9 @@ import type { SellerTarget } from '../../types/api';
  */
 export type AiProcessingState =
   | 'parsing'
+  | 'research_queued'
   | 'researching'
+  | 'research_mapping'
   | 'parse_failed'
   | 'research_failed'
   | 'completed'
@@ -26,7 +28,9 @@ export function aiProcessingState(target: SellerTarget): AiProcessingState {
 
 export const AI_PROCESSING_LABELS: Record<AiProcessingState, string> = {
   parsing: '解析中',
+  research_queued: '排队中',
   researching: '调研中',
+  research_mapping: '整理结果中',
   parse_failed: '解析失败',
   research_failed: '调研失败',
   completed: '已完成',
@@ -35,7 +39,9 @@ export const AI_PROCESSING_LABELS: Record<AiProcessingState, string> = {
 
 export const AI_PROCESSING_CLASSES: Record<AiProcessingState, string> = {
   parsing: 'bg-blue-50 text-blue-700',
+  research_queued: 'bg-sky-50 text-sky-700',
   researching: 'bg-indigo-50 text-indigo-700',
+  research_mapping: 'bg-violet-50 text-violet-700',
   parse_failed: 'bg-red-50 text-red-700',
   research_failed: 'bg-red-50 text-red-700',
   completed: 'bg-emerald-50 text-emerald-700',
@@ -43,7 +49,7 @@ export const AI_PROCESSING_CLASSES: Record<AiProcessingState, string> = {
 };
 
 export function isAiProcessingActive(state: AiProcessingState): boolean {
-  return state === 'parsing' || state === 'researching';
+  return ['parsing', 'research_queued', 'researching', 'research_mapping'].includes(state);
 }
 
 /** Hover text: which pipeline ran, when, and how it ended. */

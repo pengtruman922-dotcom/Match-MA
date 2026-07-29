@@ -16,6 +16,7 @@ from backend.app.jobs.queue import (
     mark_job_succeeded,
     requeue_stale_running_jobs,
 )
+from backend.app.jobs.retry_policy import RESEARCH_JOB_TYPES, is_transient_research_error
 
 
 def run_once(*, queue_name: str, worker_id: str, stale_after_seconds: int = 300) -> bool:
@@ -36,7 +37,17 @@ def run_once(*, queue_name: str, worker_id: str, stale_after_seconds: int = 300)
             mark_job_succeeded(db, job_id=job.id, result_json=result)
     except Exception as exc:  # pragma: no cover - defensive worker boundary
         with session_scope() as db:
-            mark_job_failed(db, job_id=job.id, error_message=str(exc))
+            retry_allowed = (
+                is_transient_research_error(exc)
+                if job.job_type in RESEARCH_JOB_TYPES
+                else True
+            )
+            mark_job_failed(
+                db,
+                job_id=job.id,
+                error_message=str(exc),
+                retry_allowed=retry_allowed,
+            )
             _mark_related_business_update_failed_if_final(db, job, str(exc))
         # 任务已经记为 failed，不再往上抛：抛出去会穿透 main() 结束进程，
         # 一条脏数据就能带走整个 worker，剩下的队列跟着停摆。
@@ -117,7 +128,8 @@ def main() -> None:
         help=(
             "Seconds a job may stay 'running' before another worker reclaims it. "
             "Must exceed the queue's slowest job: reclaiming a live job marks it "
-            "failed under max_attempts=1. The research queue runs 5-15 minutes."
+            "for retry or failure while the original process may still be working. "
+            "The research queue runs 5-15 minutes."
         ),
     )
     args = parser.parse_args()

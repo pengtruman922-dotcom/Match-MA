@@ -120,8 +120,8 @@ export default function Targets() {
     users.options().then(setOwnerOptions).catch(() => {});
   }, [admin]);
 
-  // Poll rows still parsing so recommendation/summary flips show up without a
-  // manual refresh. Completion signal is information_status leaving parsing.
+  // Poll every active AI phase so queued → researching → mapping → completed
+  // is visible without a manual refresh.
   useEffect(() => {
     const activeIds = items.filter(isParsingTarget).map((item) => item.id);
     if (activeIds.length === 0) return;
@@ -134,7 +134,11 @@ export default function Targets() {
           const next = prev.map((item) => {
             const fresh = updates.find((row) => row.id === item.id);
             if (!fresh) return item;
-            if (fresh.updated_at === item.updated_at && fresh.information_status === item.information_status) return item;
+            if (
+              fresh.updated_at === item.updated_at
+              && fresh.information_status === item.information_status
+              && fresh.ai_processing_state === item.ai_processing_state
+            ) return item;
             changed = true;
             // The detail endpoint does not aggregate relation events; keep the list values.
             return {

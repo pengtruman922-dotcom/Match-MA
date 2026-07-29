@@ -1,3 +1,4 @@
+import inspect
 from decimal import Decimal
 from uuid import UUID
 
@@ -7,6 +8,8 @@ from backend.app.api.routes.update_logs import (
     _batch_record,
     _batch_rollback_block_reason,
     _latest_effective_batch,
+    _research_job_batch,
+    _build_update_batches,
     _rollbackability,
     _values_match_for_rollback,
 )
@@ -56,6 +59,59 @@ def test_research_logs_are_grouped_by_original_research_job() -> None:
         {},
     )
     assert key == "research-job-00000000-0000-0000-0000-000000000003"
+
+
+def test_zero_write_research_still_has_a_completed_update_batch() -> None:
+    batch = _research_job_batch(
+        {
+            "id": UUID("00000000-0000-0000-0000-000000000003"),
+            "status": "succeeded",
+            "mapper_status": "succeeded",
+            "created_by": None,
+            "created_by_name": "测试顾问",
+            "created_at": "2026-07-29T10:00:00+00:00",
+            "report_available": True,
+        },
+        [],
+        entity_type="seller_target",
+        entity_id=UUID("00000000-0000-0000-0000-000000000101"),
+    )
+
+    assert batch["status"] == "applied"
+    assert batch["changed_field_count"] == 0
+    assert batch["source_type"] == "research_proposal"
+    assert batch["report_available"] is True
+
+
+def test_update_history_loads_research_jobs_even_when_they_wrote_no_fields() -> None:
+    source = inspect.getsource(_build_update_batches)
+    assert "_entity_research_jobs" in source
+    assert "_research_job_batch" in source
+
+
+def test_research_batch_exposes_queue_and_mapping_phases() -> None:
+    base = {
+        "id": UUID("00000000-0000-0000-0000-000000000003"),
+        "created_by": None,
+        "created_by_name": "测试顾问",
+        "created_at": "2026-07-29T10:00:00+00:00",
+        "report_available": False,
+    }
+    queued = _research_job_batch(
+        {**base, "status": "queued", "mapper_status": None},
+        [],
+        entity_type="seller_target",
+        entity_id=UUID("00000000-0000-0000-0000-000000000101"),
+    )
+    mapping = _research_job_batch(
+        {**base, "status": "succeeded", "mapper_status": "running"},
+        [],
+        entity_type="seller_target",
+        entity_id=UUID("00000000-0000-0000-0000-000000000101"),
+    )
+
+    assert queued["status"] == "queued"
+    assert mapping["status"] == "mapping"
 
 
 def test_rollbackability_rejects_unsafe_or_already_rolled_back_logs() -> None:
