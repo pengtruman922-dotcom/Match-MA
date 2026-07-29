@@ -13,6 +13,7 @@ from backend.app.api.routes.utils import (
     exclusion_visible_sql,
     owner_scope_required,
     relation_event_visible_sql,
+    relation_owner_sql,
     relation_sole_owner_sql,
     relation_visible_sql,
 )
@@ -193,6 +194,11 @@ def list_relations_board(
     current_user: CurrentUser,
     db: Session = Depends(get_db),
     ownership: str = Query(default="involved", pattern="^(all|involved|sole)$"),
+    # 刻意用裸默认值而不是 Query(default=None)：后者的 Python 默认值是 Query
+    # 实例本身，直接调用本函数（测试、内部复用）时 `owner is not None` 会成立，
+    # 于是把一个 FieldInfo 当成 UUID 绑进 SQL。裸 None 在 FastAPI 里同样被识别
+    # 为查询参数，且没有这个陷阱。
+    owner: UUID | None = None,
     q: str | None = Query(default=None, max_length=200),
     limit: int = Query(default=2000, ge=1, le=5000),
     offset: int = Query(default=0, ge=0),
@@ -203,6 +209,10 @@ def list_relations_board(
       all       仅受权限地板约束
       involved  任一方归我（默认，与权限地板同一谓词）
       sole      标的与买家都归我
+
+    owner 是管理侧的「指定负责人」视图筛选：任一方归该账号。它与 ownership
+    是 AND，且不放宽权限地板——非管理员挑别人只会得到两者的交集（通常为空），
+    这正是想要的：筛选器不能成为越权读取的入口。
     """
     params: dict[str, Any] = {"limit": limit, "offset": offset}
     where = _relation_base_where(params, q=q)
@@ -218,6 +228,9 @@ def list_relations_board(
     if scope_sql:
         where.extend(dict.fromkeys(scope_sql))
         params["scope_user_id"] = current_user.user_id
+    if owner is not None:
+        where.append(relation_owner_sql("r"))
+        params["owner_user_id"] = owner
 
     rows = db.execute(
         text(

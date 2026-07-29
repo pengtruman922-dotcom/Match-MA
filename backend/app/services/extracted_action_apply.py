@@ -238,6 +238,7 @@ def apply_buyer_intent_update_action(
             "action_type": action["action_type"],
             "field_value_source": source_context,
         },
+        applied_by=SYSTEM_USER_ID,
     )
     write_field_value_sources_for_diff(
         db,
@@ -351,6 +352,7 @@ def apply_buyer_seller_relation_update_action(
                 "action_type": action["action_type"],
                 "field_value_source": source_context,
             },
+            applied_by=SYSTEM_USER_ID,
         )
         write_field_value_sources_for_diff(
             db,

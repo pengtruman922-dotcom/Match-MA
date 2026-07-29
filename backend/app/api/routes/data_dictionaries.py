@@ -1,5 +1,5 @@
 from typing import Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import Response
@@ -252,6 +252,10 @@ async def import_industry_dictionary(
         rows = parse_industry_import(file.filename or "industry.csv", content)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    # 正式导入会按层级批量 upsert。先锁住写入者，让「校验现状 → 应用」之间
+    # 不会被另一个字典编辑/导入请求插入同名词；普通查询不受这个锁影响。
+    if not dry_run:
+        db.execute(text("lock table industry_taxonomy in share row exclusive mode"))
     preview_rows = _validate_import_rows(db, rows)
     errors = [row for row in preview_rows if row["status"] == "error"]
     result: dict[str, Any] = {
@@ -435,147 +439,193 @@ def _validate_import_rows(db: Session, rows: list[dict[str, Any]]) -> list[dict[
 
 
 def _apply_import_rows(db: Session, rows: list[dict[str, Any]]) -> dict[str, int]:
-    counts = {"created_l1": 0, "created_l2": 0, "created_aliases": 0}
+    """Apply one import in bounded database batches while keeping it atomic.
+
+    The old implementation did select + update/insert for every occurrence:
+    the 0729 file therefore needed about 780 ``Session.execute`` calls.  Build
+    the final value of each distinct term in memory, reuse existing ids, and
+    let psycopg execute at most six write batches instead.  The route keeps one
+    transaction and commits only after every level succeeds.
+    """
+    existing = _industry_terms_by_lower_name(db)
+    l1_terms: dict[str, dict[str, Any]] = {}
+    l2_terms: dict[str, dict[str, Any]] = {}
+    aliases: dict[str, dict[str, Any]] = {}
+
     for row in rows:
-        l1_id, created = _ensure_import_canonical(db, term=row["l1"], level="l1", parent=None, active=row["active"])
-        counts["created_l1"] += int(created)
-        canonical_id = l1_id
+        l1_key = str(row["l1"]).lower()
+        l1_item = l1_terms.setdefault(
+            l1_key,
+            {"term": row["l1"], "active": row["active"]},
+        )
+        # Preserve the first spelling, matching the former row-by-row insert,
+        # but let the last repeated row decide the final active state.
+        l1_item["active"] = row["active"]
         if row.get("l2"):
-            canonical_id, created = _ensure_import_canonical(
-                db,
-                term=row["l2"],
-                level="l2",
-                parent={"id": l1_id, "term": row["l1"]},
-                active=row["active"],
+            l2_key = str(row["l2"]).lower()
+            l2_item = l2_terms.setdefault(
+                l2_key,
+                {
+                    "term": row["l2"],
+                    "l1_key": l1_key,
+                    "l1_name": row["l1"],
+                    "active": row["active"],
+                },
             )
-            counts["created_l2"] += int(created)
+            l2_item["active"] = row["active"]
+            canonical_key = l2_key
+        else:
+            canonical_key = l1_key
         for alias in row["aliases"]:
-            counts["created_aliases"] += int(
-                _ensure_import_alias(
-                    db,
-                    term=alias,
-                    canonical_id=canonical_id,
-                    l1_name=row["l1"],
-                )
+            aliases.setdefault(
+                alias.lower(),
+                {"term": alias, "canonical_key": canonical_key, "l1_name": row["l1"]},
             )
-    return counts
+
+    ids_by_term = {key: value["id"] for key, value in existing.items()}
+    new_l1: list[dict[str, Any]] = []
+    existing_l1: list[dict[str, Any]] = []
+    for key, item in l1_terms.items():
+        term_id = ids_by_term.get(key) or uuid4()
+        ids_by_term[key] = term_id
+        params = _import_term_params(
+            term_id=term_id,
+            term=item["term"],
+            level="l1",
+            l1_name=item["term"],
+            parent_id=None,
+            active=item["active"],
+        )
+        (existing_l1 if key in existing else new_l1).append(params)
+
+    _insert_import_canonicals(db, new_l1)
+    _update_import_canonicals(db, existing_l1)
+
+    new_l2: list[dict[str, Any]] = []
+    existing_l2: list[dict[str, Any]] = []
+    for key, item in l2_terms.items():
+        term_id = ids_by_term.get(key) or uuid4()
+        ids_by_term[key] = term_id
+        params = _import_term_params(
+            term_id=term_id,
+            term=item["term"],
+            level="l2",
+            l1_name=item["l1_name"],
+            parent_id=ids_by_term[item["l1_key"]],
+            active=item["active"],
+        )
+        (existing_l2 if key in existing else new_l2).append(params)
+
+    _insert_import_canonicals(db, new_l2)
+    _update_import_canonicals(db, existing_l2)
+
+    new_aliases: list[dict[str, Any]] = []
+    existing_aliases: list[dict[str, Any]] = []
+    for key, item in aliases.items():
+        params = {
+            "id": existing[key]["id"] if key in existing else uuid4(),
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "term": item["term"],
+            "canonical_term_id": ids_by_term[item["canonical_key"]],
+            "l1_name": item["l1_name"],
+        }
+        (existing_aliases if key in existing else new_aliases).append(params)
+
+    _insert_import_aliases(db, new_aliases)
+    _update_import_aliases(db, existing_aliases)
+
+    return {
+        "created_l1": len(new_l1),
+        "created_l2": len(new_l2),
+        "created_aliases": len(new_aliases),
+    }
 
 
-def _ensure_import_canonical(
-    db: Session,
+def _import_term_params(
     *,
+    term_id: UUID,
     term: str,
     level: Literal["l1", "l2"],
-    parent: dict[str, Any] | None,
-    active: bool,
-) -> tuple[UUID, bool]:
-    existing = db.execute(
-        text(
-            """
-            select id from industry_taxonomy
-            where team_id = :team_id and workspace_id = :workspace_id and lower(term) = lower(:term)
-            """
-        ),
-        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID, "term": term},
-    ).scalar_one_or_none()
-    if existing:
-        db.execute(
-            text(
-                """
-                update industry_taxonomy
-                set active = :active,
-                    parent_id = case when :level = 'l2' then :parent_id else null end,
-                    l1_name = :l1_name,
-                    updated_at = now()
-                where id = :id
-                """
-            ),
-            {
-                "active": active,
-                "level": level,
-                "parent_id": parent["id"] if parent else None,
-                "l1_name": term if level == "l1" else parent["term"],
-                "id": existing,
-            },
-        )
-        return existing, False
-    row = db.execute(
-        text(
-            """
-            insert into industry_taxonomy (
-              team_id, workspace_id, term, level, l1_name, parent_id, active
-            ) values (
-              :team_id, :workspace_id, :term, :level, :l1_name, :parent_id, :active
-            ) returning id
-            """
-        ),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "term": term,
-            "level": level,
-            "l1_name": term if level == "l1" else parent["term"],
-            "parent_id": parent["id"] if parent else None,
-            "active": active,
-        },
-    ).scalar_one()
-    return row, True
-
-
-def _ensure_import_alias(
-    db: Session,
-    *,
-    term: str,
-    canonical_id: UUID,
     l1_name: str,
-) -> bool:
-    existing = db.execute(
-        text(
-            """
-            select id from industry_taxonomy
-            where team_id = :team_id and workspace_id = :workspace_id
-              and lower(term) = lower(:term) and level = 'alias'
-              and canonical_term_id = :canonical_term_id
-            """
-        ),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "term": term,
-            "canonical_term_id": canonical_id,
-        },
-    ).scalar_one_or_none()
-    if existing:
-        db.execute(
-            text(
-                """
-                update industry_taxonomy
-                set active = true, l1_name = :l1_name, updated_at = now()
-                where id = :id
-                """
-            ),
-            {"l1_name": l1_name, "id": existing},
-        )
-        return False
+    parent_id: UUID | None,
+    active: bool,
+) -> dict[str, Any]:
+    return {
+        "id": term_id,
+        "team_id": DEFAULT_TEAM_ID,
+        "workspace_id": DEFAULT_WORKSPACE_ID,
+        "term": term,
+        "level": level,
+        "l1_name": l1_name,
+        "parent_id": parent_id,
+        "active": active,
+    }
+
+
+def _insert_import_canonicals(db: Session, params: list[dict[str, Any]]) -> None:
+    if not params:
+        return
     db.execute(
         text(
             """
             insert into industry_taxonomy (
-              team_id, workspace_id, term, level, l1_name, canonical_term_id, active
+              id, team_id, workspace_id, term, level, l1_name, parent_id, active
             ) values (
-              :team_id, :workspace_id, :term, 'alias', :l1_name, :canonical_term_id, true
+              :id, :team_id, :workspace_id, :term, :level, :l1_name, :parent_id, :active
             )
             """
         ),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "term": term,
-            "l1_name": l1_name,
-            "canonical_term_id": canonical_id,
-        },
+        params,
     )
-    return True
+
+
+def _update_import_canonicals(db: Session, params: list[dict[str, Any]]) -> None:
+    if not params:
+        return
+    db.execute(
+        text(
+            """
+            update industry_taxonomy
+            set active = :active, parent_id = :parent_id, l1_name = :l1_name, updated_at = now()
+            where id = :id and team_id = :team_id and workspace_id = :workspace_id
+            """
+        ),
+        params,
+    )
+
+
+def _insert_import_aliases(db: Session, params: list[dict[str, Any]]) -> None:
+    if not params:
+        return
+    db.execute(
+        text(
+            """
+            insert into industry_taxonomy (
+              id, team_id, workspace_id, term, level, l1_name, canonical_term_id, active
+            ) values (
+              :id, :team_id, :workspace_id, :term, 'alias', :l1_name, :canonical_term_id, true
+            )
+            """
+        ),
+        params,
+    )
+
+
+def _update_import_aliases(db: Session, params: list[dict[str, Any]]) -> None:
+    if not params:
+        return
+    db.execute(
+        text(
+            """
+            update industry_taxonomy
+            set active = true, l1_name = :l1_name, updated_at = now()
+            where id = :id and canonical_term_id = :canonical_term_id
+              and team_id = :team_id and workspace_id = :workspace_id
+            """
+        ),
+        params,
+    )
 
 
 def _industry_terms_by_lower_name(db: Session) -> dict[str, dict[str, Any]]:

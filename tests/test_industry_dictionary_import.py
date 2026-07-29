@@ -3,7 +3,7 @@ from uuid import UUID
 
 from openpyxl import Workbook
 
-from backend.app.api.routes.data_dictionaries import _validate_import_rows
+from backend.app.api.routes.data_dictionaries import _apply_import_rows, _validate_import_rows
 from backend.app.services.industry_dictionary_import import parse_industry_import
 
 
@@ -98,3 +98,47 @@ def test_import_preview_rejects_alias_reassignment() -> None:
 
     assert preview[0]["status"] == "error"
     assert "其他行业" in preview[0]["message"]
+
+
+class _ApplyDb:
+    def __init__(self, existing_rows):
+        self.existing_rows = existing_rows
+        self.calls = []
+
+    def execute(self, statement, params):
+        self.calls.append((str(statement), params))
+        if len(self.calls) == 1:
+            return _MappingsResult(self.existing_rows)
+        return object()
+
+
+def test_apply_import_batches_the_0729_shape_instead_of_writing_row_by_row() -> None:
+    rows = [
+        {
+            "row_number": index + 2,
+            "l1": f"一级-{index % 16}",
+            "l2": f"二级-{index}",
+            "aliases": [f"别名-{index}"] if index < 40 else [],
+            "active": True,
+        }
+        for index in range(167)
+    ]
+    # 文件还有 16 个仅含 L1 的行；重复 L1 应在内存里归并，而不是再次写库。
+    rows.extend(
+        {
+            "row_number": 169 + index,
+            "l1": f"一级-{index}",
+            "l2": None,
+            "aliases": [],
+            "active": True,
+        }
+        for index in range(16)
+    )
+    db = _ApplyDb(existing_rows=[])
+
+    counts = _apply_import_rows(db, rows)
+
+    assert counts == {"created_l1": 16, "created_l2": 167, "created_aliases": 40}
+    # 1 次现状读取 + L1/L2/alias 各 1 个 executemany；即使新旧混合也至多 7 次。
+    assert len(db.calls) == 4
+    assert [len(params) for _, params in db.calls[1:]] == [16, 167, 40]

@@ -24,6 +24,7 @@ export default function Board() {
   const [searchParams, setSearchParams] = useSearchParams();
   const view = readView(searchParams);
   const ownership = readOwnership(searchParams);
+  const owner = searchParams.get('owner') || '';
   const hideStale = searchParams.get('stale') === 'hide';
 
   // 兼容旧分享链接：排序控件已移除，固定按最近关系动态降序。
@@ -57,6 +58,7 @@ export default function Board() {
 
   const { model, loading, error, loaded, truncated } = useBoardData({
     ownership,
+    owner,
     view,
     q: qDraft,
     hideStale,
@@ -83,12 +85,14 @@ export default function Board() {
         view={view}
         q={qDraft}
         ownership={ownership}
+        owner={owner}
         hideStale={hideStale}
         onViewChange={(value) => patchParams({ view: value === 'target' ? undefined : value })}
         onQChange={setQDraft}
         onOwnershipChange={(value) =>
           patchParams({ ownership: value === 'involved' ? undefined : value })
         }
+        onOwnerChange={(value) => patchParams({ owner: value || undefined })}
         onHideStaleChange={(value) => patchParams({ stale: value ? 'hide' : undefined })}
       />
 
@@ -104,14 +108,18 @@ export default function Board() {
       ) : loaded === 0 && !error ? (
         <div className="border border-gray-200 bg-white py-16 text-center">
           <p className="text-sm text-gray-500">
-            {ownership === 'involved'
-              ? '当前责任范围下还没有撮合关系'
-              : ownership === 'sole'
-                ? '没有标的与买家都归你的撮合关系'
-                : '还没有撮合关系'}
+            {owner
+              ? '该负责人名下没有撮合关系'
+              : ownership === 'involved'
+                ? '当前责任范围下还没有撮合关系'
+                : ownership === 'sole'
+                  ? '没有标的与买家都归你的撮合关系'
+                  : '还没有撮合关系'}
           </p>
           <p className="mt-1 text-xs text-gray-400">
-            在智能推荐里点「开始推进」，或在标的/买家详情页关联对手方；也可以把责任范围切到「全部」再看。
+            {owner
+              ? '责任范围与负责人是「且」的关系——先把责任范围切到「全部」，再看这个人名下有没有。'
+              : '在智能推荐里点「开始推进」，或在标的/买家详情页关联对手方；也可以把责任范围切到「全部」再看。'}
           </p>
         </div>
       ) : (

@@ -412,6 +412,41 @@ def relation_sole_owner_sql(alias: str) -> str:
     )"""
 
 
+def relation_owner_sql(alias: str) -> str:
+    """看板「指定负责人」视图筛选：任一方归 :owner_user_id 指定的账号。
+
+    与 relation_visible_sql 谓词同形，但用**独立参数**——两者可以同时出现
+    （管理员挑了某人，同时 owner_scope_enforced 又对非管理员生效），共用
+    一个参数名会让后写的值覆盖前一个，把权限地板悄悄改成视图筛选。
+    """
+    return f"""(
+        exists (
+          select 1
+          from seller_target owner_st
+          where owner_st.id = {alias}.seller_target_id
+            and owner_st.owner_user_id = :owner_user_id
+            and owner_st.deleted_at is null
+        )
+        or exists (
+          select 1
+          from buyer_intent owner_bi
+          where owner_bi.id = {alias}.buyer_intent_id
+            and owner_bi.owner_user_id = :owner_user_id
+            and owner_bi.deleted_at is null
+        )
+        or exists (
+          select 1
+          from buyer_party owner_bp
+          where owner_bp.id = coalesce(
+                {alias}.buyer_party_id,
+                (select owner_bi2.buyer_party_id from buyer_intent owner_bi2 where owner_bi2.id = {alias}.buyer_intent_id)
+              )
+            and owner_bp.owner_user_id = :owner_user_id
+            and owner_bp.deleted_at is null
+        )
+    )"""
+
+
 def relation_event_visible_sql(alias: str) -> str:
     return f"""(
         exists (

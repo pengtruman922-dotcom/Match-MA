@@ -13,6 +13,20 @@ const ROLE_LABELS: Record<string, string> = {
 
 const EMPTY_FORM: AppUserCreate = { username: '', name: '', password: '', role: 'consultant' };
 
+/** 从未动过手的账号显示「—」，而不是一个假的时间。 */
+function formatActivity(value: string | null): string {
+  if (!value) return '—';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value.slice(0, 16);
+  return parsed.toLocaleString('zh-CN', {
+    year: '2-digit',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 export default function Users() {
   const [items, setItems] = useState<AppUser[]>([]);
   const [loading, setLoading] = useState(true);
@@ -188,6 +202,9 @@ export default function Users() {
                 <th className="px-4 py-3">负责标的</th>
                 <th className="px-4 py-3">负责买家</th>
                 <th className="px-4 py-3">负责意向</th>
+                <th className="px-4 py-3" title="最近一次业务更新 / 推进动态 / 字段应用 / 推荐提问，不含 AI 自动回填">
+                  最近活跃
+                </th>
                 <th className="px-4 py-3">创建时间</th>
                 <th className="px-4 py-3 text-right">操作</th>
               </tr>
@@ -221,6 +238,7 @@ export default function Users() {
                   <td className="px-4 py-3">{user.owned_seller_targets}</td>
                   <td className="px-4 py-3">{user.owned_buyer_parties}</td>
                   <td className="px-4 py-3">{user.owned_buyer_intents}</td>
+                  <td className="px-4 py-3 text-xs text-gray-500">{formatActivity(user.latest_activity_at)}</td>
                   <td className="px-4 py-3 text-xs text-gray-400">{user.created_at.slice(0, 10)}</td>
                   <td className="px-4 py-3">
                     <div className="flex items-center justify-end gap-2">
@@ -250,7 +268,7 @@ export default function Users() {
               ))}
               {items.length === 0 && (
                 <tr>
-                  <td colSpan={8} className="px-4 py-8 text-center text-sm text-gray-400">
+                  <td colSpan={9} className="px-4 py-8 text-center text-sm text-gray-400">
                     暂无账号，点击右上角“新建账号”。
                   </td>
                 </tr>

@@ -1,4 +1,8 @@
+import { useEffect, useState } from 'react';
 import { Info, Search } from 'lucide-react';
+import { users } from '../../lib/api';
+import { isAdmin } from '../../lib/auth';
+import type { AppUserOption } from '../../types/api';
 import type { BoardOwnership, BoardView } from './boardBuckets';
 
 const VIEW_TABS: Array<{ value: BoardView; label: string }> = [
@@ -16,25 +20,61 @@ const OWNERSHIP_OPTIONS: Array<{ value: BoardOwnership; label: string; hint: str
 const SELECT_CLASS =
   'border border-gray-200 bg-white px-2 py-2 text-sm text-gray-600 outline-none transition-colors hover:border-brand-300 focus:border-brand-600';
 
+/**
+ * 负责人下拉的选项源。返回 null 表示不渲染这个筛选器。
+ *
+ * `/users/options` 是 admin-only，顾问拿不到账号名单；而且「看别人手上的活」
+ * 本就是管理侧诉求，所以非管理员直接不显示。后端仍然独立校验，前端隐藏只是
+ * 免得点出一个必然 403 的控件。
+ */
+function useOwnerOptions(): AppUserOption[] | null {
+  const [options, setOptions] = useState<AppUserOption[] | null>(null);
+
+  useEffect(() => {
+    if (!isAdmin()) return;
+    let cancelled = false;
+    users
+      .options()
+      .then((rows) => {
+        if (!cancelled) setOptions(rows.filter((row) => row.role !== 'developer'));
+      })
+      .catch(() => {
+        // 名单拿不到就退回「不限」，不要因为一个筛选器把整块看板卡住。
+        if (!cancelled) setOptions(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return options;
+}
+
 export default function BoardFilters({
   view,
   q,
   ownership,
+  owner,
   hideStale,
   onViewChange,
   onQChange,
   onOwnershipChange,
+  onOwnerChange,
   onHideStaleChange,
 }: {
   view: BoardView;
   q: string;
   ownership: BoardOwnership;
+  owner: string;
   hideStale: boolean;
   onViewChange: (value: BoardView) => void;
   onQChange: (value: string) => void;
   onOwnershipChange: (value: BoardOwnership) => void;
+  onOwnerChange: (value: string) => void;
   onHideStaleChange: (value: boolean) => void;
 }) {
+  const ownerOptions = useOwnerOptions();
+
   return (
     <div className="flex flex-wrap items-center gap-2">
       <div className="flex border border-gray-200 bg-white">
@@ -80,6 +120,26 @@ export default function BoardFilters({
           ))}
         </select>
       </label>
+
+      {ownerOptions !== null ? (
+        <label className="flex items-center gap-1.5 text-sm text-gray-500">
+          <span className="shrink-0">负责人</span>
+          <select
+            value={owner}
+            onChange={(event) => onOwnerChange(event.target.value)}
+            className={SELECT_CLASS}
+            title="只看该账号负责的关系（标的、意向、买家任一方）"
+          >
+            <option value="">不限</option>
+            {ownerOptions.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.name}
+                {option.status === 'disabled' ? '（已停用）' : ''}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
 
       <div className="flex items-center gap-1.5 text-sm text-gray-500">
         <label className="flex cursor-pointer items-center gap-1.5">

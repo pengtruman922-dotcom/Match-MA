@@ -68,7 +68,6 @@ import type {
   RecommendationSession,
   RecommendationSessionBundle,
   AppUser,
-  AppUserActivitySummary,
   AppUserCreate,
   AppUserOption,
   BatchAssignOwnerResponse,
@@ -103,7 +102,6 @@ export const auth = {
 export const users = {
   list: () => apiRequest<AppUser[]>('/users'),
   options: () => apiRequest<AppUserOption[]>('/users/options'),
-  activitySummary: () => apiRequest<AppUserActivitySummary[]>('/users/activity-summary'),
   create: (data: AppUserCreate) =>
     apiRequest<AppUser>('/users', { method: 'POST', body: JSON.stringify(data) }),
   update: (id: string, data: { name?: string; role?: string; status?: string }) =>
@@ -317,7 +315,12 @@ export const relations = {
    * 看板一次拉完整块数据在前端分组，所以这里不传 q——搜索在内存里做，
    * 见 features/board/boardBuckets.ts 的 filter 说明。
    */
-  board: (params?: { ownership?: 'all' | 'involved' | 'sole'; limit?: number; offset?: number }) =>
+  board: (params?: {
+    ownership?: 'all' | 'involved' | 'sole';
+    owner?: string;
+    limit?: number;
+    offset?: number;
+  }) =>
     apiRequest<RelationBoardCard[]>(`/relations/board${buildQuery(params || {})}`),
   get: (id: string) => apiRequest<BuyerSellerRelation>(`/relations/${id}`),
   events: (id: string, params?: { limit?: number; offset?: number }) =>

@@ -32,7 +32,9 @@ export async function apiRequest<T>(path: string, options?: RequestInit): Promis
     });
   } catch (error) {
     const reason = error instanceof Error ? error.message : 'unknown network error';
-    throw new Error(`无法连接后端服务（${reason}）。请检查 Railway 部署状态后重试。`);
+    throw new Error(
+      `${reason}：请求在收到后端响应前失败。请先重试；若持续失败，可检查当前网络与 Railway 部署状态。`,
+    );
   }
 
   if (!response.ok) {

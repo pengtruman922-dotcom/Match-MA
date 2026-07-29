@@ -21,7 +21,11 @@ from backend.app.api.routes.relations import (
     _relation_board_columns,
     _relation_select_columns,
 )
-from backend.app.api.routes.utils import relation_sole_owner_sql, relation_visible_sql
+from backend.app.api.routes.utils import (
+    relation_owner_sql,
+    relation_sole_owner_sql,
+    relation_visible_sql,
+)
 from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
@@ -141,6 +145,7 @@ def test_board_route_wins_before_uuid_route_and_returns_exact_schema() -> None:
         "limit=5001",
         "offset=-1",
         f"q={'x' * 201}",
+        "owner=not-a-uuid",
     ),
 )
 def test_board_route_rejects_invalid_query_without_hitting_db(query: str) -> None:
@@ -190,6 +195,177 @@ def test_board_sql_scope_matrix_and_bind_params(
     assert ("scope_user_id" in params) is bool(visible_count or sole_count)
     assert set(statement._bindparams) == set(params)
     assert sql.count("(") == sql.count(")")
+
+
+def test_board_owner_filter_is_absent_unless_requested() -> None:
+    """没传 owner 就一个字节的负责人谓词都不该进 SQL。
+
+    owner 用的是裸 None 默认值——若换成 Query(default=None)，直接调用本函数时
+    默认值是 FieldInfo 而非 None，这条断言会立刻挂。
+    """
+    db = _FakeSession()
+
+    with patch.object(relations, "owner_scope_required", return_value=False):
+        relations.list_relations_board(
+            current_user=_USER,
+            db=db,
+            ownership="all",
+            q=None,
+            limit=2000,
+            offset=0,
+        )
+
+    statement, params = db.calls[0]
+    assert "owner_user_id" not in str(statement)
+    assert "owner_user_id" not in params
+
+
+def test_board_owner_filter_binds_its_own_param_and_ands_with_scope() -> None:
+    """负责人筛选与权限地板必须是两个独立参数，否则后写的值会盖掉地板。"""
+    db = _FakeSession()
+    picked = UUID("22222222-2222-2222-2222-222222222222")
+
+    with patch.object(relations, "owner_scope_required", return_value=True):
+        relations.list_relations_board(
+            current_user=_USER,
+            db=db,
+            ownership="sole",
+            owner=picked,
+            q=None,
+            limit=2000,
+            offset=0,
+        )
+
+    statement, params = db.calls[0]
+    sql = str(statement)
+    assert params["owner_user_id"] == picked
+    assert params["scope_user_id"] == _USER.user_id
+    assert sql.count("from seller_target owner_st") == 1
+    assert sql.count("from seller_target scope_st") == 1
+    assert sql.count("from seller_target sole_st") == 1
+    assert set(statement._bindparams) == set(params)
+    assert sql.count("(") == sql.count(")")
+
+
+def test_owner_predicate_selects_relations_on_any_side() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    schema = (
+        "create table seller_target (id text primary key, owner_user_id text, deleted_at text)",
+        "create table buyer_party (id text primary key, owner_user_id text, deleted_at text)",
+        "create table buyer_intent ("
+        "id text primary key, buyer_party_id text, owner_user_id text, deleted_at text)",
+        "create table buyer_seller_relation ("
+        "id text primary key, seller_target_id text, buyer_intent_id text, buyer_party_id text)",
+    )
+    picked = "22222222-2222-2222-2222-222222222222"
+    other = "33333333-3333-3333-3333-333333333333"
+
+    with engine.begin() as connection:
+        for statement in schema:
+            connection.execute(text(statement))
+        connection.execute(
+            text("insert into seller_target values (:id, :owner, :deleted_at)"),
+            [
+                {"id": "st-picked", "owner": picked, "deleted_at": None},
+                {"id": "st-other", "owner": other, "deleted_at": None},
+                {"id": "st-picked-deleted", "owner": picked, "deleted_at": "2026-07-29"},
+            ],
+        )
+        connection.execute(
+            text("insert into buyer_party values (:id, :owner, null)"),
+            [
+                {"id": "bp-picked", "owner": picked},
+                {"id": "bp-other", "owner": other},
+            ],
+        )
+        connection.execute(
+            text("insert into buyer_intent values (:id, :party, :owner, null)"),
+            [
+                {"id": "bi-picked", "party": "bp-other", "owner": picked},
+                {"id": "bi-other", "party": "bp-other", "owner": other},
+                {"id": "bi-party-picked", "party": "bp-picked", "owner": other},
+            ],
+        )
+        connection.execute(
+            text("insert into buyer_seller_relation values (:id, :target, :intent, :party)"),
+            [
+                {"id": "target-side", "target": "st-picked", "intent": "bi-other", "party": None},
+                {"id": "intent-side", "target": "st-other", "intent": "bi-picked", "party": None},
+                {"id": "party-side", "target": "st-other", "intent": "bi-party-picked", "party": None},
+                {"id": "none-side", "target": "st-other", "intent": "bi-other", "party": None},
+                # 软删的标的不能把关系带进来——否则被删对象会从筛选器漏出。
+                {"id": "deleted-target", "target": "st-picked-deleted", "intent": "bi-other", "party": None},
+            ],
+        )
+        rows = connection.execute(
+            text(
+                f"select r.id from buyer_seller_relation r where {relation_owner_sql('r')}"
+            ),
+            {"owner_user_id": picked},
+        )
+        matched = set(rows.scalars())
+
+    assert matched == {"target-side", "intent-side", "party-side"}
+
+
+def test_owner_filter_is_an_intersection_and_cannot_bypass_scope() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    schema = (
+        "create table seller_target (id text primary key, owner_user_id text, deleted_at text)",
+        "create table buyer_party (id text primary key, owner_user_id text, deleted_at text)",
+        "create table buyer_intent ("
+        "id text primary key, buyer_party_id text, owner_user_id text, deleted_at text)",
+        "create table buyer_seller_relation ("
+        "id text primary key, seller_target_id text, buyer_intent_id text, buyer_party_id text)",
+    )
+    current = "11111111-1111-1111-1111-111111111111"
+    picked = "22222222-2222-2222-2222-222222222222"
+
+    with engine.begin() as connection:
+        for statement in schema:
+            connection.execute(text(statement))
+        connection.execute(
+            text("insert into seller_target values (:id, :owner, null)"),
+            [
+                {"id": "st-current", "owner": current},
+                {"id": "st-picked", "owner": picked},
+            ],
+        )
+        connection.execute(
+            text("insert into buyer_party values (:id, :owner, null)"),
+            [
+                {"id": "bp-current", "owner": current},
+                {"id": "bp-picked", "owner": picked},
+            ],
+        )
+        connection.execute(
+            text("insert into buyer_intent values (:id, :party, :owner, null)"),
+            [
+                {"id": "bi-current", "party": "bp-current", "owner": current},
+                {"id": "bi-picked", "party": "bp-picked", "owner": picked},
+            ],
+        )
+        connection.execute(
+            text("insert into buyer_seller_relation values (:id, :target, :intent, null)"),
+            [
+                # 同时命中权限地板和指定负责人，允许返回。
+                {"id": "intersection", "target": "st-current", "intent": "bi-picked"},
+                # 只命中 owner，不能绕过当前顾问的权限地板。
+                {"id": "picked-only", "target": "st-picked", "intent": "bi-picked"},
+                # 只命中 scope，也不符合指定负责人筛选。
+                {"id": "current-only", "target": "st-current", "intent": "bi-current"},
+            ],
+        )
+        rows = connection.execute(
+            text(
+                f"select r.id from buyer_seller_relation r "
+                f"where {relation_visible_sql('r')} and {relation_owner_sql('r')}"
+            ),
+            {"scope_user_id": current, "owner_user_id": picked},
+        )
+        matched = set(rows.scalars())
+
+    assert matched == {"intersection"}
 
 
 def test_sole_is_a_data_level_subset_of_involved() -> None:

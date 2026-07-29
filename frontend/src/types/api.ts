@@ -470,6 +470,8 @@ export interface AppUser {
   owned_seller_targets: number;
   owned_buyer_parties: number;
   owned_buyer_intents: number;
+  /** 最近一次**人主动做的事**（业务更新/推进动态/字段应用/推荐提问），不含 AI 回填。 */
+  latest_activity_at: string | null;
 }
 
 export interface AppUserOption {
@@ -485,21 +487,6 @@ export interface AppUserCreate {
   name: string;
   password: string;
   role: 'admin' | 'consultant';
-}
-
-export interface AppUserActivitySummary {
-  user: AppUserOption;
-  owned_seller_targets: number;
-  owned_buyer_parties: number;
-  owned_buyer_intents: number;
-  seller_target_status_counts: Record<string, number>;
-  weekly_new_seller_targets: number;
-  weekly_new_buyer_parties: number;
-  weekly_new_buyer_intents: number;
-  weekly_business_updates: number;
-  weekly_relation_events: number;
-  weekly_application_logs: number;
-  latest_activity_at: string | null;
 }
 
 export interface BatchAssignOwnerResponse {

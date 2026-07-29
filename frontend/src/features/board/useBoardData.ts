@@ -26,22 +26,24 @@ export interface BoardData {
 
 export function useBoardData(options: {
   ownership: BoardOwnership;
+  owner: string;
   view: BoardView;
   q: string;
   hideStale: boolean;
 }): BoardData {
-  const { ownership, view, q, hideStale } = options;
+  const { ownership, owner, view, q, hideStale } = options;
   const [cards, setCards] = useState<RelationBoardCard[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // 只有 ownership 变化才重新取数——视角、搜索、隐藏无动态全在内存里做。
+  // 只有 ownership / owner 变化才重新取数——两者都是后端谓词，改了必须重拉。
+  // 视角、搜索、隐藏无动态仍全在内存里做。
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
     relations
-      .board({ ownership, limit: BOARD_FETCH_LIMIT })
+      .board({ ownership, owner: owner || undefined, limit: BOARD_FETCH_LIMIT })
       .then((rows) => {
         if (!cancelled) setCards(rows);
       })
@@ -57,7 +59,7 @@ export function useBoardData(options: {
     return () => {
       cancelled = true;
     };
-  }, [ownership]);
+  }, [ownership, owner]);
 
   const model = useMemo(
     () => buildBoard(cards, { view, q, hideStale }),
