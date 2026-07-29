@@ -411,7 +411,10 @@ def _enqueue_research_map_job(db: Session, *, job: JobClaim, target_id: UUID) ->
         {
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
-            "queue_name": job.queue_name,
+            # Mapping and web research share the dedicated research worker.
+            # Do not inherit a legacy parent queue (old research jobs used
+            # "llm"), otherwise a remap could land on the wrong service.
+            "queue_name": "research",
             "target_id": target_id,
             "idempotency_key": f"seller_target_research_map:{job.id}",
             "payload_json": {"seller_target_id": str(target_id), "research_job_id": str(job.id)},

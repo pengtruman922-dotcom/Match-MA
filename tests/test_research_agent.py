@@ -272,6 +272,44 @@ def test_tool_schemas_declare_both_tools() -> None:
     assert all(tool["type"] == "function" for tool in RESEARCH_TOOLS)
 
 
+def test_mapping_job_always_uses_the_research_queue() -> None:
+    from backend.app.jobs.handlers.research import _enqueue_research_map_job
+    from backend.app.jobs.queue import JobClaim
+
+    captured = {}
+
+    class _Db:
+        def execute(self, statement, params):
+            captured.update(params)
+
+            class _Result:
+                @staticmethod
+                def scalar_one():
+                    return UUID("44444444-4444-4444-4444-444444444444")
+
+            return _Result()
+
+    legacy_parent = JobClaim(
+        id=UUID("11111111-1111-1111-1111-111111111111"),
+        job_type="seller_target_research",
+        queue_name="llm",
+        entity_type="seller_target",
+        entity_id=UUID("22222222-2222-2222-2222-222222222222"),
+        correlation_id=None,
+        payload_json={},
+        attempt_count=1,
+        max_attempts=1,
+    )
+
+    _enqueue_research_map_job(
+        _Db(),
+        job=legacy_parent,
+        target_id=legacy_parent.entity_id,
+    )
+
+    assert captured["queue_name"] == "research"
+
+
 def test_structured_fact_validation_raises_a_plain_error_for_the_worker() -> None:
     """调研自己采纳建议，校验失败不能是 HTTPException —— 后台任务里没有请求。"""
     from backend.app.services.research_apply import ResearchApplyError, normalize_structured_fact
