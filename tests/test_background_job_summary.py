@@ -56,7 +56,8 @@ class _FakeDb:
 def test_queue_summary_names_include_default_worker_queues() -> None:
     names = _queue_summary_names(["custom", "llm"], include_empty=True)
 
-    assert names[:5] == ["llm", "ocr", "embedding", "rerank", "default"]
+    # research 是独立队列：调研单次 5~15 分钟，不与解析/抽取/深评抢 llm 的槽位。
+    assert names[:6] == ["llm", "research", "ocr", "embedding", "rerank", "default"]
     assert "custom" in names
     assert names.count("llm") == 1
 

@@ -25,6 +25,11 @@ from backend.app.services.seller_target_status import AIProcessingBusyError, acq
 router = APIRouter(prefix="/research", tags=["research"])
 
 
+# 调研不跟解析、抽取、深评抢 llm 队列的槽位：一次调研占住一个 worker 5~10 分钟，
+# 而顾问粘贴业务更新、跑推荐深评时是在屏幕前等结果的，调研可以慢慢来。
+RESEARCH_QUEUE_NAME = "research"
+
+
 class SellerResearchBatchRequest(BaseModel):
     seller_target_ids: list[UUID] = Field(min_length=1, max_length=50)
 
@@ -334,7 +339,7 @@ def _enqueue_seller_research_job(
               entity_type, entity_id, idempotency_key, payload_json,
               max_attempts, created_by, metadata_json
             ) values (
-              :team_id, :workspace_id, 'seller_target_research', 45, 'llm',
+              :team_id, :workspace_id, 'seller_target_research', 45, :queue_name,
               'seller_target', :target_id, :idempotency_key, :payload_json,
               1, :created_by, :metadata_json
             ) returning id, status, queue_name
@@ -346,6 +351,7 @@ def _enqueue_seller_research_job(
         {
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
+            "queue_name": RESEARCH_QUEUE_NAME,
             "target_id": seller_target_id,
             "idempotency_key": f"seller_target_research:{seller_target_id}:{uuid4()}",
             "payload_json": {"seller_target_id": str(seller_target_id)},

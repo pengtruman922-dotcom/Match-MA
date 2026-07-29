@@ -1,11 +1,16 @@
 """Research output handling and the two tools the agent drives."""
 
+import json
+from datetime import date, datetime
+from uuid import UUID
+
 import pytest
 
 from backend.app.jobs.handlers.research import (
     RESEARCH_TOOLS,
     MAX_SEARCH_RESULTS_PER_CALL,
     ResearchTools,
+    _current_profiles_for_prompt,
     normalize_research_output,
     research_source_type,
 )
@@ -89,6 +94,27 @@ def test_not_found_never_erases_a_section_that_already_has_content() -> None:
 
     assert claims == []
     assert any("already_filled" in note for note in notes)
+
+
+def test_claims_stay_json_serialisable_when_current_profiles_carry_dates() -> None:
+    current = {
+        "business_product": {
+            "entity_id": UUID("11111111-1111-1111-1111-111111111111"),
+            "info_status": "filled",
+            "content_text": "已有内容",
+            "as_of_date": date(2026, 7, 24),
+            "updated_at": datetime(2026, 7, 24, 7, 48, 53),
+        }
+    }
+
+    claims, _ = normalize_research_output(
+        {"profile_sections": [_profile_claim()]},
+        current_profiles=current,
+    )
+
+    assert len(claims) == 1
+    json.dumps(claims[0]["current_value_json"])
+    json.dumps(_current_profiles_for_prompt(current))
 
 
 def test_non_object_output_is_rejected_rather_than_guessed_at() -> None:

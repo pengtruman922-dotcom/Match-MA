@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -708,6 +709,10 @@ def _json_safe_value(value: Any) -> Any:
         return str(value)
     if isinstance(value, Decimal):
         return float(value)
+    # datetime 是 date 的子类，先判子类。raw SQL 忘了 ::text 时这里兜住 ——
+    # 漏一个日期对象会让整个 JSONB 绑定失败，连带回滚一次几分钟的 agent 运行。
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
     if isinstance(value, dict):
         return {key: _json_safe_value(item) for key, item in value.items()}
     if isinstance(value, list):

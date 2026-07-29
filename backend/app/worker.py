@@ -1,6 +1,8 @@
 import argparse
 import socket
+import sys
 import time
+import traceback
 
 from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -16,10 +18,14 @@ from backend.app.jobs.queue import (
 )
 
 
-def run_once(*, queue_name: str, worker_id: str) -> bool:
+def run_once(*, queue_name: str, worker_id: str, stale_after_seconds: int = 300) -> bool:
     job = None
     with session_scope() as db:
-        requeue_stale_running_jobs(db, queue_name=queue_name)
+        requeue_stale_running_jobs(
+            db,
+            queue_name=queue_name,
+            stale_after_seconds=stale_after_seconds,
+        )
         job = claim_next_job(db, worker_id=worker_id, queue_name=queue_name)
     if job is None:
         return False
@@ -32,7 +38,14 @@ def run_once(*, queue_name: str, worker_id: str) -> bool:
         with session_scope() as db:
             mark_job_failed(db, job_id=job.id, error_message=str(exc))
             _mark_related_business_update_failed_if_final(db, job, str(exc))
-        raise
+        # 任务已经记为 failed，不再往上抛：抛出去会穿透 main() 结束进程，
+        # 一条脏数据就能带走整个 worker，剩下的队列跟着停摆。
+        traceback.print_exc()
+        print(
+            f"Job {job.id} ({job.job_type}) failed: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     return True
 
@@ -97,15 +110,30 @@ def main() -> None:
         help="Sleep seconds when no job is found",
     )
     parser.add_argument("--worker-id", default=f"worker-{socket.gethostname()}")
+    parser.add_argument(
+        "--stale-after",
+        type=int,
+        default=300,
+        help=(
+            "Seconds a job may stay 'running' before another worker reclaims it. "
+            "Must exceed the queue's slowest job: reclaiming a live job marks it "
+            "failed under max_attempts=1. The research queue runs 5-15 minutes."
+        ),
+    )
     args = parser.parse_args()
 
     print(
-        f"Starting Match-MA worker queue={args.queue} worker_id={args.worker_id}",
+        f"Starting Match-MA worker queue={args.queue} worker_id={args.worker_id} "
+        f"stale_after={args.stale_after}s",
         flush=True,
     )
 
     while True:
-        found = run_once(queue_name=args.queue, worker_id=args.worker_id)
+        found = run_once(
+            queue_name=args.queue,
+            worker_id=args.worker_id,
+            stale_after_seconds=args.stale_after,
+        )
         if args.once:
             return
         if not found:

@@ -182,8 +182,22 @@ def test_current_revision_is_the_last_accepted_not_the_newest_dated() -> None:
     load_profile_sections(db, entity_type="seller_target", entity_ids=["11111111-1111-1111-1111-111111111111"])
 
     statement = db.statements[0][0]
-    assert "order by entity_id, section_code, updated_at desc" in statement
+    # 表限定是必须的：select 里 updated_at 被 ::text 起了同名别名，
+    # 裸列名会绑到输出别名上，把时序排序变成字典序。
+    assert "order by entity_id, section_code, entity_profile_section.updated_at desc" in statement
     assert "as_of_date desc" not in statement
+
+
+def test_loaded_sections_carry_dates_as_text_not_date_objects() -> None:
+    """画像行会被原样塞进 JSONB 绑定（调研建议、ai_trace），
+    一个 date 对象就能让整次 agent 运行回滚。"""
+    db = _RecordingDb(returning=[])
+
+    load_profile_sections(db, entity_type="seller_target", entity_ids=["11111111-1111-1111-1111-111111111111"])
+
+    statement = db.statements[0][0]
+    assert "as_of_date::text as as_of_date" in statement
+    assert "updated_at::text as updated_at" in statement
 
 
 def test_profile_parser_removes_cross_layer_deal_and_team_noise() -> None:

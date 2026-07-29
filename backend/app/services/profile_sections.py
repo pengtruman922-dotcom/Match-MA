@@ -151,6 +151,12 @@ def load_profile_sections(
     by when the revision was accepted rather than by as_of_date — a researched
     date is often the page's publication date rather than the fact's, and it
     must not decide which revision the consultant sees.
+
+    Dates come back as text on purpose: callers hand these rows straight to
+    JSONB binds (research proposals, ai_trace payloads) and a raw date object
+    aborts the whole job there. The order by is table-qualified for the same
+    reason — a bare name would bind to the ::text output alias and silently
+    turn the sort into a lexicographic one.
     """
     if not entity_ids:
         return {}
@@ -159,7 +165,9 @@ def load_profile_sections(
             """
             select
               entity_id, section_code, info_status, content_text,
-              source_type, source_url, as_of_date, updated_at
+              source_type, source_url,
+              as_of_date::text as as_of_date,
+              updated_at::text as updated_at
             from entity_profile_section
             where team_id = :team_id
               and workspace_id = :workspace_id
@@ -167,7 +175,7 @@ def load_profile_sections(
               and entity_id = any(:entity_ids)
               and deleted_at is null
               and review_status in ('accepted', 'auto_accepted')
-            order by entity_id, section_code, updated_at desc
+            order by entity_id, section_code, entity_profile_section.updated_at desc
             """
         ),
         {

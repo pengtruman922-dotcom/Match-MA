@@ -15,6 +15,12 @@ def main() -> None:
 
     if role == "worker-llm":
         _exec([sys.executable, "-m", "backend.app.worker", "--queue", "llm", "--sleep", "2"])
+    if role == "worker-research":
+        # 调研跑 5~15 分钟，stale 窗口必须盖得住，否则多副本之间会互相判死。
+        _exec([
+            sys.executable, "-m", "backend.app.worker",
+            "--queue", "research", "--sleep", "5", "--stale-after", "1800",
+        ])
     if role == "worker-embedding":
         _exec([sys.executable, "-m", "backend.app.worker", "--queue", "embedding", "--sleep", "2"])
     if role == "worker-rerank":
@@ -44,6 +50,8 @@ def _infer_role(service_name_lower: str) -> str:
         return "worker-rerank"
     if "worker" in service_name_lower and "ocr" in service_name_lower:
         return "worker-ocr"
+    if "worker" in service_name_lower and "research" in service_name_lower:
+        return "worker-research"
     if "worker" in service_name_lower and "llm" in service_name_lower:
         return "worker-llm"
     return "api"

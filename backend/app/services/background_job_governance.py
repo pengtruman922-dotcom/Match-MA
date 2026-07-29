@@ -309,7 +309,7 @@ def _failure_summary_totals(
 
 
 def _queue_summary_names(queue_names: Any, *, include_empty: bool) -> list[str]:
-    defaults = ["llm", "ocr", "embedding", "rerank", "default"]
+    defaults = ["llm", "research", "ocr", "embedding", "rerank", "default"]
     names = list(dict.fromkeys([*defaults, *[str(item) for item in queue_names]]))
     return names if include_empty else [name for name in names if name not in defaults or name in queue_names]
 

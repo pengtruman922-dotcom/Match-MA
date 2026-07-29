@@ -636,8 +636,8 @@ def _current_profiles_for_prompt(
                 "label": label,
                 "info_status": "filled",
                 "content_text": str(section.get("content_text") or "").strip(),
-                "as_of_date": section.get("as_of_date"),
-                "sources": section.get("sources") or [],
+                "as_of_date": _json_safe_value(section.get("as_of_date")),
+                "sources": _json_safe_value(section.get("sources") or []),
             })
         else:
             items.append({
@@ -753,7 +753,7 @@ def _insert_research_trace(
             "model_name": node_config["model_name"],
             "prompt_version": node_config["prompt_version"],
             "status": status,
-            "input_json": input_json,
+            "input_json": _json_safe_value(input_json),
             "prompt_messages_json": _safe_prompt_messages_for_trace(conversation),
             "raw_output_text": loop.result.raw_output_text if loop else None,
             "parsed_output_json": loop.result.parsed_output_json if loop else None,
