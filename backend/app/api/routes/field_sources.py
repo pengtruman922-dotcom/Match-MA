@@ -30,6 +30,7 @@ class FieldValueSourceOut(BaseModel):
     created_by: UUID | None
     created_by_name: str | None = None
     evidence_span: dict[str, Any] | None = None
+    research_evidence: dict[str, Any] | None = None
     debug_ref: dict[str, Any] | None = None
 
 
@@ -126,10 +127,19 @@ def list_field_sources(
               ev.page_no as ev_page_no, ev.slide_no as ev_slide_no, ev.sheet_name as ev_sheet_name,
               ev.cell_range as ev_cell_range, ev.text_excerpt as ev_text_excerpt,
               ev.char_start as ev_char_start, ev.char_end as ev_char_end,
-              ev.created_at::text as ev_created_at
+              ev.created_at::text as ev_created_at,
+              rp.id as rp_id, rp.job_id as rp_job_id, rp.source_type as rp_source_type,
+              rp.source_url as rp_source_url, rp.source_title as rp_source_title,
+              rp.source_excerpt as rp_source_excerpt, rp.period_label as rp_period_label,
+              rp.as_of_date::text as rp_as_of_date
             from field_value_source fvs
             left join app_user author on author.id = fvs.created_by
             left join evidence_span ev on ev.id = fvs.evidence_id
+            left join research_proposal rp
+              on fvs.source_type = 'research_proposal'
+             and rp.id = fvs.source_id
+             and rp.team_id = fvs.team_id
+             and rp.workspace_id = fvs.workspace_id
             where {' and '.join(where)}
             order by fvs.created_at desc
             limit :limit offset :offset
@@ -159,12 +169,26 @@ def _field_value_source_out(row: dict[str, Any]) -> dict[str, Any]:
             "char_end": row.get("ev_char_end"),
             "created_at": row.get("ev_created_at"),
         }
+    value_snapshot = dict(row.get("value_snapshot_json") or {})
+    source_context = dict(value_snapshot.get("source_context") or {})
+    research_evidence = None
+    if row.get("source_type") == "research_proposal":
+        research_evidence = {
+            "proposal_id": row.get("rp_id") or row.get("source_id"),
+            "job_id": row.get("rp_job_id") or source_context.get("research_job_id"),
+            "source_type": row.get("rp_source_type"),
+            "source_url": row.get("rp_source_url") or source_context.get("source_url"),
+            "source_title": row.get("rp_source_title") or source_context.get("source_title"),
+            "source_excerpt": row.get("rp_source_excerpt") or source_context.get("source_excerpt"),
+            "period_label": row.get("rp_period_label") or source_context.get("period_label"),
+            "as_of_date": row.get("rp_as_of_date") or source_context.get("as_of_date"),
+        }
     return {
         "id": row["id"],
         "entity_type": row["entity_type"],
         "entity_id": row["entity_id"],
         "field_path": row["field_path"],
-        "value_snapshot_json": row["value_snapshot_json"],
+        "value_snapshot_json": value_snapshot,
         "source_type": row.get("source_type"),
         "source_id": row.get("source_id"),
         "evidence_id": row.get("evidence_id"),
@@ -175,6 +199,7 @@ def _field_value_source_out(row: dict[str, Any]) -> dict[str, Any]:
         "created_by": row.get("created_by"),
         "created_by_name": row.get("created_by_name"),
         "evidence_span": evidence_span,
+        "research_evidence": research_evidence,
         "debug_ref": _debug_ref(row.get("source_type"), row.get("source_id")),
     }
 

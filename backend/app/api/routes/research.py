@@ -18,7 +18,11 @@ from backend.app.db import get_db
 from backend.app.jobs.handlers.common import _get_default_node_config
 from backend.app.jobs.handlers.research import RESEARCH_NODE_NAME
 from backend.app.services.profile_sections import PROFILE_SECTION_LABELS
-from backend.app.services.research_apply import ResearchApplyError, apply_research_proposal
+from backend.app.services.research_apply import (
+    ResearchApplyError,
+    apply_research_proposal,
+    normalize_structured_fact,
+)
 from backend.app.services.search_service import get_default_search_provider
 from backend.app.services.seller_target_status import AIProcessingBusyError, acquire_ai_processing
 
@@ -70,6 +74,8 @@ class ResearchProposalOut(BaseModel):
     review_status: str
     reviewed_at: str | None
     created_at: str
+    is_actionable: bool = True
+    validation_error: str | None = None
 
 
 @router.post("/seller-targets/{seller_target_id}", response_model=ResearchJobOut, status_code=status.HTTP_201_CREATED)
@@ -218,7 +224,7 @@ def list_research_proposals(
         ),
         params,
     ).mappings().all()
-    return [_proposal_output(row) for row in rows]
+    return [_proposal_output(row, db=db) for row in rows]
 
 
 @router.post("/proposals/{proposal_id}/accept", response_model=ResearchProposalOut)
@@ -250,7 +256,7 @@ def accept_research_proposal(
         user_id=current_user.user_id,
     )
     db.commit()
-    return _proposal_output(_get_research_proposal(db, proposal_id))
+    return _proposal_output(_get_research_proposal(db, proposal_id), db=db)
 
 
 @router.post("/proposals/{proposal_id}/reject", response_model=ResearchProposalOut)
@@ -278,7 +284,7 @@ def reject_research_proposal(
         user_id=current_user.user_id,
     )
     db.commit()
-    return _proposal_output(_get_research_proposal(db, proposal_id))
+    return _proposal_output(_get_research_proposal(db, proposal_id), db=db)
 
 
 def _ensure_research_ready(db: Session) -> None:
@@ -434,10 +440,26 @@ def _proposal_select_columns() -> str:
     """
 
 
-def _proposal_output(row: Any) -> dict[str, Any]:
+def _proposal_output(row: Any, *, db: Session | None = None) -> dict[str, Any]:
     result = dict(row)
     result["section_label"] = PROFILE_SECTION_LABELS.get(str(result.get("section_code") or ""))
     result["anchor_matches_json"] = list(result.get("anchor_matches_json") or [])
     result["proposed_value_json"] = dict(result.get("proposed_value_json") or {})
     result["current_value_json"] = dict(result.get("current_value_json") or {})
+    validation_error = str(result["proposed_value_json"].get("validation_error") or "").strip() or None
+    if (
+        validation_error is None
+        and db is not None
+        and result.get("proposal_kind") == "structured_fact"
+    ):
+        try:
+            normalize_structured_fact(
+                db,
+                str(result.get("field_path") or ""),
+                result["proposed_value_json"].get("value"),
+            )
+        except ResearchApplyError as exc:
+            validation_error = str(exc)
+    result["validation_error"] = validation_error
+    result["is_actionable"] = validation_error is None
     return result

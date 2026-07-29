@@ -9,9 +9,10 @@ import {
   RotateCcw,
   X,
 } from 'lucide-react';
-import { attachments, updateLogs } from '../lib/api';
-import type { UpdateBatch } from '../types/api';
+import { attachments, backgroundJobs, updateLogs } from '../lib/api';
+import type { BackgroundJob, UpdateBatch } from '../types/api';
 import { fieldLabel, sourceTypeLabel, valueLabel } from '../lib/fieldLabels';
+import ResearchReportDrawer from '../features/targets/ResearchReportDrawer';
 
 type EntityType = 'seller_target' | 'buyer_intent';
 
@@ -39,6 +40,7 @@ export default function UpdateHistory({
   const [rollbackBatch, setRollbackBatch] = useState<UpdateBatch | null>(null);
   const [rollbackLoading, setRollbackLoading] = useState(false);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [reportJob, setReportJob] = useState<Pick<BackgroundJob, 'id' | 'result_json' | 'created_at' | 'finished_at'> | null>(null);
   const wasParsingRef = useRef(false);
   const processingSettledRef = useRef(onProcessingSettled);
 
@@ -123,6 +125,14 @@ export default function UpdateHistory({
     }
   };
 
+  const openResearchReport = async (jobId: string) => {
+    try {
+      setReportJob(await backgroundJobs.get(jobId));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '读取调研报告失败');
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12 text-sm text-gray-400">
@@ -204,6 +214,16 @@ export default function UpdateHistory({
                 </div>
 
                 <div className="flex shrink-0 items-center gap-2">
+                  {item.source_type === 'research_proposal' && item.source_id ? (
+                    <button
+                      type="button"
+                      onClick={() => void openResearchReport(item.source_id as string)}
+                      className="inline-flex items-center gap-1 px-2 py-1 text-xs text-brand-700 hover:bg-brand-50"
+                    >
+                      <FileText className="h-3.5 w-3.5" />
+                      查看调研报告
+                    </button>
+                  ) : null}
                   {(item.raw_input || item.attachments.length > 0 || item.changes.length > 0) ? (
                     <button
                       type="button"
@@ -255,6 +275,7 @@ export default function UpdateHistory({
           onConfirm={() => void handleRollback()}
         />
       ) : null}
+      {reportJob ? <ResearchReportDrawer job={reportJob} onClose={() => setReportJob(null)} /> : null}
     </>
   );
 }

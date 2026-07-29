@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronRight,
   ExternalLink,
+  FileSearch,
   Loader2,
   Pencil,
   Search,
@@ -15,14 +16,18 @@ import { formatYuan } from '../../lib/format';
 import type {
   IndicatorRegistryResponse,
   IndustryOptionsResponse,
+  BackgroundJob,
   FieldValueSource,
   ProfileSection,
   ProfileSectionsResponse,
   ResearchProposal,
   SellerTarget,
+  SellerResearchStatus,
 } from '../../types/api';
 import { formatListedStatus, formatTransferRatio, getSubjectDisplay } from './presentation';
 import { buildInfoGroups, groupFilledCount, type InfoGroup } from './infoGroups';
+import ResearchEvidenceDrawer from './ResearchEvidenceDrawer';
+import ResearchReportDrawer from './ResearchReportDrawer';
 
 /**
  * 标的信息：结构化字段和匹配画像放在同一页，按业务大类分组。
@@ -53,6 +58,9 @@ export default function TargetInfoPanel({
   const [error, setError] = useState<string | null>(null);
   const [registry, setRegistry] = useState<IndicatorRegistryResponse | null>(null);
   const [sources, setSources] = useState<FieldValueSource[]>([]);
+  const [selectedEvidence, setSelectedEvidence] = useState<FieldValueSource | null>(null);
+  const [latestResearchJob, setLatestResearchJob] = useState<SellerResearchStatus['latest_job']>(null);
+  const [reportJob, setReportJob] = useState<Pick<BackgroundJob, 'id' | 'result_json' | 'created_at' | 'finished_at'> | null>(null);
   const [industryOptions, setIndustryOptions] = useState<IndustryOptionsResponse>({ l1: [], l2: [] });
 
   const groups = useMemo(
@@ -73,13 +81,14 @@ export default function TargetInfoPanel({
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [freshTarget, profileData, proposalData, registryData, sourceData, industryData] = await Promise.all([
+      const [freshTarget, profileData, proposalData, registryData, sourceData, industryData, researchStatus] = await Promise.all([
         sellerTargets.get(currentTarget.id),
         profileSections.list('seller_target', currentTarget.id),
         research.proposals(currentTarget.id, 'pending_review'),
         indicatorRegistry.list('seller_target'),
         fieldSources.list({ entity_type: 'seller_target', entity_id: currentTarget.id, limit: 200 }),
         meta.industryOptions(),
+        research.sellerTargetStatus(currentTarget.id),
       ]);
       setCurrentTarget(freshTarget);
       onTargetChanged?.(freshTarget);
@@ -88,6 +97,7 @@ export default function TargetInfoPanel({
       setRegistry(registryData);
       setSources(sourceData);
       setIndustryOptions(industryData);
+      setLatestResearchJob(researchStatus.latest_job);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载标的信息失败');
@@ -193,6 +203,16 @@ export default function TargetInfoPanel({
     }
   };
 
+  const openResearchReport = async (jobId: string) => {
+    try {
+      const job = await backgroundJobs.get(jobId);
+      setReportJob(job);
+      setSelectedEvidence(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '读取调研报告失败');
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center gap-2 px-1 py-3 text-xs text-gray-400">
@@ -214,15 +234,26 @@ export default function TargetInfoPanel({
             <span>上次调研：{currentTarget.last_research_at.slice(0, 10)}</span>
           )}
         </div>
-        <button
-          type="button"
-          disabled={researching}
-          onClick={() => void startResearch()}
-          className="inline-flex items-center gap-1 border border-brand-200 px-2.5 py-1 text-xs text-brand-700 disabled:opacity-50"
-        >
-          {researching ? <Loader2 className="h-3 w-3 animate-spin" /> : <Search className="h-3 w-3" />}
-          {researching ? '调研中' : 'AI调研'}
-        </button>
+        <div className="flex items-center gap-2">
+          {Boolean(latestResearchJob?.result_json?.report_text) && latestResearchJob && (
+            <button
+              type="button"
+              onClick={() => setReportJob(latestResearchJob)}
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-gray-500 hover:bg-gray-50 hover:text-brand-700"
+            >
+              <FileSearch className="h-3 w-3" />查看调研报告
+            </button>
+          )}
+          <button
+            type="button"
+            disabled={researching}
+            onClick={() => void startResearch()}
+            className="inline-flex items-center gap-1 border border-brand-200 px-2.5 py-1 text-xs text-brand-700 disabled:opacity-50"
+          >
+            {researching ? <Loader2 className="h-3 w-3 animate-spin" /> : <Search className="h-3 w-3" />}
+            {researching ? '调研中' : 'AI调研'}
+          </button>
+        </div>
       </div>
 
       {error && <p className="border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">{error}</p>}
@@ -284,6 +315,7 @@ export default function TargetInfoPanel({
                         editing: editing === `field:${field.field}`,
                         saving,
                         source: sourceByField.get(field.field),
+                        onShowEvidence: (source: FieldValueSource) => setSelectedEvidence(source),
                         onStart: () => { setEditing(`field:${field.field}`); setDraft(String((currentTarget as unknown as Record<string, unknown>)[field.field] ?? '')); },
                         onCancel: () => setEditing(null),
                       };
@@ -322,14 +354,23 @@ export default function TargetInfoPanel({
           </section>
         );
       })}
+      {selectedEvidence && (
+        <ResearchEvidenceDrawer
+          source={selectedEvidence}
+          onClose={() => setSelectedEvidence(null)}
+          onOpenReport={(jobId) => void openResearchReport(jobId)}
+        />
+      )}
+      {reportJob && <ResearchReportDrawer job={reportJob} onClose={() => setReportJob(null)} />}
     </div>
   );
 }
 
-function StructuredField({ field, editing, draft, saving, source, onStart, onCancel, onDraft, onSave }: {
+function StructuredField({ field, editing, draft, saving, source, onStart, onCancel, onDraft, onSave, onShowEvidence }: {
   field: InfoGroup['fields'][number]; editing: boolean; draft: string; saving: boolean;
   source?: FieldValueSource;
   onStart: () => void; onCancel: () => void; onDraft: (value: string) => void; onSave: (value: unknown) => Promise<void>;
+  onShowEvidence: (source: FieldValueSource) => void;
 }) {
   const raw = draft.trim();
   const save = () => {
@@ -345,7 +386,7 @@ function StructuredField({ field, editing, draft, saving, source, onStart, onCan
           : <input type={field.kind === 'yuan' || field.kind === 'ratio' ? 'number' : 'text'} value={draft} onChange={(event) => onDraft(event.target.value)} className="min-w-0 flex-1 border border-gray-200 px-1 text-xs" />}
         <button type="button" disabled={saving} onClick={() => void save()} className="text-brand-600"><Check className="h-3.5 w-3.5" /></button><button type="button" onClick={onCancel} className="text-gray-400"><X className="h-3.5 w-3.5" /></button>
       </div> : <button type="button" disabled={!field.writable} onClick={onStart} className={`group flex w-full items-center justify-between text-left text-sm ${field.value ? 'text-gray-800' : 'text-gray-300'} ${field.writable ? 'hover:text-brand-600' : ''}`}><span>{field.value || '-'}</span>{field.writable && <Pencil className="h-3 w-3 opacity-0 group-hover:opacity-100" />}</button>}
-      {!editing && source && <p className="mt-0.5 text-[10px] text-gray-400">来源：{fieldSourceLabel(source)}{source.created_by_name && ` · ${source.created_by_name}`}{source.created_at && ` · ${formatSourceTime(source.created_at)}`}</p>}
+      {!editing && <FieldCaption source={source} onShowEvidence={onShowEvidence} />}
     </div>
   </div>;
 }
@@ -357,18 +398,23 @@ type SpecialFieldProps = {
   source?: FieldValueSource;
   onStart: () => void;
   onCancel: () => void;
+  onShowEvidence: (source: FieldValueSource) => void;
 };
 
-function FieldCaption({ source }: { source?: FieldValueSource }) {
+function FieldCaption({ source, onShowEvidence }: { source?: FieldValueSource; onShowEvidence: (source: FieldValueSource) => void }) {
   if (!source) return null;
-  return <p className="mt-0.5 text-[10px] text-gray-400">来源：{fieldSourceLabel(source)}{source.created_by_name && ` · ${source.created_by_name}`}{source.created_at && ` · ${formatSourceTime(source.created_at)}`}</p>;
+  const detail = <>{fieldSourceLabel(source)}{source.created_by_name && ` · ${source.created_by_name}`}{source.created_at && ` · ${formatSourceTime(source.created_at)}`}</>;
+  if (source.source_type === 'research_proposal') {
+    return <button type="button" onClick={() => onShowEvidence(source)} className="mt-0.5 block text-left text-[10px] text-gray-400 hover:text-brand-600 hover:underline">来源：{detail}</button>;
+  }
+  return <p className="mt-0.5 text-[10px] text-gray-400">来源：{detail}</p>;
 }
 
 function FieldLabel({ field }: { field: InfoGroup['fields'][number] }) {
   return <span className="flex w-28 shrink-0 items-center gap-1 pt-1 text-xs text-gray-500">{field.label}{field.screening && <span title="参与筛选与打分" className="bg-brand-50 px-1 text-[10px] font-medium text-brand-700">筛</span>}</span>;
 }
 
-function IndustryPairsField({ field, editing, saving, source, onStart, onCancel, pairs, options, onSave }: SpecialFieldProps & {
+function IndustryPairsField({ field, editing, saving, source, onStart, onCancel, onShowEvidence, pairs, options, onSave }: SpecialFieldProps & {
   pairs: Array<{ l1: string; l2?: string }>;
   options: IndustryOptionsResponse;
   onSave: (value: Array<{ l1: string; l2?: string }>) => Promise<void>;
@@ -420,7 +466,7 @@ function IndustryPairsField({ field, editing, saving, source, onStart, onCancel,
           {selectedL1.length === 0 && l2Scope === 'selected' ? <p className="text-xs text-gray-400">先选择一级行业，或切换为“全部一级行业”。</p> : <div className="max-h-32 overflow-y-auto space-y-1"><div className="grid grid-cols-1 gap-x-3 gap-y-1 sm:grid-cols-2">{scopedL2.map(({ term, l1 }) => <label key={`${l1}:${term}`} className="flex min-w-0 items-center gap-1 text-xs text-gray-700"><input type="checkbox" checked={draftPairs.some((pair) => pair.l1 === l1 && pair.l2 === term)} onChange={() => toggleL2(l1, term)} /> <span className="truncate">{term}</span><span className="ml-auto shrink-0 text-[10px] text-gray-400">{l1}</span></label>)}</div></div>}
         </div>
         <div className="flex items-center gap-2"><button type="button" disabled={saving} onClick={() => void onSave(draftPairs)} className="inline-flex items-center gap-1 bg-brand-600 px-2.5 py-1 text-xs text-white disabled:opacity-40"><Check className="h-3 w-3" />保存</button><button type="button" onClick={onCancel} className="text-xs text-gray-400 hover:text-gray-600">取消</button></div>
-      </div> : <><button type="button" disabled={!field.writable} onClick={onStart} className={`group flex w-full items-center justify-between text-left text-sm ${display ? 'text-gray-800' : 'text-gray-300'} ${field.writable ? 'hover:text-brand-600' : ''}`}><span>{display || '-'}</span>{field.writable && <Pencil className="h-3 w-3 opacity-0 group-hover:opacity-100" />}</button><FieldCaption source={source} /></>}
+      </div> : <><button type="button" disabled={!field.writable} onClick={onStart} className={`group flex w-full items-center justify-between text-left text-sm ${display ? 'text-gray-800' : 'text-gray-300'} ${field.writable ? 'hover:text-brand-600' : ''}`}><span>{display || '-'}</span>{field.writable && <Pencil className="h-3 w-3 opacity-0 group-hover:opacity-100" />}</button><FieldCaption source={source} onShowEvidence={onShowEvidence} /></>}
     </div>
   </div>;
 }
@@ -435,7 +481,7 @@ function areaCode(entries: Array<[string, string]>, name: string | null): string
   return entries.find(([, label]) => label === name)?.[0] || '';
 }
 
-function LocationField({ field, editing, saving, source, onStart, onCancel, target, onSave }: SpecialFieldProps & {
+function LocationField({ field, editing, saving, source, onStart, onCancel, onShowEvidence, target, onSave }: SpecialFieldProps & {
   target: SellerTarget;
   onSave: (changes: Record<string, unknown>) => Promise<void>;
 }) {
@@ -459,7 +505,7 @@ function LocationField({ field, editing, saving, source, onStart, onCancel, targ
   return <div className="flex items-start gap-2">
     <FieldLabel field={field} />
     <div className="min-w-0 flex-1">
-      {editing ? <div className="space-y-2 border border-gray-200 bg-gray-50 p-2"><div className="grid grid-cols-1 gap-1 sm:grid-cols-3"><select value={province} onChange={(event) => { setProvince(event.target.value); setCity(''); setDistrict(''); }} className="border border-gray-200 bg-white px-1.5 py-1 text-xs"><option value="">省（可不填）</option>{areaEntries.province.map(([code, name]) => <option key={code} value={name}>{name}</option>)}</select><select value={city} onChange={(event) => { setCity(event.target.value); setDistrict(''); }} disabled={!province} className="border border-gray-200 bg-white px-1.5 py-1 text-xs disabled:bg-gray-100"><option value="">市（可不填）</option>{cityOptions.map(([code, name]) => <option key={code} value={name}>{name}</option>)}</select><select value={district} onChange={(event) => setDistrict(event.target.value)} disabled={!city} className="border border-gray-200 bg-white px-1.5 py-1 text-xs disabled:bg-gray-100"><option value="">区/县（可不填）</option>{districtOptions.map(([code, name]) => <option key={code} value={name}>{name}</option>)}</select></div><p className="text-[10px] text-gray-400">变更上级会自动清空下级；筛选仍按省、市、区三个字段命中。</p><div className="flex items-center gap-2"><button type="button" disabled={saving} onClick={() => void onSave({ location_province: province || null, location_city: city || null, location_district: district || null })} className="inline-flex items-center gap-1 bg-brand-600 px-2.5 py-1 text-xs text-white disabled:opacity-40"><Check className="h-3 w-3" />保存</button><button type="button" onClick={onCancel} className="text-xs text-gray-400 hover:text-gray-600">取消</button></div></div> : <><button type="button" disabled={!field.writable} onClick={onStart} className={`group flex w-full items-center justify-between text-left text-sm ${display ? 'text-gray-800' : 'text-gray-300'} ${field.writable ? 'hover:text-brand-600' : ''}`}><span>{display || '-'}</span>{field.writable && <Pencil className="h-3 w-3 opacity-0 group-hover:opacity-100" />}</button><FieldCaption source={source} /></>}
+      {editing ? <div className="space-y-2 border border-gray-200 bg-gray-50 p-2"><div className="grid grid-cols-1 gap-1 sm:grid-cols-3"><select value={province} onChange={(event) => { setProvince(event.target.value); setCity(''); setDistrict(''); }} className="border border-gray-200 bg-white px-1.5 py-1 text-xs"><option value="">省（可不填）</option>{areaEntries.province.map(([code, name]) => <option key={code} value={name}>{name}</option>)}</select><select value={city} onChange={(event) => { setCity(event.target.value); setDistrict(''); }} disabled={!province} className="border border-gray-200 bg-white px-1.5 py-1 text-xs disabled:bg-gray-100"><option value="">市（可不填）</option>{cityOptions.map(([code, name]) => <option key={code} value={name}>{name}</option>)}</select><select value={district} onChange={(event) => setDistrict(event.target.value)} disabled={!city} className="border border-gray-200 bg-white px-1.5 py-1 text-xs disabled:bg-gray-100"><option value="">区/县（可不填）</option>{districtOptions.map(([code, name]) => <option key={code} value={name}>{name}</option>)}</select></div><p className="text-[10px] text-gray-400">变更上级会自动清空下级；筛选仍按省、市、区三个字段命中。</p><div className="flex items-center gap-2"><button type="button" disabled={saving} onClick={() => void onSave({ location_province: province || null, location_city: city || null, location_district: district || null })} className="inline-flex items-center gap-1 bg-brand-600 px-2.5 py-1 text-xs text-white disabled:opacity-40"><Check className="h-3 w-3" />保存</button><button type="button" onClick={onCancel} className="text-xs text-gray-400 hover:text-gray-600">取消</button></div></div> : <><button type="button" disabled={!field.writable} onClick={onStart} className={`group flex w-full items-center justify-between text-left text-sm ${display ? 'text-gray-800' : 'text-gray-300'} ${field.writable ? 'hover:text-brand-600' : ''}`}><span>{display || '-'}</span>{field.writable && <Pencil className="h-3 w-3 opacity-0 group-hover:opacity-100" />}</button><FieldCaption source={source} onShowEvidence={onShowEvidence} /></>}
     </div>
   </div>;
 }
@@ -594,6 +640,7 @@ function ProposalCard({
     : proposal.source_url
       ? [proposal.source_url]
       : [];
+  const actionable = proposal.is_actionable !== false && !proposal.validation_error;
 
   return (
     <div className="border border-amber-100 bg-white px-3 py-2 text-xs">
@@ -604,6 +651,9 @@ function ProposalCard({
             <span className="ml-2 font-normal text-amber-700">{conflictLabel(proposal.conflict_kind)}</span>
           </p>
           <p className="mt-1 text-gray-600">{proposed}</p>
+          {!actionable && (
+            <p className="mt-1 text-red-600">格式无效：{proposal.validation_error || '该建议无法写入，只能忽略'}</p>
+          )}
           {sources.map((url) => (
             <a
               key={url}
@@ -618,14 +668,16 @@ function ProposalCard({
           ))}
         </div>
         <div className="flex shrink-0 gap-1.5">
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => void onReview(proposal.id, 'accept')}
-            className="bg-brand-600 px-2 py-1 text-white disabled:opacity-50"
-          >
-            确认
-          </button>
+          {actionable && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void onReview(proposal.id, 'accept')}
+              className="bg-brand-600 px-2 py-1 text-white disabled:opacity-50"
+            >
+              确认
+            </button>
+          )}
           <button
             type="button"
             disabled={busy}

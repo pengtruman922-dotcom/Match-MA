@@ -95,6 +95,30 @@ def test_no_actual_change_writes_nothing(recorded) -> None:
     assert recorded["logs"] is None and recorded["sources"] is None and recorded["search"] is None
 
 
+def test_research_reverification_records_source_without_fake_change_log(recorded) -> None:
+    from decimal import Decimal
+
+    db = _Db({"current_revenue_yuan": Decimal("100")})
+    provenance = WriteProvenance(
+        source_type="research_proposal",
+        actor_user_id=uuid4(),
+        write_unchanged_field_source=True,
+    )
+
+    applied = write_seller_target_fields(
+        db,
+        uuid4(),
+        {"current_revenue_yuan": 100},
+        provenance=provenance,
+        search_doc_source="research_proposal_accept",
+    )
+
+    assert applied == []
+    assert recorded["logs"] is None
+    assert set(recorded["sources"]["diff"]) == {"current_revenue_yuan"}
+    assert recorded["search"] is None
+
+
 def test_real_change_updates_audits_and_returns_fields(recorded) -> None:
     db = _Db({"business_summary": "旧", "listed_status": "unknown"})
     applied = write_seller_target_fields(

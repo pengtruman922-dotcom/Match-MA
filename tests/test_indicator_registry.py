@@ -34,6 +34,7 @@ RECOMMENDATION_FLOW = REPO / "backend/app/services/recommendation_flow.py"
 BASELINE = REPO / "database/migrations/001_baseline.sql"
 R4A_MIGRATION = REPO / "database/migrations/002_target_information_model.sql"
 R5_MIGRATION = REPO / "database/migrations/004_information_refinement.sql"
+RESEARCH_PERIOD_MIGRATION = REPO / "database/migrations/009_research_financial_period_guard.sql"
 
 
 def test_consumers_derive_from_the_registry() -> None:
@@ -113,12 +114,14 @@ def test_every_indicator_is_a_real_seller_target_column() -> None:
     missing = {ind.column for ind in SELLER_TARGET_INDICATORS} - columns
     migration_sql = R4A_MIGRATION.read_text(encoding="utf-8")
     refinement_sql = R5_MIGRATION.read_text(encoding="utf-8")
-    assert missing <= {"location_province", "location_city", "location_district", "industry_pairs_json"}, (
+    assert missing <= {"location_province", "location_city", "location_district", "industry_pairs_json", "financial_period_end_date"}, (
         f"注册表引用了 seller_target 不存在的列：{sorted(missing)}"
     )
     for column in missing:
         if column == "industry_pairs_json":
             assert f"add column {column} jsonb" in refinement_sql
+        elif column == "financial_period_end_date":
+            assert f"add column if not exists {column} date" in RESEARCH_PERIOD_MIGRATION.read_text(encoding="utf-8")
         else:
             assert f"add column {column} text" in migration_sql
     for retired in ("industry_primary", "industry_secondary", "registered_province", "registered_city", "headquarter_province", "headquarter_city", "raw_region_text", "region_granularity"):

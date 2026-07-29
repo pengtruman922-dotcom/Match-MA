@@ -92,6 +92,10 @@ SELLER_TARGET_INDICATORS: tuple[Indicator, ...] = (
     Indicator("current_debt_ratio", "资产负债率", "ops_quality", "ratio", screening=True, writable_by=_ALL),
     Indicator("current_operating_cash_flow_yuan", "经营现金流", "ops_quality", "yuan", writable_by=_ALL),
     Indicator("financial_period_label", "财务期间", "ops_quality", "text", writable_by=_ALL),
+    # Internal comparison key.  The mapper must provide as_of_date on each
+    # financial fact; research_apply derives this column instead of asking the
+    # model to invent a second period field.  fold_into keeps it out of the UI.
+    Indicator("financial_period_end_date", "财务期间截止日", "ops_quality", "date", writable_by=_RESEARCH, fold_into="financial_period_label"),
     Indicator("profitability_status", "盈利状态", "ops_quality", "enum", screening=True, writable_by=_ALL, enum_options=_PROFITABILITY),
     Indicator("cash_flow_status", "现金流状态", "ops_quality", "enum", screening=True, writable_by=_ALL, enum_options=_CASH_FLOW),
     Indicator("operation_stability_status", "经营稳定性", "ops_quality", "enum", writable_by=_ALL, enum_options=_OPERATION_STABILITY),

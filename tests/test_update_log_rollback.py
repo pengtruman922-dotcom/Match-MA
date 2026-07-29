@@ -30,6 +30,34 @@ def test_rollbackability_accepts_supported_fields() -> None:
     assert result["ok"] is True
 
 
+def test_research_listing_market_and_internal_period_are_rollbackable() -> None:
+    for field_path in ("listing_market_region", "financial_period_end_date"):
+        result = _rollbackability(
+            {
+                "id": LOG_ID,
+                "entity_type": "seller_target",
+                "field_path": field_path,
+                "can_rollback": True,
+                "rollback_at": None,
+                "source_type": "research_proposal",
+            }
+        )
+        assert result["ok"] is True
+
+
+def test_research_logs_are_grouped_by_original_research_job() -> None:
+    key = _batch_key_for_log(
+        {
+            "id": LOG_ID,
+            "source_type": "research_proposal",
+            "source_id": UUID("00000000-0000-0000-0000-000000000002"),
+            "research_job_id": UUID("00000000-0000-0000-0000-000000000003"),
+        },
+        {},
+    )
+    assert key == "research-job-00000000-0000-0000-0000-000000000003"
+
+
 def test_rollbackability_rejects_unsafe_or_already_rolled_back_logs() -> None:
     unsupported = _rollbackability(
         {

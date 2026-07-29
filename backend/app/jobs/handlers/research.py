@@ -12,7 +12,9 @@ carrying the URLs it came from.
 
 from __future__ import annotations
 
+import re
 import time
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 from urllib.parse import urlparse
@@ -39,9 +41,12 @@ from backend.app.services.profile_sections import (
     normalize_profile_section_items,
 )
 from backend.app.services.research_apply import (
+    CORE_FINANCIAL_FIELDS,
+    RESEARCH_AGENT_STRUCTURED_FIELDS,
     RESEARCH_STRUCTURED_FIELDS,
     ResearchApplyError,
     apply_research_proposal,
+    normalize_structured_fact,
 )
 from backend.app.services.search_providers import SearchError
 from backend.app.services.search_providers.fetch import fetch_page_text
@@ -66,6 +71,15 @@ SNIPPET_LIMIT = 600
 
 RELATION_KINDS = {"consistent", "supplement", "temporal_update", "same_period_conflict"}
 DEFAULT_RELATION = "supplement"
+TRUSTED_RESEARCH_SOURCE_TYPES = {"company_website", "government", "regulatory_disclosure"}
+
+
+@dataclass
+class ResearchClaimApplySummary:
+    auto_accepted_count: int = 0
+    pending_review_count: int = 0
+    ignored_count: int = 0
+    errors: list[str] = field(default_factory=list)
 
 PROFILE_SECTION_CATALOG: list[dict[str, str]] = [
     {"code": code, "label": label} for code, label in PROFILE_SECTION_LABELS.items()
@@ -305,7 +319,7 @@ def _handle_seller_target_research(db: Session, job: JobClaim) -> dict[str, obje
         }
 
     # 未配置映射节点时退回内联采纳，让修复批次可以独立发版验证。
-    applied_count, apply_errors = apply_research_claims(
+    apply_summary = apply_research_claims(
         db,
         job=job,
         target_id=target_id,
@@ -323,9 +337,10 @@ def _handle_seller_target_research(db: Session, job: JobClaim) -> dict[str, obje
         "research_outcome": outcome,
         "mapper_configured": False,
         "proposal_count": len(claims),
-        "auto_accepted_count": applied_count,
-        "pending_review_count": len(apply_errors),
-        "apply_errors": apply_errors,
+        "auto_accepted_count": apply_summary.auto_accepted_count,
+        "pending_review_count": apply_summary.pending_review_count,
+        "ignored_count": apply_summary.ignored_count,
+        "apply_errors": apply_summary.errors,
         **report,
         **usage_summary,
     }
@@ -338,17 +353,17 @@ def apply_research_claims(
     target_id: UUID,
     claims: list[dict[str, Any]],
     target_website: str | None,
-) -> tuple[int, list[str]]:
+) -> ResearchClaimApplySummary:
     """Turn normalized claims into proposals and accept them.
 
     Shared by the research handler's inline fallback and the mapping job, so
-    both write the same audit trail. Auto-accepting is safe because every write
-    lands in the update log and can be rolled back; a claim that fails
-    validation stays pending_review instead of aborting the rest of the run.
+    both write the same audit trail.  Only consistent facts and evidence from a
+    trusted primary source are auto-accepted. Conflicts stay pending; malformed
+    facts are retained as ignored audit records and never shown as actionable.
     """
-    applied_count = 0
-    apply_errors: list[str] = []
-    for claim in claims:
+    summary = ResearchClaimApplySummary()
+    prepared_claims = _prepare_research_claims(db, target_id=target_id, claims=claims)
+    for claim in prepared_claims:
         proposal = _insert_research_proposal(
             db,
             job=job,
@@ -356,6 +371,15 @@ def apply_research_claims(
             claim=claim,
             target_website=target_website,
         )
+        label = str(proposal.get("section_code") or proposal.get("field_path") or "unknown")
+        validation_error = str(claim.get("validation_error") or "").strip()
+        if validation_error:
+            summary.ignored_count += 1
+            summary.errors.append(f"{label}: {validation_error}")
+            continue
+        if not _should_auto_accept_research_proposal(proposal):
+            summary.pending_review_count += 1
+            continue
         try:
             apply_research_proposal(
                 db,
@@ -364,11 +388,148 @@ def apply_research_claims(
                 review_status="auto_accepted",
             )
         except ResearchApplyError as exc:
-            apply_errors.append(f"{proposal.get('section_code') or proposal.get('field_path')}: {exc}")
+            _mark_proposal_invalid(db, proposal, str(exc))
+            summary.ignored_count += 1
+            summary.errors.append(f"{label}: {exc}")
             continue
         _mark_proposal_auto_accepted(db, proposal["id"])
-        applied_count += 1
-    return applied_count, apply_errors
+        summary.auto_accepted_count += 1
+    return summary
+
+
+def _prepare_research_claims(
+    db: Session,
+    *,
+    target_id: UUID,
+    claims: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Attach deterministic current-value and period decisions to claims.
+
+    The mapper chooses which report period is semantically appropriate.  Code
+    only enforces facts that should never be left to a prompt: numeric validity,
+    one core-finance period per batch, and no older-period overwrite.
+    """
+    prepared = [dict(claim) for claim in claims]
+    structured = [claim for claim in prepared if claim.get("proposal_kind") == "structured_fact"]
+    if not structured:
+        return prepared
+
+    current = _load_current_research_facts(db, target_id=target_id)
+    # The new comparison column is null on historical rows.  Reuse the
+    # consultant-facing label as a one-time compatibility key so an existing
+    # "2024年度" snapshot can still be compared with a 2025 research result.
+    # Once any core financial fact is accepted, research_apply persists the
+    # machine date and this fallback is no longer needed for that target.
+    current_financial_period = (
+        _valid_date(current.get("financial_period_end_date"))
+        or _financial_period_from_label(current.get("financial_period_label"))
+    )
+    for claim in structured:
+        field_path = str(claim.get("field_path") or "")
+        current_value = current.get(field_path)
+        claim["current_value_json"] = {
+            "value": _json_safe_value(current_value),
+            "financial_period_end_date": current_financial_period,
+        }
+        try:
+            normalized_value = normalize_structured_fact(db, field_path, claim.get("value"))
+        except ResearchApplyError as exc:
+            claim["validation_error"] = str(exc)
+            continue
+        claim["relation"] = _structured_fact_relation(
+            field_path=field_path,
+            current_value=current_value,
+            new_value=normalized_value,
+            current_period=current_financial_period,
+            new_period=claim.get("as_of_date"),
+        )
+        if field_path in CORE_FINANCIAL_FIELDS:
+            new_period = _valid_date(claim.get("as_of_date"))
+            if new_period is None:
+                claim["validation_error"] = f"{field_path} 缺少合法财务期间截止日。"
+                continue
+            if current_financial_period and new_period < current_financial_period:
+                claim["validation_error"] = (
+                    f"{field_path} 的期间 {new_period} 早于当前期间 {current_financial_period}，已阻止覆盖。"
+                )
+
+    finance_periods = {
+        str(claim.get("as_of_date"))
+        for claim in structured
+        if claim.get("field_path") in CORE_FINANCIAL_FIELDS
+        and not claim.get("validation_error")
+        and claim.get("as_of_date")
+    }
+    if len(finance_periods) > 1:
+        message = f"同批核心财务指标期间不一致：{', '.join(sorted(finance_periods))}。"
+        for claim in structured:
+            if claim.get("field_path") in CORE_FINANCIAL_FIELDS:
+                claim["validation_error"] = message
+    return prepared
+
+
+def _load_current_research_facts(db: Session, *, target_id: UUID) -> dict[str, Any]:
+    columns = sorted(RESEARCH_STRUCTURED_FIELDS | {"financial_period_end_date"})
+    row = db.execute(
+        text(
+            f"""
+            select {', '.join(columns)}
+            from seller_target
+            where id = :target_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ),
+        {
+            "target_id": target_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        raise ValueError(f"Seller target not found: {target_id}")
+    return dict(row)
+
+
+def _structured_fact_relation(
+    *,
+    field_path: str,
+    current_value: Any,
+    new_value: Any,
+    current_period: Any,
+    new_period: Any,
+) -> str:
+    current_missing = current_value in (None, "", [], {})
+    values_match = _json_safe_value(current_value) == _json_safe_value(new_value)
+    if field_path not in CORE_FINANCIAL_FIELDS:
+        if current_missing:
+            return "supplement"
+        return "consistent" if values_match else "same_period_conflict"
+
+    current_period_text = _valid_date(current_period)
+    new_period_text = _valid_date(new_period)
+    if current_period_text and new_period_text:
+        if new_period_text > current_period_text:
+            return "temporal_update"
+        if new_period_text < current_period_text:
+            return "same_period_conflict"
+        if current_missing:
+            return "supplement"
+        return "consistent" if values_match else "same_period_conflict"
+    if current_missing:
+        return "supplement"
+    return "consistent" if values_match else "same_period_conflict"
+
+
+def _should_auto_accept_research_proposal(proposal: dict[str, Any]) -> bool:
+    relation = str(proposal.get("conflict_kind") or "")
+    if relation == "consistent":
+        return True
+    return (
+        relation in {"supplement", "temporal_update"}
+        and proposal.get("source_type") in TRUSTED_RESEARCH_SOURCE_TYPES
+    )
 
 
 def _agent_output_has_content(parsed: Any) -> bool:
@@ -500,6 +661,8 @@ def normalize_research_output(
                 "period_label": _short_text(raw.get("period_label"), 100),
                 "as_of_date": item.get("as_of_date"),
                 "sources": sources,
+                "source_title": _short_text(raw.get("source_title"), 300),
+                "source_excerpt": _short_text(raw.get("source_excerpt"), 2000),
             }
         )
 
@@ -511,7 +674,7 @@ def normalize_research_output(
             notes.append(f"structured_facts[{index}]:not_an_object")
             continue
         field_path = str(raw.get("field_path") or "").strip()
-        if field_path not in RESEARCH_STRUCTURED_FIELDS:
+        if field_path not in RESEARCH_AGENT_STRUCTURED_FIELDS:
             notes.append(f"structured_facts[{index}]:unsupported_field:{field_path[:50]}")
             continue
         value = raw.get("value")
@@ -536,6 +699,8 @@ def normalize_research_output(
                 "period_label": _short_text(raw.get("period_label"), 100),
                 "as_of_date": _valid_date(raw.get("as_of_date")),
                 "sources": sources,
+                "source_title": _short_text(raw.get("source_title"), 300),
+                "source_excerpt": _short_text(raw.get("source_excerpt"), 2000),
             }
         )
 
@@ -556,6 +721,8 @@ def normalize_research_output(
                 "period_label": None,
                 "as_of_date": None,
                 "sources": [],
+                "source_title": None,
+                "source_excerpt": None,
             }
         )
     return claims, notes
@@ -663,6 +830,9 @@ def _insert_research_proposal(
             "info_status": claim["info_status"],
             "sources": sources,
         }
+    validation_error = str(claim.get("validation_error") or "").strip() or None
+    if validation_error:
+        proposed_value_json["validation_error"] = validation_error
     row = db.execute(
         text(
             """
@@ -671,17 +841,17 @@ def _insert_research_proposal(
               proposal_kind, section_code, field_path,
               proposed_value_json, current_value_json, conflict_kind,
               period_label, as_of_date, source_type, source_url,
-              review_status, created_by
+              source_title, source_excerpt, review_status, created_by
             ) values (
               :team_id, :workspace_id, 'seller_target', :entity_id, :job_id,
               :proposal_kind, :section_code, :field_path,
               :proposed_value_json, :current_value_json, :conflict_kind,
               :period_label, :as_of_date, :source_type, :source_url,
-              'pending_review', :created_by
+              :source_title, :source_excerpt, :review_status, :created_by
             ) returning
               id, entity_id, proposal_kind, section_code, field_path,
-              proposed_value_json, conflict_kind, as_of_date,
-              source_type, source_url, source_title, source_excerpt
+              job_id, proposed_value_json, conflict_kind, period_label, as_of_date,
+              source_type, source_url, source_title, source_excerpt, review_status
             """
         ).bindparams(
             bindparam("proposed_value_json", type_=JSONB),
@@ -704,6 +874,9 @@ def _insert_research_proposal(
             if sources
             else None,
             "source_url": sources[0] if sources else None,
+            "source_title": claim.get("source_title"),
+            "source_excerpt": claim.get("source_excerpt"),
+            "review_status": "ignored" if validation_error else "pending_review",
             "created_by": SYSTEM_USER_ID,
         },
     ).mappings().one()
@@ -720,6 +893,22 @@ def _mark_proposal_auto_accepted(db: Session, proposal_id: UUID) -> None:
             """
         ),
         {"proposal_id": proposal_id},
+    )
+
+
+def _mark_proposal_invalid(db: Session, proposal: dict[str, Any], error: str) -> None:
+    proposed_value = dict(proposal.get("proposed_value_json") or {})
+    proposed_value["validation_error"] = error[:1000]
+    db.execute(
+        text(
+            """
+            update research_proposal
+            set review_status = 'ignored', proposed_value_json = :proposed_value_json,
+                reviewed_at = now(), updated_at = now()
+            where id = :proposal_id
+            """
+        ).bindparams(bindparam("proposed_value_json", type_=JSONB)),
+        {"proposal_id": proposal["id"], "proposed_value_json": proposed_value},
     )
 
 
@@ -948,6 +1137,29 @@ def _valid_date(value: Any) -> str | None:
         return date.fromisoformat(raw).isoformat()
     except ValueError:
         return None
+
+
+def _financial_period_from_label(value: Any) -> str | None:
+    """Parse only common, unambiguous Chinese financial-period labels.
+
+    This is deliberately narrower than natural-language date parsing. Unknown
+    labels remain unknown and therefore cannot trigger an automatic overwrite.
+    """
+    label = re.sub(r"\s+", "", str(value or "")).lower()
+    year_match = re.search(r"(?<!\d)(20\d{2})(?!\d)", label)
+    if year_match is None:
+        return None
+    year = int(year_match.group(1))
+    quarter_ends = (
+        (("一季度", "第一季度", "1季度", "q1"), (3, 31)),
+        (("半年度", "半年报", "中期", "二季度", "第二季度", "2季度", "q2"), (6, 30)),
+        (("三季度", "第三季度", "3季度", "q3"), (9, 30)),
+        (("年度", "年报", "年末", "四季度", "第四季度", "4季度", "q4"), (12, 31)),
+    )
+    for markers, (month, day) in quarter_ends:
+        if any(marker in label for marker in markers):
+            return date(year, month, day).isoformat()
+    return None
 
 
 def _domain(url: str) -> str:

@@ -43,7 +43,7 @@ from backend.app.jobs.queue import JobClaim
 from backend.app.registry.indicators import Indicator, indicators_for
 from backend.app.services.industry_taxonomy import list_l1_terms
 from backend.app.services.profile_sections import PROFILE_SECTION_LABELS, load_profile_sections
-from backend.app.services.research_apply import MONEY_UNIT_MULTIPLIERS, RESEARCH_STRUCTURED_FIELDS
+from backend.app.services.research_apply import MONEY_UNIT_MULTIPLIERS, RESEARCH_AGENT_STRUCTURED_FIELDS
 
 # 报告全文进上下文，但不是无限：一份九模块报告正常在几千字，
 # 明显超出的多半是模型跑飞了，截断比撑爆上下文好。
@@ -138,7 +138,7 @@ def _handle_seller_target_research_map(db: Session, job: JobClaim) -> dict[str, 
     # a mapper retry should update the same proposal set, not look like a new
     # web-research run.
     research_job = _research_job_for_proposals(job, research_job_id)
-    applied_count, apply_errors = apply_research_claims(
+    apply_summary = apply_research_claims(
         db,
         job=research_job,
         target_id=target_id,
@@ -151,7 +151,7 @@ def _handle_seller_target_research_map(db: Session, job: JobClaim) -> dict[str, 
     proposal_count = len([claim for claim in claims if claim["proposal_kind"] != "not_found"])
     # 调研 job 给的是暂定结论（agent 有没有产出），最终结论由这里覆写：
     # 报告写得再好，落不进字段和画像就不算「找到了」。
-    if applied_count:
+    if apply_summary.auto_accepted_count or apply_summary.pending_review_count:
         outcome = "found"
     elif proposal_count:
         # 报告里有内容，但一条都没落进字段或画像 —— 和「真的查不到」不是一回事，
@@ -168,9 +168,10 @@ def _handle_seller_target_research_map(db: Session, job: JobClaim) -> dict[str, 
         "research_job_id": str(research_job_id),
         "research_outcome": outcome,
         "proposal_count": len(claims),
-        "auto_accepted_count": applied_count,
-        "pending_review_count": len(apply_errors),
-        "apply_errors": apply_errors,
+        "auto_accepted_count": apply_summary.auto_accepted_count,
+        "pending_review_count": apply_summary.pending_review_count,
+        "ignored_count": apply_summary.ignored_count,
+        "apply_errors": apply_summary.errors,
         "normalization_notes": notes,
         "prompt_version": node_config["prompt_version"],
         "prompt_tokens": result.prompt_tokens,
@@ -220,7 +221,7 @@ def _writable_indicators() -> list[Indicator]:
     return [
         item
         for item in indicators_for("seller_target")
-        if item.column in RESEARCH_STRUCTURED_FIELDS
+        if item.column in RESEARCH_AGENT_STRUCTURED_FIELDS
     ]
 
 

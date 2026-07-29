@@ -1070,6 +1070,7 @@ export interface FieldValueSource {
   entity_type: string;
   entity_id: string;
   field_path: string;
+  value_snapshot_json: { value?: unknown; source_context?: Record<string, unknown> };
   source_type: string | null;
   source_label: string | null;
   review_status: string;
@@ -1078,6 +1079,16 @@ export interface FieldValueSource {
   created_by_name: string | null;
   evidence_span?: {
     attachment_id?: string | null;
+  } | null;
+  research_evidence?: {
+    proposal_id: string | null;
+    job_id: string | null;
+    source_type: string | null;
+    source_url: string | null;
+    source_title: string | null;
+    source_excerpt: string | null;
+    period_label: string | null;
+    as_of_date: string | null;
   } | null;
 }
 
@@ -1926,6 +1937,8 @@ export interface ResearchProposal {
   review_status: string;
   reviewed_at: string | null;
   created_at: string;
+  is_actionable: boolean;
+  validation_error: string | null;
 }
 
 export interface SellerResearchStatus {

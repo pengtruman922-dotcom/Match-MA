@@ -13,7 +13,7 @@ from backend.app.jobs.handlers.research_map import (
     _research_job_for_proposals,
 )
 from backend.app.jobs.queue import JobClaim
-from backend.app.services.research_apply import RESEARCH_STRUCTURED_FIELDS
+from backend.app.services.research_apply import RESEARCH_AGENT_STRUCTURED_FIELDS
 
 
 class _NoNodeDb:
@@ -73,7 +73,7 @@ def test_mapping_context_hands_over_dictionaries_as_data_not_prose() -> None:
     )
 
     field_paths = {item["field_path"] for item in context["writable_fields"]}
-    assert field_paths == RESEARCH_STRUCTURED_FIELDS
+    assert field_paths == RESEARCH_AGENT_STRUCTURED_FIELDS
     assert context["industry_l1_terms"] == ["信息技术与通信", "医药与生命科学"]
 
     # 枚举取值随字段一起交付，模型不必去猜合法 code。

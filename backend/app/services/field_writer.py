@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
+from datetime import date
 from typing import Any
 from uuid import UUID
 
@@ -60,6 +61,10 @@ class WriteProvenance:
     source_context: dict[str, Any] | None = None
     log_metadata: dict[str, Any] = field(default_factory=dict)
     write_field_source: bool = True
+    # A research run that independently confirms the current value is still
+    # useful provenance.  It must not create a fake action log, but it should
+    # append a field source saying when and where the value was re-verified.
+    write_unchanged_field_source: bool = False
 
 
 def _seller_target_columns() -> set[str]:
@@ -112,6 +117,11 @@ def _normalize_value(db: Session, indicator: Indicator, value: Any) -> Any:
         # Province is spelled one way for everyone, so cascading filters match
         # regardless of whether a value came from the picker or from an LLM.
         return REGION_NORMALIZERS[indicator.column](value)
+    if indicator.column == "financial_period_end_date":
+        try:
+            return value if isinstance(value, date) else date.fromisoformat(str(value))
+        except (TypeError, ValueError) as exc:
+            raise FieldWriteError("financial_period_end_date must be an ISO date.") from exc
     if indicator.kind == "enum":
         if not isinstance(value, str):
             raise FieldWriteError(f"{indicator.column} must be an enum value.")
@@ -196,6 +206,26 @@ def write_seller_target_fields(
     original = _load_current(db, seller_target_id, list(normalized_changes))
     diff = diff_payload(original, normalized_changes)
     if not diff:
+        if provenance.write_field_source and provenance.write_unchanged_field_source:
+            unchanged = {
+                column: (original.get(column), normalized_changes[column])
+                for column in normalized_changes
+            }
+            write_field_value_sources_for_diff(
+                db,
+                entity_type="seller_target",
+                entity_id=seller_target_id,
+                changes=normalized_changes,
+                diff=unchanged,
+                source_type=provenance.source_type,
+                source_id=provenance.source_id,
+                evidence_id=provenance.evidence_id,
+                source_label=provenance.field_source_label,
+                confidence=provenance.confidence,
+                review_status=provenance.review_status,
+                source_context=provenance.source_context,
+                created_by=provenance.actor_user_id,
+            )
         return []
 
     set_clauses = [f"{column} = :{column}" for column in diff]

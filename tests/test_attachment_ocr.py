@@ -910,3 +910,36 @@ def test_field_value_source_out_includes_evidence_and_debug_ref() -> None:
 
     assert source["debug_ref"]["route"] == f"/debug/entities/background_job/{JOB_ID}"
     assert source["evidence_span"]["text_excerpt"] == "OCR excerpt"
+
+
+def test_field_value_source_out_exposes_research_excerpt_and_report_job() -> None:
+    proposal_id = UUID("00000000-0000-0000-0000-000000000017")
+    source = _field_value_source_out(
+        {
+            "id": UUID("00000000-0000-0000-0000-000000000018"),
+            "entity_type": "seller_target",
+            "entity_id": SELLER_TARGET_ID,
+            "field_path": "current_revenue_yuan",
+            "value_snapshot_json": {"value": "2102873724.18"},
+            "source_type": "research_proposal",
+            "source_id": proposal_id,
+            "evidence_id": None,
+            "source_label": "2024 年年度报告",
+            "confidence": None,
+            "review_status": "auto_accepted",
+            "created_at": "2026-07-28",
+            "created_by": None,
+            "rp_id": proposal_id,
+            "rp_job_id": JOB_ID,
+            "rp_source_type": "regulatory_disclosure",
+            "rp_source_url": "https://static.cninfo.com.cn/report.pdf",
+            "rp_source_title": "2024 年年度报告",
+            "rp_source_excerpt": "营业收入 2,102,873,724.18 元",
+            "rp_period_label": "2024年度",
+            "rp_as_of_date": "2024-12-31",
+        }
+    )
+
+    evidence = source["research_evidence"]
+    assert evidence["job_id"] == JOB_ID
+    assert evidence["source_excerpt"] == "营业收入 2,102,873,724.18 元"

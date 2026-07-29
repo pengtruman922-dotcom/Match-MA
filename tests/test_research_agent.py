@@ -12,6 +12,10 @@ from backend.app.jobs.handlers.research import (
     MAX_SEARCH_RESULTS_PER_CALL,
     ResearchTools,
     _current_profiles_for_prompt,
+    _financial_period_from_label,
+    _prepare_research_claims,
+    _should_auto_accept_research_proposal,
+    _structured_fact_relation,
     normalize_research_output,
     research_source_type,
 )
@@ -44,6 +48,147 @@ def test_claims_without_a_source_url_are_dropped() -> None:
     assert [claim["section_code"] for claim in claims] == ["business_product"]
     assert claims[0]["sources"] == ["https://www.szse.cn/disclosure/a"]
     assert any("tech_team:missing_sources" in note for note in notes)
+
+
+def test_field_level_excerpt_survives_normalization() -> None:
+    claims, _ = normalize_research_output(
+        {
+            "structured_facts": [
+                {
+                    "field_path": "current_revenue_yuan",
+                    "value": {"value": "2102873724.18", "unit": "元"},
+                    "sources": ["https://static.cninfo.com.cn/report.pdf"],
+                    "source_title": "2024 年年度报告",
+                    "source_excerpt": "营业收入 2,102,873,724.18 元",
+                    "as_of_date": "2024-12-31",
+                    "period_label": "2024年度",
+                }
+            ]
+        }
+    )
+
+    assert claims[0]["source_title"] == "2024 年年度报告"
+    assert claims[0]["source_excerpt"] == "营业收入 2,102,873,724.18 元"
+
+
+def test_structured_relation_uses_financial_period_before_value() -> None:
+    assert _structured_fact_relation(
+        field_path="current_revenue_yuan",
+        current_value=100,
+        new_value=100,
+        current_period="2024-12-31",
+        new_period="2025-12-31",
+    ) == "temporal_update"
+    assert _structured_fact_relation(
+        field_path="current_revenue_yuan",
+        current_value=100,
+        new_value=120,
+        current_period="2024-12-31",
+        new_period="2024-12-31",
+    ) == "same_period_conflict"
+
+
+def test_auto_accept_boundary_requires_trusted_primary_source() -> None:
+    assert _should_auto_accept_research_proposal(
+        {"conflict_kind": "consistent", "source_type": "public_web"}
+    ) is True
+    assert _should_auto_accept_research_proposal(
+        {"conflict_kind": "supplement", "source_type": "regulatory_disclosure"}
+    ) is True
+    assert _should_auto_accept_research_proposal(
+        {"conflict_kind": "supplement", "source_type": "public_web"}
+    ) is False
+    assert _should_auto_accept_research_proposal(
+        {"conflict_kind": "same_period_conflict", "source_type": "regulatory_disclosure"}
+    ) is False
+
+
+class _CurrentFactsDb:
+    def __init__(self, row: dict) -> None:
+        self.row = row
+
+    def execute(self, *args, **kwargs):
+        row = self.row
+
+        class _Result:
+            def mappings(self):
+                return self
+
+            def one_or_none(self):
+                return row
+
+        return _Result()
+
+
+def _finance_claim(field_path: str, value: int, period: str) -> dict:
+    return {
+        "proposal_kind": "structured_fact",
+        "field_path": field_path,
+        "value": {"value": value, "unit": "元"},
+        "as_of_date": period,
+        "relation": "supplement",
+    }
+
+
+def test_financial_guard_blocks_older_and_mixed_period_claims() -> None:
+    current = {
+        "current_revenue_yuan": Decimal("100"),
+        "current_net_profit_yuan": Decimal("10"),
+        "financial_period_end_date": date(2025, 12, 31),
+    }
+    older = _prepare_research_claims(
+        _CurrentFactsDb(current),
+        target_id=UUID("11111111-1111-1111-1111-111111111111"),
+        claims=[_finance_claim("current_revenue_yuan", 90, "2024-12-31")],
+    )
+    assert "早于当前期间" in older[0]["validation_error"]
+
+    mixed = _prepare_research_claims(
+        _CurrentFactsDb({**current, "financial_period_end_date": date(2024, 12, 31)}),
+        target_id=UUID("11111111-1111-1111-1111-111111111111"),
+        claims=[
+            _finance_claim("current_revenue_yuan", 120, "2025-12-31"),
+            _finance_claim("current_net_profit_yuan", 12, "2025-09-30"),
+        ],
+    )
+    assert all("期间不一致" in claim["validation_error"] for claim in mixed)
+
+
+def test_financial_guard_uses_legacy_display_period_until_machine_date_exists() -> None:
+    current = {
+        "current_revenue_yuan": Decimal("100"),
+        "financial_period_label": "2024年度",
+        "financial_period_end_date": None,
+    }
+    newer = _prepare_research_claims(
+        _CurrentFactsDb(current),
+        target_id=UUID("11111111-1111-1111-1111-111111111111"),
+        claims=[_finance_claim("current_revenue_yuan", 120, "2025-12-31")],
+    )
+    assert newer[0]["relation"] == "temporal_update"
+    assert "validation_error" not in newer[0]
+    assert newer[0]["current_value_json"]["financial_period_end_date"] == "2024-12-31"
+
+    older = _prepare_research_claims(
+        _CurrentFactsDb(current),
+        target_id=UUID("11111111-1111-1111-1111-111111111111"),
+        claims=[_finance_claim("current_revenue_yuan", 90, "2023-12-31")],
+    )
+    assert "早于当前期间 2024-12-31" in older[0]["validation_error"]
+
+
+@pytest.mark.parametrize(
+    ("label", "expected"),
+    [
+        ("2024年年度报告", "2024-12-31"),
+        ("2025年一季度", "2025-03-31"),
+        ("2025 半年度", "2025-06-30"),
+        ("2025Q3", "2025-09-30"),
+        ("截至2025年", None),
+    ],
+)
+def test_financial_period_label_fallback_is_deliberately_narrow(label: str, expected: str | None) -> None:
+    assert _financial_period_from_label(label) == expected
 
 
 def test_structured_facts_are_limited_to_the_whitelist() -> None:
@@ -359,6 +504,26 @@ def test_a_rejected_fact_leaves_the_rest_of_the_run_intact() -> None:
             },
             user_id="u1",
         )
+
+
+def test_invalid_legacy_pending_proposal_is_not_actionable_in_the_api() -> None:
+    from backend.app.api.routes.research import _proposal_output
+
+    proposal = _proposal_output(
+        {
+            "id": UUID("11111111-1111-1111-1111-111111111111"),
+            "proposal_kind": "structured_fact",
+            "field_path": "pe_ratio",
+            "proposed_value_json": {"value": "亏损，无有效PE（TTM约-26.08）"},
+            "current_value_json": {},
+            "section_code": None,
+            "anchor_matches_json": [],
+        },
+        db=object(),
+    )
+
+    assert proposal["is_actionable"] is False
+    assert "不是数字" in proposal["validation_error"]
 
 
 def test_field_writer_rejection_is_translated_so_one_bad_value_cannot_abort_the_run() -> None:

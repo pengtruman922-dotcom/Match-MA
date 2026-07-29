@@ -8,6 +8,7 @@ clicking 确认. The route wraps ResearchApplyError back into a 4xx.
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID
@@ -30,7 +31,21 @@ LISTED_STATUS_VALUES = {"listed", "unlisted", "pre_ipo", "unknown"}
 # registry (the single source). No numeric fields there by design: a wrong
 # industry label is visible on the page and cheap to undo, a wrong revenue
 # figure is neither.
+# Both values are derived from each core financial claim's period metadata.
+# Asking the mapper to emit them as standalone facts creates a duplicate
+# proposal that can disagree with the metric it describes.
+RESEARCH_INTERNAL_FIELDS = {"financial_period_end_date", "financial_period_label"}
 RESEARCH_STRUCTURED_FIELDS = writable_columns("research")
+RESEARCH_AGENT_STRUCTURED_FIELDS = RESEARCH_STRUCTURED_FIELDS - RESEARCH_INTERNAL_FIELDS
+
+CORE_FINANCIAL_FIELDS = {
+    "current_revenue_yuan",
+    "current_net_profit_yuan",
+    "current_total_profit_yuan",
+    "current_assets_yuan",
+    "current_debt_ratio",
+    "current_operating_cash_flow_yuan",
+}
 
 
 class ResearchApplyError(ValueError):
@@ -125,10 +140,22 @@ def _write_structured_fact(
     user_id: UUID,
     review_status: str,
 ) -> None:
+    changes: dict[str, Any] = {field_path: new_value}
+    if field_path in CORE_FINANCIAL_FIELDS:
+        as_of_date = proposal.get("as_of_date")
+        try:
+            period_end = as_of_date if isinstance(as_of_date, date) else date.fromisoformat(str(as_of_date or ""))
+        except (TypeError, ValueError) as exc:
+            raise ResearchApplyError(f"{field_path} 缺少合法财务期间截止日。") from exc
+        changes["financial_period_end_date"] = period_end
+        period_label = str(proposal.get("period_label") or "").strip()
+        if period_label:
+            changes["financial_period_label"] = period_label
+
     write_seller_target_fields(
         db,
         proposal["entity_id"],
-        {field_path: new_value},
+        changes,
         provenance=WriteProvenance(
             source_type="research_proposal",
             actor_user_id=user_id,
@@ -138,6 +165,10 @@ def _write_structured_fact(
             source_context={
                 "source_url": proposal.get("source_url"),
                 "source_excerpt": proposal.get("source_excerpt"),
+                "source_title": proposal.get("source_title"),
+                "period_label": proposal.get("period_label"),
+                "as_of_date": str(proposal.get("as_of_date") or "") or None,
+                "research_job_id": str(proposal.get("job_id") or "") or None,
             },
             log_metadata={
                 "source_url": proposal.get("source_url"),
@@ -145,6 +176,7 @@ def _write_structured_fact(
                 "conflict_kind": proposal.get("conflict_kind"),
                 "auto_accepted": review_status == "auto_accepted",
             },
+            write_unchanged_field_source=proposal.get("conflict_kind") == "consistent",
         ),
         search_doc_source="research_proposal_accept",
     )

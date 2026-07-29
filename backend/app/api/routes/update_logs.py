@@ -445,9 +445,15 @@ def _update_batch_logs(db: Session, *, entity_type: str, entity_id: UUID) -> lis
               al.applied_by, al.applied_at::text as applied_at,
               al.edited_before_apply, al.can_rollback,
               al.rollback_at::text as rollback_at, al.metadata_json,
-              applied_user.name as applied_by_name
+              applied_user.name as applied_by_name,
+              rp.job_id as research_job_id
             from action_application_log al
             left join app_user applied_user on applied_user.id = al.applied_by
+            left join research_proposal rp
+              on al.source_type = 'research_proposal'
+             and rp.id = al.source_id
+             and rp.team_id = al.team_id
+             and rp.workspace_id = al.workspace_id
             where al.team_id = :team_id
               and al.workspace_id = :workspace_id
               and al.entity_type = :entity_type
@@ -597,6 +603,8 @@ def _batch_key_for_log(
         return f"business-update-{row['business_update_id']}"
     if row.get("source_type") in {"seller_target_parse", "buyer_intent_parse"} and row.get("source_id"):
         return f"parse-job-{row['source_id']}"
+    if row.get("source_type") == "research_proposal" and row.get("research_job_id"):
+        return f"research-job-{row['research_job_id']}"
     signature = (
         str(row.get("source_type") or "direct_api"),
         str(row.get("applied_by") or "system"),
@@ -686,12 +694,13 @@ def _log_only_batch(
 ) -> dict[str, Any]:
     first = logs[0]
     is_rollback = first.get("source_type") == "rollback"
+    source_id = first.get("research_job_id") if first.get("source_type") == "research_proposal" else first.get("source_id")
     return _batch_record(
         batch_key=batch_key,
         entity_type=entity_type,
         entity_id=entity_id,
         source_type=first.get("source_type") or "direct_api",
-        source_id=first.get("source_id"),
+        source_id=source_id,
         input_type=None,
         raw_input=None,
         attachments=[],
@@ -876,6 +885,7 @@ ROLLBACK_FIELDS_BY_ENTITY = {
         "location_city",
         "location_district",
         "listed_status",
+        "listing_market_region",
         "market_cap_yuan",
         "current_revenue_yuan",
         "current_net_profit_yuan",
@@ -884,6 +894,7 @@ ROLLBACK_FIELDS_BY_ENTITY = {
         "current_debt_ratio",
         "current_operating_cash_flow_yuan",
         "financial_period_label",
+        "financial_period_end_date",
         "profitability_status",
         "cash_flow_status",
         "operation_stability_status",
