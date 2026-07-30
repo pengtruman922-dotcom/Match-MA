@@ -171,6 +171,7 @@ export default function CreateIntentModal({ onClose, onCreated }: { onClose: () 
   };
 
   const selectExistingBuyer = async (buyerName: string) => {
+    setSubmitError(null);
     try {
       const suggestions = await buyerParties.suggestions({ q: buyerName, limit: 10 });
       const exact = suggestions.find((item) => item.buyer_name.trim().toLowerCase() === buyerName.trim().toLowerCase());

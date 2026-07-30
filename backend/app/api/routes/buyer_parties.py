@@ -737,6 +737,15 @@ def _filter_options(
     ]
 
 
+def _truncate_text(value: Any, max_length: int) -> str | None:
+    if value is None:
+        return None
+    normalized = " ".join(str(value).split())
+    if not normalized:
+        return None
+    return normalized if len(normalized) <= max_length else normalized[: max_length - 1].rstrip() + "…"
+
+
 def _soft_delete_buyer_parties(
     db: Session,
     buyer_party_ids: list[UUID],

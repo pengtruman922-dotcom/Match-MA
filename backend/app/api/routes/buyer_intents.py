@@ -3,7 +3,7 @@ from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
@@ -29,6 +29,20 @@ from backend.app.services.recommendation_conditions import normalize_condition_e
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 
 router = APIRouter(prefix="/buyer-intents", tags=["buyer-intents"])
+
+YesNoRequirement = Literal["yes", "no", "unknown", "likely"]
+RequirementStrength = Literal["required", "preferred", "not_required", "unknown"]
+EquityRequirementType = Literal[
+    "control_required",
+    "consolidation_required",
+    "minority_acceptable",
+    "minority_only",
+    "flexible",
+    "specific_range",
+    "unknown",
+]
+ListedStatusRequirement = Literal["listed", "unlisted", "pre_ipo", "preparing_listing", "any", "unknown"]
+ListingMarketRegion = Literal["domestic", "overseas", "unknown"]
 
 
 class BuyerIntentCreate(BaseModel):
@@ -59,15 +73,15 @@ class BuyerIntentCreate(BaseModel):
     min_market_cap_yuan: Decimal | None = None
     max_market_cap_yuan: Decimal | None = None
     market_cap_range_summary: str | None = None
-    requires_control: str = "unknown"
-    requires_consolidation: str = "unknown"
-    accepts_minority_investment: str = "unknown"
+    requires_control: YesNoRequirement = "unknown"
+    requires_consolidation: YesNoRequirement = "unknown"
+    accepts_minority_investment: YesNoRequirement = "unknown"
     desired_equity_ratio_min: Decimal | None = None
     desired_equity_ratio_max: Decimal | None = None
     equity_ratio_summary: str | None = None
-    equity_requirement_type: str | None = None
+    equity_requirement_type: EquityRequirementType | None = None
     acceptable_control_paths_json: list[Any] | dict[str, Any] | None = None
-    preferred_listed_status: str | None = "unknown"
+    preferred_listed_status: ListedStatusRequirement | None = "unknown"
     acceptable_listed_status_json: list[Any] | None = None
     condition_effects_json: dict[str, Any] | None = None
     listing_board_requirement_summary: str | None = None
@@ -82,13 +96,13 @@ class BuyerIntentCreate(BaseModel):
     buyer_industry_advantage_summary: str | None = None
     acceptable_cash_flow_status_json: list[Any] | None = None
     acceptable_profitability_status_json: list[Any] | None = None
-    requires_relocation: str = "unknown"
+    requires_relocation: RequirementStrength = "unknown"
     relocation_target_regions_json: list[Any] | None = None
-    requires_return_investment: str = "unknown"
+    requires_return_investment: RequirementStrength = "unknown"
     return_investment_multiple: Decimal | None = None
-    requires_team_retention: str = "unknown"
-    earnout_requirement: str = "unknown"
-    listing_market_region: str | None = None
+    requires_team_retention: RequirementStrength = "unknown"
+    earnout_requirement: RequirementStrength = "unknown"
+    listing_market_region: ListingMarketRegion | None = None
     budget_min_yuan: Decimal | None = None
     budget_max_yuan: Decimal | None = None
     needs_confirmation_json: list[Any] | None = None
@@ -96,6 +110,13 @@ class BuyerIntentCreate(BaseModel):
     priority_summary: str | None = None
     preference_summary: str | None = None
     unknown_summary: str | None = None
+
+    @field_validator("equity_requirement_type", "listing_market_region", mode="before")
+    @classmethod
+    def normalize_nullable_enum(cls, value: Any) -> Any:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 class BuyerIntentOut(BaseModel):
@@ -182,7 +203,7 @@ class BuyerIntentListOut(BaseModel):
 
 class BuyerIntentUpdate(BaseModel):
     intent_name: str | None = Field(default=None, min_length=1, max_length=300)
-    status: str | None = None
+    status: Literal["active", "paused", "closed"] | None = None
     pause_reason: str | None = None
     contact_name: str | None = None
     raw_requirement_text: str | None = None
@@ -208,15 +229,15 @@ class BuyerIntentUpdate(BaseModel):
     min_market_cap_yuan: Decimal | None = None
     max_market_cap_yuan: Decimal | None = None
     market_cap_range_summary: str | None = None
-    requires_control: str | None = None
-    requires_consolidation: str | None = None
-    accepts_minority_investment: str | None = None
+    requires_control: YesNoRequirement | None = None
+    requires_consolidation: YesNoRequirement | None = None
+    accepts_minority_investment: YesNoRequirement | None = None
     desired_equity_ratio_min: Decimal | None = None
     desired_equity_ratio_max: Decimal | None = None
     equity_ratio_summary: str | None = None
-    equity_requirement_type: str | None = None
+    equity_requirement_type: EquityRequirementType | None = None
     acceptable_control_paths_json: list[Any] | dict[str, Any] | None = None
-    preferred_listed_status: str | None = None
+    preferred_listed_status: ListedStatusRequirement | None = None
     acceptable_listed_status_json: list[Any] | None = None
     condition_effects_json: dict[str, Any] | None = None
     listing_board_requirement_summary: str | None = None
@@ -231,13 +252,13 @@ class BuyerIntentUpdate(BaseModel):
     buyer_industry_advantage_summary: str | None = None
     acceptable_cash_flow_status_json: list[Any] | None = None
     acceptable_profitability_status_json: list[Any] | None = None
-    requires_relocation: str | None = None
+    requires_relocation: RequirementStrength | None = None
     relocation_target_regions_json: list[Any] | None = None
-    requires_return_investment: str | None = None
+    requires_return_investment: RequirementStrength | None = None
     return_investment_multiple: Decimal | None = None
-    requires_team_retention: str | None = None
-    earnout_requirement: str | None = None
-    listing_market_region: str | None = None
+    requires_team_retention: RequirementStrength | None = None
+    earnout_requirement: RequirementStrength | None = None
+    listing_market_region: ListingMarketRegion | None = None
     budget_min_yuan: Decimal | None = None
     budget_max_yuan: Decimal | None = None
     needs_confirmation_json: list[Any] | None = None
@@ -246,6 +267,13 @@ class BuyerIntentUpdate(BaseModel):
     preference_summary: str | None = None
     unknown_summary: str | None = None
     owner_user_id: UUID | None = None
+
+    @field_validator("equity_requirement_type", "listing_market_region", mode="before")
+    @classmethod
+    def normalize_nullable_enum(cls, value: Any) -> Any:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 class BuyerIntentParseRequest(BaseModel):

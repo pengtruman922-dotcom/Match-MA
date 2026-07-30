@@ -2,12 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   AlertCircle,
-  CheckCircle2,
+  Check,
   Copy,
   Loader2,
   Pencil,
   Plus,
-  Save,
   Trash2,
   X,
 } from 'lucide-react';
@@ -17,7 +16,6 @@ import type {
   BuyerIntentConfirmationItem,
   BuyerIntentParseStatus,
   BuyerIntentScenario,
-  BuyerIntentScenarioWrite,
   BuyerIntentUpdate,
   BuyerRegionConstraint,
   IndicatorGroupMeta,
@@ -30,6 +28,12 @@ import AdministrativeAreaPicker from './AdministrativeAreaPicker';
 
 type ConditionEffect = 'required' | 'preferred' | 'deep_eval';
 type PendingItem = BuyerIntentConfirmationItem & { scopeLabel: string; scenario?: BuyerIntentScenario };
+type ConditionRowDefinition = {
+  key: string;
+  label: string;
+  group: string;
+  indicators: IndicatorMeta[];
+};
 
 export default function BuyerIntentRequirements({
   intent,
@@ -44,12 +48,7 @@ export default function BuyerIntentRequirements({
   const [taxonomy, setTaxonomy] = useState<IndustryOptionsResponse>({ l1: [], l2: [] });
   const [registry, setRegistry] = useState<IndicatorRegistryResponse | null>(null);
   const [loadingScenarios, setLoadingScenarios] = useState(true);
-  const [editing, setEditing] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [reviewing, setReviewing] = useState(false);
   const [resolvingItem, setResolvingItem] = useState<string | null>(null);
-  const [draft, setDraft] = useState<Record<string, unknown>>(() => intentDraft(intent));
-  const [effects, setEffects] = useState<Record<string, ConditionEffect>>(intent.condition_effects_json || {});
 
   const loadScenarios = useCallback(async () => {
     setLoadingScenarios(true);
@@ -62,41 +61,34 @@ export default function BuyerIntentRequirements({
 
   useEffect(() => { void loadScenarios(); }, [loadScenarios]);
   useEffect(() => {
-    setDraft(intentDraft(intent));
-    setEffects(intent.condition_effects_json || {});
-  }, [intent]);
-  useEffect(() => {
     Promise.all([meta.industryOptions(), indicatorRegistry.list('buyer_intent')])
       .then(([industryData, registryData]) => { setTaxonomy(industryData); setRegistry(registryData); })
       .catch(() => {});
   }, []);
 
   const indicators = registry?.indicators || [];
-  const allPending = useMemo<PendingItem[]>(
-    () => [
-      ...(intent.needs_confirmation_json || []).map((item) => ({ ...item, scopeLabel: '公共条件' })),
-      ...scenarios.flatMap((scenario) =>
-        (scenario.needs_confirmation_json || []).map((item) => ({ ...item, scopeLabel: scenario.label, scenario })),
-      ),
-    ],
-    [intent.needs_confirmation_json, scenarios],
+  const commonPending = useMemo<PendingItem[]>(
+    () => (intent.needs_confirmation_json || []).map((item) => ({ ...item, scopeLabel: '公共条件' })),
+    [intent.needs_confirmation_json],
+  );
+  const pendingCount = commonPending.length + scenarios.reduce(
+    (total, scenario) => total + (scenario.needs_confirmation_json || []).length,
+    0,
   );
 
-  const saveShared = async () => {
-    setSaving(true);
-    try {
-      const payload = {
-        ...cleanFields(draft, indicators, false),
-        condition_effects_json: effects,
-      } as BuyerIntentUpdate;
-      await buyerIntents.update(intent.id, payload);
-      setEditing(false);
-      await onRefresh?.();
-    } catch (error) {
-      alert(error instanceof Error ? error.message : '保存需求失败');
-    } finally {
-      setSaving(false);
+  const saveSharedConditions = async (
+    changes: Record<string, unknown>,
+    effectChanges: Record<string, ConditionEffect>,
+  ) => {
+    const payload = normalizeCommonFieldChanges(changes, indicators) as BuyerIntentUpdate;
+    if (Object.keys(effectChanges).length) {
+      payload.condition_effects_json = {
+        ...(intent.condition_effects_json || {}),
+        ...effectChanges,
+      };
     }
+    await buyerIntents.update(intent.id, payload);
+    await onRefresh?.();
   };
 
   const addScenario = async () => {
@@ -126,19 +118,6 @@ export default function BuyerIntentRequirements({
     if (!window.confirm(`确认删除“${scenario.label}”？`)) return;
     await buyerIntents.deleteScenario(intent.id, scenario.id);
     setScenarios((current) => current.filter((item) => item.id !== scenario.id));
-  };
-
-  const completeReview = async () => {
-    if (allPending.length && !window.confirm('确认已人工核对这些事项并清除“需要确认”状态？')) return;
-    setReviewing(true);
-    try {
-      await buyerIntents.review(intent.id, allPending.length > 0);
-      await Promise.all([loadScenarios(), onRefresh?.()]);
-    } catch (error) {
-      alert(error instanceof Error ? error.message : '完成复核失败');
-    } finally {
-      setReviewing(false);
-    }
   };
 
   const resolvePending = async (
@@ -174,7 +153,12 @@ export default function BuyerIntentRequirements({
         const currentValue = (intent as unknown as Record<string, unknown>)[item.field];
         const payload: Record<string, unknown> = { needs_confirmation_json: nextPending };
         if (action !== 'discard' && proposed !== undefined) payload[item.field] = mergeProposedValue(currentValue, proposed);
-        if (action === 'deep_eval') payload.condition_effects_json = { ...(intent.condition_effects_json || {}), [item.field]: 'deep_eval' };
+        if (action === 'deep_eval') {
+          payload.condition_effects_json = {
+            ...(intent.condition_effects_json || {}),
+            [item.field]: 'deep_eval',
+          };
+        }
         await buyerIntents.update(intent.id, payload as BuyerIntentUpdate);
         await onRefresh?.();
       }
@@ -210,20 +194,25 @@ export default function BuyerIntentRequirements({
           <p className="text-xs font-semibold text-gray-500">需求摘要</p>
           <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-gray-800">{intent.intent_summary || '暂无需求摘要'}</p>
         </div>
-        <div className="flex items-center gap-2">
-          {allPending.length ? <StateBadge tone="amber" text={`${allPending.length} 项需要确认`} /> : null}
-          {intent.reviewed_at ? <StateBadge tone="green" text="已人工复核" /> : <StateBadge tone="gray" text="尚未人工复核" />}
-          <button type="button" onClick={() => setEditing((value) => !value)} className="inline-flex items-center gap-1 border border-gray-200 px-3 py-1.5 text-xs text-gray-700 hover:border-brand-500 hover:text-brand-700">
-            {editing ? <X className="h-3.5 w-3.5" /> : <Pencil className="h-3.5 w-3.5" />}{editing ? '取消编辑' : '编辑公共条件'}
-          </button>
-        </div>
+        {pendingCount ? <StateBadge tone="amber" text={`${pendingCount} 项需要确认`} /> : null}
       </div>
 
-      {editing ? (
-        registry ? <ContractEditor groups={registry.groups} indicators={indicators} fields={draft} effects={effects} taxonomy={taxonomy} onFields={setDraft} onEffects={setEffects} saving={saving} onSave={saveShared} /> : <Loading label="正在读取字段契约" />
-      ) : (
-        <ConditionDisplay title="公共条件" subtitle="与下面任一启用方案共同生效" groups={registry?.groups || []} indicators={indicators} fields={intent as unknown as Record<string, unknown>} effects={intent.condition_effects_json || {}} />
-      )}
+      {registry ? (
+        <InlineConditionEditor
+          title="公共条件"
+          subtitle="与下面任一启用方案共同生效；点击字段即可单独编辑和保存"
+          groups={registry.groups}
+          indicators={indicators}
+          fields={intent as unknown as Record<string, unknown>}
+          effects={intent.condition_effects_json || {}}
+          taxonomy={taxonomy}
+          pending={commonPending}
+          resolvingItem={resolvingItem}
+          onSave={saveSharedConditions}
+          onResolvePending={resolvePending}
+          onModifyPending={modifyPending}
+        />
+      ) : <Loading label="正在读取字段契约" />}
 
       <section className="space-y-3">
         <div className="flex items-center justify-between">
@@ -238,38 +227,16 @@ export default function BuyerIntentRequirements({
             groups={registry?.groups || []}
             indicators={indicators.filter((indicator) => indicator.scenario_allowed)}
             taxonomy={taxonomy}
+            resolvingItem={resolvingItem}
             onSaved={(updated) => setScenarios((current) => current.map((item) => item.id === updated.id ? updated : item))}
             onCopy={() => void copyScenario(scenario)}
             onDelete={() => void deleteScenario(scenario)}
+            onResolvePending={resolvePending}
+            onModifyPending={modifyPending}
           />
         )) : (
           <div className="border border-dashed border-gray-200 px-4 py-5 text-sm text-gray-500">未设置显式方案，当前需求按一套公共条件进行匹配。</div>
         )}
-      </section>
-
-      <section className={`border ${allPending.length ? 'border-amber-200 bg-amber-50/40' : 'border-gray-200'}`}>
-        <div className="flex items-center justify-between border-b border-inherit px-4 py-3">
-          <div><p className="text-sm font-semibold text-gray-900">待确认事项</p><p className="mt-0.5 text-xs text-gray-500">确认前仅隔离存疑项：不参加初筛和软排序，但原始内容仍进入 AI 深评。</p></div>
-          <button type="button" onClick={() => void completeReview()} disabled={reviewing} className="inline-flex items-center gap-1 bg-brand-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">
-            {reviewing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}{allPending.length ? '完成复核' : '标记已复核'}
-          </button>
-        </div>
-        <div className="divide-y divide-amber-100 px-4">
-          {allPending.length ? allPending.map((item, index) => (
-            <div key={`${confirmationKey(item)}-${index}`} className="py-3 text-sm">
-              <div className="flex flex-wrap items-center gap-2"><EffectBadge effect="pending" /><span className="font-medium text-gray-900">{item.scopeLabel} · {indicatorLabel(indicators, item.field)}</span>{item.effect ? <EffectBadge effect={item.effect} /> : null}</div>
-              <p className="mt-1 text-gray-700">{item.reason}</p>
-              {item.proposed_value !== undefined ? <p className="mt-1 whitespace-pre-wrap text-xs text-gray-500">AI 建议值：{displayUnknown(item.proposed_value)}</p> : null}
-              {item.evidence ? <p className="mt-1 text-xs text-gray-500">原文：{item.evidence}</p> : null}
-              <div className="mt-2 flex flex-wrap gap-2">
-                {item.proposed_value !== undefined ? <button type="button" disabled={resolvingItem === confirmationKey(item)} onClick={() => void resolvePending(item, 'apply')} className="border border-amber-300 bg-white px-2.5 py-1 text-xs text-amber-800 disabled:opacity-50">采纳建议值</button> : null}
-                {item.proposed_value !== undefined ? <button type="button" disabled={resolvingItem === confirmationKey(item)} onClick={() => modifyPending(item)} className="border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-600 disabled:opacity-50">修改并采纳</button> : null}
-                <button type="button" disabled={resolvingItem === confirmationKey(item)} onClick={() => void resolvePending(item, 'deep_eval')} className="border border-violet-200 bg-white px-2.5 py-1 text-xs text-violet-700 disabled:opacity-50">改为仅深评</button>
-                <button type="button" disabled={resolvingItem === confirmationKey(item)} onClick={() => void resolvePending(item, 'discard')} className="border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-600 disabled:opacity-50">不设置该条件</button>
-              </div>
-            </div>
-          )) : <p className="py-4 text-sm text-gray-500">暂无待确认事项。</p>}
-        </div>
       </section>
 
       <section>
@@ -280,63 +247,251 @@ export default function BuyerIntentRequirements({
   );
 }
 
-function ContractEditor({ groups, indicators, fields, effects, taxonomy, onFields, onEffects, saving, onSave }: {
+function InlineConditionEditor({
+  title,
+  subtitle,
+  groups,
+  indicators,
+  fields,
+  effects,
+  taxonomy,
+  pending,
+  resolvingItem,
+  showEmpty = true,
+  onSave,
+  onResolvePending,
+  onModifyPending,
+}: {
+  title: string;
+  subtitle: string;
   groups: IndicatorGroupMeta[];
   indicators: IndicatorMeta[];
   fields: Record<string, unknown>;
   effects: Record<string, ConditionEffect>;
   taxonomy: IndustryOptionsResponse;
-  onFields: (value: Record<string, unknown>) => void;
-  onEffects: (value: Record<string, ConditionEffect>) => void;
-  saving: boolean;
-  onSave: () => void;
+  pending: PendingItem[];
+  resolvingItem: string | null;
+  showEmpty?: boolean;
+  onSave: (changes: Record<string, unknown>, effectChanges: Record<string, ConditionEffect>) => Promise<void>;
+  onResolvePending: (item: PendingItem, action: 'apply' | 'discard' | 'deep_eval', replacement?: unknown) => Promise<void>;
+  onModifyPending: (item: PendingItem) => void;
 }) {
-  const setField = (field: string, value: unknown) => onFields({ ...fields, [field]: value });
-  const setFields = (changes: Record<string, unknown>) => onFields({ ...fields, ...changes });
-  const setEffect = (field: string, effect: ConditionEffect) => onEffects({ ...effects, [field]: effect });
+  const rows = useMemo(() => conditionRows(indicators), [indicators]);
+  const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [draftFields, setDraftFields] = useState<Record<string, unknown>>({});
+  const [draftEffects, setDraftEffects] = useState<Record<string, ConditionEffect>>({});
+  const [saving, setSaving] = useState(false);
+
+  const startEditing = (row: ConditionRowDefinition) => {
+    setDraftFields(Object.fromEntries(row.indicators.map((indicator) => [indicator.column, fields[indicator.column]])));
+    setDraftEffects(Object.fromEntries(
+      row.indicators
+        .filter((indicator) => indicator.effect_editable && indicator.editor !== 'region_multi')
+        .map((indicator) => [indicator.column, effectiveEffect(indicator, effects, fields[indicator.column])]),
+    ));
+    setEditingKey(row.key);
+  };
+
+  const saveRow = async () => {
+    setSaving(true);
+    try {
+      await onSave(draftFields, draftEffects);
+      setEditingKey(null);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : '保存字段失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const pendingForRow = (row: ConditionRowDefinition) => pending.filter(
+    (item) => row.indicators.some((indicator) => indicator.column === item.field),
+  );
+  const isVisible = (row: ConditionRowDefinition) => showEmpty
+    || row.indicators.some((indicator) => hasValue(fields[indicator.column]))
+    || pendingForRow(row).length > 0
+    || editingKey === row.key;
+  const hiddenRows = rows.filter((row) => !isVisible(row));
+  const orphanPending = pending.filter(
+    (item) => !rows.some((row) => row.indicators.some((indicator) => indicator.column === item.field)),
+  );
+
   return (
-    <section className="space-y-5 border border-brand-200 bg-brand-50/20 p-4">
+    <section className="border border-gray-200 bg-white">
+      {(title || !showEmpty) ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-100 px-4 py-3">
+          <div>{title ? <p className="text-sm font-semibold text-gray-900">{title}</p> : null}{subtitle ? <p className="mt-0.5 text-xs text-gray-400">{subtitle}</p> : null}</div>
+          {!showEmpty && hiddenRows.length ? (
+            <select
+              value=""
+              onChange={(event) => {
+                const row = rows.find((item) => item.key === event.target.value);
+                if (row) startEditing(row);
+              }}
+              className="border border-gray-200 bg-white px-2.5 py-1.5 text-xs text-gray-700"
+            >
+              <option value="">新增条件…</option>
+              {hiddenRows.map((row) => <option key={row.key} value={row.key}>{row.label}</option>)}
+            </select>
+          ) : null}
+        </div>
+      ) : null}
+
       {groups.map((group) => {
-        const groupIndicators = indicators.filter((indicator) => indicator.group === group.key);
-        if (!groupIndicators.length) return null;
+        const groupRows = rows.filter((row) => row.group === group.key && isVisible(row));
+        if (!groupRows.length) return null;
         return (
-          <div key={group.key} className="space-y-3">
-            <p className="border-b border-gray-200 pb-2 text-sm font-semibold text-gray-800">{group.label}</p>
-            {group.key === 'intent_scope' ? (
-              <IndustryFieldsEditor indicators={groupIndicators} fields={fields} effects={effects} taxonomy={taxonomy} setFields={setFields} setEffect={setEffect} />
-            ) : null}
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {groupIndicators.filter((indicator) => !INDUSTRY_FIELDS.has(indicator.column)).map((indicator) => (
-                <FieldEditor key={indicator.column} indicator={indicator} value={fields[indicator.column]} effect={effects[indicator.column] || indicator.default_effect || 'deep_eval'} onValue={(value) => setField(indicator.column, value)} onEffect={(effect) => setEffect(indicator.column, effect)} />
-              ))}
+          <div key={group.key} className="border-b border-gray-100 last:border-0">
+            <p className="bg-gray-50 px-4 py-2 text-xs font-semibold text-gray-500">{group.label}</p>
+            <div className="divide-y divide-gray-100 px-4">
+              {groupRows.map((row) => {
+                const rowPending = pendingForRow(row);
+                const editing = editingKey === row.key;
+                const rowHasValue = row.indicators.some((indicator) => hasValue(fields[indicator.column]));
+                return (
+                  <div key={row.key} className="py-3">
+                    {editing ? (
+                      <div className="space-y-3">
+                        <ConditionRowEditor
+                          row={row}
+                          fields={draftFields}
+                          effects={draftEffects}
+                          taxonomy={taxonomy}
+                          onFields={setDraftFields}
+                          onEffects={setDraftEffects}
+                        />
+                        <div className="flex justify-end gap-2">
+                          <button type="button" disabled={saving} onClick={() => void saveRow()} className="inline-flex items-center gap-1 bg-brand-600 px-3 py-1.5 text-xs text-white disabled:opacity-50">{saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}保存</button>
+                          <button type="button" disabled={saving} onClick={() => setEditingKey(null)} className="inline-flex items-center gap-1 border border-gray-200 px-3 py-1.5 text-xs text-gray-600"><X className="h-3.5 w-3.5" />取消</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-start gap-3">
+                        <div className="flex w-20 shrink-0 flex-wrap gap-1">
+                          {rowHasValue ? row.indicators.filter((indicator) => hasValue(fields[indicator.column])).map((indicator) => (
+                            <EffectBadge key={indicator.column} effect={effectiveEffect(indicator, effects, fields[indicator.column])} />
+                          )) : <span className="px-1.5 py-0.5 text-[11px] text-gray-400">未设置</span>}
+                        </div>
+                        <span className="w-36 shrink-0 text-xs text-gray-500">{row.label}</span>
+                        <span className={`min-w-0 flex-1 whitespace-pre-wrap text-sm ${rowHasValue ? 'text-gray-800' : 'text-gray-300'}`}>{formatConditionRow(row, fields, taxonomy)}</span>
+                        {rowPending.length ? <StateBadge tone="amber" text={`${rowPending.length} 项待确认`} /> : null}
+                        <button type="button" title={`编辑${row.label}`} onClick={() => startEditing(row)} className="p-1.5 text-gray-400 hover:bg-gray-100 hover:text-brand-700"><Pencil className="h-3.5 w-3.5" /></button>
+                      </div>
+                    )}
+                    {rowPending.length ? (
+                      <PendingItems
+                        items={rowPending}
+                        resolvingItem={resolvingItem}
+                        onResolve={onResolvePending}
+                        onModify={onModifyPending}
+                      />
+                    ) : null}
+                  </div>
+                );
+              })}
             </div>
           </div>
         );
       })}
-      <div className="flex justify-end"><button type="button" onClick={onSave} disabled={saving} className="inline-flex items-center gap-1 bg-brand-600 px-4 py-2 text-sm text-white disabled:opacity-50">{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}保存</button></div>
+
+      {orphanPending.map((item, index) => (
+        <div key={`${confirmationKey(item)}:${index}`} className="border-t border-amber-100 px-4 py-3">
+          <div className="flex items-center gap-3"><EffectBadge effect="pending" /><span className="text-xs text-gray-500">{item.field}</span></div>
+          <PendingItems items={[item]} resolvingItem={resolvingItem} onResolve={onResolvePending} onModify={onModifyPending} />
+        </div>
+      ))}
+
+      {!showEmpty && !rows.some(isVisible) && !orphanPending.length ? <p className="px-4 py-4 text-sm text-gray-500">暂无方案条件，可从右上角新增。</p> : null}
     </section>
   );
 }
 
-const INDUSTRY_FIELDS = new Set(['industries_json', 'industry_l2_json', 'excluded_industries_json']);
-
-function IndustryFieldsEditor({ indicators, fields, effects, taxonomy, setFields, setEffect }: {
-  indicators: IndicatorMeta[];
+function ConditionRowEditor({ row, fields, effects, taxonomy, onFields, onEffects }: {
+  row: ConditionRowDefinition;
   fields: Record<string, unknown>;
   effects: Record<string, ConditionEffect>;
   taxonomy: IndustryOptionsResponse;
-  setFields: (fields: Record<string, unknown>) => void;
-  setEffect: (field: string, effect: ConditionEffect) => void;
+  onFields: (value: Record<string, unknown>) => void;
+  onEffects: (value: Record<string, ConditionEffect>) => void;
 }) {
-  const l1Indicator = indicators.find((item) => item.column === 'industries_json');
-  const l2Indicator = indicators.find((item) => item.column === 'industry_l2_json');
-  const excludedIndicator = indicators.find((item) => item.column === 'excluded_industries_json');
-  const pairs = requirementPairs(fields, taxonomy);
-  const excludedPairs = industryTermsToPairs(stringArray(fields.excluded_industries_json), taxonomy);
+  const setField = (field: string, value: unknown) => onFields({ ...fields, [field]: value });
+  const setEffect = (field: string, effect: ConditionEffect) => onEffects({ ...effects, [field]: effect });
+
+  if (row.key === 'accepted_industries') {
+    const l1Indicator = row.indicators.find((item) => item.column === 'industries_json');
+    const l2Indicator = row.indicators.find((item) => item.column === 'industry_l2_json');
+    return (
+      <div>
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <span className="text-xs font-medium text-gray-600">可接受行业</span>
+          <div className="flex gap-2">
+            {l1Indicator ? <EffectSelect label="一级" value={effects.industries_json || l1Indicator.default_effect || 'required'} onChange={(value) => setEffect('industries_json', value)} /> : null}
+            {l2Indicator ? <EffectSelect label="二级" value={effects.industry_l2_json || l2Indicator.default_effect || 'preferred'} onChange={(value) => setEffect('industry_l2_json', value)} /> : null}
+          </div>
+        </div>
+        <IndustryPairsEditor
+          value={requirementPairs(fields, taxonomy)}
+          options={taxonomy}
+          onChange={(value) => onFields({
+            ...fields,
+            industries_json: [...new Set(value.map((pair) => pair.l1))],
+            industry_l2_json: [...new Set(value.flatMap((pair) => pair.l2 ? [pair.l2] : []))],
+          })}
+        />
+      </div>
+    );
+  }
+
+  const indicator = row.indicators[0];
+  if (indicator.column === 'excluded_industries_json') {
+    return (
+      <div>
+        <div className="mb-2 flex items-center justify-between gap-2"><span className="text-xs font-medium text-gray-600">{indicator.label}</span><EffectBadge effect="required" /></div>
+        <IndustryPairsEditor
+          value={industryTermsToPairs(stringArray(fields.excluded_industries_json), taxonomy)}
+          options={taxonomy}
+          onChange={(value) => setField('excluded_industries_json', [...new Set(value.map((pair) => pair.l2 || pair.l1))])}
+        />
+      </div>
+    );
+  }
+
   return (
-    <div className="grid gap-4 xl:grid-cols-2">
-      {l1Indicator && l2Indicator ? <div><div className="mb-2 flex flex-wrap items-center justify-between gap-2"><span className="text-xs font-medium text-gray-600">可接受行业</span><div className="flex gap-2"><EffectSelect label="一级" value={effects.industries_json || l1Indicator.default_effect || 'required'} onChange={(value) => setEffect('industries_json', value)} /><EffectSelect label="二级" value={effects.industry_l2_json || l2Indicator.default_effect || 'preferred'} onChange={(value) => setEffect('industry_l2_json', value)} /></div></div><IndustryPairsEditor value={pairs} options={taxonomy} onChange={(value) => setFields({ industries_json: [...new Set(value.map((pair) => pair.l1))], industry_l2_json: [...new Set(value.flatMap((pair) => pair.l2 ? [pair.l2] : []))] })} /></div> : null}
-      {excludedIndicator ? <div><div className="mb-2 flex items-center justify-between gap-2"><span className="text-xs font-medium text-gray-600">排除行业</span><EffectBadge effect="required" /></div><IndustryPairsEditor value={excludedPairs} options={taxonomy} onChange={(value) => setFields({ excluded_industries_json: [...new Set(value.map((pair) => pair.l2 || pair.l1))] })} /></div> : null}
+    <FieldEditor
+      indicator={indicator}
+      value={fields[indicator.column]}
+      effect={effects[indicator.column] || effectiveEffect(indicator, {}, fields[indicator.column])}
+      onValue={(value) => setField(indicator.column, value)}
+      onEffect={(effect) => setEffect(indicator.column, effect)}
+    />
+  );
+}
+
+function PendingItems({ items, resolvingItem, onResolve, onModify }: {
+  items: PendingItem[];
+  resolvingItem: string | null;
+  onResolve: (item: PendingItem, action: 'apply' | 'discard' | 'deep_eval', replacement?: unknown) => Promise<void>;
+  onModify: (item: PendingItem) => void;
+}) {
+  return (
+    <div className="mt-3 divide-y divide-amber-100 border border-amber-200 bg-amber-50/50 px-3">
+      {items.map((item, index) => {
+        const key = confirmationKey(item);
+        return (
+          <div key={`${key}:${index}`} className="py-3 text-sm">
+            <div className="flex flex-wrap items-center gap-2"><EffectBadge effect="pending" />{item.effect ? <EffectBadge effect={item.effect} /> : null}<span className="text-xs text-gray-500">确认前不参加初筛和软排序</span></div>
+            <p className="mt-1 text-gray-700">{item.reason}</p>
+            {item.proposed_value !== undefined ? <p className="mt-1 whitespace-pre-wrap text-xs text-gray-500">AI 建议值：{displayUnknown(item.proposed_value)}</p> : null}
+            {item.evidence ? <p className="mt-1 text-xs text-gray-500">原文：{item.evidence}</p> : null}
+            <div className="mt-2 flex flex-wrap gap-2">
+              {item.proposed_value !== undefined ? <button type="button" disabled={resolvingItem === key} onClick={() => void onResolve(item, 'apply')} className="border border-amber-300 bg-white px-2.5 py-1 text-xs text-amber-800 disabled:opacity-50">采纳建议值</button> : null}
+              {item.proposed_value !== undefined ? <button type="button" disabled={resolvingItem === key} onClick={() => onModify(item)} className="border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-600 disabled:opacity-50">修改并采纳</button> : null}
+              <button type="button" disabled={resolvingItem === key} onClick={() => void onResolve(item, 'deep_eval')} className="border border-violet-200 bg-white px-2.5 py-1 text-xs text-violet-700 disabled:opacity-50">改为仅深评</button>
+              <button type="button" disabled={resolvingItem === key} onClick={() => void onResolve(item, 'discard')} className="border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-600 disabled:opacity-50">不设置该条件</button>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -349,12 +504,12 @@ function FieldEditor({ indicator, value, effect, onValue, onEffect }: {
   onEffect: (value: ConditionEffect) => void;
 }) {
   const header = <div className="mb-1 flex items-center justify-between gap-2"><span className="text-xs font-medium text-gray-600">{indicator.label}</span>{indicator.effect_editable && indicator.editor !== 'region_multi' ? <EffectSelect value={effect} onChange={onEffect} /> : <EffectBadge effect={effectiveEffect(indicator, {}, value)} />}</div>;
-  if (indicator.editor === 'region_multi') return <div className="md:col-span-2 lg:col-span-3">{header}<RegionConstraintsEditor value={regionArray(value)} onChange={onValue} /></div>;
+  if (indicator.editor === 'region_multi') return <div>{header}<RegionConstraintsEditor value={regionArray(value)} onChange={onValue} /></div>;
   if (indicator.editor === 'multi_enum') return <div>{header}<CheckboxOptions value={stringArray(value)} options={indicator.enum_options} onChange={onValue} /></div>;
   if (indicator.editor === 'tags') return <div>{header}<input className="input" value={stringArray(value).join('、')} onChange={(event) => onValue(splitTerms(event.target.value))} placeholder="多个值用顿号、逗号或换行分隔" /></div>;
   if (indicator.kind === 'enum') return <div>{header}<select className="input" value={stringValue(value, 'unknown')} onChange={(event) => onValue(event.target.value)}>{indicator.enum_options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></div>;
   if (indicator.kind === 'yuan' || indicator.kind === 'ratio') return <div>{header}<input className="input" type="number" value={stringValue(value)} onChange={(event) => onValue(event.target.value)} /></div>;
-  if (indicator.editor === 'textarea' || indicator.group === 'intent_notes') return <div className="md:col-span-2 lg:col-span-3">{header}<textarea className="input min-h-20 resize-y" value={stringValue(value)} onChange={(event) => onValue(event.target.value)} /></div>;
+  if (indicator.editor === 'textarea' || indicator.group === 'intent_notes') return <div>{header}<textarea className="input min-h-20 resize-y" value={stringValue(value)} onChange={(event) => onValue(event.target.value)} /></div>;
   return <div>{header}<input className="input" value={stringValue(value)} onChange={(event) => onValue(event.target.value)} /></div>;
 }
 
@@ -374,94 +529,210 @@ function RegionConstraintsEditor({ value, onChange }: { value: BuyerRegionConstr
   );
 }
 
-function ScenarioCard({ intentId, scenario, groups, indicators, taxonomy, onSaved, onCopy, onDelete }: {
+function ScenarioCard({
+  intentId,
+  scenario,
+  groups,
+  indicators,
+  taxonomy,
+  resolvingItem,
+  onSaved,
+  onCopy,
+  onDelete,
+  onResolvePending,
+  onModifyPending,
+}: {
   intentId: string;
   scenario: BuyerIntentScenario;
   groups: IndicatorGroupMeta[];
   indicators: IndicatorMeta[];
   taxonomy: IndustryOptionsResponse;
+  resolvingItem: string | null;
   onSaved: (scenario: BuyerIntentScenario) => void;
   onCopy: () => void;
   onDelete: () => void;
+  onResolvePending: (item: PendingItem, action: 'apply' | 'discard' | 'deep_eval', replacement?: unknown) => Promise<void>;
+  onModifyPending: (item: PendingItem) => void;
 }) {
-  const [editing, setEditing] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [editingMeta, setEditingMeta] = useState(false);
+  const [savingMeta, setSavingMeta] = useState(false);
   const [label, setLabel] = useState(scenario.label);
   const [sortOrder, setSortOrder] = useState(String(scenario.sort_order));
   const [active, setActive] = useState(scenario.active);
-  const [fields, setFields] = useState<Record<string, unknown>>({ ...scenario.fields_json });
-  const [effects, setEffects] = useState<Record<string, ConditionEffect>>(scenario.condition_effects_json || {});
 
   useEffect(() => {
-    setLabel(scenario.label); setSortOrder(String(scenario.sort_order)); setActive(scenario.active); setFields({ ...scenario.fields_json }); setEffects(scenario.condition_effects_json || {});
+    setLabel(scenario.label);
+    setSortOrder(String(scenario.sort_order));
+    setActive(scenario.active);
   }, [scenario]);
 
-  const save = async () => {
-    setSaving(true);
+  const saveMetadata = async () => {
+    setSavingMeta(true);
     try {
-      const payload: BuyerIntentScenarioWrite = {
+      onSaved(await buyerIntents.updateScenario(intentId, scenario.id, {
         label: label.trim() || scenario.label,
         sort_order: Number(sortOrder) || 0,
         active,
-        fields_json: cleanFields(fields, indicators, true),
+        fields_json: scenario.fields_json,
         needs_confirmation_json: scenario.needs_confirmation_json,
-        condition_effects_json: effects,
-      };
-      onSaved(await buyerIntents.updateScenario(intentId, scenario.id, payload));
-      setEditing(false);
+        condition_effects_json: scenario.condition_effects_json,
+      }));
+      setEditingMeta(false);
     } catch (error) {
-      alert(error instanceof Error ? error.message : '保存方案失败');
+      alert(error instanceof Error ? error.message : '保存方案信息失败');
     } finally {
-      setSaving(false);
+      setSavingMeta(false);
     }
   };
 
-  if (!editing) {
-    return (
-      <div className={`border ${scenario.active ? 'border-gray-200 bg-white' : 'border-gray-200 bg-gray-50 opacity-70'}`}>
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-100 px-4 py-3">
-          <div className="flex items-center gap-2"><p className="text-sm font-semibold text-gray-900">{scenario.label}</p><StateBadge tone={scenario.active ? 'green' : 'gray'} text={scenario.active ? '启用' : '停用'} /><span className="text-xs text-gray-400">排序 {scenario.sort_order}</span></div>
-          <div className="flex items-center gap-1"><IconButton title="复制" onClick={onCopy}><Copy className="h-3.5 w-3.5" /></IconButton><IconButton title="编辑" onClick={() => setEditing(true)}><Pencil className="h-3.5 w-3.5" /></IconButton><IconButton title="删除" onClick={onDelete}><Trash2 className="h-3.5 w-3.5" /></IconButton></div>
-        </div>
-        <ConditionDisplay title="" subtitle="" groups={groups} indicators={indicators} fields={scenario.fields_json} effects={scenario.condition_effects_json || {}} compact />
-        <p className="border-t border-gray-100 px-4 py-2 text-xs text-gray-400">有效画像 = 公共条件 + 本方案条件</p>
-      </div>
-    );
-  }
+  const saveScenarioConditions = async (
+    changes: Record<string, unknown>,
+    effectChanges: Record<string, ConditionEffect>,
+  ) => {
+    const changedFields = new Set(Object.keys(changes));
+    const nextFields = applyScenarioFieldChanges(scenario.fields_json, changes, indicators);
+    const nextEffects = { ...(scenario.condition_effects_json || {}) };
+    for (const field of changedFields) {
+      if (!(field in nextFields)) delete nextEffects[field];
+    }
+    Object.assign(nextEffects, effectChanges);
+    const nextPending = scenario.needs_confirmation_json.filter((item) => !changedFields.has(item.field));
+    onSaved(await buyerIntents.updateScenario(intentId, scenario.id, {
+      label: scenario.label,
+      sort_order: scenario.sort_order,
+      active: scenario.active,
+      fields_json: nextFields,
+      needs_confirmation_json: nextPending,
+      condition_effects_json: nextEffects,
+    }));
+  };
+
+  const scenarioPending = (scenario.needs_confirmation_json || []).map((item) => ({
+    ...item,
+    scopeLabel: scenario.label,
+    scenario,
+  }));
 
   return (
-    <div className="space-y-4 border border-brand-200 bg-brand-50/20 p-4">
-      <div className="grid gap-4 md:grid-cols-3"><SimpleInput label="方案名称" value={label} onChange={setLabel} /><SimpleInput label="排序" type="number" value={sortOrder} onChange={setSortOrder} /><label className="block"><span className="mb-1 block text-xs font-medium text-gray-600">状态</span><select className="input" value={active ? 'active' : 'inactive'} onChange={(event) => setActive(event.target.value === 'active')}><option value="active">启用</option><option value="inactive">停用</option></select></label></div>
-      <ContractEditor groups={groups} indicators={indicators} fields={fields} effects={effects} taxonomy={taxonomy} onFields={setFields} onEffects={setEffects} saving={saving} onSave={() => void save()} />
-      <div className="flex justify-end"><button type="button" onClick={() => setEditing(false)} className="border border-gray-200 px-3 py-1.5 text-xs text-gray-600">取消</button></div>
+    <div className={`border ${scenario.active ? 'border-gray-200 bg-white' : 'border-gray-200 bg-gray-50'}`}>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-100 px-4 py-3">
+        {editingMeta ? (
+          <div className="grid flex-1 gap-3 md:grid-cols-[minmax(12rem,1fr)_7rem_8rem_auto]">
+            <SimpleInput label="方案名称" value={label} onChange={setLabel} />
+            <SimpleInput label="排序" type="number" value={sortOrder} onChange={setSortOrder} />
+            <label className="block"><span className="mb-1 block text-xs font-medium text-gray-600">状态</span><select className="input" value={active ? 'active' : 'inactive'} onChange={(event) => setActive(event.target.value === 'active')}><option value="active">启用</option><option value="inactive">停用</option></select></label>
+            <div className="flex items-end gap-2"><button type="button" disabled={savingMeta} onClick={() => void saveMetadata()} className="inline-flex items-center gap-1 bg-brand-600 px-3 py-2 text-xs text-white disabled:opacity-50">{savingMeta ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}保存</button><button type="button" onClick={() => setEditingMeta(false)} className="border border-gray-200 px-3 py-2 text-xs text-gray-600">取消</button></div>
+          </div>
+        ) : (
+          <>
+            <div className="flex items-center gap-2"><p className="text-sm font-semibold text-gray-900">{scenario.label}</p><StateBadge tone={scenario.active ? 'green' : 'gray'} text={scenario.active ? '启用' : '停用'} /><span className="text-xs text-gray-400">排序 {scenario.sort_order}</span>{scenarioPending.length ? <StateBadge tone="amber" text={`${scenarioPending.length} 项待确认`} /> : null}</div>
+            <div className="flex items-center gap-1"><IconButton title="复制" onClick={onCopy}><Copy className="h-3.5 w-3.5" /></IconButton><IconButton title="编辑方案名称、排序和状态" onClick={() => setEditingMeta(true)}><Pencil className="h-3.5 w-3.5" /></IconButton><IconButton title="删除" onClick={onDelete}><Trash2 className="h-3.5 w-3.5" /></IconButton></div>
+          </>
+        )}
+      </div>
+
+      <InlineConditionEditor
+        title=""
+        subtitle=""
+        groups={groups}
+        indicators={indicators}
+        fields={scenario.fields_json}
+        effects={scenario.condition_effects_json || {}}
+        taxonomy={taxonomy}
+        pending={scenarioPending}
+        resolvingItem={resolvingItem}
+        showEmpty={false}
+        onSave={saveScenarioConditions}
+        onResolvePending={onResolvePending}
+        onModifyPending={onModifyPending}
+      />
+      <p className="border-t border-gray-100 px-4 py-2 text-xs text-gray-400">有效画像 = 公共条件 + 本方案条件</p>
     </div>
   );
 }
 
-function ConditionDisplay({ title, subtitle, groups, indicators, fields, effects, compact = false }: {
-  title: string;
-  subtitle: string;
-  groups: IndicatorGroupMeta[];
-  indicators: IndicatorMeta[];
-  fields: Record<string, unknown>;
-  effects: Record<string, ConditionEffect>;
-  compact?: boolean;
-}) {
-  const rows = indicators.map((indicator) => ({ indicator, value: fields[indicator.column], effect: effectiveEffect(indicator, effects, fields[indicator.column]) })).filter(({ value }) => hasValue(value));
-  return (
-    <section className={compact ? '' : 'border border-gray-200'}>
-      {title ? <SectionHeader title={title} subtitle={subtitle} /> : null}
-      {rows.length ? groups.map((group) => {
-        const groupRows = rows.filter(({ indicator }) => indicator.group === group.key);
-        if (!groupRows.length) return null;
-        return <div key={group.key} className="border-b border-gray-100 last:border-0"><p className="bg-gray-50 px-4 py-2 text-xs font-semibold text-gray-500">{group.label}</p><div className="divide-y divide-gray-100 px-4">{groupRows.map(({ indicator, value, effect }) => <ConditionLine key={indicator.column} label={indicator.label} value={formatFieldValue(indicator, value)} effect={effect} />)}</div></div>;
-      }) : <p className="px-4 py-4 text-sm text-gray-500">暂无结构化条件。</p>}
-    </section>
-  );
+function conditionRows(indicators: IndicatorMeta[]): ConditionRowDefinition[] {
+  const rows: ConditionRowDefinition[] = [];
+  const l2 = indicators.find((item) => item.column === 'industry_l2_json');
+  for (const indicator of indicators) {
+    if (!indicator.group || indicator.column === 'industry_l2_json') continue;
+    if (indicator.column === 'industries_json') {
+      rows.push({
+        key: 'accepted_industries',
+        label: '可接受行业',
+        group: indicator.group,
+        indicators: l2 ? [indicator, l2] : [indicator],
+      });
+      continue;
+    }
+    rows.push({ key: indicator.column, label: indicator.label, group: indicator.group, indicators: [indicator] });
+  }
+  return rows;
 }
 
-function ConditionLine({ label, value, effect }: { label: string; value: string; effect: ConditionEffect }) {
-  return <div className="flex items-start gap-3 py-2.5"><EffectBadge effect={effect} /><span className="w-32 shrink-0 text-xs text-gray-500">{label}</span><span className="min-w-0 whitespace-pre-wrap text-sm text-gray-800">{value}</span></div>;
+function normalizeCommonFieldChanges(
+  changes: Record<string, unknown>,
+  indicators: IndicatorMeta[],
+): Record<string, unknown> {
+  const byColumn = new Map(indicators.map((indicator) => [indicator.column, indicator]));
+  return Object.fromEntries(Object.entries(changes).flatMap(([field, value]) => {
+    const indicator = byColumn.get(field);
+    if (!indicator) return [];
+    return [[field, normalizeFieldValue(indicator, value, false)]];
+  }));
+}
+
+function applyScenarioFieldChanges(
+  current: Record<string, unknown>,
+  changes: Record<string, unknown>,
+  indicators: IndicatorMeta[],
+): Record<string, unknown> {
+  const result = { ...current };
+  const byColumn = new Map(indicators.map((indicator) => [indicator.column, indicator]));
+  for (const [field, value] of Object.entries(changes)) {
+    const indicator = byColumn.get(field);
+    if (!indicator) continue;
+    const normalized = normalizeFieldValue(indicator, value, true);
+    if (normalized === undefined) delete result[field];
+    else result[field] = normalized;
+  }
+  return result;
+}
+
+function normalizeFieldValue(indicator: IndicatorMeta, value: unknown, scenario: boolean): unknown {
+  if (indicator.kind === 'yuan' || indicator.kind === 'ratio') {
+    if (value === '' || value === null || value === undefined) return scenario ? undefined : null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : scenario ? undefined : null;
+  }
+  if (indicator.kind === 'text') {
+    const normalized = String(value || '').trim();
+    return normalized || (scenario ? undefined : null);
+  }
+  if (indicator.kind === 'json' && indicator.multi_value) {
+    const normalized = Array.isArray(value) ? value : [];
+    return normalized.length || !scenario ? normalized : undefined;
+  }
+  if (indicator.kind === 'enum') {
+    const normalized = String(value || '').trim();
+    if (!normalized || (scenario && normalized === 'unknown')) return scenario ? undefined : null;
+    return normalized;
+  }
+  return value;
+}
+
+function formatConditionRow(
+  row: ConditionRowDefinition,
+  fields: Record<string, unknown>,
+  taxonomy: IndustryOptionsResponse,
+): string {
+  if (row.key === 'accepted_industries') {
+    const pairs = requirementPairs(fields, taxonomy);
+    return pairs.length ? pairs.map((pair) => pair.l2 ? `${pair.l1} / ${pair.l2}` : pair.l1).join('、') : '-';
+  }
+  const indicator = row.indicators[0];
+  const value = fields[indicator.column];
+  return hasValue(value) ? formatFieldValue(indicator, value) : '-';
 }
 
 function EffectBadge({ effect }: { effect: ConditionEffect | 'pending' }) {
@@ -489,31 +760,6 @@ function effectiveEffect(indicator: IndicatorMeta, effects: Record<string, Condi
     return regions.some((item) => item.effect === 'required' || item.effect === 'excluded') ? 'required' : 'preferred';
   }
   return indicator.default_effect || 'deep_eval';
-}
-
-function cleanFields(fields: Record<string, unknown>, indicators: IndicatorMeta[], scenario: boolean): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  for (const indicator of indicators) {
-    const value = fields[indicator.column];
-    if (scenario && !hasValue(value)) continue;
-    if (scenario && indicator.kind === 'enum' && value === 'unknown') continue;
-    if (indicator.kind === 'yuan' || indicator.kind === 'ratio') {
-      const number = value === '' || value === null || value === undefined ? null : Number(value);
-      if (!scenario || Number.isFinite(number)) result[indicator.column] = Number.isFinite(number) ? number : null;
-    } else if (indicator.kind === 'text') {
-      result[indicator.column] = String(value || '').trim() || (scenario ? undefined : null);
-    } else if (indicator.kind === 'json' && indicator.multi_value) {
-      result[indicator.column] = Array.isArray(value) ? value : [];
-    } else if (value !== undefined) {
-      result[indicator.column] = value;
-    }
-  }
-  return Object.fromEntries(Object.entries(result).filter(([, value]) => value !== undefined));
-}
-
-function intentDraft(intent: BuyerIntent): Record<string, unknown> {
-  const source = intent as unknown as Record<string, unknown>;
-  return Object.fromEntries(Object.entries(source).map(([key, value]) => [key, value ?? (key.endsWith('_json') ? [] : '')]));
 }
 
 function requirementPairs(fields: Record<string, unknown>, taxonomy: IndustryOptionsResponse): IndustryPairValue[] {
@@ -554,15 +800,13 @@ function mergeProposedValue(current: unknown, proposed: unknown): unknown {
 
 function regionArray(value: unknown): BuyerRegionConstraint[] { return Array.isArray(value) ? value.filter((item): item is BuyerRegionConstraint => Boolean(item) && typeof item === 'object' && 'province' in item) : []; }
 function stringArray(value: unknown): string[] { return Array.isArray(value) ? value.map(String).filter(Boolean) : []; }
-function stringValue(value: unknown, fallback = ''): string { return value === null || value === undefined ? fallback : String(value); }
-function splitTerms(value: string): string[] { return [...new Set(value.split(/[、,，;；\n]/).map((item) => item.trim()).filter(Boolean))]; }
+function stringValue(value: unknown, fallback = ''): string { return value === null || value === undefined || value === '' ? fallback : String(value); }
+function splitTerms(value: string): string[] { return [...new Set(value.split(/[、，,\n]/).map((item) => item.trim()).filter(Boolean))]; }
 function hasValue(value: unknown): boolean { return value !== null && value !== undefined && value !== '' && value !== 'unknown' && (!Array.isArray(value) || value.length > 0); }
 function moneyText(value: unknown): string { const number = Number(value); if (!Number.isFinite(number)) return String(value); if (Math.abs(number) < 10_000) return `${number.toFixed(0)}元`; if (Math.abs(number) < 100_000_000) return `${(number / 10_000).toFixed(0)}万`; return `${(number / 100_000_000).toFixed(1)}亿`; }
 function displayUnknown(value: unknown): string { return typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value); }
-function indicatorLabel(indicators: IndicatorMeta[], field: string): string { return indicators.find((indicator) => indicator.column === field)?.label || field; }
 function confirmationKey(item: PendingItem): string { return `${item.scopeLabel}:${item.item_key || item.field}:${item.uncertain_part || ''}`; }
 function sameConfirmation(left: BuyerIntentConfirmationItem, right: BuyerIntentConfirmationItem): boolean { if (left.item_key || right.item_key) return left.item_key === right.item_key; return left.field === right.field && (left.evidence || '') === (right.evidence || '') && left.reason === right.reason; }
-function SectionHeader({ title, subtitle }: { title: string; subtitle: string }) { return <div className="border-b border-gray-100 px-4 py-3"><p className="text-sm font-semibold text-gray-900">{title}</p><p className="mt-0.5 text-xs text-gray-400">{subtitle}</p></div>; }
 function StateBadge({ tone, text }: { tone: 'amber' | 'green' | 'gray'; text: string }) { const style = tone === 'amber' ? 'bg-amber-50 text-amber-700' : tone === 'green' ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-600'; return <span className={`px-2 py-0.5 text-xs font-medium ${style}`}>{text}</span>; }
 function IconButton({ title, onClick, children }: { title: string; onClick: () => void; children: ReactNode }) { return <button type="button" title={title} onClick={onClick} className="p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700">{children}</button>; }
 function Loading({ label }: { label: string }) { return <div className="flex items-center justify-center border border-gray-100 py-8 text-sm text-gray-400"><Loader2 className="mr-2 h-4 w-4 animate-spin" />{label}</div>; }
