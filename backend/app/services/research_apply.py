@@ -8,6 +8,7 @@ clicking 确认. The route wraps ResearchApplyError back into a 4xx.
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -50,6 +51,12 @@ CORE_FINANCIAL_FIELDS = {
 
 class ResearchApplyError(ValueError):
     """A proposal that cannot be written back as-is."""
+
+
+_PER_SHARE_CASH_FLOW_RE = re.compile(
+    r"(?:每股[^，。；;]{0,20}现金流|现金流[^，。；;]{0,20}每股|(?:元|万元)\s*[/／]\s*股)",
+    re.IGNORECASE,
+)
 
 
 def apply_research_proposal(
@@ -115,7 +122,12 @@ def _apply_structured_fact_proposal(
     if field_path not in RESEARCH_STRUCTURED_FIELDS:
         raise ResearchApplyError("不支持该基础事实字段。")
     raw_value = (proposal.get("proposed_value_json") or {}).get("value")
-    new_value = normalize_structured_fact(db, field_path, raw_value)
+    new_value = normalize_structured_fact(
+        db,
+        field_path,
+        raw_value,
+        source_excerpt=proposal.get("source_excerpt"),
+    )
     # FieldWriteError 和 ResearchApplyError 是兄弟类，不翻译的话它会越过
     # 调用方的 per-claim 捕获，一个越界的负债率就能把整轮调研连同其他建议一起回滚。
     try:
@@ -244,7 +256,13 @@ def _ratio_value(field_path: str, value: Any) -> Decimal:
         raise ResearchApplyError(f"{field_path} 不是数字：{text_value[:40]}") from exc
 
 
-def normalize_structured_fact(db: Session, field_path: str, value: Any) -> Any:
+def normalize_structured_fact(
+    db: Session,
+    field_path: str,
+    value: Any,
+    *,
+    source_excerpt: Any = None,
+) -> Any:
     """Turn one proposed fact into something the field writer will accept.
 
     Only two things happen here that the writer cannot do for itself: money
@@ -263,6 +281,14 @@ def normalize_structured_fact(db: Session, field_path: str, value: Any) -> Any:
 
     indicator = _indicator(field_path)
     if indicator is not None and indicator.kind == "yuan":
+        if field_path == "current_operating_cash_flow_yuan":
+            unit = str(value.get("unit") or "") if isinstance(value, dict) else ""
+            excerpt = str(source_excerpt or "")
+            if "股" in unit or _PER_SHARE_CASH_FLOW_RE.search(excerpt):
+                raise ResearchApplyError(
+                    "current_operating_cash_flow_yuan 只接受公司经营现金流总额，"
+                    "不能写入每股经营现金流。"
+                )
         return _money_to_yuan(field_path, value)
     if indicator is not None and indicator.kind == "ratio":
         return _ratio_value(field_path, value)

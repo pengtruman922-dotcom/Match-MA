@@ -185,6 +185,27 @@ def test_financial_guard_uses_legacy_display_period_until_machine_date_exists() 
     assert "早于当前期间 2024-12-31" in older[0]["validation_error"]
 
 
+def test_financial_guard_rejects_mapper_relabelled_per_share_cash_flow() -> None:
+    claims = _prepare_research_claims(
+        _CurrentFactsDb({"financial_period_end_date": None}),
+        target_id=UUID("11111111-1111-1111-1111-111111111111"),
+        claims=[
+            {
+                **_finance_claim(
+                    "current_operating_cash_flow_yuan",
+                    -0.36,
+                    "2025-12-31",
+                ),
+                # Reproduces the production failure: mapper changed 元/股 to 元,
+                # while the verbatim evidence still exposed the real basis.
+                "source_excerpt": "每股经营现金流：-0.36元",
+            }
+        ],
+    )
+
+    assert "不能写入每股经营现金流" in claims[0]["validation_error"]
+
+
 @pytest.mark.parametrize(
     ("label", "expected"),
     [
@@ -632,6 +653,34 @@ def test_money_units_are_converted_by_code_not_by_the_model() -> None:
         normalize_structured_fact(None, "current_revenue_yuan", {"value": "8.32", "unit": "斤"})
     with pytest.raises(ResearchApplyError):
         normalize_structured_fact(None, "current_revenue_yuan", {"value": "去年三个亿", "unit": "元"})
+
+
+def test_per_share_cash_flow_cannot_be_written_as_company_cash_flow_total() -> None:
+    from backend.app.services.research_apply import ResearchApplyError, normalize_structured_fact
+
+    with pytest.raises(ResearchApplyError, match="只接受公司经营现金流总额"):
+        normalize_structured_fact(
+            None,
+            "current_operating_cash_flow_yuan",
+            {"value": "-0.36", "unit": "元/股"},
+            source_excerpt="每股经营现金流：-0.36元",
+        )
+
+    # The evidence backstop still catches a mapper that rewrites 元/股 to 元.
+    with pytest.raises(ResearchApplyError, match="不能写入每股经营现金流"):
+        normalize_structured_fact(
+            None,
+            "current_operating_cash_flow_yuan",
+            {"value": "-0.36", "unit": "元"},
+            source_excerpt="每股经营现金流：-0.36元",
+        )
+
+    assert normalize_structured_fact(
+        None,
+        "current_operating_cash_flow_yuan",
+        {"value": "-1130", "unit": "万元"},
+        source_excerpt="经营活动产生的现金流量净额为-1130万元",
+    ) == -11300000
 
 
 def test_a_rejected_fact_leaves_the_rest_of_the_run_intact() -> None:

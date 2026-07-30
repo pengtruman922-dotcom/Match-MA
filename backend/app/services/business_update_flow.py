@@ -589,6 +589,11 @@ def _mark_bound_seller_targets_parsing(db: Session, business_update_id: UUID) ->
     The extract-actions handler releases them afterwards: field applies and
     follow-up-only applies return to normal; failures become parse_failed.
     A target currently owned by research is deliberately left untouched.
+
+    A follow-up-only update parses a relation-event draft, not seller facts.
+    It must never reserve the target's seller-information pipeline: that job
+    has no seller parse completion branch and would otherwise leave the target
+    permanently stuck in ``parsing`` after succeeding.
     """
     db.execute(
         text(
@@ -604,6 +609,8 @@ def _mark_bound_seller_targets_parsing(db: Session, business_update_id: UUID) ->
               and st.team_id = :team_id
               and st.workspace_id = :workspace_id
               and st.deleted_at is null
+              and coalesce(bu.metadata_json ->> 'processing_scope', 'basic_info')
+                    in ('basic_info', 'both')
               and st.information_status not in ('parsing', 'researching')
               and st.id::text in (
                 select jsonb_array_elements_text(bu.bound_seller_target_ids_json)

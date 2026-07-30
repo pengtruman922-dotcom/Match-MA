@@ -154,6 +154,22 @@ def test_follow_up_scope_requires_relation() -> None:
     assert "必须选择推进关系" in str(exc_info.value.detail)
 
 
+def test_follow_up_only_update_does_not_mark_bound_target_parsing() -> None:
+    class _CaptureDb:
+        def __init__(self) -> None:
+            self.sql = ""
+
+        def execute(self, statement, params):
+            self.sql = str(statement)
+
+    db = _CaptureDb()
+
+    business_update_flow._mark_bound_seller_targets_parsing(db, BUSINESS_UPDATE_ID)
+
+    assert "metadata_json ->> 'processing_scope'" in db.sql
+    assert "in ('basic_info', 'both')" in db.sql
+
+
 def test_bound_relation_must_belong_to_current_entity(monkeypatch) -> None:
     monkeypatch.setattr(business_update_routes, "ensure_relation_visible", lambda *args: None)
     db = _RelationDb(

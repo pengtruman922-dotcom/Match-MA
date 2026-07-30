@@ -247,6 +247,11 @@ def _mapping_context(db: Session, *, report: dict[str, Any]) -> dict[str, Any]:
             entry["note"] = (
                 '给出 {"value": 数字, "unit": "万元"} —— 单位换算由代码完成，不要自己折算。'
             )
+            if indicator.column == "current_operating_cash_flow_yuan":
+                entry["note"] += (
+                    " 该字段只表示公司层面的经营活动现金流量净额（总额）；"
+                    "每股经营现金流、元/股等口径不是该字段，必须省略，且不得按股本倒推。"
+                )
         fields.append(entry)
 
     return {

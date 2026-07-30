@@ -89,6 +89,15 @@ def test_mapping_context_hands_over_dictionaries_as_data_not_prose() -> None:
     assert "unit" in revenue["note"]
     assert "万元" in context["money_units"]
 
+    cash_flow = next(
+        item
+        for item in context["writable_fields"]
+        if item["field_path"] == "current_operating_cash_flow_yuan"
+    )
+    assert "只表示公司层面的经营活动现金流量净额" in cash_flow["note"]
+    assert "每股经营现金流" in cash_flow["note"]
+    assert "不得按股本倒推" in cash_flow["note"]
+
     # 整份上下文要进 ai_trace 的 JSONB 绑定。
     json.dumps(context, ensure_ascii=False)
 

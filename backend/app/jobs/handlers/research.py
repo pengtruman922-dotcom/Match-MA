@@ -575,7 +575,12 @@ def _prepare_research_claims(
             "financial_period_end_date": current_financial_period,
         }
         try:
-            normalized_value = normalize_structured_fact(db, field_path, claim.get("value"))
+            normalized_value = normalize_structured_fact(
+                db,
+                field_path,
+                claim.get("value"),
+                source_excerpt=claim.get("source_excerpt"),
+            )
         except ResearchApplyError as exc:
             claim["validation_error"] = str(exc)
             continue
