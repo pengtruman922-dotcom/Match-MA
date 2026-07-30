@@ -1,3 +1,4 @@
+import json
 from decimal import Decimal
 from uuid import UUID
 
@@ -19,6 +20,7 @@ from backend.app.jobs.handlers import (
     _build_business_update_image_context,
     _business_update_action_evidence_id,
     _business_update_raw_text_with_attachments,
+    _insert_extracted_actions,
     _insert_llm_trace,
     _mark_bound_seller_targets_complete_after_business_update_parse,
     _mark_business_update_failed_if_final_attempt,
@@ -33,7 +35,11 @@ from backend.app.jobs.handlers.business_update import (
     _verified_document_excerpt,
 )
 from backend.app.jobs.queue import JobClaim
-from backend.app.services.attachment_storage import decode_text_bytes, is_text_upload, safe_upload_filename
+from backend.app.services.attachment_storage import (
+    decode_text_bytes,
+    is_text_upload,
+    safe_upload_filename,
+)
 
 ATTACHMENT_ID = UUID("00000000-0000-0000-0000-000000000001")
 JOB_ID = UUID("00000000-0000-0000-0000-000000000002")
@@ -49,6 +55,9 @@ class _SqlCaptureResult:
 
     def all(self) -> list[dict]:
         return []
+
+    def one(self) -> dict:
+        return {"id": JOB_ID}
 
 
 class _SqlCaptureDb:
@@ -539,6 +548,40 @@ def test_business_update_final_attempt_marks_failed() -> None:
 
     assert "set processing_status = 'failed'" in db.sql_text
     assert db.params["metadata_patch"]["last_processing_result"] == "failed"
+
+
+def test_extracted_action_jsonb_values_are_recursively_json_safe() -> None:
+    db = _SqlCaptureDb()
+
+    action_ids = _insert_extracted_actions(
+        db,
+        BUSINESS_UPDATE_ID,
+        [
+            {
+                "action_type": "buyer_intent_update",
+                "target_entity_type": "buyer_intent",
+                "target_entity_id": None,
+                "proposed_changes_json": {
+                    "max_valuation_yuan": Decimal("10000000000"),
+                    "nested": [{"source_id": JOB_ID}],
+                },
+                "raw_evidence_text": "预算上限 100 亿元",
+                "evidence_id": None,
+                "confidence": Decimal("0.95"),
+                "reason": "附件原文",
+                "raw_action": {"job_id": JOB_ID, "confidence": Decimal("0.95")},
+            }
+        ],
+        JOB_ID,
+    )
+
+    assert action_ids == [JOB_ID]
+    assert db.params["proposed_changes_json"] == {
+        "max_valuation_yuan": 10000000000.0,
+        "nested": [{"source_id": str(JOB_ID)}],
+    }
+    json.dumps(db.params["proposed_changes_json"])
+    json.dumps(db.params["metadata_json"])
 
 
 def test_business_update_accepts_unambiguous_action_shape_aliases() -> None:

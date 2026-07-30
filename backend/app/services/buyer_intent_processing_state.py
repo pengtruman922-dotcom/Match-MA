@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session
 
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 
-
 ACTIVE_JOB_STATUSES = {"queued", "running", "retry_waiting"}
 FAILED_JOB_STATUSES = {"failed", "canceled", "cancelled"}
 
@@ -62,7 +61,9 @@ def buyer_intent_processing_states(
             where bu.team_id = :team_id
               and bu.workspace_id = :workspace_id
               and bound.intent_id_text in :intent_ids
-            order by bound.intent_id_text, bu.created_at desc
+            order by bound.intent_id_text,
+              coalesce(latest_job.created_at, bu.created_at) desc,
+              bu.created_at desc
             """
         ).bindparams(bindparam("intent_ids", expanding=True)),
         params,

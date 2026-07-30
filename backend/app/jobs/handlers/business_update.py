@@ -13,26 +13,6 @@ from sqlalchemy.orm import Session
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
 from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
-from backend.app.services.extracted_action_apply import (
-    apply_buyer_intent_target_exclusion_action,
-    apply_buyer_intent_update_action,
-    apply_buyer_seller_relation_update_action,
-    apply_seller_fact_update_action,
-)
-from backend.app.jobs.queue import JobClaim
-from backend.app.services.image_inputs import (
-    is_supported_multimodal_image,
-    multimodal_image_constraints,
-    prepare_image_for_multimodal,
-)
-from backend.app.services.industry_taxonomy import (
-    industry_l1_prompt_list,
-)
-from backend.app.services.profile_sections import (
-    normalize_profile_section_items,
-    apply_profile_section,
-)
-
 from backend.app.jobs.handlers.buyer_intent_parse import (
     BUYER_INTENT_PARSE_JSON_FIELDS,
     BUYER_INTENT_PARSE_NUMERIC_FIELDS,
@@ -61,6 +41,7 @@ from backend.app.jobs.handlers.common import (
     _fetch_seller_targets,
     _get_default_node_config,
     _json_safe_dict,
+    _json_safe_value,
     _normalize_change_fields,
     _optional_decimal,
     _optional_uuid,
@@ -77,6 +58,26 @@ from backend.app.jobs.handlers.seller_target_parse import (
 from backend.app.jobs.handlers.traces import (
     _insert_llm_trace,
 )
+from backend.app.jobs.queue import JobClaim
+from backend.app.services.extracted_action_apply import (
+    apply_buyer_intent_target_exclusion_action,
+    apply_buyer_intent_update_action,
+    apply_buyer_seller_relation_update_action,
+    apply_seller_fact_update_action,
+)
+from backend.app.services.image_inputs import (
+    is_supported_multimodal_image,
+    multimodal_image_constraints,
+    prepare_image_for_multimodal,
+)
+from backend.app.services.industry_taxonomy import (
+    industry_l1_prompt_list,
+)
+from backend.app.services.profile_sections import (
+    apply_profile_section,
+    normalize_profile_section_items,
+)
+
 
 def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[str, object]:
     business_update_id = _resolve_business_update_id(job)
@@ -1095,18 +1096,20 @@ def _insert_extracted_actions(
                 "action_type": action["action_type"],
                 "target_entity_type": action["target_entity_type"],
                 "target_entity_id": action["target_entity_id"],
-                "proposed_changes_json": action["proposed_changes_json"],
+                "proposed_changes_json": _json_safe_value(action["proposed_changes_json"]),
                 "raw_evidence_text": action["raw_evidence_text"],
                 "evidence_id": action.get("evidence_id"),
                 "confidence": action["confidence"],
-                "metadata_json": {
-                    "source": "business_update_extractor",
-                    "job_id": str(job_id),
-                    "reason": action.get("reason"),
-                    "raw_action": action.get("raw_action"),
-                    "normalization_notes": action.get("normalization_notes", []),
-                    "profile_sections": action.get("profile_sections", []),
-                },
+                "metadata_json": _json_safe_value(
+                    {
+                        "source": "business_update_extractor",
+                        "job_id": str(job_id),
+                        "reason": action.get("reason"),
+                        "raw_action": action.get("raw_action"),
+                        "normalization_notes": action.get("normalization_notes", []),
+                        "profile_sections": action.get("profile_sections", []),
+                    }
+                ),
             },
         ).mappings().one()
         action_ids.append(row["id"])

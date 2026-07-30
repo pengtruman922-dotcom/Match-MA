@@ -96,6 +96,15 @@ def test_new_active_attachment_retry_wins_over_old_failure() -> None:
     assert state["current_stage"] == "attachment_extraction"
 
 
+def test_bulk_state_selects_latest_active_chain_not_newest_update_row() -> None:
+    source = (
+        ROOT / "backend/app/services/buyer_intent_processing_state.py"
+    ).read_text(encoding="utf-8")
+
+    assert "coalesce(latest_job.created_at, bu.created_at) desc" in source
+    assert "order by bound.intent_id_text, bu.created_at desc" not in source
+
+
 def test_partial_attachment_failure_can_finish_with_warning_after_ai_write() -> None:
     state = _state(
         intent=_intent(needs_confirmation_json=[{"field": "region_constraints_json"}]),
