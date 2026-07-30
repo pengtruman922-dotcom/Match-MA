@@ -1,6 +1,7 @@
 import type {
   SearchConfigOverview,
   SearchProviderTestResult,
+  PlatformOverview,
   ProfileSection,
   ProfileSectionsResponse,
   ProfileSectionWrite,
@@ -299,6 +300,10 @@ export const extractedActions = {
     apiRequest<{ status: string; applied_fields?: string[] }>(`/extracted-actions/${id}/apply`, {
       method: 'POST',
     }),
+};
+
+export const stats = {
+  overview: () => apiRequest<PlatformOverview>('/stats/overview'),
 };
 
 export const relations = {

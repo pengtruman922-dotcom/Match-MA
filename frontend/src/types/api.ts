@@ -2002,3 +2002,46 @@ export interface SearchProviderTestResult {
   result_count: number;
   sample_titles: string[];
 }
+
+export interface TargetProvinceCount {
+  province: string;
+  count: number;
+}
+
+export interface TargetIndustryCount {
+  /** 二级行业。一级行业太粗，看板上读不出赛道。 */
+  l2: string;
+  count: number;
+}
+
+export interface RevenueBucketCount {
+  key: string;
+  label: string;
+  count: number;
+}
+
+export interface PlatformOverview {
+  /** 服务端取数时刻；大屏长时间不刷新时用来判断屏上的数还新不新。 */
+  generated_at: string;
+  targets: {
+    total: number;
+    provinces: TargetProvinceCount[];
+    /** 标的总数减去有省份的标的数；地图上单独标注，不混进「0 个」。 */
+    province_unknown_count: number;
+    /** 只含前 N 名；一个标的可挂多个二级行业，因此各项之和可能大于 total。 */
+    industries: TargetIndustryCount[];
+    /** 榜外还有多少个二级行业。 */
+    industry_other_count: number;
+    /** 完全没有二级行业的标的数。 */
+    industry_unknown_count: number;
+    /** 含计数为 0 的档位，顺序即档位顺序。 */
+    revenue_buckets: RevenueBucketCount[];
+    revenue_unknown_count: number;
+  };
+  /** 买家主体（buyer_party）的所在地分布，不是买家需求的目标地域。 */
+  buyers: {
+    total: number;
+    provinces: TargetProvinceCount[];
+    province_unknown_count: number;
+  };
+}

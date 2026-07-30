@@ -22,6 +22,7 @@ from backend.app.api.routes import (
     relations,
     search_docs,
     seller_targets,
+    stats,
     update_logs,
     users,
 )
@@ -43,6 +44,7 @@ api_router.include_router(research.router)
 api_router.include_router(search_config.router)
 api_router.include_router(recommendations.router)
 api_router.include_router(relations.router)
+api_router.include_router(stats.router)
 api_router.include_router(search_docs.router)
 api_router.include_router(update_logs.router)
 api_router.include_router(business_updates.router)
