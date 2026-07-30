@@ -101,6 +101,19 @@ def test_alembic_wrappers_route_through_run_migration_sql(version_name: str) -> 
         )
 
 
+def test_every_sql_migration_has_an_alembic_wrapper() -> None:
+    wrapper_sources = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in ALEMBIC_VERSIONS_DIR.glob("*.py")
+    )
+    unreferenced = [
+        path.name
+        for path in sorted(MIGRATIONS_DIR.glob("*.sql"))
+        if f'run_migration_sql(op.get_bind(), "{path.name}")' not in wrapper_sources
+    ]
+    assert not unreferenced, f"SQL migrations without Alembic wrappers: {unreferenced}"
+
+
 _PLPGSQL_FORMAT_STATEMENTS = ("raise ", "format(")
 _DOLLAR_QUOTE_RE = re.compile(r"\$[A-Za-z0-9_]*\$")
 # 002 predates this guard and has already succeeded in fresh-database CI and
