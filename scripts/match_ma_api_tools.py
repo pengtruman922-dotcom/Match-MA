@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 from urllib import error, parse, request
 
-
 DEFAULT_API_BASE = "https://match-ma-production.up.railway.app/api/v1"
 DEFAULT_PINDA_DIR = Path(
     r"C:\Users\MP\search-toolkit\Match-MA\测试样本\业务更新文本\标的更新或新建\拼哒出行"
@@ -286,16 +285,31 @@ def recover_buyer_intent(*, api_base: str, token: str, args: argparse.Namespace)
             "attachment_status": (attachment or {}).get("content_extraction_status"),
             "batch_status": (batch or {}).get("status"),
         }, ensure_ascii=False))
-        terminal = state.get("overall_status") in {"succeeded", "failed"}
         attachment_terminal = (attachment or {}).get("content_extraction_status") in {"succeeded", "failed", "skipped"}
+        terminal = state.get("overall_status") == "failed" or _buyer_recovery_succeeded(latest)
         if terminal and attachment_terminal:
             break
         if time.monotonic() >= deadline:
             raise ApiError("Buyer-intent recovery did not reach a terminal state before timeout.")
         time.sleep(args.poll_seconds)
     print(json.dumps(latest, ensure_ascii=False, indent=2))
-    if latest.get("processing_state", {}).get("overall_status") != "succeeded":
+    if not _buyer_recovery_succeeded(latest):
         raise ApiError("Buyer-intent recovery reached a non-success terminal state.")
+
+
+def _buyer_recovery_succeeded(latest: dict[str, Any]) -> bool:
+    state = latest.get("processing_state") or {}
+    attachment = latest.get("attachment") or {}
+    batch = latest.get("business_update_batch") or {}
+    return bool(
+        state.get("overall_status") == "succeeded"
+        and attachment.get("content_extraction_status") == "succeeded"
+        and batch.get("status") == "applied"
+        and state.get("ai_parse_status") == "succeeded"
+        and state.get("semantic_parse_status") == "succeeded"
+        and state.get("normalization_status") == "succeeded"
+        and state.get("write_status") == "succeeded"
+    )
 
 
 def handle_failures(*, api_base: str, token: str, args: argparse.Namespace) -> None:

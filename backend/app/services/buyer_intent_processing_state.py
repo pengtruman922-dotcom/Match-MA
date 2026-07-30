@@ -226,8 +226,6 @@ def compute_buyer_intent_processing_state(
         overall, stage = "processing", "attachment_extraction"
     elif active_update:
         overall, stage = "processing", "business_update_processing"
-    elif parse_succeeded or (update_succeeded and evidence.get("has_business_update_write")):
-        overall, stage = "succeeded", "completed"
     elif parse_is_current and parse_status in FAILED_JOB_STATUSES:
         overall, stage = "failed", parse_stage or "ai_parse"
     elif business_update and (update_status == "failed" or update_job_status in FAILED_JOB_STATUSES):
@@ -235,6 +233,8 @@ def compute_buyer_intent_processing_state(
         stage = "attachment_extraction" if attachment_failed else "business_update_processing"
     elif all_attachments_failed:
         overall, stage = "failed", "attachment_extraction"
+    elif parse_succeeded or (update_succeeded and evidence.get("has_business_update_write")):
+        overall, stage = "succeeded", "completed"
     elif reliable_history:
         overall, stage = "succeeded", "completed"
     else:

@@ -1,3 +1,4 @@
+import json
 from uuid import UUID
 
 from backend.app.api.routes.buyer_intents import _compact_parse_trace
@@ -6,15 +7,15 @@ from backend.app.jobs.handlers import (
     _build_buyer_profile_context,
     _business_update_parser_node_name,
     _normalize_actions,
-    _normalize_buyer_party_parse_changes,
     _normalize_buyer_intent_industry_changes,
     _normalize_buyer_intent_parse_changes,
+    _normalize_buyer_party_parse_changes,
     _normalize_equity_requirement_type,
     _normalize_listed_status,
     _normalize_yes_no_like,
     _validate_buyer_intent_parse_output,
 )
-
+from backend.app.jobs.handlers.buyer_intent_parse import _set_buyer_intent_parse_stage
 
 JOB_ID = UUID("00000000-0000-0000-0000-000000000001")
 
@@ -35,11 +36,27 @@ class _FakeDb:
         self.row = row
         self.statement = None
         self.params = None
+        self.committed = False
 
     def execute(self, statement, params):
         self.statement = str(statement)
         self.params = params
         return _FakeMappingResult(self.row)
+
+    def commit(self):
+        self.committed = True
+
+
+def test_buyer_intent_stage_metadata_uses_typed_jsonb_patch() -> None:
+    db = _FakeDb(None)
+
+    _set_buyer_intent_parse_stage(db, JOB_ID, "semantic_parsing")
+
+    assert "metadata_json = metadata_json || :metadata_patch" in db.statement
+    assert "jsonb_build_object" not in db.statement
+    assert db.params["metadata_patch"]["processing_stage"] == "semantic_parsing"
+    json.dumps(db.params["metadata_patch"])
+    assert db.committed is True
 
 
 def test_buyer_intent_parse_output_validation_requires_supported_fields() -> None:

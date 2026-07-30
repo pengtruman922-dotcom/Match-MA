@@ -9,6 +9,7 @@ from backend.app.services.buyer_intent_processing_state import (
     compute_buyer_intent_processing_state,
 )
 from backend.app.services.json_values import json_safe_value
+from scripts.match_ma_api_tools import _buyer_recovery_succeeded
 
 ROOT = Path(__file__).resolve().parents[1]
 INTENT_ID = UUID("00000000-0000-0000-0000-000000000101")
@@ -131,6 +132,53 @@ def test_partial_attachment_failure_can_finish_with_warning_after_ai_write() -> 
     assert state["attachment_warning_count"] == 1
     assert state["review_status"] == "needs_confirmation"
     assert state["needs_confirmation_count"] == 1
+
+
+def test_current_parse_failure_wins_over_historical_business_update_write() -> None:
+    state = _state(
+        update={
+            "id": UPDATE_ID,
+            "created_at": "2026-07-30T10:00:00+00:00",
+            "processing_status": "applied",
+            "latest_job_status": "failed",
+        },
+        parse_job={
+            "id": UUID("00000000-0000-0000-0000-000000000104"),
+            "status": "failed",
+            "created_at": "2026-07-30T10:02:00+00:00",
+            "payload_json": {"business_update_id": str(UPDATE_ID)},
+            "metadata_json": {"processing_stage": "semantic_parsing"},
+        },
+        evidence={"has_business_update_write": True},
+    )
+
+    assert state["overall_status"] == "failed"
+    assert state["current_stage"] == "semantic_parsing"
+
+
+def test_production_recovery_requires_all_ai_stages_to_succeed() -> None:
+    latest = {
+        "processing_state": {
+            "overall_status": "succeeded",
+            "ai_parse_status": "failed",
+            "semantic_parse_status": "failed",
+            "normalization_status": "not_started",
+            "write_status": "not_started",
+        },
+        "attachment": {"content_extraction_status": "succeeded"},
+        "business_update_batch": {"status": "applied"},
+    }
+
+    assert _buyer_recovery_succeeded(latest) is False
+    latest["processing_state"].update(
+        {
+            "ai_parse_status": "succeeded",
+            "semantic_parse_status": "succeeded",
+            "normalization_status": "succeeded",
+            "write_status": "succeeded",
+        }
+    )
+    assert _buyer_recovery_succeeded(latest) is True
 
 
 def test_frontend_list_uses_bulk_state_without_per_row_parse_status_requests() -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -12,24 +13,6 @@ from sqlalchemy.orm import Session
 
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
-from backend.app.jobs.queue import JobClaim
-from backend.app.services.search_docs import (
-    create_search_doc_rebuild_job,
-)
-from backend.app.registry.indicators import indicators_for
-from backend.app.services.recommendation_conditions import normalize_condition_effects, normalize_scenario_fields
-from backend.app.services.industry_taxonomy import (
-    classify_terms,
-    industry_l1_prompt_list,
-    industry_l2_prompt_list,
-    load_term_levels,
-    normalize_excluded_terms,
-    normalize_l2_values,
-    normalize_l1_values,
-    resolve_l1,
-)
-from backend.app.services.region_dictionary import PROVINCES, normalize_buyer_region_constraints
-
 from backend.app.jobs.handlers.common import (
     CLOSED_LIST_FIELD_VALUES,
     REQUIREMENT_STRENGTH_FIELDS,
@@ -54,6 +37,27 @@ from backend.app.jobs.handlers.common import (
 from backend.app.jobs.handlers.traces import (
     _insert_buyer_intent_parse_trace,
 )
+from backend.app.jobs.queue import JobClaim
+from backend.app.registry.indicators import indicators_for
+from backend.app.services.industry_taxonomy import (
+    classify_terms,
+    industry_l1_prompt_list,
+    industry_l2_prompt_list,
+    load_term_levels,
+    normalize_excluded_terms,
+    normalize_l1_values,
+    normalize_l2_values,
+    resolve_l1,
+)
+from backend.app.services.recommendation_conditions import (
+    normalize_condition_effects,
+    normalize_scenario_fields,
+)
+from backend.app.services.region_dictionary import PROVINCES, normalize_buyer_region_constraints
+from backend.app.services.search_docs import (
+    create_search_doc_rebuild_job,
+)
+
 
 def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
     buyer_intent_id = _resolve_entity_id(job, expected_entity_type="buyer_intent")
@@ -216,19 +220,19 @@ def _set_buyer_intent_parse_stage(db: Session, job_id: UUID, stage: str) -> None
         text(
             """
             update background_job
-            set metadata_json = metadata_json || jsonb_build_object(
-                  'processing_stage', :stage,
-                  'processing_stage_updated_at', now()::text
-                ),
+            set metadata_json = metadata_json || :metadata_patch,
                 updated_at = now()
             where id = :job_id
               and team_id = :team_id
               and workspace_id = :workspace_id
             """
-        ),
+        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
         {
             "job_id": job_id,
-            "stage": stage,
+            "metadata_patch": {
+                "processing_stage": stage,
+                "processing_stage_updated_at": datetime.now(UTC).isoformat(),
+            },
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
         },
