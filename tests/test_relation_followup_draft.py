@@ -397,6 +397,11 @@ def test_ocr_completion_uses_scope_aware_business_update_dispatcher(monkeypatch)
         }
 
     monkeypatch.setattr(attachment_ocr, "_enqueue_business_update_process_job", fake_enqueue)
+    monkeypatch.setattr(
+        attachment_ocr,
+        "_business_update_content_readiness",
+        lambda *_args, **_kwargs: {"all_terminal": True, "combined_text": "OCR 文本"},
+    )
     ocr_job = JobClaim(
         id=UUID(int=200),
         job_type="attachment_ocr_parse",
@@ -428,6 +433,7 @@ def test_ocr_completion_uses_scope_aware_business_update_dispatcher(monkeypatch)
             "source": "attachment_ocr_auto_business_update_process",
         }
     ]
+    assert result["id"] == str(JOB_ID)
     assert [job["job_type"] for job in result["jobs"]] == [
         business_update_flow.BUSINESS_UPDATE_BASIC_JOB_TYPE,
         business_update_flow.BUSINESS_UPDATE_FOLLOWUP_JOB_TYPE,

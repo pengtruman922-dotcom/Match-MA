@@ -92,7 +92,7 @@ export default function BuyerIntentWorkspace({
             onDrawerClose={onProgressDrawerClose}
           />
         ) : null}
-        {activeTab === 'attachments' ? <IntentAttachments intentId={intent.id} /> : null}
+        {activeTab === 'attachments' ? <IntentAttachments intentId={intent.id} onIntentRefresh={onIntentRefresh} /> : null}
         {activeTab === 'history' ? (
           <UpdateHistory
             entityType="buyer_intent"
@@ -104,43 +104,6 @@ export default function BuyerIntentWorkspace({
         ) : null}
       </div>
     </div>
-  );
-}
-
-export function IntentParseBadge({
-  intent,
-  parseStatus,
-}: {
-  intent: BuyerIntent;
-  parseStatus: BuyerIntentParseStatus | null;
-}) {
-  const status = parseStatus?.latest_job?.status;
-  const active = status === 'queued' || status === 'running' || status === 'retry_waiting';
-  const failed = status === 'failed';
-  const pendingCount = intent.needs_confirmation_json?.length || 0;
-  const label = active
-    ? '解析中'
-    : failed
-      ? '解析失败'
-      : pendingCount
-        ? `已解析 · ${pendingCount}项待确认`
-        : intent.reviewed_at
-          ? '已人工复核'
-          : hasStructuredIntentFields(intent) ? '已解析' : '未解析';
-  const className = active
-    ? 'bg-blue-50 text-blue-700'
-    : failed
-      ? 'bg-red-50 text-red-700'
-      : label === '已解析' || label === '已人工复核'
-        ? 'bg-emerald-50 text-emerald-700'
-        : pendingCount
-          ? 'bg-amber-50 text-amber-700'
-        : 'bg-gray-100 text-gray-600';
-  return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium ${className}`}>
-      {active ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-      {label}
-    </span>
   );
 }
 
@@ -241,11 +204,12 @@ export function BuyerInfo({ party, onSaved }: { party: BuyerParty; onSaved?: (pa
   );
 }
 
-function IntentAttachments({ intentId }: { intentId: string }) {
+function IntentAttachments({ intentId, onIntentRefresh }: { intentId: string; onIntentRefresh?: () => void | Promise<void> }) {
   const [items, setItems] = useState<AttachmentItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [retryingId, setRetryingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -260,6 +224,11 @@ function IntentAttachments({ intentId }: { intentId: string }) {
   }, [intentId]);
 
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (!items.some((item) => ['pending', 'processing'].includes(item.content_extraction_status))) return;
+    const timer = window.setInterval(() => { void load(); void onIntentRefresh?.(); }, 2500);
+    return () => window.clearInterval(timer);
+  }, [items, load, onIntentRefresh]);
 
   const download = async (item: AttachmentItem) => {
     setDownloadingId(item.id);
@@ -280,6 +249,18 @@ function IntentAttachments({ intentId }: { intentId: string }) {
     }
   };
 
+  const reprocess = async (item: AttachmentItem) => {
+    setRetryingId(item.id);
+    try {
+      await attachments.reprocess(item.id);
+      await Promise.all([load(), Promise.resolve(onIntentRefresh?.())]);
+    } catch (retryError) {
+      alert(retryError instanceof Error ? retryError.message : '重新处理失败');
+    } finally {
+      setRetryingId(null);
+    }
+  };
+
   if (loading) return <LoadingText text="正在读取附件" />;
   if (error) return <ErrorState message={error} onRetry={() => void load()} />;
   if (!items.length) return <EmptyState title="暂无附件" description="录入当前并购需求更新时上传的文件会自动出现在这里。" />;
@@ -295,12 +276,16 @@ function IntentAttachments({ intentId }: { intentId: string }) {
         {items.map((item) => (
           <div key={item.id} className="flex items-center justify-between gap-4 px-4 py-3">
             <div className="min-w-0">
-              <div className="flex items-center gap-2"><FileText className="h-4 w-4 shrink-0 text-gray-400" /><p className="truncate text-sm font-medium text-gray-900">{item.file_name}</p><AttachmentStatus status={item.parse_status} /></div>
-              <p className="mt-1 text-xs text-gray-400">{item.mime_type || item.file_type || '未知类型'} · {formatBytes(item.file_size)} · {formatDateTime(item.uploaded_at)}</p>
+              <div className="flex items-center gap-2"><FileText className="h-4 w-4 shrink-0 text-gray-400" /><p className="truncate text-sm font-medium text-gray-900">{item.file_name}</p><AttachmentStatus item={item} /></div>
+              <p className="mt-1 text-xs text-gray-400">{attachmentKindLabel(item)} · {formatBytes(item.file_size)} · {formatDateTime(item.uploaded_at)}</p>
+              {item.error_message ? <p className="mt-1 max-w-2xl text-xs text-red-600">{item.error_message}</p> : null}
             </div>
-            <button type="button" onClick={() => void download(item)} disabled={downloadingId === item.id} className="inline-flex shrink-0 items-center gap-1.5 border border-gray-200 px-2.5 py-1.5 text-xs text-gray-600 hover:border-brand-500 hover:text-brand-700 disabled:opacity-50">
-              {downloadingId === item.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}下载
-            </button>
+            <div className="flex shrink-0 items-center gap-2">
+              {item.recoverable ? <button type="button" onClick={() => void reprocess(item)} disabled={retryingId === item.id} className="inline-flex items-center gap-1.5 border border-red-200 px-2.5 py-1.5 text-xs text-red-700 hover:bg-red-50 disabled:opacity-50">{retryingId === item.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}重新处理</button> : null}
+              <button type="button" onClick={() => void download(item)} disabled={downloadingId === item.id} className="inline-flex items-center gap-1.5 border border-gray-200 px-2.5 py-1.5 text-xs text-gray-600 hover:border-brand-500 hover:text-brand-700 disabled:opacity-50">
+                {downloadingId === item.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}下载
+              </button>
+            </div>
           </div>
         ))}
       </div>
@@ -314,14 +299,22 @@ function LoadingText({ text }: { text: string }) { return <div className="flex i
 function ErrorState({ message, onRetry }: { message: string; onRetry: () => void }) { return <div className="border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"><p>{message}</p><button type="button" onClick={onRetry} className="mt-2 text-xs font-medium underline">重新加载</button></div>; }
 function EmptyState({ title, description }: { title: string; description: string }) { return <div className="py-12 text-center"><Search className="mx-auto h-8 w-8 text-gray-300" /><p className="mt-2 text-sm text-gray-500">{title}</p><p className="mt-1 text-xs text-gray-400">{description}</p></div>; }
 
-function AttachmentStatus({ status }: { status: string }) {
-  const labels: Record<string, string> = { pending: '等待解析', parsing: '解析中', parsed: '已解析', failed: '解析失败', skipped: '无需解析' };
-  const color = status === 'failed' ? 'bg-red-50 text-red-700' : status === 'parsing' || status === 'pending' ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-600';
-  return <span className={`shrink-0 px-1.5 py-0.5 text-[11px] ${color}`}>{labels[status] || status}</span>;
+function AttachmentStatus({ item }: { item: AttachmentItem }) {
+  const labels = { pending: '等待读取', processing: '读取中', succeeded: '读取成功', failed: '读取失败', skipped: '无需读取' };
+  const status = item.content_extraction_status;
+  const color = status === 'failed' ? 'bg-red-50 text-red-700' : status === 'processing' || status === 'pending' ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-600';
+  return <span className={`shrink-0 px-1.5 py-0.5 text-[11px] ${color}`}>{labels[status]}</span>;
 }
 
 function partyDraft(party: BuyerParty): Partial<BuyerPartyCreate> { return { buyer_name: party.buyer_name, legal_name: party.legal_name || '', buyer_type: party.buyer_type || '', group_name: party.group_name || '', listed_status: party.listed_status || 'unknown', region_province: party.region_province || '', region_city: party.region_city || '', main_business: party.main_business || '', capital_strength_summary: party.capital_strength_summary || '', profile_summary: party.profile_summary || '', notes: party.notes || '' }; }
 function nullIfEmpty(value: string | null | undefined): string | null { return value?.trim() || null; }
-function hasStructuredIntentFields(intent: BuyerIntent): boolean { return Boolean(intent.intent_summary || intent.industry_primary || intent.region_scope_summary || intent.min_net_profit_yuan); }
+function attachmentKindLabel(item: AttachmentItem): string {
+  const extension = (item.file_type || item.file_name.split('.').pop() || '').toLowerCase();
+  if (extension === 'doc' || extension === 'docx') return `Word 文档 · ${item.extraction_strategy === 'office_text_layer' ? '本地内容读取' : '内容读取'}`;
+  if (extension === 'xls' || extension === 'xlsx') return `Excel 文档 · ${item.extraction_strategy === 'office_text_layer' ? '本地内容读取' : '内容读取'}`;
+  if (extension === 'ppt' || extension === 'pptx') return `PowerPoint 文档 · ${item.extraction_strategy === 'office_text_layer' ? '本地内容读取' : '内容读取'}`;
+  if (item.extraction_strategy === 'doc2x_ocr') return '扫描 PDF · OCR';
+  return item.mime_type || item.file_type || '未知类型';
+}
 function formatBytes(value: number | null): string { if (value === null) return '未知大小'; if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`; if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`; return `${value} B`; }
 function formatDateTime(value: string): string { const date = new Date(value); return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); }

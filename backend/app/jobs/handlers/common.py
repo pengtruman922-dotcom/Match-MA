@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -20,6 +19,7 @@ from backend.app.services.attachment_storage import (
     read_attachment_bytes,
     read_local_text_content,
 )
+from backend.app.services.json_values import json_safe_dict, json_safe_value
 
 ALLOWED_ACTION_TYPES = {
     "seller_fact_update",
@@ -715,24 +715,10 @@ def _uuid_list(values: Any) -> list[UUID]:
     return uuids
 
 def _json_safe_dict(row: Any) -> dict[str, Any]:
-    return _json_safe_value(dict(row))
+    return json_safe_dict(row)
 
 def _json_safe_value(value: Any) -> Any:
-    if isinstance(value, UUID):
-        return str(value)
-    if isinstance(value, Decimal):
-        return float(value)
-    # datetime 是 date 的子类，先判子类。raw SQL 忘了 ::text 时这里兜住 ——
-    # 漏一个日期对象会让整个 JSONB 绑定失败，连带回滚一次几分钟的 agent 运行。
-    if isinstance(value, (datetime, date)):
-        return value.isoformat()
-    if isinstance(value, dict):
-        return {key: _json_safe_value(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_json_safe_value(item) for item in value]
-    if isinstance(value, tuple):
-        return [_json_safe_value(item) for item in value]
-    return value
+    return json_safe_value(value)
 
 def _json_dumps(value: dict[str, Any]) -> str:
     import json

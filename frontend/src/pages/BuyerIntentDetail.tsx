@@ -1,10 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, Loader2, Sparkles, UserRound } from 'lucide-react';
+import { ArrowLeft, Loader2, RefreshCw, Sparkles, UserRound } from 'lucide-react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import BuyerIntentWorkspace, {
-  IntentParseBadge,
-  IntentStatusBadge,
-} from '../components/BuyerIntentWorkspace';
+import BuyerIntentWorkspace, { IntentStatusBadge } from '../components/BuyerIntentWorkspace';
 import type { BuyerWorkspaceTab } from '../components/BuyerIntentWorkspace';
 import BusinessUpdateDrawer from '../components/BusinessUpdateDrawer';
 import UpdateEntryMenu from '../components/UpdateEntryMenu';
@@ -18,6 +15,7 @@ import type {
   BuyerParty,
   BusinessUpdateProcessingScope,
 } from '../types/api';
+import { ParseStatusBadge } from '../features/buyers/presentation';
 
 export default function BuyerIntentDetail() {
   const { id } = useParams<{ id: string }>();
@@ -126,7 +124,7 @@ export default function BuyerIntentDetail() {
             <div className="flex flex-wrap items-center gap-2">
               <h1 className="truncate text-lg font-semibold text-gray-900">{intent.intent_name}</h1>
               <IntentStatusBadge status={intent.status} />
-              <IntentParseBadge intent={intent} parseStatus={parseStatus} />
+              <ParseStatusBadge item={intent} parseStatus={parseStatus || undefined} />
             </div>
             <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-500">
               <span>买家：{party?.buyer_name || intent.buyer_name || '未关联买家'}</span>
@@ -138,6 +136,7 @@ export default function BuyerIntentDetail() {
           </div>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
+          {parseStatus?.processing_state.recoverable ? <button type="button" onClick={() => setActiveTab('attachments')} className="inline-flex items-center gap-1.5 border border-red-200 px-3 py-1.5 text-sm text-red-700 hover:bg-red-50"><RefreshCw className="h-3.5 w-3.5" />使用原附件重新处理</button> : null}
           {admin ? <label className="flex items-center gap-1 text-xs text-gray-500">负责人<select value={intent.owner_user_id || ''} onChange={(event) => void changeOwner(event.target.value)} disabled={ownerSaving} className="border border-gray-200 bg-white px-2 py-1.5 text-sm text-gray-700 disabled:opacity-50"><option value="">未指派</option>{ownerOptions.filter((option) => option.status === 'active').map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}</select></label> : null}
           <select value={intent.status} onChange={(event) => void changeStatus(event.target.value)} disabled={statusSaving} className="border border-gray-200 bg-white px-2 py-1.5 text-sm text-gray-700 disabled:opacity-50"><option value="active">持续推荐</option><option value="paused">暂停推荐</option><option value="closed">已结束</option></select>
           <UpdateEntryMenu primaryScope={activeTab === 'progress' ? 'follow_up' : 'basic_info'} onSelect={(scope) => setUpdateDrawer({ open: true, scope })} />

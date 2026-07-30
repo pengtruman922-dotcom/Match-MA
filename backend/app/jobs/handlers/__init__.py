@@ -165,6 +165,7 @@ from backend.app.jobs.handlers.attachment_ocr import (
     _enqueue_business_update_process_after_ocr,
     _enqueue_doc2x_poll_job,
     _enqueue_linked_parse_jobs_after_ocr,
+    _finalize_attachment_job_failure,
     _get_attachment_for_ocr,
     _handle_attachment_ocr_parse,
     _handle_attachment_ocr_poll,

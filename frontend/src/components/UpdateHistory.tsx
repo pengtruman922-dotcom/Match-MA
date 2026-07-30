@@ -173,6 +173,7 @@ export default function UpdateHistory({
                     <span className="font-mono text-xs text-gray-500">{formatDateTime(item.submitted_at)}</span>
                     <span className="text-sm font-medium text-gray-900">{item.operator_name}</span>
                     <BatchStatusBadge status={item.status} sourceType={item.source_type} />
+                    {item.stage_label ? <span className="text-xs text-gray-500">{item.stage_label}</span> : null}
                     {item.batch_category === 'management_operation' ? (
                       <span className="bg-sky-50 px-1.5 py-0.5 text-[11px] text-sky-700">管理操作</span>
                     ) : null}
@@ -211,6 +212,7 @@ export default function UpdateHistory({
                             <Download className="h-3 w-3 shrink-0" />
                           )}
                           <span className="truncate">{attachment.file_name}</span>
+                          <AttachmentReadStatus status={attachment.content_extraction_status} />
                         </button>
                       ))}
                     </div>
@@ -218,9 +220,9 @@ export default function UpdateHistory({
                   {item.status === 'failed' ? (
                     <div className="mt-2 flex items-start gap-1.5 text-xs text-red-700">
                       <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                      {item.source_type === 'research_proposal'
+                      {item.error_message || (item.source_type === 'research_proposal'
                         ? '本次调研失败，未写入字段。请在任务中心查看错误后重试。'
-                        : '本次解析失败，未写入字段。请重新录入更新，或联系管理员在任务中心处理。'}
+                        : '本次处理失败，未写入字段。可在附件页使用原附件重新处理。')}
                     </div>
                   ) : null}
                 </div>
@@ -425,12 +427,12 @@ function RollbackDialog({
 
 function BatchStatusBadge({ status, sourceType }: { status: string; sourceType: string }) {
   const config: Record<string, { label: string; className: string; spinning?: boolean }> = {
-    parsing: { label: '解析中', className: 'bg-blue-50 text-blue-700', spinning: true },
+    parsing: { label: '处理中', className: 'bg-blue-50 text-blue-700', spinning: true },
     queued: { label: '排队中', className: 'bg-sky-50 text-sky-700', spinning: true },
     researching: { label: '调研中', className: 'bg-indigo-50 text-indigo-700', spinning: true },
     mapping: { label: '整理结果中', className: 'bg-violet-50 text-violet-700', spinning: true },
-    failed: { label: '解析失败', className: 'bg-red-50 text-red-700' },
-    applied: { label: '已写入', className: 'bg-emerald-50 text-emerald-700' },
+    failed: { label: '处理失败', className: 'bg-red-50 text-red-700' },
+    applied: { label: '处理完成', className: 'bg-emerald-50 text-emerald-700' },
     rolled_back: { label: '已撤回', className: 'bg-gray-100 text-gray-600' },
   };
   const item = sourceType === 'research_proposal' && status === 'applied'
@@ -444,6 +446,12 @@ function BatchStatusBadge({ status, sourceType }: { status: string; sourceType: 
       {item.label}
     </span>
   );
+}
+
+function AttachmentReadStatus({ status }: { status: string }) {
+  const labels: Record<string, string> = { pending: '等待读取', processing: '读取中', succeeded: '读取成功', failed: '读取失败', skipped: '无需读取' };
+  const color = status === 'failed' ? 'text-red-600' : status === 'processing' || status === 'pending' ? 'text-blue-600' : 'text-gray-400';
+  return <span className={`shrink-0 text-[10px] ${color}`}>[{labels[status] || status}]</span>;
 }
 
 function batchSourceLabel(batch: UpdateBatch): string {

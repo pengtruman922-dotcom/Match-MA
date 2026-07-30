@@ -71,6 +71,8 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
     semantic_output_json: dict[str, Any] | None = None
     pipeline_mode = "two_stage" if semantic_node and normalizer_node else "legacy_fallback"
 
+    _set_buyer_intent_parse_stage(db, job.id, "semantic_parsing")
+
     if semantic_node and normalizer_node:
         semantic_output_json, semantic_validation = _call_buyer_intent_node(
             db,
@@ -91,6 +93,7 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
         )
         if not semantic_validation["valid"]:
             raise ValueError(semantic_validation.get("error") or "Buyer intent semantic output is invalid.")
+        _set_buyer_intent_parse_stage(db, job.id, "normalizing")
         parsed_output_json, schema_validation_json = _call_buyer_intent_node(
             db,
             job=job,
@@ -141,6 +144,7 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
             validator=_validate_buyer_intent_parse_output,
         )
 
+    _set_buyer_intent_parse_stage(db, job.id, "writing")
     changes, normalization_notes = _normalize_buyer_intent_parse_changes(parsed_output_json, raw_requirement_text)
     normalization_notes.extend(_normalize_buyer_intent_industry_changes(db, changes))
     if "region_constraints_json" in changes:
@@ -205,6 +209,33 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
         "pipeline_nodes": changes["parsed_requirement_json"]["nodes"],
         "schema_valid": schema_validation_json["valid"],
     }
+
+
+def _set_buyer_intent_parse_stage(db: Session, job_id: UUID, stage: str) -> None:
+    db.execute(
+        text(
+            """
+            update background_job
+            set metadata_json = metadata_json || jsonb_build_object(
+                  'processing_stage', :stage,
+                  'processing_stage_updated_at', now()::text
+                ),
+                updated_at = now()
+            where id = :job_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {
+            "job_id": job_id,
+            "stage": stage,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )
+    # Stage state is operational telemetry and must be visible while a long LLM
+    # call is running. No buyer data is written before the final writing stage.
+    db.commit()
 
 
 def _optional_node_config(db: Session, node_name: str) -> dict[str, Any] | None:

@@ -146,6 +146,8 @@ export default function CreateIntentModal({ onClose, onCreated }: { onClose: () 
           formData.set('auto_process', 'true');
           formData.set('process_after_ocr', 'true');
           formData.set('include_attachment_text', 'true');
+          formData.set('auto_parse_linked_objects', 'true');
+          formData.set('parse_entity_types', JSON.stringify(['buyer_intent']));
           formData.set('bound_buyer_intent_ids', JSON.stringify([createdIntent.id]));
           formData.set(
             'metadata_json',

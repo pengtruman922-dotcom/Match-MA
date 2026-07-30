@@ -27,6 +27,7 @@ from backend.app.api.routes.utils import (
 from backend.app.db import get_db
 from backend.app.services.recommendation_conditions import normalize_condition_effects, normalize_scenario_fields
 from backend.app.services.search_docs import create_search_doc_rebuild_job
+from backend.app.services.buyer_intent_processing_state import buyer_intent_processing_states
 
 router = APIRouter(prefix="/buyer-intents", tags=["buyer-intents"])
 
@@ -192,6 +193,7 @@ class BuyerIntentOut(BaseModel):
     owner_name: str | None = None
     created_at: str
     updated_at: str
+    processing_state: dict[str, Any] | None = None
 
 
 class BuyerIntentListOut(BaseModel):
@@ -295,6 +297,7 @@ class BuyerIntentParseJobOut(BaseModel):
 
 class BuyerIntentParseStatusOut(BaseModel):
     buyer_intent: dict[str, Any]
+    processing_state: dict[str, Any]
     latest_job: dict[str, Any] | None
     latest_trace: dict[str, Any] | None
     recent_update_logs: list[dict[str, Any]]
@@ -577,7 +580,11 @@ def list_buyer_intents(
         ),
         params,
     ).mappings().all()
-    return {"items": [dict(row) for row in rows], "total": total, "limit": limit, "offset": offset}
+    items = [dict(row) for row in rows]
+    states = buyer_intent_processing_states(db, items)
+    for item in items:
+        item["processing_state"] = states[str(item["id"])]
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 @router.get("/filter-options", response_model=BuyerIntentFilterOptionsOut)
@@ -863,6 +870,7 @@ def get_buyer_intent(
 ) -> dict[str, Any]:
     intent = _get_buyer_intent_or_404(db, buyer_intent_id)
     ensure_entity_visible(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
+    intent["processing_state"] = buyer_intent_processing_states(db, [intent])[str(buyer_intent_id)]
     return intent
 
 
@@ -970,8 +978,11 @@ def get_buyer_intent_parse_status(
     ensure_entity_visible(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
     latest_job = _latest_parse_job(db, buyer_intent_id)
     latest_trace = _latest_parse_trace(db, buyer_intent_id)
+    processing_state = buyer_intent_processing_states(db, [intent])[str(buyer_intent_id)]
+    intent["processing_state"] = processing_state
     return {
         "buyer_intent": intent,
+        "processing_state": processing_state,
         "latest_job": _compact_parse_job(latest_job) if latest_job else None,
         "latest_trace": _compact_parse_trace(latest_trace) if latest_trace else None,
         "recent_update_logs": _recent_parse_update_logs(db, buyer_intent_id),

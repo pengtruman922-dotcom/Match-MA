@@ -4,65 +4,35 @@ import { valueLabel } from '../../lib/fieldLabels';
 import { formatCompactMoney } from '../../lib/format';
 
 export function ParseStatusBadge({ item, parseStatus }: { item: BuyerIntent; parseStatus?: BuyerIntentParseStatus }) {
-  const job = parseStatus?.latest_job;
-  const status = job?.status;
-  const isActive = status === 'queued' || status === 'running' || status === 'retry_waiting';
-  let label = hasStructuredIntentFields(item) ? '已解析' : '待解析';
-  let color = hasStructuredIntentFields(item) ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-500';
-
-  if (status === 'queued') {
-    label = '排队中';
-    color = 'bg-blue-50 text-blue-700';
-  } else if (status === 'running') {
-    label = '解析中';
-    color = 'bg-blue-50 text-blue-700';
-  } else if (status === 'retry_waiting') {
-    label = '重试中';
-    color = 'bg-amber-50 text-amber-700';
-  } else if (status === 'succeeded') {
-    label = '已解析';
-    color = 'bg-emerald-50 text-emerald-700';
-  } else if (status === 'failed') {
-    label = '解析失败';
-    color = 'bg-red-50 text-red-700';
-  } else if (status === 'cancelled') {
-    label = '已取消';
-    color = 'bg-gray-100 text-gray-600';
-  }
-
-  const title = job?.error_message
-    || (job ? `任务 ${job.status}，尝试 ${job.attempt_count}/${job.max_attempts}` : undefined);
+  const state = parseStatus?.processing_state || item.processing_state;
+  const status = state?.overall_status || 'not_started';
+  const isActive = status === 'processing';
+  const color = status === 'processing'
+    ? 'bg-blue-50 text-blue-700'
+    : status === 'failed'
+      ? 'bg-red-50 text-red-700'
+      : status === 'succeeded'
+        ? 'bg-emerald-50 text-emerald-700'
+        : 'bg-gray-100 text-gray-500';
+  const label = state?.status_label || '未解析';
+  const title = state?.error_message || state?.stage_label || undefined;
+  const needsCount = state?.needs_confirmation_count || 0;
 
   return (
-    <span title={title} className={`inline-flex items-center justify-center gap-1 whitespace-nowrap px-2 py-0.5 text-xs font-medium ${color}`}>
-      {isActive && <Loader2 className="h-3 w-3 animate-spin" />}
-      {label}
+    <span className="inline-flex flex-wrap items-center justify-center gap-1" title={title}>
+      <span className={`inline-flex items-center gap-1 whitespace-nowrap px-2 py-0.5 text-xs font-medium ${color}`}>
+        {isActive && <Loader2 className="h-3 w-3 animate-spin" />}
+        {label}
+      </span>
+      {state?.stage_label && status !== 'succeeded' ? <span className="whitespace-nowrap text-[11px] text-gray-500">{state.stage_label}</span> : null}
+      {needsCount > 0 && status === 'succeeded' ? <span className="whitespace-nowrap bg-amber-50 px-1.5 py-0.5 text-[11px] text-amber-700">{needsCount}项待确认</span> : null}
+      {state?.review_status === 'reviewed' && status === 'succeeded' ? <span className="whitespace-nowrap bg-sky-50 px-1.5 py-0.5 text-[11px] text-sky-700">已人工复核</span> : null}
     </span>
   );
 }
 
 export function isActiveParseStatus(status: BuyerIntentParseStatus): boolean {
-  const jobStatus = status.latest_job?.status;
-  return jobStatus === 'queued' || jobStatus === 'running' || jobStatus === 'retry_waiting';
-}
-
-export function hasStructuredIntentFields(item: BuyerIntent): boolean {
-  return Boolean(
-    item.intent_summary
-    || item.industry_primary
-    || item.industry_secondary
-    || item.region_scope_summary
-    || item.min_revenue_yuan
-    || item.min_net_profit_yuan
-    || item.max_valuation_yuan
-    || item.market_cap_range_summary
-    || (item.preferred_listed_status && item.preferred_listed_status !== 'unknown')
-    || (item.requires_consolidation && item.requires_consolidation !== 'unknown')
-    || (item.requires_control && item.requires_control !== 'unknown')
-    || item.transaction_type
-    || item.major_risk_tolerance_summary
-    || item.preference_summary
-  );
+  return status.processing_state.overall_status === 'processing';
 }
 
 export function IntentStatusBadge({ status }: { status: string }) {

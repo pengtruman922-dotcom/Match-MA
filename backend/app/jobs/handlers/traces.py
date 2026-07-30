@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
 from backend.app.jobs.queue import JobClaim
+from backend.app.services.json_values import json_safe_value
 
 def _insert_llm_trace(
     db: Session,
@@ -78,7 +79,7 @@ def _insert_llm_trace(
             "model_name": node_config["model_name"],
             "prompt_version": node_config["prompt_version"],
             "status": status,
-            "input_json": input_json,
+            "input_json": json_safe_value(input_json),
             "prompt_messages_json": prompt_messages_json,
             "raw_output_text": raw_output_text,
             "parsed_output_json": parsed_output_json,
@@ -475,8 +476,10 @@ def _insert_model_node_test_trace(
             "input_json": input_json,
             "prompt_messages_json": prompt_messages_json or [],
             "raw_output_text": raw_output_text,
-            "parsed_output_json": parsed_output_json,
-            "schema_validation_json": {"valid": status in {"succeeded", "skipped"}},
+            "parsed_output_json": json_safe_value(parsed_output_json),
+            "schema_validation_json": json_safe_value(
+                {"valid": status in {"succeeded", "skipped"}}
+            ),
             "error_code": error_code,
             "error_message": error_message,
             "latency_ms": latency_ms,
@@ -542,15 +545,19 @@ def _insert_ocr_trace(
             "provider_name": node_config["provider_name"],
             "model_name": node_config["model_name"],
             "status": status,
-            "input_json": input_json,
+            "input_json": json_safe_value(input_json),
             "raw_output_text": raw_output_text,
-            "parsed_output_json": parsed_output_json,
-            "schema_validation_json": {"valid": status in {"succeeded", "skipped"}},
+            "parsed_output_json": json_safe_value(parsed_output_json),
+            "schema_validation_json": json_safe_value(
+                {"valid": status in {"succeeded", "skipped"}}
+            ),
             "error_code": error_code,
             "error_message": error_message,
             "latency_ms": latency_ms,
             "created_by": SYSTEM_USER_ID,
-            "metadata_json": {"source": "attachment_ocr_parse", "execution_mode": "skeleton"},
+            "metadata_json": json_safe_value(
+                {"source": "attachment_ocr_parse", "execution_mode": "skeleton"}
+            ),
         },
     )
 

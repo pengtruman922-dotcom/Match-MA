@@ -276,6 +276,35 @@ export interface BuyerRegionConstraint {
   effect: 'required' | 'preferred' | 'excluded';
 }
 
+export interface BuyerIntentProcessingState {
+  overall_status: 'not_started' | 'processing' | 'succeeded' | 'failed';
+  current_stage: string | null;
+  status_label: string;
+  stage_label: string | null;
+  attachment_summary: {
+    total: number;
+    pending: number;
+    processing: number;
+    succeeded: number;
+    failed: number;
+    skipped: number;
+  };
+  attachment_warning_count: number;
+  ai_parse_status: string;
+  semantic_parse_status: string;
+  normalization_status: string;
+  write_status: string;
+  review_status: 'pending' | 'needs_confirmation' | 'reviewed';
+  needs_confirmation_count: number;
+  source_business_update_id: string | null;
+  latest_job_id: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  recoverable: boolean;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
 export interface BuyerIntent {
   id: string;
   buyer_party_id: string | null;
@@ -348,6 +377,7 @@ export interface BuyerIntent {
   owner_name?: string | null;
   created_at: string;
   updated_at: string;
+  processing_state?: BuyerIntentProcessingState | null;
 }
 
 export interface BuyerIntentListResponse {
@@ -635,6 +665,7 @@ export interface BuyerIntentParseJob {
 
 export interface BuyerIntentParseStatus {
   buyer_intent: BuyerIntent;
+  processing_state: BuyerIntentProcessingState;
   latest_job: {
     id: string;
     job_type: string;
@@ -951,6 +982,11 @@ export interface AttachmentItem {
   uploaded_by: string | null;
   uploaded_at: string;
   parse_status: string;
+  content_extraction_status: 'pending' | 'processing' | 'succeeded' | 'failed' | 'skipped';
+  extraction_strategy: string | null;
+  latest_job_status: string | null;
+  error_message: string | null;
+  recoverable: boolean;
   metadata_json: Record<string, unknown>;
   deleted_at: string | null;
   links: Array<{
@@ -971,6 +1007,10 @@ export interface UpdateBatchAttachment {
   file_size: number | null;
   uploaded_at: string;
   download_route: string;
+  content_extraction_status: 'pending' | 'processing' | 'succeeded' | 'failed' | 'skipped';
+  extraction_strategy: string | null;
+  error_message: string | null;
+  recoverable: boolean;
 }
 
 export interface UpdateBatchChange {
@@ -1000,6 +1040,9 @@ export interface UpdateBatch {
   submitted_at: string;
   applied_at: string | null;
   status: 'parsing' | 'failed' | 'applied' | 'rolled_back' | string;
+  stage_label: string | null;
+  error_message: string | null;
+  attachment_warning_count: number;
   changes: UpdateBatchChange[];
   changed_field_count: number;
   is_latest_effective_batch: boolean;

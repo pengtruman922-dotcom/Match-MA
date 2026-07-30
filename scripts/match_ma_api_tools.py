@@ -22,6 +22,8 @@ PINDA_FILES = [
     "拼哒出行介绍V1.8.pdf",
     "拼哒宣传文.txt",
 ]
+BEIDA_INTENT_ID = "3d3a30cb-b850-4849-a6e3-a8d589af0257"
+BEIDA_ATTACHMENT_ID = "37d34f41-2631-4231-8648-6ae27668860a"
 
 
 class ApiError(RuntimeError):
@@ -64,6 +66,21 @@ def main() -> int:
     )
     failures.add_argument("--test-label", default="historical_validation", help="Label used by --mark-test-data.")
 
+    repair = subparsers.add_parser("repair-stuck", help="Dry-run or apply the audited stuck-state repair.")
+    repair.add_argument("--apply", action="store_true")
+
+    recover = subparsers.add_parser("recover-buyer-intent", help="Retry an original attachment and verify the full buyer-intent chain.")
+    recover.add_argument("--buyer-intent-id", default=BEIDA_INTENT_ID)
+    recover.add_argument("--attachment-id", default=BEIDA_ATTACHMENT_ID)
+    recover.add_argument("--retry", action="store_true")
+    recover.add_argument("--poll-seconds", type=int, default=8)
+    recover.add_argument("--max-wait-seconds", type=int, default=900)
+
+    health = subparsers.add_parser("health", help="Read health or wait for a deployed commit hash.")
+    health.add_argument("--expect-commit")
+    health.add_argument("--poll-seconds", type=int, default=10)
+    health.add_argument("--max-wait-seconds", type=int, default=600)
+
     args = parser.parse_args()
     api_base = args.api_base.rstrip("/")
     try:
@@ -79,6 +96,15 @@ def main() -> int:
             )
         elif args.command == "failures":
             handle_failures(api_base=api_base, token=token, args=args)
+        elif args.command == "repair-stuck":
+            print(json.dumps(_request_json(
+                api_base, "POST", "/background-jobs/repair-stuck-processing",
+                token=token, json_body={"apply": args.apply},
+            ), ensure_ascii=False, indent=2))
+        elif args.command == "recover-buyer-intent":
+            recover_buyer_intent(api_base=api_base, token=token, args=args)
+        elif args.command == "health":
+            wait_for_health(api_base=api_base, token=token, args=args)
     except ApiError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
@@ -179,6 +205,97 @@ def run_pinda_sample(
             indent=2,
         )
     )
+
+
+def wait_for_health(*, api_base: str, token: str, args: argparse.Namespace) -> None:
+    deadline = time.monotonic() + args.max_wait_seconds
+    while True:
+        health = _request_json(api_base, "GET", "/health", token=token)
+        railway = health.get("railway") or {}
+        commit = str(
+            health.get("commit") or health.get("commit_hash") or health.get("git_commit")
+            or railway.get("git_commit_sha") or ""
+        )
+        print(json.dumps(health, ensure_ascii=False))
+        if not args.expect_commit or commit.startswith(args.expect_commit) or args.expect_commit.startswith(commit):
+            return
+        if time.monotonic() >= deadline:
+            raise ApiError(f"Health commit did not switch to {args.expect_commit}; latest was {commit or 'missing'}.")
+        time.sleep(args.poll_seconds)
+
+
+def recover_buyer_intent(*, api_base: str, token: str, args: argparse.Namespace) -> None:
+    if args.retry:
+        retry = _request_json(
+            api_base,
+            "POST",
+            f"/attachments/{args.attachment_id}/ocr",
+            token=token,
+            json_body={"force": True},
+        )
+        print(json.dumps({"retry": retry}, ensure_ascii=False, indent=2))
+
+    deadline = time.monotonic() + args.max_wait_seconds
+    latest: dict[str, Any] = {}
+    while True:
+        parse_status = _request_json(
+            api_base, "GET", f"/buyer-intents/{args.buyer_intent_id}/parse-status", token=token
+        )
+        attachment_items = _request_json(
+            api_base,
+            "GET",
+            "/attachments",
+            token=token,
+            query={"entity_type": "buyer_intent", "entity_id": args.buyer_intent_id, "limit": 100},
+        )
+        batches = _request_json(
+            api_base,
+            "GET",
+            "/update-logs/batches",
+            token=token,
+            query={"entity_type": "buyer_intent", "entity_id": args.buyer_intent_id, "limit": 50},
+        )
+        attachment = next(
+            (item for item in attachment_items if str(item.get("id")) == args.attachment_id), None
+        )
+        state = parse_status.get("processing_state") or {}
+        source_update_id = state.get("source_business_update_id")
+        batch = next(
+            (item for item in batches.get("items", []) if str(item.get("source_id")) == str(source_update_id)),
+            None,
+        )
+        latest = {
+            "buyer_intent_id": args.buyer_intent_id,
+            "processing_state": state,
+            "attachment": attachment,
+            "business_update_batch": batch,
+            "latest_job": parse_status.get("latest_job"),
+            "latest_trace": parse_status.get("latest_trace"),
+            "structured_fields": {
+                key: parse_status.get("buyer_intent", {}).get(key)
+                for key in (
+                    "intent_summary", "industries_json", "industry_l2_json",
+                    "region_constraints_json", "min_net_profit_yuan", "preferred_listed_status",
+                    "requires_control", "transaction_types_json", "needs_confirmation_json",
+                )
+            },
+        }
+        print(json.dumps({
+            "overall_status": state.get("overall_status"),
+            "current_stage": state.get("current_stage"),
+            "attachment_status": (attachment or {}).get("content_extraction_status"),
+            "batch_status": (batch or {}).get("status"),
+        }, ensure_ascii=False))
+        terminal = state.get("overall_status") in {"succeeded", "failed"}
+        attachment_terminal = (attachment or {}).get("content_extraction_status") in {"succeeded", "failed", "skipped"}
+        if terminal and attachment_terminal:
+            break
+        if time.monotonic() >= deadline:
+            raise ApiError("Buyer-intent recovery did not reach a terminal state before timeout.")
+        time.sleep(args.poll_seconds)
+    print(json.dumps(latest, ensure_ascii=False, indent=2))
+    if latest.get("processing_state", {}).get("overall_status") != "succeeded":
+        raise ApiError("Buyer-intent recovery reached a non-success terminal state.")
 
 
 def handle_failures(*, api_base: str, token: str, args: argparse.Namespace) -> None:
@@ -379,7 +496,7 @@ def _multipart_body(fields: dict[str, str], file_paths: list[Path]) -> tuple[byt
         chunks.extend(
             [
                 f"--{boundary}\r\n".encode(),
-                f'Content-Disposition: form-data; name="files"; filename="{path.name}"\r\n'.encode("utf-8"),
+                f'Content-Disposition: form-data; name="files"; filename="{path.name}"\r\n'.encode(),
                 f"Content-Type: {mime_type}\r\n\r\n".encode(),
                 path.read_bytes(),
                 b"\r\n",

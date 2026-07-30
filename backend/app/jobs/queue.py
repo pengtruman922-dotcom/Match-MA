@@ -9,6 +9,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+from backend.app.services.json_values import json_safe_value
 
 
 @dataclass(frozen=True)
@@ -151,7 +152,7 @@ def mark_job_succeeded(
             where id = :job_id
             """
         ).bindparams(bindparam("result_json", type_=JSONB)),
-        {"job_id": job_id, "result_json": result_json or {}},
+        {"job_id": job_id, "result_json": json_safe_value(result_json or {})},
     )
     db.commit()
 
@@ -194,7 +195,7 @@ def mark_job_failed(
             "job_id": job_id,
             "error_code": error_code,
             "error_message": error_message,
-            "error_detail_json": error_detail_json or {},
+            "error_detail_json": json_safe_value(error_detail_json or {}),
             "retry_allowed": retry_allowed,
         },
     )

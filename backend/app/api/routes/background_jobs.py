@@ -77,6 +77,10 @@ class BackgroundJobTestDataRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
 
 
+class StuckProcessingRepairRequest(BaseModel):
+    apply: bool = False
+
+
 class BackgroundJobOut(BaseModel):
     id: UUID
     job_type: str
@@ -104,6 +108,150 @@ class BackgroundJobOut(BaseModel):
     created_at: str
     updated_at: str
     metadata_json: dict[str, Any]
+
+
+@router.post("/repair-stuck-processing")
+def repair_stuck_processing(
+    payload: StuckProcessingRepairRequest,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    attachment_rows = db.execute(
+        text(
+            """
+            select
+              a.id, a.file_name, a.parse_status,
+              latest_job.id as failed_job_id,
+              latest_job.status as failed_job_status,
+              latest_job.error_message
+            from attachment a
+            join lateral (
+              select id, status, error_message
+              from background_job bj
+              where bj.team_id = a.team_id
+                and bj.workspace_id = a.workspace_id
+                and bj.entity_type = 'attachment'
+                and bj.entity_id = a.id
+                and bj.job_type in ('attachment_ocr_parse', 'attachment_ocr_poll')
+              order by bj.created_at desc
+              limit 1
+            ) latest_job on true
+            where a.team_id = :team_id
+              and a.workspace_id = :workspace_id
+              and a.deleted_at is null
+              and a.parse_status in ('pending', 'parsing')
+              and latest_job.status in ('failed', 'canceled', 'cancelled')
+            order by a.uploaded_at asc
+            """
+        ),
+        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    ).mappings().all()
+    update_rows = db.execute(
+        text(
+            """
+            select
+              bu.id, bu.processing_status,
+              latest_failed.id as failed_job_id,
+              latest_failed.error_message
+            from business_update bu
+            join lateral (
+              select id, status, error_message
+              from background_job bj
+              where bj.team_id = bu.team_id
+                and bj.workspace_id = bu.workspace_id
+                and (
+                  (bj.entity_type = 'business_update' and bj.entity_id = bu.id)
+                  or bj.payload_json ->> 'business_update_id' = bu.id::text
+                )
+              order by bj.created_at desc
+              limit 1
+            ) latest_failed on true
+            where bu.team_id = :team_id
+              and bu.workspace_id = :workspace_id
+              and bu.processing_status = 'processing'
+              and latest_failed.status in ('failed', 'canceled', 'cancelled')
+              and not exists (
+                select 1 from background_job active
+                where active.team_id = bu.team_id
+                  and active.workspace_id = bu.workspace_id
+                  and active.status in ('queued', 'running', 'retry_waiting')
+                  and (
+                    (active.entity_type = 'business_update' and active.entity_id = bu.id)
+                    or active.payload_json ->> 'business_update_id' = bu.id::text
+                  )
+              )
+            order by bu.created_at asc
+            """
+        ),
+        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    ).mappings().all()
+
+    applied_attachment_count = 0
+    applied_update_count = 0
+    if payload.apply:
+        for row in attachment_rows:
+            result = db.execute(
+                text(
+                    """
+                    update attachment
+                    set parse_status = 'failed',
+                        metadata_json = metadata_json || jsonb_build_object(
+                          'stuck_state_repaired_at', now()::text,
+                          'stuck_state_repair_job_id', :job_id_text,
+                          'last_ocr_status', 'failed',
+                          'last_ocr_error', :error_message
+                        )
+                    where id = :attachment_id
+                      and team_id = :team_id and workspace_id = :workspace_id
+                      and parse_status in ('pending', 'parsing')
+                    """
+                ),
+                {
+                    "attachment_id": row["id"],
+                    "job_id_text": str(row["failed_job_id"]),
+                    "error_message": row.get("error_message"),
+                    "team_id": DEFAULT_TEAM_ID,
+                    "workspace_id": DEFAULT_WORKSPACE_ID,
+                },
+            )
+            applied_attachment_count += int(result.rowcount or 0)
+        for row in update_rows:
+            result = db.execute(
+                text(
+                    """
+                    update business_update
+                    set processing_status = 'failed',
+                        metadata_json = metadata_json || jsonb_build_object(
+                          'stuck_state_repaired_at', now()::text,
+                          'stuck_state_repair_job_id', :job_id_text,
+                          'last_processing_result', 'failed',
+                          'last_error_message', :error_message
+                        )
+                    where id = :business_update_id
+                      and team_id = :team_id and workspace_id = :workspace_id
+                      and processing_status = 'processing'
+                    """
+                ),
+                {
+                    "business_update_id": row["id"],
+                    "job_id_text": str(row["failed_job_id"]),
+                    "error_message": row.get("error_message"),
+                    "team_id": DEFAULT_TEAM_ID,
+                    "workspace_id": DEFAULT_WORKSPACE_ID,
+                },
+            )
+            applied_update_count += int(result.rowcount or 0)
+        db.commit()
+
+    return {
+        "mode": "apply" if payload.apply else "dry_run",
+        "attachment_candidates": [dict(row) for row in attachment_rows],
+        "business_update_candidates": [dict(row) for row in update_rows],
+        "attachment_candidate_count": len(attachment_rows),
+        "business_update_candidate_count": len(update_rows),
+        "applied_attachment_count": applied_attachment_count,
+        "applied_business_update_count": applied_update_count,
+    }
 
 
 class AiTraceOut(BaseModel):

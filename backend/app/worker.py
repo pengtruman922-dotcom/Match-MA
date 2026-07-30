@@ -10,6 +10,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import session_scope
 from backend.app.jobs.handlers import execute_job
+from backend.app.jobs.handlers.attachment_ocr import _finalize_attachment_job_failure
 from backend.app.jobs.queue import (
     claim_next_job,
     mark_job_failed,
@@ -48,6 +49,7 @@ def run_once(*, queue_name: str, worker_id: str, stale_after_seconds: int = 300)
                 error_message=str(exc),
                 retry_allowed=retry_allowed,
             )
+            _finalize_attachment_job_failure(db, job, str(exc))
             _mark_related_business_update_failed_if_final(db, job, str(exc))
         # 任务已经记为 failed，不再往上抛：抛出去会穿透 main() 结束进程，
         # 一条脏数据就能带走整个 worker，剩下的队列跟着停摆。

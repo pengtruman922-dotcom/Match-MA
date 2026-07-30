@@ -7,7 +7,6 @@ import type {
   AppUserOption,
   BuyerIntent,
   BuyerIntentFilterOptions,
-  BuyerIntentParseStatus,
   BuyerIntentSuggestion,
   BusinessUpdateProcessingScope,
 } from '../../types/api';
@@ -31,7 +30,6 @@ import {
 import {
   compactRequirementNotes,
   IntentStatusBadge,
-  isActiveParseStatus,
   ParseStatusBadge,
 } from './presentation';
 
@@ -58,7 +56,6 @@ export default function IntentsList({
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
-  const [parseStatuses, setParseStatuses] = useState<Record<string, BuyerIntentParseStatus>>({});
   const admin = isAdmin();
   const [ownerOptions, setOwnerOptions] = useState<AppUserOption[]>([]);
   const [assignOwnerId, setAssignOwnerId] = useState('');
@@ -89,8 +86,8 @@ export default function IntentsList({
     setSearchParams(next, { replace: options?.replace });
   }, [searchParams, setSearchParams]);
 
-  const fetchData = useCallback(() => {
-    setLoading(true);
+  const fetchData = useCallback((silent = false) => {
+    if (!silent) setLoading(true);
     buyerIntents
       .list({
         q: filters.q || undefined,
@@ -113,7 +110,7 @@ export default function IntentsList({
         }
       })
       .catch(() => {})
-      .finally(() => setLoading(false));
+      .finally(() => { if (!silent) setLoading(false); });
   }, [filters, updateFilters]);
 
   useEffect(() => { fetchData(); }, [fetchData, refreshKey]);
@@ -125,64 +122,10 @@ export default function IntentsList({
   }, [admin]);
 
   useEffect(() => {
-    if (items.length === 0) {
-      setParseStatuses({});
-      return;
-    }
-    let cancelled = false;
-    Promise.all(
-      items.map((item) =>
-        buyerIntents
-          .parseStatus(item.id)
-          .then((status) => [item.id, status] as const)
-          .catch(() => null)
-      )
-    ).then((pairs) => {
-      if (cancelled) return;
-      const next: Record<string, BuyerIntentParseStatus> = {};
-      for (const pair of pairs) {
-        if (pair) next[pair[0]] = pair[1];
-      }
-      setParseStatuses(next);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [items]);
-
-  useEffect(() => {
-    const activeIds = Object.entries(parseStatuses)
-      .filter(([, status]) => isActiveParseStatus(status))
-      .map(([id]) => id);
-    if (activeIds.length === 0) return;
-    const timer = window.setInterval(() => {
-      Promise.all(
-        activeIds.map((id) =>
-          buyerIntents
-            .parseStatus(id)
-            .then((status) => [id, status] as const)
-            .catch(() => null)
-        )
-      ).then((pairs) => {
-        const shouldRefreshRows = pairs.some((pair) => {
-          if (!pair) return false;
-          const [id, status] = pair;
-          return parseStatuses[id]?.latest_job?.status !== 'succeeded' && status.latest_job?.status === 'succeeded';
-        });
-        setParseStatuses((prev) => {
-          const next = { ...prev };
-          for (const pair of pairs) {
-            if (!pair) continue;
-            const [id, status] = pair;
-            next[id] = status;
-          }
-          return next;
-        });
-        if (shouldRefreshRows) fetchData();
-      });
-    }, INTENT_PARSE_STATUS_POLL_INTERVAL_MS);
+    if (!items.some((item) => item.processing_state?.overall_status === 'processing')) return;
+    const timer = window.setInterval(() => fetchData(true), INTENT_PARSE_STATUS_POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [fetchData, parseStatuses]);
+  }, [fetchData, items]);
 
   useEffect(() => {
     const query = searchQuery.trim();
@@ -353,7 +296,6 @@ export default function IntentsList({
               <IntentRow
                 key={item.id}
                 item={item}
-                parseStatus={parseStatuses[item.id]}
                 selected={selectedIds.has(item.id)}
                 onSelectedChange={(checked) => toggleSelected(item.id, checked)}
                 onRecord={(scope) => setUpdateDrawer({ item, scope })}
@@ -381,13 +323,11 @@ export default function IntentsList({
 
 function IntentRow({
   item,
-  parseStatus,
   selected,
   onSelectedChange,
   onRecord,
 }: {
   item: BuyerIntent;
-  parseStatus?: BuyerIntentParseStatus;
   selected: boolean;
   onSelectedChange: (checked: boolean) => void;
   onRecord: (scope: BusinessUpdateProcessingScope) => void;
@@ -400,7 +340,7 @@ function IntentRow({
       </td>
       <td className="px-4 py-3 align-middle text-gray-700"><p className="line-clamp-2 leading-5" title={item.buyer_name || '未关联买家'}>{item.buyer_name || <span className="text-amber-600">未关联买家</span>}</p></td>
       <td className="px-4 py-3 align-middle text-gray-600"><p className="line-clamp-2 leading-5" title={compactRequirementNotes(item)}>{compactRequirementNotes(item) || '-'}</p></td>
-      <td className="px-4 py-3 text-center align-middle"><ParseStatusBadge item={item} parseStatus={parseStatus} /></td>
+      <td className="px-4 py-3 text-center align-middle"><ParseStatusBadge item={item} /></td>
       <td className="px-4 py-3 text-center align-middle"><IntentStatusBadge status={item.status} /></td>
       <td className="px-4 py-3 align-middle text-gray-600"><p className="line-clamp-2" title={item.owner_name || '未指派'}>{item.owner_name || <span className="text-gray-300">未指派</span>}</p></td>
       <td className="whitespace-nowrap px-4 py-3 align-middle text-gray-500">{shortDate(item.updated_at)}</td>

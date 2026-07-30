@@ -295,6 +295,10 @@ export const attachments = {
     offset?: number;
   }) => apiRequest<AttachmentItem[]>(`/attachments${buildQuery(params || {})}`),
   download: (id: string) => apiBlobResponse(`/attachments/${id}/download`),
+  reprocess: (id: string) => apiRequest<{ job_id: string; status: string }>(`/attachments/${id}/ocr`, {
+    method: 'POST',
+    body: JSON.stringify({ force: true }),
+  }),
 };
 
 export const extractedActions = {

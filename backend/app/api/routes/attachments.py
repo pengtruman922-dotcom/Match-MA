@@ -88,6 +88,11 @@ class AttachmentOut(BaseModel):
     uploaded_by: UUID | None
     uploaded_at: str
     parse_status: str
+    content_extraction_status: str = "pending"
+    extraction_strategy: str | None = None
+    latest_job_status: str | None = None
+    error_message: str | None = None
+    recoverable: bool = False
     metadata_json: dict[str, Any]
     deleted_at: str | None
     links: list[AttachmentLinkOut] = Field(default_factory=list)
@@ -563,6 +568,13 @@ def _enqueue_attachment_ocr_job(
         if existing_job:
             return {**existing_job, "reused_existing": True}
 
+    prior_context = _attachment_retry_context(db, attachment_id)
+    business_update_id = prior_context.get("business_update_id")
+    should_parse_linked = bool(
+        auto_parse_linked_objects or prior_context.get("auto_parse_linked_objects")
+    )
+    effective_parse_types = parse_entity_types or prior_context.get("parse_entity_types") or []
+
     row = db.execute(
         text(
             """
@@ -590,8 +602,11 @@ def _enqueue_attachment_ocr_job(
             "payload_json": {
                 "attachment_id": str(attachment_id),
                 "mock_extracted_text": mock_extracted_text,
-                "auto_parse_linked_objects": auto_parse_linked_objects,
-                "parse_entity_types": parse_entity_types,
+                "business_update_id": business_update_id,
+                "auto_parse_linked_objects": should_parse_linked,
+                "parse_entity_types": effective_parse_types,
+                "process_business_update_after_ocr": bool(business_update_id),
+                "include_attachment_text": True,
             },
             "created_by": DEFAULT_ADMIN_USER_ID,
             "metadata_json": {"source": source, "force": force},
@@ -620,6 +635,62 @@ def _enqueue_attachment_ocr_job(
         },
     )
     return {**dict(row), "reused_existing": False}
+
+
+def _attachment_retry_context(db: Session, attachment_id: UUID) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            """
+            select
+              coalesce(latest.payload_json ->> 'business_update_id', linked.business_update_id::text)
+                as business_update_id,
+              coalesce((latest.payload_json ->> 'auto_parse_linked_objects')::boolean, false)
+                or coalesce(linked.is_buyer_intake, false) as auto_parse_linked_objects,
+              case
+                when jsonb_typeof(latest.payload_json -> 'parse_entity_types') = 'array'
+                  then latest.payload_json -> 'parse_entity_types'
+                when coalesce(linked.is_buyer_intake, false) then '["buyer_intent"]'::jsonb
+                else '[]'::jsonb
+              end as parse_entity_types
+            from (select 1) seed
+            left join lateral (
+              select payload_json
+              from background_job
+              where team_id = :team_id
+                and workspace_id = :workspace_id
+                and entity_type = 'attachment'
+                and entity_id = :attachment_id
+                and job_type in ('attachment_ocr_parse', 'attachment_ocr_poll')
+              order by created_at desc
+              limit 1
+            ) latest on true
+            left join lateral (
+              select
+                bu.id as business_update_id,
+                (bu.metadata_json ->> 'source' = 'frontend_buyer_create_modal'
+                  and jsonb_array_length(bu.bound_buyer_intent_ids_json) > 0) as is_buyer_intake
+              from attachment_link al
+              join business_update bu on bu.id = al.entity_id
+              where al.team_id = :team_id
+                and al.workspace_id = :workspace_id
+                and al.attachment_id = :attachment_id
+                and al.entity_type = 'business_update'
+              order by al.created_at desc
+              limit 1
+            ) linked on true
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "attachment_id": attachment_id,
+        },
+    ).mappings().one()
+    return {
+        "business_update_id": row.get("business_update_id"),
+        "auto_parse_linked_objects": bool(row.get("auto_parse_linked_objects")),
+        "parse_entity_types": row.get("parse_entity_types") or [],
+    }
 
 
 def _ocr_job_out(row: dict[str, Any]) -> dict[str, Any]:
@@ -1118,6 +1189,34 @@ def _attachment_with_links(db: Session, attachment_id: UUID) -> dict[str, Any]:
 
 
 def _attach_links_to_row(db: Session, attachment: dict[str, Any]) -> dict[str, Any]:
+    latest_job = _latest_ocr_job(db, attachment["id"])
+    stored_status = str(attachment.get("parse_status") or "pending")
+    job_status = str(latest_job.get("status") or "") if latest_job else None
+    effective_status = stored_status
+    if stored_status in {"pending", "parsing"} and job_status in {"failed", "canceled", "cancelled"}:
+        effective_status = "failed"
+    product_status = {
+        "pending": "pending",
+        "parsing": "processing",
+        "parsed": "succeeded",
+        "failed": "failed",
+        "skipped": "skipped",
+    }.get(effective_status, "pending")
+    metadata = attachment.get("metadata_json") or {}
+    strategy = metadata.get("last_ocr_provider") if isinstance(metadata, dict) else None
+    if not strategy and isinstance(metadata, dict) and metadata.get("last_office_kind"):
+        strategy = "office_text_layer"
+    attachment.update(
+        {
+            "content_extraction_status": product_status,
+            "extraction_strategy": strategy,
+            "latest_job_status": job_status,
+            "error_message": (
+                latest_job.get("error_message") if latest_job else metadata.get("last_ocr_error")
+            ),
+            "recoverable": product_status == "failed",
+        }
+    )
     attachment["links"] = _attachment_links(db, attachment["id"])
     return attachment
 
@@ -1153,7 +1252,7 @@ def _latest_active_ocr_job(db: Session, attachment_id: UUID) -> dict[str, Any] |
             from background_job
             where team_id = :team_id
               and workspace_id = :workspace_id
-              and job_type = 'attachment_ocr_parse'
+              and job_type in ('attachment_ocr_parse', 'attachment_ocr_poll')
               and entity_type = 'attachment'
               and entity_id = :attachment_id
               and status in ('queued', 'running', 'retry_waiting')
@@ -1183,7 +1282,7 @@ def _latest_ocr_job(db: Session, attachment_id: UUID) -> dict[str, Any] | None:
             from background_job
             where team_id = :team_id
               and workspace_id = :workspace_id
-              and job_type = 'attachment_ocr_parse'
+              and job_type in ('attachment_ocr_parse', 'attachment_ocr_poll')
               and entity_type = 'attachment'
               and entity_id = :attachment_id
             order by created_at desc

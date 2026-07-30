@@ -67,6 +67,10 @@ class UpdateBatchAttachmentOut(BaseModel):
     file_size: int | None = None
     uploaded_at: str
     download_route: str
+    content_extraction_status: str = "pending"
+    extraction_strategy: str | None = None
+    error_message: str | None = None
+    recoverable: bool = False
 
 
 class UpdateBatchChangeOut(BaseModel):
@@ -96,6 +100,9 @@ class UpdateBatchOut(BaseModel):
     submitted_at: str
     applied_at: str | None = None
     status: str
+    stage_label: str | None = None
+    error_message: str | None = None
+    attachment_warning_count: int = 0
     changes: list[UpdateBatchChangeOut]
     changed_field_count: int
     is_latest_effective_batch: bool
@@ -516,9 +523,23 @@ def _entity_business_updates(
         select
           bu.id, bu.raw_text, bu.input_type, bu.processing_status,
           bu.created_by, bu.created_at::text as created_at, bu.metadata_json,
-          creator.name as created_by_name
+          creator.name as created_by_name,
+          latest_job.status as latest_job_status,
+          latest_job.job_type as latest_job_type,
+          latest_job.error_message as latest_job_error_message
         from business_update bu
         left join app_user creator on creator.id = bu.created_by
+        left join lateral (
+          select status, job_type, error_message
+          from background_job bj
+          where bj.team_id = bu.team_id and bj.workspace_id = bu.workspace_id
+            and (
+              (bj.entity_type = 'business_update' and bj.entity_id = bu.id)
+              or bj.payload_json ->> 'business_update_id' = bu.id::text
+            )
+          order by bj.created_at desc
+          limit 1
+        ) latest_job on true
         where bu.team_id = :team_id
           and bu.workspace_id = :workspace_id
           and (
@@ -550,9 +571,20 @@ def _business_update_attachments(
             select
               al.entity_id as business_update_id,
               a.id, a.file_name, a.mime_type, a.file_size,
-              a.uploaded_at::text as uploaded_at
+              a.uploaded_at::text as uploaded_at, a.parse_status, a.metadata_json,
+              latest_job.status as latest_job_status,
+              latest_job.error_message as latest_job_error_message
             from attachment_link al
             join attachment a on a.id = al.attachment_id
+            left join lateral (
+              select status, error_message
+              from background_job bj
+              where bj.team_id = al.team_id and bj.workspace_id = al.workspace_id
+                and bj.entity_type = 'attachment' and bj.entity_id = a.id
+                and bj.job_type in ('attachment_ocr_parse', 'attachment_ocr_poll')
+              order by bj.created_at desc
+              limit 1
+            ) latest_job on true
             where al.team_id = :team_id
               and al.workspace_id = :workspace_id
               and al.entity_type = 'business_update'
@@ -572,6 +604,20 @@ def _business_update_attachments(
         item = dict(row)
         update_id = str(item.pop("business_update_id"))
         item["download_route"] = f"/attachments/{item['id']}/download"
+        stored = str(item.pop("parse_status") or "pending")
+        job_status = str(item.pop("latest_job_status") or "")
+        if stored in {"pending", "parsing"} and job_status in {"failed", "canceled", "cancelled"}:
+            stored = "failed"
+        item["content_extraction_status"] = {
+            "pending": "pending", "parsing": "processing", "parsed": "succeeded",
+            "failed": "failed", "skipped": "skipped",
+        }.get(stored, "pending")
+        metadata = item.pop("metadata_json") or {}
+        item["extraction_strategy"] = metadata.get("last_ocr_provider") or (
+            "office_text_layer" if metadata.get("last_office_kind") else None
+        )
+        item["error_message"] = item.pop("latest_job_error_message") or metadata.get("last_ocr_error")
+        item["recoverable"] = item["content_extraction_status"] == "failed"
         grouped.setdefault(update_id, []).append(item)
     return grouped
 
@@ -693,14 +739,26 @@ def _business_update_batch(
 ) -> dict[str, Any]:
     active_logs = _active_batch_logs(logs)
     status_value = str(update.get("processing_status") or "pending")
-    if status_value in {"pending", "processing"}:
+    latest_job_status = str(update.get("latest_job_status") or "")
+    active_attachments = any(item.get("content_extraction_status") in {"pending", "processing"} for item in attachments)
+    failed_attachments = [item for item in attachments if item.get("content_extraction_status") == "failed"]
+    if latest_job_status in {"queued", "running", "retry_waiting"} or active_attachments:
         batch_status = "parsing"
-    elif status_value == "failed":
+    elif status_value == "failed" or latest_job_status in {"failed", "canceled", "cancelled"}:
         batch_status = "failed"
     elif logs and not active_logs:
         batch_status = "rolled_back"
     else:
         batch_status = "applied"
+    stage_label = None
+    if active_attachments:
+        stage_label = "附件内容读取中"
+    elif batch_status == "failed" and failed_attachments:
+        stage_label = "附件内容读取失败"
+    elif batch_status == "failed":
+        stage_label = "AI 处理失败"
+    elif batch_status == "applied" and failed_attachments:
+        stage_label = f"处理完成 · {len(failed_attachments)} 个附件读取失败"
     return _batch_record(
         batch_key=f"business-update-{update['id']}",
         entity_type=entity_type,
@@ -715,6 +773,11 @@ def _business_update_batch(
         submitted_at=update["created_at"],
         status_value=batch_status,
         logs=logs,
+        stage_label=stage_label,
+        error_message=update.get("latest_job_error_message") or next(
+            (item.get("error_message") for item in failed_attachments if item.get("error_message")), None
+        ),
+        attachment_warning_count=len(failed_attachments) if batch_status == "applied" else 0,
     )
 
 
@@ -837,6 +900,9 @@ def _batch_record(
     status_value: str,
     logs: list[dict[str, Any]],
     report_available: bool = False,
+    stage_label: str | None = None,
+    error_message: str | None = None,
+    attachment_warning_count: int = 0,
 ) -> dict[str, Any]:
     active_logs = _active_batch_logs(logs)
     visible_logs = logs if source_type == "rollback" else [row for row in logs if row.get("source_type") != "rollback"]
@@ -871,6 +937,9 @@ def _batch_record(
         "submitted_at": submitted_at,
         "applied_at": applied_at,
         "status": status_value,
+        "stage_label": stage_label,
+        "error_message": _truncate_text(error_message, 500),
+        "attachment_warning_count": attachment_warning_count,
         "changes": changes,
         "changed_field_count": len(changes),
         "is_latest_effective_batch": False,

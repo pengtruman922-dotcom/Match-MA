@@ -21,6 +21,8 @@ from backend.app.services.pdf_inspection import inspect_pdf_text_layer
 from backend.app.services.business_update_flow import _enqueue_business_update_process_job
 
 from backend.app.jobs.handlers.business_update import (
+    _build_business_update_attachment_context,
+    _get_business_update,
     _latest_active_child_parse_job,
 )
 from backend.app.jobs.handlers.common import (
@@ -186,7 +188,7 @@ def _handle_attachment_ocr_poll(db: Session, job: JobClaim) -> dict[str, object]
     if attachment_id is None:
         raise ValueError("attachment_ocr_poll job requires an attachment entity_id.")
 
-    attachment = _get_attachment_for_ocr(db, attachment_id)
+    _get_attachment_for_ocr(db, attachment_id)
     settings = get_settings()
     uid = str(job.payload_json.get("doc2x_uid") or "").strip()
     if not uid:
@@ -922,6 +924,31 @@ def _mark_business_updates_blocked_by_attachment_ocr(
         ).first()
         if active:
             continue
+        readiness = _business_update_content_readiness(db, business_update_id)
+        if readiness["has_usable_text"]:
+            db.execute(
+                text(
+                    """
+                    update business_update
+                    set metadata_json = metadata_json || :metadata_patch
+                    where id = :business_update_id
+                      and team_id = :team_id
+                      and workspace_id = :workspace_id
+                    """
+                ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+                {
+                    "business_update_id": business_update_id,
+                    "team_id": DEFAULT_TEAM_ID,
+                    "workspace_id": DEFAULT_WORKSPACE_ID,
+                    "metadata_patch": {
+                        "attachment_extraction_warning": True,
+                        "failed_attachment_id": str(attachment_id),
+                        "failed_attachment_job_id": str(job_id),
+                        "last_ocr_error": error_message,
+                    },
+                },
+            )
+            continue
         target_failed_count = _mark_seller_targets_parse_failed(
             db,
             seller_target_ids=_uuid_list(row.get("bound_seller_target_ids_json")),
@@ -956,6 +983,97 @@ def _mark_business_updates_blocked_by_attachment_ocr(
                 },
             },
         )
+
+
+def _finalize_attachment_job_failure(db: Session, job: JobClaim, error_message: str) -> None:
+    """Close user-visible state only after the worker recorded a final job failure."""
+    if job.job_type not in {"attachment_ocr_parse", "attachment_ocr_poll"}:
+        return
+    attachment_id = _resolve_entity_id(job, expected_entity_type="attachment")
+    if attachment_id is None:
+        attachment_id = _optional_uuid(job.payload_json.get("attachment_id"))
+    if attachment_id is None:
+        return
+
+    failed = db.execute(
+        text(
+            """
+            select status
+            from background_job
+            where id = :job_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {"job_id": job.id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    ).mappings().one_or_none()
+    if not failed or failed["status"] != "failed":
+        return
+
+    newer_active = db.execute(
+        text(
+            """
+            select 1
+            from background_job newer
+            join background_job failed_job on failed_job.id = :job_id
+            where newer.team_id = :team_id
+              and newer.workspace_id = :workspace_id
+              and newer.entity_type = 'attachment'
+              and newer.entity_id = :attachment_id
+              and newer.job_type in ('attachment_ocr_parse', 'attachment_ocr_poll')
+              and newer.status in ('queued', 'running', 'retry_waiting')
+              and newer.created_at > failed_job.created_at
+            limit 1
+            """
+        ),
+        {
+            "job_id": job.id,
+            "attachment_id": attachment_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).first()
+    if newer_active:
+        return
+
+    _update_attachment_parse_terminal_without_document(
+        db,
+        attachment_id=attachment_id,
+        parse_status="failed",
+        job_id=job.id,
+        metadata_patch={
+            "last_ocr_error": _truncate_text(error_message, 1000),
+            "last_ocr_failed_at": _utc_now_text(),
+            "last_ocr_failed_job_id": str(job.id),
+        },
+    )
+    _mark_business_updates_blocked_by_attachment_ocr(
+        db,
+        attachment_id=attachment_id,
+        job_id=job.id,
+        error_message=error_message,
+    )
+    _enqueue_linked_parse_jobs_after_ocr(
+        db,
+        job=job,
+        attachment_id=attachment_id,
+        parsed_document_id=None,
+        evidence_id=None,
+        extracted_text="",
+    )
+    _enqueue_business_update_process_after_ocr(
+        db,
+        job=job,
+        attachment_id=attachment_id,
+        evidence_id=None,
+        extracted_text="",
+    )
+
+
+def _utc_now_text() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).isoformat()
 
 def _insert_parsed_document_for_ocr(
     db: Session,
@@ -1262,7 +1380,17 @@ def _enqueue_linked_parse_jobs_after_ocr(
     evidence_id: UUID | None,
     extracted_text: str,
 ) -> list[dict[str, Any]]:
-    if not extracted_text.strip() or not job.payload_json.get("auto_parse_linked_objects"):
+    if not job.payload_json.get("auto_parse_linked_objects"):
+        return []
+
+    parse_text = extracted_text.strip()
+    business_update_id = _optional_uuid(job.payload_json.get("business_update_id"))
+    if business_update_id:
+        readiness = _business_update_content_readiness(db, business_update_id)
+        if not readiness["all_terminal"] or not readiness["combined_text"]:
+            return []
+        parse_text = str(readiness["combined_text"])
+    if not parse_text:
         return []
 
     requested_entity_types = _parse_requested_entity_types(job.payload_json.get("parse_entity_types"))
@@ -1301,7 +1429,8 @@ def _enqueue_linked_parse_jobs_after_ocr(
 
         payload_json = {
             f"{entity_type}_id": str(link["entity_id"]),
-            raw_text_key: extracted_text,
+            raw_text_key: parse_text,
+            "business_update_id": str(business_update_id) if business_update_id else None,
             "attachment_id": str(attachment_id),
             "parsed_document_id": str(parsed_document_id),
             "evidence_id": str(evidence_id) if evidence_id else None,
@@ -1394,9 +1523,12 @@ def _enqueue_business_update_process_after_ocr(
     business_update_id = _optional_uuid(job.payload_json.get("business_update_id"))
     if (
         not business_update_id
-        or not extracted_text.strip()
         or not job.payload_json.get("process_business_update_after_ocr")
     ):
+        return None
+
+    readiness = _business_update_content_readiness(db, business_update_id)
+    if not readiness["all_terminal"] or not readiness["combined_text"]:
         return None
 
     row = _enqueue_business_update_process_job(
@@ -1429,4 +1561,57 @@ def _enqueue_business_update_process_after_ocr(
             },
         },
     )
-    return row
+    return _json_safe_dict(row)
+
+
+def _business_update_content_readiness(db: Session, business_update_id: UUID) -> dict[str, Any]:
+    """Return one batch-level decision after every linked attachment reaches a terminal state."""
+    status_row = db.execute(
+        text(
+            """
+            select
+              count(*)::int as total,
+              count(*) filter (where a.parse_status in ('pending', 'parsing'))::int as active,
+              count(*) filter (where a.parse_status = 'parsed')::int as succeeded,
+              count(*) filter (where a.parse_status = 'failed')::int as failed,
+              count(*) filter (where a.parse_status = 'skipped')::int as skipped
+            from attachment_link al
+            join attachment a on a.id = al.attachment_id
+            where al.team_id = :team_id
+              and al.workspace_id = :workspace_id
+              and al.entity_type = 'business_update'
+              and al.entity_id = :business_update_id
+              and a.deleted_at is null
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "business_update_id": business_update_id,
+        },
+    ).mappings().one()
+    business_update = _get_business_update(db, business_update_id)
+    raw_text = _meaningful_business_update_raw_text(business_update)
+    attachment_context = _build_business_update_attachment_context(db, business_update_id)
+    attachment_text = str(attachment_context.get("combined_text") or "").strip()
+    combined_text = "\n\n".join(part for part in (raw_text, attachment_text) if part).strip()
+    return {
+        **_json_safe_dict(status_row),
+        "all_terminal": int(status_row.get("active") or 0) == 0,
+        "combined_text": combined_text,
+        "has_usable_text": bool(combined_text),
+    }
+
+
+def _meaningful_business_update_raw_text(business_update: dict[str, Any]) -> str:
+    raw_text = str(business_update.get("raw_text") or "").strip()
+    if not raw_text:
+        return ""
+    metadata = business_update.get("metadata_json")
+    source = str(metadata.get("source") or "") if isinstance(metadata, dict) else ""
+    if source == "frontend_buyer_create_modal":
+        marker = "【需求原文/补充材料】"
+        if marker not in raw_text:
+            return ""
+        return raw_text.split(marker, 1)[1].strip()
+    return raw_text
