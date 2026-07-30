@@ -36,11 +36,15 @@ const NODE_LABELS: Record<string, string> = {
   seller_target_parser: '标的新建解析',
   seller_target_update_parser: '标的更新解析',
   buyer_intent_parser: '买家新建解析',
+  buyer_intent_semantic_parser: '买家需求语义解析',
+  buyer_intent_normalizer: '买家需求字段规范化',
   buyer_intent_update_parser: '买家基本信息更新解析',
   relation_followup_draft_parser: '推进跟进整理',
   seller_target_researcher: '标的 AI 调研',
   seller_target_research_mapper: '调研结果规范化',
   recommendation_deep_eval: '推荐深度评估',
+  recommendation_deep_eval_to_target: '推荐深评·为买家找标的',
+  recommendation_deep_eval_to_buyer: '推荐深评·为标的找买家',
   recommendation_report_writer: '推荐报告生成',
   ocr_attachment_parser: '附件 OCR',
   business_update_extractor: '混合更新兼容节点',
@@ -75,6 +79,8 @@ function AiSettings() {
   const [editingNode, setEditingNode] = useState<ModelNodeConfig | null>(null);
   const [editingModel, setEditingModel] = useState<ModelProviderConfig | 'new' | null>(null);
   const [promptNode, setPromptNode] = useState<ModelNodeConfig | null>(null);
+  const [creatingNodeName, setCreatingNodeName] = useState<string | null>(null);
+  const [testingNodeId, setTestingNodeId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -100,6 +106,26 @@ function AiSettings() {
       alert(removeError instanceof Error ? removeError.message : '删除模型配置失败');
     } finally {
       setDeletingId(null);
+    }
+  };
+
+  const runNodeTest = async (node: ModelNodeConfig) => {
+    setTestingNodeId(node.id);
+    try {
+      const started = await modelConfig.testNode(node.id, '');
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 2000));
+        const result = await modelConfig.nodeTestJob(started.job_id);
+        if (['succeeded', 'failed', 'canceled'].includes(result.job_status)) {
+          if (result.job_status !== 'succeeded') alert(result.error_message || result.error_code || '节点业务测试失败');
+          break;
+        }
+      }
+      await load();
+    } catch (testError) {
+      alert(testError instanceof Error ? testError.message : '节点业务测试失败');
+    } finally {
+      setTestingNodeId(null);
     }
   };
 
@@ -152,6 +178,39 @@ function AiSettings() {
 
       <section>
         <div className="mb-3">
+          <h2 className="text-sm font-semibold text-gray-900">买家需求与推荐节点</h2>
+          <p className="mt-1 text-xs text-gray-500">新流程需要四个独立节点。未完成配置时会明确显示当前兼容回退，不会静默切换。</p>
+        </div>
+        <div className="grid gap-3 lg:grid-cols-2">
+          {data.required_business_nodes.map((status) => {
+            const node = nodes.find((item) => item.id === status.node_id);
+            const tone = status.ready ? 'border-emerald-200 bg-emerald-50/40' : status.using_fallback ? 'border-amber-200 bg-amber-50/40' : 'border-red-200 bg-red-50/40';
+            return (
+              <div key={status.node_name} className={`border p-4 ${tone}`}>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div><p className="text-sm font-semibold text-gray-900">{status.label}</p><p className="mt-1 font-mono text-[11px] text-gray-400">{status.node_name}</p></div>
+                  <StateBadge ready={status.ready} fallback={status.using_fallback} />
+                </div>
+                <p className="mt-2 text-xs leading-5 text-gray-600">{status.description}</p>
+                <p className="mt-2 text-xs text-gray-500">模型：{status.configured ? status.model_name || '已配置' : '未配置'} · Prompt：{status.prompt_configured ? '已发布' : '未发布'}</p>
+                {status.using_fallback ? <p className="mt-1 text-xs text-amber-700">当前回退到 {NODE_LABELS[status.fallback_node_name] || status.fallback_node_name}</p> : null}
+                {!status.ready && !status.using_fallback ? <p className="mt-1 text-xs text-red-700">当前节点和回退节点均不可用，相关流程会失败。</p> : null}
+                {status.test_summary?.latest_status ? <p className={`mt-1 text-xs ${status.test_summary.latest_status === 'failed' ? 'text-red-700' : 'text-gray-500'}`}>最近测试：{status.test_summary.latest_status}{status.test_summary.latest_latency_ms ? ` · ${status.test_summary.latest_latency_ms} ms` : ''}{status.test_summary.latest_error_message ? ` · ${status.test_summary.latest_error_message}` : ''}</p> : null}
+                {status.latest_production_call ? <p className={`mt-1 text-xs ${status.latest_production_call.status === 'failed' ? 'text-red-700' : 'text-gray-500'}`}>最近生产调用：{status.latest_production_call.status}{status.latest_production_call.latency_ms ? ` · ${status.latest_production_call.latency_ms} ms` : ''}{status.latest_production_call.error_message ? ` · ${status.latest_production_call.error_message}` : ''}</p> : <p className="mt-1 text-xs text-gray-400">暂无生产调用记录</p>}
+                {status.latest_test ? <details className="mt-2"><summary className="cursor-pointer text-xs text-gray-500">查看最近业务测试 JSON / Token</summary><pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-all bg-white/70 p-2 text-[10px] text-gray-600">{JSON.stringify(status.latest_test, null, 2)}</pre></details> : null}
+                <div className="mt-3 flex flex-wrap gap-3">
+                  {node ? <button type="button" onClick={() => setEditingNode(node)} className="text-xs text-brand-700">配置模型</button> : <button type="button" onClick={() => setCreatingNodeName(status.node_name)} className="text-xs text-brand-700">配置节点</button>}
+                  {node?.prompt_editable ? <button type="button" onClick={() => setPromptNode(node)} className="text-xs text-brand-700">{node.default_prompt ? '管理 Prompt' : '创建 Prompt'}</button> : null}
+                  {node ? <button type="button" disabled={testingNodeId === node.id || !status.prompt_configured} onClick={() => void runNodeTest(node)} className="inline-flex items-center gap-1 text-xs text-brand-700 disabled:text-gray-300">{testingNodeId === node.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <TestTube2 className="h-3.5 w-3.5" />}业务测试</button> : null}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      <section>
+        <div className="mb-3">
           <h2 className="text-sm font-semibold text-gray-900">业务节点</h2>
           <p className="mt-1 text-xs text-gray-500">为每个业务流程选择模型，Prompt 在节点中独立维护。</p>
         </div>
@@ -166,7 +225,7 @@ function AiSettings() {
                     <Td><div className="font-medium text-gray-900">{NODE_LABELS[node.node_name] || node.node_name}</div><div className="mt-0.5 font-mono text-[11px] text-gray-400">{node.node_name}</div></Td>
                     <Td><div>{selectedModel?.provider_name || node.provider_name || '-'}</div><div className="mt-0.5 font-mono text-xs text-gray-500">{selectedModel?.model_name || node.model_name}</div></Td>
                     <Td>{node.prompt_editable ? <button type="button" onClick={() => setPromptNode(node)} className="text-xs text-brand-700">{node.default_prompt?.version || '新建版本'}</button> : <span className="text-xs text-gray-400">无 Prompt</span>}</Td>
-                    <Td><button type="button" onClick={() => setEditingNode(node)} className="inline-flex items-center gap-1 text-xs text-brand-700"><Pencil className="h-3.5 w-3.5" />配置</button></Td>
+                    <Td><div className="flex items-center gap-3"><button type="button" onClick={() => setEditingNode(node)} className="inline-flex items-center gap-1 text-xs text-brand-700"><Pencil className="h-3.5 w-3.5" />配置</button><button type="button" disabled={testingNodeId === node.id || !node.default_prompt} onClick={() => void runNodeTest(node)} className="inline-flex items-center gap-1 text-xs text-brand-700 disabled:text-gray-300">{testingNodeId === node.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <TestTube2 className="h-3.5 w-3.5" />}测试</button></div>{node.test_summary.latest_status ? <p className={`mt-1 max-w-xs text-[11px] ${node.test_summary.latest_status === 'failed' ? 'text-red-600' : 'text-gray-400'}`}>{node.test_summary.latest_status}{node.test_summary.latest_error_message ? ` · ${node.test_summary.latest_error_message}` : ''}</p> : null}</Td>
                   </tr>
                 );
               })}
@@ -186,6 +245,7 @@ function AiSettings() {
         />
       ) : null}
       {editingNode ? <NodeEditor node={editingNode} models={models} onClose={() => setEditingNode(null)} onSaved={async () => { setEditingNode(null); await load(); }} /> : null}
+      {creatingNodeName ? <NewNodeEditor nodeName={creatingNodeName} models={models} onClose={() => setCreatingNodeName(null)} onSaved={async () => { setCreatingNodeName(null); await load(); }} /> : null}
       {promptNode ? <PromptEditor node={promptNode} onClose={() => setPromptNode(null)} onSaved={async () => { setPromptNode(null); await load(); }} /> : null}
     </div>
   );
@@ -366,8 +426,10 @@ function NodeEditor({ node, models, onClose, onSaved }: { node: ModelNodeConfig;
     }
     setSaving(true);
     try {
+      const selectedModel = models.find((model) => model.id === modelId);
       await modelConfig.updateNode(node.id, {
         provider_config_id: modelId,
+        model_name: selectedModel?.model_name || node.model_name,
         temperature: asNumber(temperature),
         top_p: asNumber(topP),
         timeout_seconds: timeout,
@@ -401,9 +463,57 @@ function NodeEditor({ node, models, onClose, onSaved }: { node: ModelNodeConfig;
   );
 }
 
+function NewNodeEditor({ nodeName, models, onClose, onSaved }: { nodeName: string; models: ModelProviderConfig[]; onClose: () => void; onSaved: () => Promise<void> }) {
+  const [modelId, setModelId] = useState(models[0]?.id || '');
+  const [saving, setSaving] = useState(false);
+  const save = async () => {
+    const model = models.find((item) => item.id === modelId);
+    if (!model) { alert('请选择模型。'); return; }
+    setSaving(true);
+    try {
+      await modelConfig.createNode({
+        node_name: nodeName,
+        node_type: nodeName.startsWith('buyer_intent_') ? 'parser' : 'llm',
+        provider_config_id: model.id,
+        model_name: model.model_name,
+        temperature: 0.2,
+        top_p: 0.8,
+        max_tokens: 4096,
+        timeout_seconds: 120,
+        response_format: 'json_object',
+        output_mode: 'json',
+        is_active: true,
+        is_default: true,
+        metadata_json: { source: 'ai_settings_required_business_node' },
+      });
+      await onSaved();
+    } catch (saveError) {
+      alert(saveError instanceof Error ? saveError.message : '创建业务节点失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Editor title={`配置节点 · ${NODE_LABELS[nodeName] || nodeName}`} onClose={onClose} footer={<SaveButton saving={saving} onClick={save} />}>
+      <p className="text-xs text-gray-500">创建后请继续发布该节点的 Prompt 版本；在 Prompt 发布前，页面会继续显示兼容回退。</p>
+      <Field label="模型">
+        <select className="input" value={modelId} onChange={(event) => setModelId(event.target.value)}>
+          <option value="">请选择</option>
+          {models.map((model) => <option key={model.id} value={model.id}>{model.provider_name} · {model.model_name}</option>)}
+        </select>
+      </Field>
+    </Editor>
+  );
+}
+
 const PROMPT_VARIABLE_DESCRIPTIONS: Record<string, string> = {
   raw_requirement_text: '买家需求原文',
   buyer_profile_json: '买家画像 JSON',
+  semantic_parse_json: '语义解析阶段输出 JSON',
+  field_contract_json: '买家需求统一字段契约 JSON',
+  industry_l2_list: '二级行业字典（渲染时自动注入当前启用清单）',
+  province_list: '标准省级行政区划清单',
+  enum_contract_json: '结构化字段候选值规则 JSON',
   raw_target_text: '标的材料原文',
   target_context_json: '标的上下文 JSON',
   raw_text: '用户录入原文（含附件文本）',
@@ -840,6 +950,7 @@ function Grid({ children }: { children: React.ReactNode }) { return <div classNa
 function Th({ children }: { children: React.ReactNode }) { return <th className="px-4 py-3 font-medium">{children}</th>; }
 function Td({ children, clamp = false }: { children: React.ReactNode; clamp?: boolean }) { return <td className="px-4 py-3 text-gray-700"><div className={clamp ? 'max-w-xs truncate' : ''}>{children}</div></td>; }
 function Status({ active }: { active: boolean }) { return <span className={`inline-flex items-center gap-1 text-xs ${active ? 'text-emerald-700' : 'text-gray-400'}`}>{active ? <CheckCircle2 className="h-3.5 w-3.5" /> : null}{active ? '启用' : '停用'}</span>; }
+function StateBadge({ ready, fallback }: { ready: boolean; fallback: boolean }) { const style = ready ? 'bg-emerald-100 text-emerald-700' : fallback ? 'bg-amber-100 text-amber-800' : 'bg-red-100 text-red-700'; return <span className={`px-2 py-0.5 text-xs font-medium ${style}`}>{ready ? '已就绪' : fallback ? '兼容回退' : '未配置'}</span>; }
 function Loading() { return <div className="flex items-center justify-center py-12 text-sm text-gray-400"><Loader2 className="mr-2 h-4 w-4 animate-spin" />正在加载</div>; }
 function ErrorState({ message, onRetry }: { message: string; onRetry: () => void | Promise<void> }) { return <div className="border border-red-200 bg-red-50 px-4 py-4 text-sm text-red-700"><p>{message}</p><button type="button" onClick={() => void onRetry()} className="mt-2 text-xs underline">重新加载</button></div>; }
 function SaveButton({ saving, onClick, label = '保存', disabled = false }: { saving: boolean; onClick: () => void | Promise<void>; label?: string; disabled?: boolean }) { return <button type="button" onClick={() => void onClick()} disabled={saving || disabled} className="inline-flex items-center gap-1.5 bg-brand-600 px-4 py-2 text-sm text-white disabled:opacity-50">{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}{label}</button>; }

@@ -25,7 +25,7 @@ from backend.app.api.routes.utils import (
     write_action_logs_for_diff,
 )
 from backend.app.db import get_db
-from backend.app.services.recommendation_conditions import normalize_scenario_fields
+from backend.app.services.recommendation_conditions import normalize_condition_effects, normalize_scenario_fields
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 
 router = APIRouter(prefix="/buyer-intents", tags=["buyer-intents"])
@@ -68,6 +68,8 @@ class BuyerIntentCreate(BaseModel):
     equity_requirement_type: str | None = None
     acceptable_control_paths_json: list[Any] | dict[str, Any] | None = None
     preferred_listed_status: str | None = "unknown"
+    acceptable_listed_status_json: list[Any] | None = None
+    condition_effects_json: dict[str, Any] | None = None
     listing_board_requirement_summary: str | None = None
     financing_stage_requirement_summary: str | None = None
     transaction_type: str | None = None
@@ -135,6 +137,8 @@ class BuyerIntentOut(BaseModel):
     equity_requirement_type: str | None
     acceptable_control_paths_json: list[Any] | dict[str, Any]
     preferred_listed_status: str | None
+    acceptable_listed_status_json: list[Any] = []
+    condition_effects_json: dict[str, Any] = {}
     listing_board_requirement_summary: str | None
     financing_stage_requirement_summary: str | None
     transaction_type: str | None
@@ -213,6 +217,8 @@ class BuyerIntentUpdate(BaseModel):
     equity_requirement_type: str | None = None
     acceptable_control_paths_json: list[Any] | dict[str, Any] | None = None
     preferred_listed_status: str | None = None
+    acceptable_listed_status_json: list[Any] | None = None
+    condition_effects_json: dict[str, Any] | None = None
     listing_board_requirement_summary: str | None = None
     financing_stage_requirement_summary: str | None = None
     transaction_type: str | None = None
@@ -321,6 +327,7 @@ BUYER_INTENT_OUT_COLUMNS = """
               bi.accepts_minority_investment, bi.desired_equity_ratio_min,
               bi.desired_equity_ratio_max, bi.equity_ratio_summary, bi.equity_requirement_type,
               bi.acceptable_control_paths_json, bi.preferred_listed_status,
+              bi.acceptable_listed_status_json, bi.condition_effects_json,
               bi.listing_board_requirement_summary, bi.financing_stage_requirement_summary,
               bi.transaction_type, bi.transaction_types_json, bi.premium_tolerance_summary,
               bi.max_premium_rate, bi.max_debt_ratio, bi.debt_ratio_requirement_summary,
@@ -370,7 +377,8 @@ def create_buyer_intent(
               requires_control, requires_consolidation, accepts_minority_investment,
               desired_equity_ratio_min, desired_equity_ratio_max, equity_ratio_summary,
               equity_requirement_type, acceptable_control_paths_json,
-              preferred_listed_status, listing_board_requirement_summary,
+              preferred_listed_status, acceptable_listed_status_json, condition_effects_json,
+              listing_board_requirement_summary,
               financing_stage_requirement_summary, transaction_type, transaction_types_json,
               premium_tolerance_summary, max_premium_rate, max_debt_ratio,
               debt_ratio_requirement_summary, major_risk_tolerance_summary,
@@ -397,7 +405,8 @@ def create_buyer_intent(
               :requires_control, :requires_consolidation, :accepts_minority_investment,
               :desired_equity_ratio_min, :desired_equity_ratio_max, :equity_ratio_summary,
               :equity_requirement_type, :acceptable_control_paths_json,
-              :preferred_listed_status, :listing_board_requirement_summary,
+              :preferred_listed_status, :acceptable_listed_status_json, :condition_effects_json,
+              :listing_board_requirement_summary,
               :financing_stage_requirement_summary, :transaction_type, :transaction_types_json,
               :premium_tolerance_summary, :max_premium_rate, :max_debt_ratio,
               :debt_ratio_requirement_summary, :major_risk_tolerance_summary,
@@ -421,6 +430,8 @@ def create_buyer_intent(
             bindparam("industry_focus_tags_json", type_=JSONB),
             bindparam("region_constraints_json", type_=JSONB),
             bindparam("acceptable_control_paths_json", type_=JSONB),
+            bindparam("acceptable_listed_status_json", type_=JSONB),
+            bindparam("condition_effects_json", type_=JSONB),
             bindparam("transaction_types_json", type_=JSONB),
             bindparam("acceptable_cash_flow_status_json", type_=JSONB),
             bindparam("acceptable_profitability_status_json", type_=JSONB),
@@ -951,6 +962,19 @@ def update_buyer_intent(
     ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
     changes = payload.model_dump(exclude_unset=True)
 
+    if "acceptable_listed_status_json" in changes:
+        changes["acceptable_listed_status_json"] = _normalize_acceptable_listed_statuses(
+            changes["acceptable_listed_status_json"]
+        )
+        changes["preferred_listed_status"] = _legacy_listed_status(changes["acceptable_listed_status_json"])
+    elif "preferred_listed_status" in changes:
+        changes["preferred_listed_status"] = _normalize_legacy_listed_status(changes["preferred_listed_status"])
+        changes["acceptable_listed_status_json"] = _normalize_acceptable_listed_statuses(
+            [changes["preferred_listed_status"]]
+        )
+    if "condition_effects_json" in changes:
+        changes["condition_effects_json"] = normalize_condition_effects(changes["condition_effects_json"])
+
     if "owner_user_id" in changes:
         require_admin(current_user)
         if changes["owner_user_id"] is not None:
@@ -1008,6 +1032,8 @@ def update_buyer_intent(
         "acceptable_profitability_status_json",
         "relocation_target_regions_json",
         "needs_confirmation_json",
+        "acceptable_listed_status_json",
+        "condition_effects_json",
     }
 
     bind_params = [bindparam(field, type_=JSONB) for field in changes if field in json_fields]
@@ -1265,6 +1291,9 @@ def _resolve_intent_owner(payload: BuyerIntentCreate, current_user: AuthContext,
 
 
 def _buyer_intent_params(payload: BuyerIntentCreate, current_user: AuthContext, db: Session) -> dict[str, Any]:
+    acceptable_listed_statuses = _normalize_acceptable_listed_statuses(payload.acceptable_listed_status_json)
+    if not acceptable_listed_statuses:
+        acceptable_listed_statuses = _normalize_acceptable_listed_statuses([payload.preferred_listed_status])
     return {
         "team_id": DEFAULT_TEAM_ID,
         "workspace_id": DEFAULT_WORKSPACE_ID,
@@ -1303,7 +1332,9 @@ def _buyer_intent_params(payload: BuyerIntentCreate, current_user: AuthContext, 
         "equity_ratio_summary": payload.equity_ratio_summary,
         "equity_requirement_type": payload.equity_requirement_type,
         "acceptable_control_paths_json": payload.acceptable_control_paths_json or [],
-        "preferred_listed_status": payload.preferred_listed_status,
+        "preferred_listed_status": _legacy_listed_status(acceptable_listed_statuses),
+        "acceptable_listed_status_json": acceptable_listed_statuses,
+        "condition_effects_json": normalize_condition_effects(payload.condition_effects_json),
         "listing_board_requirement_summary": payload.listing_board_requirement_summary,
         "financing_stage_requirement_summary": payload.financing_stage_requirement_summary,
         "transaction_type": payload.transaction_type,
@@ -1333,6 +1364,27 @@ def _buyer_intent_params(payload: BuyerIntentCreate, current_user: AuthContext, 
         "created_by": current_user.user_id,
         "updated_by": current_user.user_id,
     }
+
+
+def _normalize_acceptable_listed_statuses(raw: Any) -> list[str]:
+    values = raw if isinstance(raw, list) else []
+    output: list[str] = []
+    for value in values:
+        normalized = _normalize_legacy_listed_status(value)
+        if normalized in {"listed", "unlisted", "pre_ipo"} and normalized not in output:
+            output.append(normalized)
+    return output
+
+
+def _normalize_legacy_listed_status(value: Any) -> str:
+    normalized = str(value or "unknown").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized == "preparing_listing":
+        return "pre_ipo"
+    return normalized if normalized in {"listed", "unlisted", "pre_ipo", "any", "unknown"} else "unknown"
+
+
+def _legacy_listed_status(values: list[str]) -> str:
+    return values[0] if len(values) == 1 else "any"
 
 
 def _latest_active_parse_job(db: Session, buyer_intent_id: UUID) -> dict[str, Any] | None:
@@ -1402,7 +1454,7 @@ def _latest_parse_trace(db: Session, buyer_intent_id: UUID) -> dict[str, Any] | 
             from ai_trace
             where team_id = :team_id
               and workspace_id = :workspace_id
-              and node_name = 'buyer_intent_parser'
+              and node_name in ('buyer_intent_parser', 'buyer_intent_semantic_parser', 'buyer_intent_normalizer')
               and entity_type = 'buyer_intent'
               and entity_id = :buyer_intent_id
             order by started_at desc
@@ -1514,6 +1566,7 @@ class BuyerIntentScenarioOut(BaseModel):
     active: bool
     fields_json: dict[str, Any]
     needs_confirmation_json: list[Any] = []
+    condition_effects_json: dict[str, Any] = {}
     source: str
     created_at: str
     updated_at: str
@@ -1526,6 +1579,7 @@ class BuyerIntentScenarioWrite(BaseModel):
     # 只接受条件白名单里的字段；越权字段在 normalize_scenario_fields 中被丢弃。
     fields_json: dict[str, Any] = Field(default_factory=dict)
     needs_confirmation_json: list[Any] = Field(default_factory=list)
+    condition_effects_json: dict[str, Any] = Field(default_factory=dict)
 
 
 @router.get("/{buyer_intent_id}/scenarios", response_model=list[BuyerIntentScenarioOut])
@@ -1541,7 +1595,7 @@ def list_buyer_intent_scenarios(
             """
             select
               id, buyer_intent_id, label, sort_order, active, fields_json,
-              needs_confirmation_json, source,
+              needs_confirmation_json, condition_effects_json, source,
               created_at::text as created_at, updated_at::text as updated_at
             from buyer_intent_scenario
             where buyer_intent_id = :buyer_intent_id
@@ -1578,20 +1632,21 @@ def create_buyer_intent_scenario(
             """
             insert into buyer_intent_scenario (
               team_id, workspace_id, buyer_intent_id, label, sort_order, active,
-              fields_json, needs_confirmation_json, source, created_by, updated_by
+              fields_json, needs_confirmation_json, condition_effects_json, source, created_by, updated_by
             )
             values (
               :team_id, :workspace_id, :buyer_intent_id, :label, :sort_order, :active,
-              :fields_json, :needs_confirmation_json, 'manual', :user_id, :user_id
+              :fields_json, :needs_confirmation_json, :condition_effects_json, 'manual', :user_id, :user_id
             )
             returning
               id, buyer_intent_id, label, sort_order, active, fields_json,
-              needs_confirmation_json, source,
+              needs_confirmation_json, condition_effects_json, source,
               created_at::text as created_at, updated_at::text as updated_at
             """
         ).bindparams(
             bindparam("fields_json", type_=JSONB),
             bindparam("needs_confirmation_json", type_=JSONB),
+            bindparam("condition_effects_json", type_=JSONB),
         ),
         {
             "team_id": DEFAULT_TEAM_ID,
@@ -1602,6 +1657,7 @@ def create_buyer_intent_scenario(
             "active": payload.active,
             "fields_json": normalize_scenario_fields(payload.fields_json),
             "needs_confirmation_json": payload.needs_confirmation_json,
+            "condition_effects_json": normalize_condition_effects(payload.condition_effects_json),
             "user_id": current_user.user_id,
         },
     ).mappings().one()
@@ -1628,6 +1684,7 @@ def update_buyer_intent_scenario(
                 active = :active,
                 fields_json = :fields_json,
                 needs_confirmation_json = :needs_confirmation_json,
+                condition_effects_json = :condition_effects_json,
                 updated_at = now(),
                 updated_by = :user_id
             where id = :scenario_id
@@ -1637,12 +1694,13 @@ def update_buyer_intent_scenario(
               and deleted_at is null
             returning
               id, buyer_intent_id, label, sort_order, active, fields_json,
-              needs_confirmation_json, source,
+              needs_confirmation_json, condition_effects_json, source,
               created_at::text as created_at, updated_at::text as updated_at
             """
         ).bindparams(
             bindparam("fields_json", type_=JSONB),
             bindparam("needs_confirmation_json", type_=JSONB),
+            bindparam("condition_effects_json", type_=JSONB),
         ),
         {
             "scenario_id": scenario_id,
@@ -1654,6 +1712,7 @@ def update_buyer_intent_scenario(
             "active": payload.active,
             "fields_json": normalize_scenario_fields(payload.fields_json),
             "needs_confirmation_json": payload.needs_confirmation_json,
+            "condition_effects_json": normalize_condition_effects(payload.condition_effects_json),
             "user_id": current_user.user_id,
         },
     ).mappings().one_or_none()

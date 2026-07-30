@@ -5,6 +5,7 @@ from backend.app.api.routes.model_config import (
     _safe_queue_name_for_node_type,
     _settings_node_summary,
     _settings_page_overview,
+    _required_business_node_statuses,
 )
 
 NODE_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -58,6 +59,49 @@ def test_settings_node_summary_exposes_ui_flags_and_latest_test() -> None:
     assert summary["test_summary"]["latest_latency_ms"] == 123
     assert summary["ui"]["show_prompt_editor"] is True
     assert summary["ui"]["show_sampling_options"] is True
+
+
+def test_required_business_nodes_make_fallback_visible() -> None:
+    nodes = [
+        {
+            "id": NODE_ID,
+            "node_name": "buyer_intent_parser",
+            "is_active": True,
+            "is_default": True,
+            "model_name": "legacy-model",
+        },
+        {
+            "id": UUID("00000000-0000-0000-0000-000000000004"),
+            "node_name": "buyer_intent_semantic_parser",
+            "is_active": True,
+            "is_default": True,
+            "model_name": "semantic-model",
+        },
+    ]
+    prompts = {
+        "buyer_intent_parser": [{"is_active": True, "is_default": True}],
+        "buyer_intent_semantic_parser": [{"is_active": True, "is_default": True}],
+    }
+
+    statuses = _required_business_node_statuses(
+        nodes=nodes,
+        prompts_by_node_name=prompts,
+        latest_production_calls={
+            "buyer_intent_semantic_parser": {
+                "status": "failed",
+                "error_message": "invalid output",
+            }
+        },
+    )
+    semantic = next(item for item in statuses if item["node_name"] == "buyer_intent_semantic_parser")
+    normalizer = next(item for item in statuses if item["node_name"] == "buyer_intent_normalizer")
+
+    assert semantic["ready"] is False  # 两阶段必须成对就绪
+    assert semantic["using_fallback"] is True
+    assert semantic["effective_node_name"] == "buyer_intent_parser"
+    assert semantic["latest_production_call"]["error_message"] == "invalid output"
+    assert normalizer["configured"] is False
+    assert normalizer["using_fallback"] is True
 
 
 def test_settings_node_summary_hides_prompt_editor_for_rerank() -> None:

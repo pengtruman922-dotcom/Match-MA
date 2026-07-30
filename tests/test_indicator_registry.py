@@ -35,6 +35,7 @@ BASELINE = REPO / "database/migrations/001_baseline.sql"
 R4A_MIGRATION = REPO / "database/migrations/002_target_information_model.sql"
 R5_MIGRATION = REPO / "database/migrations/004_information_refinement.sql"
 RESEARCH_PERIOD_MIGRATION = REPO / "database/migrations/009_research_financial_period_guard.sql"
+BUYER_CONTRACT_MIGRATION = REPO / "database/migrations/011_buyer_intent_condition_contract.sql"
 
 
 def test_consumers_derive_from_the_registry() -> None:
@@ -52,7 +53,12 @@ def test_buyer_intent_indicators_are_real_columns() -> None:
     assert body, "baseline 未找到 buyer_intent 建表块"
     columns = set(re.findall(r"^\s+([a-z_0-9]+)\s", body.group(1), re.M))
     missing = {ind.column for ind in BUYER_INTENT_INDICATORS} - columns
-    assert not missing, f"注册表引用了 buyer_intent 不存在的列：{sorted(missing)}"
+    assert missing <= {"acceptable_listed_status_json", "condition_effects_json"}, (
+        f"注册表引用了 buyer_intent 不存在的列：{sorted(missing)}"
+    )
+    migration_sql = BUYER_CONTRACT_MIGRATION.read_text(encoding="utf-8")
+    for column in missing:
+        assert f"add column if not exists {column} jsonb" in migration_sql
     assert indicators_for("buyer_intent") is BUYER_INTENT_INDICATORS
 
 

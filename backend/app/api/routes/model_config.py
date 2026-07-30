@@ -325,7 +325,36 @@ class ModelConfigSettingsPageOut(BaseModel):
     node_test_records: dict[str, list[NodeTestRecordOut]]
     overview: dict[str, Any]
     quick_actions: list[dict[str, Any]]
+    required_business_nodes: list[dict[str, Any]]
     security_note: str
+
+
+REQUIRED_BUSINESS_NODE_SPECS: tuple[dict[str, str], ...] = (
+    {
+        "node_name": "buyer_intent_semantic_parser",
+        "label": "买家需求语义解析",
+        "description": "理解原始材料并拆解公共条件、方案、条件作用和证据。",
+        "fallback_node_name": "buyer_intent_parser",
+    },
+    {
+        "node_name": "buyer_intent_normalizer",
+        "label": "买家需求字段规范化",
+        "description": "结合字段契约、行业字典、行政区划和枚举规则校验标准化。",
+        "fallback_node_name": "buyer_intent_parser",
+    },
+    {
+        "node_name": "recommendation_deep_eval_to_target",
+        "label": "推荐深评·为买家找标的",
+        "description": "固定买家需求，深度评价候选标的。",
+        "fallback_node_name": "recommendation_deep_eval",
+    },
+    {
+        "node_name": "recommendation_deep_eval_to_buyer",
+        "label": "推荐深评·为标的找买家",
+        "description": "固定标的画像，深度评价候选买家需求。",
+        "fallback_node_name": "recommendation_deep_eval",
+    },
+)
 
 
 @router.get("/capabilities")
@@ -367,6 +396,7 @@ def get_model_config_settings_page(
         nodes=nodes,
         tests_per_node=tests_per_node,
     )
+    latest_production_calls = _latest_production_calls_for_required_nodes(db)
     enriched_nodes = [
         _settings_node_summary(
             node,
@@ -381,6 +411,11 @@ def get_model_config_settings_page(
         prompts=prompts,
         node_test_records=node_test_records,
     )
+    required_business_nodes = _required_business_node_statuses(
+        nodes=enriched_nodes,
+        prompts_by_node_name=prompts_by_node_name,
+        latest_production_calls=latest_production_calls,
+    )
     return {
         "capabilities": get_model_config_capabilities(),
         "providers": providers,
@@ -390,6 +425,7 @@ def get_model_config_settings_page(
         "node_test_records": node_test_records,
         "overview": overview,
         "quick_actions": _settings_page_quick_actions(overview),
+        "required_business_nodes": required_business_nodes,
         "security_note": "Environment references are preferred. Direct API keys are encrypted and never returned.",
     }
 
@@ -1025,6 +1061,93 @@ def _settings_node_summary(
             "key_ref_field_label": "api_key_secret_ref",
         },
     }
+
+
+def _required_business_node_statuses(
+    *,
+    nodes: list[dict[str, Any]],
+    prompts_by_node_name: dict[str, list[dict[str, Any]]],
+    latest_production_calls: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Expose required workflow nodes and every compatibility fallback.
+
+    Runtime fallback is intentional during rollout, but it must never be
+    invisible in AI management. A node is ready only when both an active
+    default model node and an active default Prompt exist.
+    """
+    latest_production_calls = latest_production_calls or {}
+    default_nodes = {
+        str(node.get("node_name")): node
+        for node in nodes
+        if node.get("is_active") and node.get("is_default")
+    }
+
+    def prompt_ready(node_name: str) -> bool:
+        return any(
+            prompt.get("is_active") and prompt.get("is_default")
+            for prompt in prompts_by_node_name.get(node_name, [])
+        )
+
+    two_stage_ready = all(
+        name in default_nodes and prompt_ready(name)
+        for name in ("buyer_intent_semantic_parser", "buyer_intent_normalizer")
+    )
+    statuses: list[dict[str, Any]] = []
+    for spec in REQUIRED_BUSINESS_NODE_SPECS:
+        node_name = spec["node_name"]
+        fallback_name = spec["fallback_node_name"]
+        configured = node_name in default_nodes
+        has_prompt = prompt_ready(node_name)
+        ready = configured and has_prompt
+        if node_name.startswith("buyer_intent_"):
+            ready = ready and two_stage_ready
+        fallback_ready = fallback_name in default_nodes and prompt_ready(fallback_name)
+        node = default_nodes.get(node_name)
+        statuses.append(
+            {
+                **spec,
+                "configured": configured,
+                "prompt_configured": has_prompt,
+                "ready": ready,
+                "node_id": str(node["id"]) if node else None,
+                "model_name": node.get("model_name") if node else None,
+                "using_fallback": not ready and fallback_ready,
+                "fallback_ready": fallback_ready,
+                "effective_node_name": node_name if ready else fallback_name if fallback_ready else None,
+                "latest_test": node.get("latest_test") if node else None,
+                "test_summary": node.get("test_summary") if node else None,
+                "latest_production_call": latest_production_calls.get(node_name),
+            }
+        )
+    return statuses
+
+
+def _latest_production_calls_for_required_nodes(db: Session) -> dict[str, dict[str, Any]]:
+    node_names = [spec["node_name"] for spec in REQUIRED_BUSINESS_NODE_SPECS]
+    rows = db.execute(
+        text(
+            """
+            select distinct on (node_name)
+              node_name, status, model_name, latency_ms,
+              error_code, error_message,
+              started_at::text as started_at, finished_at::text as finished_at
+            from ai_trace
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and node_name = any(:node_names)
+              and coalesce(metadata_json ->> 'source', '') not in (
+                'model_node_test', 'model_config_node_test'
+              )
+            order by node_name, started_at desc
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "node_names": node_names,
+        },
+    ).mappings().all()
+    return {str(row["node_name"]): dict(row) for row in rows}
 
 
 def _settings_page_overview(

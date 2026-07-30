@@ -17,42 +17,40 @@ from sqlalchemy.orm import Session
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
 from backend.app.ai.prompting import render_template
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+from backend.app.registry.indicators import indicator_by_column, indicators_for
 from backend.app.services.industry_taxonomy import industry_l1_prompt_list
 
 QUERY_PARSER_NODE_NAME = "recommendation_query_parser"
 
-# Override fields the chat may touch, with their value kind for coercion.
-# Every field here maps 1:1 onto the anchor keys read by the rule scorer.
+def _condition_value_kind(field: str) -> str | None:
+    indicator = indicator_by_column("buyer_intent", field)
+    if indicator.kind in {"yuan", "ratio"}:
+        return "number"
+    if indicator.editor in {"industry", "industry_l2"}:
+        return "industry_list"
+    if indicator.editor in {"multi_enum", "tags"}:
+        return "string_list"
+    if indicator.editor == "region_multi":
+        return "region_list"
+    if field in {"requires_control", "requires_consolidation", "accepts_minority_investment"}:
+        return "yes_no"
+    if field == "preferred_listed_status":
+        return "listed_status"
+    if field == "listing_market_region":
+        return "listing_market_region"
+    if field in {"requires_relocation", "requires_return_investment", "requires_team_retention", "earnout_requirement"}:
+        return "requirement_strength"
+    if indicator.kind == "text":
+        return "text"
+    return None
+
+
+# Every scenario/chat field is derived from the buyer condition contract.
 OVERRIDE_FIELD_KINDS: dict[str, str] = {
-    "industries_json": "industry_list",
-    "industry_l2_json": "industry_list",
-    "excluded_industries_json": "industry_list",
-    "region_scope_summary": "text",
-    "min_net_profit_yuan": "number",
-    "min_revenue_yuan": "number",
-    "min_total_profit_yuan": "number",
-    "min_valuation_yuan": "number",
-    "max_valuation_yuan": "number",
-    "max_pe": "number",
-    "max_ps": "number",
-    "min_net_margin": "number",
-    "min_gross_margin": "number",
-    "min_market_cap_yuan": "number",
-    "max_market_cap_yuan": "number",
-    "requires_control": "yes_no",
-    "requires_consolidation": "yes_no",
-    "accepts_minority_investment": "yes_no",
-    "desired_equity_ratio_min": "number",
-    "desired_equity_ratio_max": "number",
-    "preferred_listed_status": "listed_status",
-    "listing_market_region": "listing_market_region",
-    "max_debt_ratio": "number",
-    "acceptable_cash_flow_status_json": "string_list",
-    "acceptable_profitability_status_json": "string_list",
-    "requires_relocation": "requirement_strength",
-    "requires_return_investment": "requirement_strength",
-    "requires_team_retention": "requirement_strength",
-    "earnout_requirement": "requirement_strength",
+    indicator.column: kind
+    for indicator in indicators_for("buyer_intent")
+    if (indicator.scenario_allowed or indicator.column == "preferred_listed_status")
+    if (kind := _condition_value_kind(indicator.column)) is not None
 }
 
 FIELD_LABELS: dict[str, str] = {
@@ -70,10 +68,11 @@ FIELD_LABELS: dict[str, str] = {
     "requires_consolidation": "并表要求",
     "desired_equity_ratio_min": "最低股比",
     "preferred_listed_status": "上市偏好",
+    "acceptable_listed_status_json": "可接受上市状态",
     "max_debt_ratio": "负债率上限",
 }
 
-_LISTED_STATUS_VALUES = {"listed", "unlisted", "preparing_listing", "pre_ipo", "any", "unknown"}
+_LISTED_STATUS_VALUES = {"listed", "unlisted", "pre_ipo", "any", "unknown"}
 _YES_NO_VALUES = {"yes", "no", "unknown"}
 _LISTING_MARKET_REGION_VALUES = {"domestic", "overseas", "unknown"}
 _REQUIREMENT_STRENGTH_VALUES = {"required", "preferred", "not_required", "unknown"}
@@ -101,6 +100,8 @@ def _coerce_value(kind: str, value: Any) -> Any | None:
     if kind == "requirement_strength":
         text_value = str(value or "").strip().lower()
         return text_value if text_value in _REQUIREMENT_STRENGTH_VALUES else None
+    if kind == "region_list":
+        return value if isinstance(value, list) else None
     if kind in {"industry_list", "string_list"}:
         if isinstance(value, str):
             item = value.strip()
@@ -293,6 +294,48 @@ def normalize_scenario_fields(raw: Any) -> dict[str, Any]:
     return fields
 
 
+CONDITION_EFFECTS = {"required", "preferred", "deep_eval"}
+
+
+def normalize_condition_effects(raw: Any) -> dict[str, str]:
+    """Keep only editable contract fields and the three supported effects."""
+    if not isinstance(raw, dict):
+        return {}
+    allowed = {
+        indicator.column
+        for indicator in indicators_for("buyer_intent")
+        if indicator.effect_editable or indicator.default_effect is not None
+    }
+    return {
+        str(field): str(effect)
+        for field, effect in raw.items()
+        if str(field) in allowed and str(effect) in CONDITION_EFFECTS
+    }
+
+
+def condition_effect(anchor: dict[str, Any], field: str) -> str:
+    effects = anchor.get("condition_effects_json")
+    if isinstance(effects, dict) and str(effects.get(field)) in CONDITION_EFFECTS:
+        return str(effects[field])
+    # These fields carry their effect in the value itself.  Keeping that
+    # interpretation here lets the scorer use the same contract as ordinary
+    # fields without accidentally downgrading a ``required`` requirement to
+    # the registry's editing default.
+    if field in {
+        "requires_relocation",
+        "requires_return_investment",
+        "requires_team_retention",
+    }:
+        strength = str(anchor.get(field) or "").strip().lower()
+        if strength in {"required", "preferred"}:
+            return strength
+        return "deep_eval"
+    try:
+        return indicator_by_column("buyer_intent", field).default_effect or "deep_eval"
+    except KeyError:
+        return "deep_eval"
+
+
 def merge_scenario_into_anchor(anchor: dict[str, Any], scenario_fields: Any) -> dict[str, Any]:
     """Global intent conditions AND the scenario's own conditions.
 
@@ -317,6 +360,39 @@ def confirmation_field_names(raw: Any) -> set[str]:
     }
 
 
+def _confirmation_proposed_values(raw: Any, field: str) -> list[Any]:
+    if not isinstance(raw, list):
+        return []
+    return [
+        item.get("proposed_value")
+        for item in raw
+        if isinstance(item, dict)
+        and str(item.get("field") or "").strip() == field
+        and item.get("proposed_value") is not None
+    ]
+
+
+def _remove_pending_items(value: Any, proposed_values: list[Any]) -> Any:
+    if not isinstance(value, list) or not proposed_values:
+        return value
+    pending_scalars: set[str] = set()
+    pending_objects: list[dict[str, Any]] = []
+    for proposed in proposed_values:
+        items = proposed if isinstance(proposed, list) else [proposed]
+        for item in items:
+            if isinstance(item, dict):
+                pending_objects.append(item)
+            else:
+                pending_scalars.add(str(item))
+
+    def pending(item: Any) -> bool:
+        if isinstance(item, dict):
+            return any(all(item.get(key) == expected for key, expected in candidate.items()) for candidate in pending_objects)
+        return str(item) in pending_scalars
+
+    return [item for item in value if not pending(item)]
+
+
 def suppress_pending_confirmation_fields(
     anchor: dict[str, Any],
     extra_confirmations: Any = None,
@@ -327,11 +403,17 @@ def suppress_pending_confirmation_fields(
     only applied to the copy passed into the rule scorer.
     """
     effective = dict(anchor)
-    pending_fields = confirmation_field_names(anchor.get("needs_confirmation_json"))
+    anchor_confirmations = anchor.get("needs_confirmation_json")
+    pending_fields = confirmation_field_names(anchor_confirmations)
     pending_fields.update(confirmation_field_names(extra_confirmations))
     for field in pending_fields:
         kind = OVERRIDE_FIELD_KINDS.get(field)
-        effective[field] = [] if kind in {"industry_list", "string_list"} else None
+        proposed_values = _confirmation_proposed_values(anchor_confirmations, field)
+        proposed_values.extend(_confirmation_proposed_values(extra_confirmations, field))
+        if kind in {"industry_list", "string_list", "region_list"} and proposed_values:
+            effective[field] = _remove_pending_items(effective.get(field), proposed_values)
+        else:
+            effective[field] = [] if kind in {"industry_list", "string_list", "region_list"} else None
         if field == "industries_json":
             effective["industry_primary"] = None
     return effective

@@ -84,6 +84,39 @@ def test_pending_confirmation_field_is_stored_but_not_applied() -> None:
     assert "held_for_confirmation:min_revenue_yuan" in notes
 
 
+def test_pending_multi_value_items_are_isolated_individually() -> None:
+    changes, _ = _normalize_buyer_intent_parse_changes(
+        {
+            "fields": {
+                "industries_json": ["医药与健康", "不确定行业A", "不确定行业B"],
+            },
+            "needs_confirmation": [
+                {
+                    "field": "industries_json",
+                    "item_key": "industry-a",
+                    "proposed_value": "不确定行业A",
+                    "reason": "无法映射行业A",
+                    "evidence": "关注不确定行业",
+                },
+                {
+                    "field": "industries_json",
+                    "item_key": "industry-b",
+                    "proposed_value": "不确定行业B",
+                    "reason": "无法映射行业B",
+                    "evidence": "关注不确定行业",
+                },
+            ],
+        },
+        "关注医药与健康及两个不确定行业",
+    )
+
+    assert changes["industries_json"] == ["医药与健康"]
+    assert [item["item_key"] for item in changes["needs_confirmation_json"]] == [
+        "industry-a",
+        "industry-b",
+    ]
+
+
 def test_buyer_intent_parse_changes_normalize_common_enums_and_numbers() -> None:
     changes, notes = _normalize_buyer_intent_parse_changes(
         {

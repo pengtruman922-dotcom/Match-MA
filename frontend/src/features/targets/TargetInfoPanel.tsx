@@ -10,7 +10,6 @@ import {
   Search,
   X,
 } from 'lucide-react';
-import { areaList } from '@vant/area-data';
 import { backgroundJobs, fieldSources, indicatorRegistry, meta, profileSections, research, sellerTargets } from '../../lib/api';
 import { formatYuan } from '../../lib/format';
 import type {
@@ -28,6 +27,8 @@ import { formatListedStatus, formatTransferRatio, getSubjectDisplay } from './pr
 import { buildInfoGroups, groupFilledCount, type InfoGroup } from './infoGroups';
 import ResearchEvidenceDrawer from './ResearchEvidenceDrawer';
 import ResearchReportDrawer from './ResearchReportDrawer';
+import IndustryPairsEditor from '../../components/IndustryPairsEditor';
+import AdministrativeAreaPicker from '../../components/AdministrativeAreaPicker';
 
 const ACTIVE_RESEARCH_STATES = new Set([
   'research_queued',
@@ -509,65 +510,24 @@ function IndustryPairsField({ field, editing, saving, source, onStart, onCancel,
   onSave: (value: Array<{ l1: string; l2?: string }>) => Promise<void>;
 }) {
   const [draftPairs, setDraftPairs] = useState<Array<{ l1: string; l2?: string }>>(pairs);
-  const [l1Query, setL1Query] = useState('');
-  const [l2Query, setL2Query] = useState('');
-  const [l2Scope, setL2Scope] = useState('selected');
 
   useEffect(() => {
     if (editing) {
       setDraftPairs(pairs);
-      setL1Query('');
-      setL2Query('');
-      setL2Scope('selected');
     }
   }, [editing, pairs]);
 
-  const selectedL1 = [...new Set(draftPairs.map((pair) => pair.l1))];
-  const visibleL1 = options.l1.filter(({ term }) => term.includes(l1Query.trim()));
-  const scopedL2 = options.l2.filter(({ l1, term }) => {
-    const inScope = l2Scope === 'all' || (l2Scope === 'selected' ? selectedL1.includes(l1) : l1 === l2Scope);
-    return inScope && term.includes(l2Query.trim());
-  });
-  const toggleL1 = (l1: string) => setDraftPairs((current) => (
-    current.some((pair) => pair.l1 === l1)
-      ? current.filter((pair) => pair.l1 !== l1)
-      : [...current, { l1 }]
-  ));
-  const toggleL2 = (l1: string, l2: string) => setDraftPairs((current) => (
-    current.some((pair) => pair.l1 === l1 && pair.l2 === l2)
-      ? current.filter((pair) => !(pair.l1 === l1 && pair.l2 === l2))
-      : [...current, { l1, l2 }]
-  ));
   const display = pairs.map((pair) => [pair.l1, pair.l2].filter(Boolean).join(' / ')).join('；');
 
   return <div className="flex items-start gap-2 sm:col-span-2">
     <FieldLabel field={field} />
     <div className="min-w-0 flex-1">
-      {editing ? <div className="space-y-2 border border-gray-200 bg-gray-50 p-2">
-        <div>
-          <div className="mb-1 flex items-center gap-2 text-xs text-gray-600"><span className="font-medium">一级行业（可多选）</span><input value={l1Query} onChange={(event) => setL1Query(event.target.value)} placeholder="搜索" className="min-w-0 border border-gray-200 bg-white px-1.5 py-0.5 text-xs" /></div>
-          <div className="grid grid-cols-2 gap-x-3 gap-y-1 sm:grid-cols-3">
-            {visibleL1.map(({ term }) => <label key={term} className="flex min-w-0 items-center gap-1 text-xs text-gray-700"><input type="checkbox" checked={selectedL1.includes(term)} onChange={() => toggleL1(term)} /> <span className="truncate">{term}</span></label>)}
-          </div>
-        </div>
-        <div className="border-t border-gray-200 pt-2">
-          <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-gray-600"><span className="font-medium">二级行业（可多选）</span><select value={l2Scope} onChange={(event) => setL2Scope(event.target.value)} className="border border-gray-200 bg-white px-1 py-0.5 text-xs"><option value="selected">已选一级行业</option><option value="all">全部一级行业</option>{selectedL1.map((l1) => <option key={l1} value={l1}>{l1}</option>)}</select><input value={l2Query} onChange={(event) => setL2Query(event.target.value)} placeholder="搜索" className="min-w-0 border border-gray-200 bg-white px-1.5 py-0.5 text-xs" /></div>
-          {selectedL1.length === 0 && l2Scope === 'selected' ? <p className="text-xs text-gray-400">先选择一级行业，或切换为“全部一级行业”。</p> : <div className="max-h-32 overflow-y-auto space-y-1"><div className="grid grid-cols-1 gap-x-3 gap-y-1 sm:grid-cols-2">{scopedL2.map(({ term, l1 }) => <label key={`${l1}:${term}`} className="flex min-w-0 items-center gap-1 text-xs text-gray-700"><input type="checkbox" checked={draftPairs.some((pair) => pair.l1 === l1 && pair.l2 === term)} onChange={() => toggleL2(l1, term)} /> <span className="truncate">{term}</span><span className="ml-auto shrink-0 text-[10px] text-gray-400">{l1}</span></label>)}</div></div>}
-        </div>
+      {editing ? <div className="space-y-2">
+        <IndustryPairsEditor value={draftPairs} options={options} onChange={setDraftPairs} />
         <div className="flex items-center gap-2"><button type="button" disabled={saving} onClick={() => void onSave(draftPairs)} className="inline-flex items-center gap-1 bg-brand-600 px-2.5 py-1 text-xs text-white disabled:opacity-40"><Check className="h-3 w-3" />保存</button><button type="button" onClick={onCancel} className="text-xs text-gray-400 hover:text-gray-600">取消</button></div>
       </div> : <><button type="button" disabled={!field.writable} onClick={onStart} className={`group flex w-full items-center justify-between text-left text-sm ${display ? 'text-gray-800' : 'text-gray-300'} ${field.writable ? 'hover:text-brand-600' : ''}`}><span>{display || '-'}</span>{field.writable && <Pencil className="h-3 w-3 opacity-0 group-hover:opacity-100" />}</button><FieldCaption source={source} onShowEvidence={onShowEvidence} /></>}
     </div>
   </div>;
-}
-
-const areaEntries = {
-  province: Object.entries(areaList.province_list),
-  city: Object.entries(areaList.city_list),
-  district: Object.entries(areaList.county_list),
-};
-
-function areaCode(entries: Array<[string, string]>, name: string | null): string {
-  return entries.find(([, label]) => label === name)?.[0] || '';
 }
 
 function LocationField({ field, editing, saving, source, onStart, onCancel, onShowEvidence, target, onSave }: SpecialFieldProps & {
@@ -577,10 +537,6 @@ function LocationField({ field, editing, saving, source, onStart, onCancel, onSh
   const [province, setProvince] = useState(target.location_province || '');
   const [city, setCity] = useState(target.location_city || '');
   const [district, setDistrict] = useState(target.location_district || '');
-  const provinceCode = areaCode(areaEntries.province, province);
-  const cityCode = areaCode(areaEntries.city, city);
-  const cityOptions = areaEntries.city.filter(([code]) => !provinceCode || code.slice(0, 2) === provinceCode.slice(0, 2));
-  const districtOptions = areaEntries.district.filter(([code]) => !cityCode || code.slice(0, 4) === cityCode.slice(0, 4));
 
   useEffect(() => {
     if (editing) {
@@ -594,7 +550,7 @@ function LocationField({ field, editing, saving, source, onStart, onCancel, onSh
   return <div className="flex items-start gap-2">
     <FieldLabel field={field} />
     <div className="min-w-0 flex-1">
-      {editing ? <div className="space-y-2 border border-gray-200 bg-gray-50 p-2"><div className="grid grid-cols-1 gap-1 sm:grid-cols-3"><select value={province} onChange={(event) => { setProvince(event.target.value); setCity(''); setDistrict(''); }} className="border border-gray-200 bg-white px-1.5 py-1 text-xs"><option value="">省（可不填）</option>{areaEntries.province.map(([code, name]) => <option key={code} value={name}>{name}</option>)}</select><select value={city} onChange={(event) => { setCity(event.target.value); setDistrict(''); }} disabled={!province} className="border border-gray-200 bg-white px-1.5 py-1 text-xs disabled:bg-gray-100"><option value="">市（可不填）</option>{cityOptions.map(([code, name]) => <option key={code} value={name}>{name}</option>)}</select><select value={district} onChange={(event) => setDistrict(event.target.value)} disabled={!city} className="border border-gray-200 bg-white px-1.5 py-1 text-xs disabled:bg-gray-100"><option value="">区/县（可不填）</option>{districtOptions.map(([code, name]) => <option key={code} value={name}>{name}</option>)}</select></div><p className="text-[10px] text-gray-400">变更上级会自动清空下级；筛选仍按省、市、区三个字段命中。</p><div className="flex items-center gap-2"><button type="button" disabled={saving} onClick={() => void onSave({ location_province: province || null, location_city: city || null, location_district: district || null })} className="inline-flex items-center gap-1 bg-brand-600 px-2.5 py-1 text-xs text-white disabled:opacity-40"><Check className="h-3 w-3" />保存</button><button type="button" onClick={onCancel} className="text-xs text-gray-400 hover:text-gray-600">取消</button></div></div> : <><button type="button" disabled={!field.writable} onClick={onStart} className={`group flex w-full items-center justify-between text-left text-sm ${display ? 'text-gray-800' : 'text-gray-300'} ${field.writable ? 'hover:text-brand-600' : ''}`}><span>{display || '-'}</span>{field.writable && <Pencil className="h-3 w-3 opacity-0 group-hover:opacity-100" />}</button><FieldCaption source={source} onShowEvidence={onShowEvidence} /></>}
+      {editing ? <div className="space-y-2 border border-gray-200 bg-gray-50 p-2"><AdministrativeAreaPicker value={{ province, city: city || undefined, district: district || undefined }} onChange={(value) => { setProvince(value.province); setCity(value.city || ''); setDistrict(value.district || ''); }} /><p className="text-[10px] text-gray-400">变更上级会自动清空下级；筛选仍按省、市、区三个字段命中。</p><div className="flex items-center gap-2"><button type="button" disabled={saving} onClick={() => void onSave({ location_province: province || null, location_city: city || null, location_district: district || null })} className="inline-flex items-center gap-1 bg-brand-600 px-2.5 py-1 text-xs text-white disabled:opacity-40"><Check className="h-3 w-3" />保存</button><button type="button" onClick={onCancel} className="text-xs text-gray-400 hover:text-gray-600">取消</button></div></div> : <><button type="button" disabled={!field.writable} onClick={onStart} className={`group flex w-full items-center justify-between text-left text-sm ${display ? 'text-gray-800' : 'text-gray-300'} ${field.writable ? 'hover:text-brand-600' : ''}`}><span>{display || '-'}</span>{field.writable && <Pencil className="h-3 w-3 opacity-0 group-hover:opacity-100" />}</button><FieldCaption source={source} onShowEvidence={onShowEvidence} /></>}
     </div>
   </div>;
 }

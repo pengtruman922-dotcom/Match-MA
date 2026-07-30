@@ -107,6 +107,63 @@ def normalize_district(value: Any) -> str | None:
     return _clean(value)
 
 
+def normalize_buyer_region_constraints(raw: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Validate normalized buyer regions against the shared province vocabulary.
+
+    LLM expansion happens before this boundary. Code accepts canonical provinces
+    and isolates an unrecognised item for review without disabling valid items.
+    """
+    values = raw if isinstance(raw, list) else ([raw] if isinstance(raw, dict) else [])
+    constraints: list[dict[str, Any]] = []
+    pending: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    effect_aliases = {
+        "hard": "required",
+        "required": "required",
+        "must": "required",
+        "soft": "preferred",
+        "preferred": "preferred",
+        "prefer": "preferred",
+        "exclude": "excluded",
+        "excluded": "excluded",
+    }
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        raw_province = _clean(item.get("province") or item.get("province_name"))
+        if raw_province in {"全国", "不限", "全国范围"}:
+            continue
+        province = normalize_province(raw_province)
+        city = normalize_city(item.get("city") or item.get("city_name"))
+        district = normalize_district(item.get("district") or item.get("county") or item.get("district_name"))
+        effect = effect_aliases.get(
+            str(item.get("effect") or item.get("constraint_type") or "preferred").strip().lower(),
+            "preferred",
+        )
+        proposed = {
+            "province": province,
+            **({"city": city} if city else {}),
+            **({"district": district} if district else {}),
+            "effect": effect,
+        }
+        if not province or province not in PROVINCES:
+            pending.append(
+                {
+                    "field": "region_constraints_json",
+                    "uncertain_part": "taxonomy_mapping",
+                    "proposed_value": proposed,
+                    "reason": f"地区“{raw_province or city or district or '空值'}”未规范化到标准省份",
+                    **({"evidence": str(item.get("evidence"))[:1000]} if item.get("evidence") else {}),
+                }
+            )
+            continue
+        key = (province, city or "", district or "", effect)
+        if key not in seen:
+            seen.add(key)
+            constraints.append(proposed)
+    return constraints, pending
+
+
 NORMALIZERS = {
     "location_province": normalize_province,
     "location_city": normalize_city,

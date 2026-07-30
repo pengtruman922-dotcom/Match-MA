@@ -942,7 +942,8 @@ def _get_candidate_search_doc_text(db: Session, *, mode: str, candidate: dict[st
                   max_pe, max_ps, min_net_margin, min_gross_margin,
                   requires_control, requires_consolidation, accepts_minority_investment,
                   desired_equity_ratio_min, desired_equity_ratio_max, equity_ratio_summary,
-                  preferred_listed_status, listing_board_requirement_summary,
+                  preferred_listed_status, acceptable_listed_status_json, condition_effects_json,
+                  listing_board_requirement_summary,
                   financing_stage_requirement_summary, transaction_type, transaction_types_json,
                   premium_tolerance_summary, max_premium_rate, max_debt_ratio,
                   debt_ratio_requirement_summary, major_risk_tolerance_summary,
@@ -954,7 +955,8 @@ def _get_candidate_search_doc_text(db: Session, *, mode: str, candidate: dict[st
                         'id', scenario.id,
                         'label', scenario.label,
                         'fields', scenario.fields_json,
-                        'needs_confirmation', scenario.needs_confirmation_json
+                        'needs_confirmation', scenario.needs_confirmation_json,
+                        'condition_effects', scenario.condition_effects_json
                       ) order by scenario.sort_order, scenario.created_at
                     )
                     from buyer_intent_scenario scenario

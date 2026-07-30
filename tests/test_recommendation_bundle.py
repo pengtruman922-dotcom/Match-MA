@@ -279,6 +279,90 @@ def test_score_target_against_intent_uses_expanded_buyer_filters() -> None:
     assert meta["unknown_dimensions"] == []
 
 
+def test_condition_effects_control_conflict_ranking_and_deep_eval() -> None:
+    target = {"current_revenue_yuan": 8_000_000}
+    base_intent = {"min_revenue_yuan": 10_000_000}
+
+    _, _, _, required_meta = _score_target_against_intent(
+        target,
+        {**base_intent, "condition_effects_json": {"min_revenue_yuan": "required"}},
+    )
+    preferred_score, _, preferred_gaps, preferred_meta = _score_target_against_intent(
+        target,
+        {**base_intent, "condition_effects_json": {"min_revenue_yuan": "preferred"}},
+    )
+    deep_score, _, deep_gaps, deep_meta = _score_target_against_intent(
+        target,
+        {**base_intent, "condition_effects_json": {"min_revenue_yuan": "deep_eval"}},
+    )
+
+    assert required_meta["state"] == "conflict"
+    assert preferred_meta["state"] == "compatible"
+    assert preferred_score == 0
+    assert "营收低于买家门槛" in preferred_gaps
+    assert deep_meta["state"] == "compatible"
+    assert deep_score == 40
+    assert deep_gaps == []
+
+
+def test_required_unknown_target_value_never_conflicts() -> None:
+    _, _, gaps, meta = _score_target_against_intent(
+        {},
+        {
+            "min_revenue_yuan": 10_000_000,
+            "condition_effects_json": {"min_revenue_yuan": "required"},
+        },
+    )
+
+    assert meta["state"] == "possible"
+    assert meta["conflicts"] == []
+    assert "标的营收缺失" in gaps
+
+
+def test_secondary_industry_miss_is_soft_by_default() -> None:
+    score, _, gaps, meta = _score_target_against_intent(
+        {"industry_l1": "医药与健康", "industry_l2": "医疗器械"},
+        {"industries_json": ["医药与健康"], "industry_l2_json": ["生物医药"]},
+    )
+
+    assert meta["state"] == "compatible"
+    assert meta["conflicts"] == []
+    assert score < 100
+    assert "细分赛道不在买家关注方向" in gaps
+
+
+def test_requirement_capability_only_required_and_explicit_no_conflicts() -> None:
+    _, _, _, required_no = _score_target_against_intent(
+        {"accepts_relocation": "no"},
+        {"requires_relocation": "required"},
+    )
+    _, _, _, preferred_no = _score_target_against_intent(
+        {"accepts_relocation": "no"},
+        {"requires_relocation": "preferred"},
+    )
+    _, _, _, required_unknown = _score_target_against_intent(
+        {"accepts_relocation": "unknown"},
+        {"requires_relocation": "required"},
+    )
+
+    assert required_no["state"] == "conflict"
+    assert preferred_no["state"] == "compatible"
+    assert required_unknown["state"] == "possible"
+
+
+def test_acceptable_listed_status_is_a_multi_value_condition() -> None:
+    _, evidence, _, meta = _score_target_against_intent(
+        {"listed_status": "pre_ipo"},
+        {
+            "acceptable_listed_status_json": ["listed", "pre_ipo"],
+            "condition_effects_json": {"acceptable_listed_status_json": "required"},
+        },
+    )
+
+    assert meta["state"] == "compatible"
+    assert "上市状态符合偏好" in evidence
+
+
 def test_score_gate_mismatch_becomes_conflict() -> None:
     score, evidence, gaps, meta = _score_target_against_intent(
         {

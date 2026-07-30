@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import time
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
@@ -14,7 +16,8 @@ from backend.app.jobs.queue import JobClaim
 from backend.app.services.search_docs import (
     create_search_doc_rebuild_job,
 )
-from backend.app.services.recommendation_conditions import normalize_scenario_fields
+from backend.app.registry.indicators import indicators_for
+from backend.app.services.recommendation_conditions import normalize_condition_effects, normalize_scenario_fields
 from backend.app.services.industry_taxonomy import (
     classify_terms,
     industry_l1_prompt_list,
@@ -25,6 +28,7 @@ from backend.app.services.industry_taxonomy import (
     normalize_l1_values,
     resolve_l1,
 )
+from backend.app.services.region_dictionary import PROVINCES, normalize_buyer_region_constraints
 
 from backend.app.jobs.handlers.common import (
     CLOSED_LIST_FIELD_VALUES,
@@ -62,79 +66,104 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
     if not raw_requirement_text.strip():
         raise ValueError("buyer_intent_parse job requires raw_requirement_text.")
 
-    node_config = _get_default_node_config(db, "buyer_intent_parser")
-    prompt_messages = _render_prompt_messages(
-        node_config,
-        {
-            "raw_requirement_text": raw_requirement_text,
-            "buyer_profile_json": buyer_profile_json,
-            "industry_l1_list": industry_l1_prompt_list(db),
-            "industry_l2_list": industry_l2_prompt_list(db),
-        },
-    )
-    input_json = {
-        "buyer_intent_id": str(buyer_intent_id),
-        "raw_requirement_text": raw_requirement_text,
-        "buyer_profile_json": buyer_profile_json,
-    }
+    semantic_node = _optional_node_config(db, "buyer_intent_semantic_parser")
+    normalizer_node = _optional_node_config(db, "buyer_intent_normalizer")
+    semantic_output_json: dict[str, Any] | None = None
+    pipeline_mode = "two_stage" if semantic_node and normalizer_node else "legacy_fallback"
 
-    started = time.perf_counter()
-    try:
-        llm_result = call_openai_compatible_chat(
-            base_url=node_config["base_url"],
-            api_key_secret_ref=node_config["api_key_secret_ref"],
-            api_key_encrypted=node_config.get("api_key_encrypted"),
-            model_name=node_config["model_name"],
-            messages=prompt_messages,
-            temperature=node_config["temperature"],
-            top_p=node_config["top_p"],
-            max_tokens=node_config["max_tokens"],
-            timeout_seconds=node_config["timeout_seconds"] or 90,
-            response_format=node_config["response_format"],
+    if semantic_node and normalizer_node:
+        semantic_output_json, semantic_validation = _call_buyer_intent_node(
+            db,
+            job=job,
+            buyer_intent_id=buyer_intent_id,
+            node_config=semantic_node,
+            variables={
+                "raw_requirement_text": raw_requirement_text,
+                "buyer_profile_json": json.dumps(buyer_profile_json, ensure_ascii=False, default=str),
+            },
+            input_json={
+                "stage": "semantic_parse",
+                "buyer_intent_id": str(buyer_intent_id),
+                "raw_requirement_text": raw_requirement_text,
+                "buyer_profile_json": buyer_profile_json,
+            },
+            validator=_validate_buyer_intent_semantic_output,
         )
-    except LlmCallError as exc:
-        latency_ms = int((time.perf_counter() - started) * 1000)
-        _insert_buyer_intent_parse_trace(
+        if not semantic_validation["valid"]:
+            raise ValueError(semantic_validation.get("error") or "Buyer intent semantic output is invalid.")
+        parsed_output_json, schema_validation_json = _call_buyer_intent_node(
+            db,
+            job=job,
+            buyer_intent_id=buyer_intent_id,
+            node_config=normalizer_node,
+            variables={
+                "semantic_parse_json": json.dumps(semantic_output_json, ensure_ascii=False, default=str),
+                "buyer_profile_json": json.dumps(buyer_profile_json, ensure_ascii=False, default=str),
+                "field_contract_json": json.dumps(_buyer_intent_field_contract(), ensure_ascii=False),
+                "industry_l1_list": industry_l1_prompt_list(db),
+                "industry_l2_list": industry_l2_prompt_list(db),
+                "province_list": "、".join(PROVINCES),
+                "enum_contract_json": json.dumps(_buyer_intent_enum_contract(), ensure_ascii=False),
+            },
+            input_json={
+                "stage": "normalization",
+                "buyer_intent_id": str(buyer_intent_id),
+                "semantic_parse_json": semantic_output_json,
+                "dictionary_snapshot": {
+                    "industry_l1": industry_l1_prompt_list(db),
+                    "industry_l2": industry_l2_prompt_list(db),
+                    "provinces": list(PROVINCES),
+                },
+            },
+            validator=_validate_buyer_intent_parse_output,
+        )
+        node_config = normalizer_node
+    else:
+        node_config = _get_default_node_config(db, "buyer_intent_parser")
+        parsed_output_json, schema_validation_json = _call_buyer_intent_node(
             db,
             job=job,
             buyer_intent_id=buyer_intent_id,
             node_config=node_config,
-            status="failed",
-            input_json=input_json,
-            prompt_messages_json=_safe_prompt_messages_for_trace(prompt_messages),
-            raw_output_text=None,
-            parsed_output_json=None,
-            schema_validation_json={"valid": False, "error": str(exc)},
-            latency_ms=latency_ms,
-            error_code="llm_call_failed",
-            error_message=str(exc),
+            variables={
+                "raw_requirement_text": raw_requirement_text,
+                "buyer_profile_json": json.dumps(buyer_profile_json, ensure_ascii=False, default=str),
+                "industry_l1_list": industry_l1_prompt_list(db),
+                "industry_l2_list": industry_l2_prompt_list(db),
+            },
+            input_json={
+                "stage": "legacy_parse_and_normalize",
+                "buyer_intent_id": str(buyer_intent_id),
+                "raw_requirement_text": raw_requirement_text,
+                "buyer_profile_json": buyer_profile_json,
+                "fallback_reason": "Two-stage nodes are not both configured.",
+            },
+            validator=_validate_buyer_intent_parse_output,
         )
-        db.commit()
-        raise
 
-    parsed_output_json = llm_result.parsed_output_json
-    schema_validation_json = _validate_buyer_intent_parse_output(parsed_output_json)
     changes, normalization_notes = _normalize_buyer_intent_parse_changes(parsed_output_json, raw_requirement_text)
     normalization_notes.extend(_normalize_buyer_intent_industry_changes(db, changes))
-    _insert_buyer_intent_parse_trace(
-        db,
-        job=job,
-        buyer_intent_id=buyer_intent_id,
-        node_config=node_config,
-        status="succeeded" if schema_validation_json["valid"] else "failed",
-        input_json=input_json,
-        prompt_messages_json=prompt_messages,
-        raw_output_text=llm_result.raw_output_text,
-        parsed_output_json=parsed_output_json,
-        schema_validation_json=schema_validation_json,
-        latency_ms=llm_result.latency_ms,
-        prompt_tokens=llm_result.prompt_tokens,
-        completion_tokens=llm_result.completion_tokens,
-        total_tokens=llm_result.total_tokens,
-        error_code=None if schema_validation_json["valid"] else "schema_validation_failed",
-        error_message=schema_validation_json.get("error"),
-    )
-    db.commit()
+    if "region_constraints_json" in changes:
+        normalized_regions, region_pending = normalize_buyer_region_constraints(changes["region_constraints_json"])
+        changes["region_constraints_json"] = normalized_regions
+        changes["needs_confirmation_json"] = _merge_confirmation_items(
+            changes.get("needs_confirmation_json"), region_pending
+        )
+    changes["parsed_requirement_json"] = {
+        "source": "buyer_intent_two_stage" if pipeline_mode == "two_stage" else "buyer_intent_parser",
+        "raw_requirement_text": raw_requirement_text,
+        "semantic_output": semantic_output_json,
+        "normalization_output": parsed_output_json,
+        "pipeline_mode": pipeline_mode,
+        "nodes": [
+            {
+                "node_name": config["node_name"],
+                "prompt_version": config.get("prompt_version"),
+            }
+            for config in ([semantic_node, normalizer_node] if pipeline_mode == "two_stage" else [node_config])
+            if config
+        ],
+    }
     if not schema_validation_json["valid"]:
         raise ValueError(schema_validation_json.get("error") or "Buyer intent parser output is invalid.")
 
@@ -172,8 +201,138 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
         "trace_created": True,
         "model_name": node_config["model_name"],
         "prompt_version": node_config["prompt_version"],
+        "pipeline_mode": pipeline_mode,
+        "pipeline_nodes": changes["parsed_requirement_json"]["nodes"],
         "schema_valid": schema_validation_json["valid"],
     }
+
+
+def _optional_node_config(db: Session, node_name: str) -> dict[str, Any] | None:
+    try:
+        return _get_default_node_config(db, node_name)
+    except ValueError:
+        return None
+
+
+def _call_buyer_intent_node(
+    db: Session,
+    *,
+    job: JobClaim,
+    buyer_intent_id: UUID,
+    node_config: dict[str, Any],
+    variables: dict[str, Any],
+    input_json: dict[str, Any],
+    validator: Callable[[dict[str, Any] | None], dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    prompt_messages = _render_prompt_messages(node_config, variables)
+    started = time.perf_counter()
+    try:
+        llm_result = call_openai_compatible_chat(
+            base_url=node_config["base_url"],
+            api_key_secret_ref=node_config["api_key_secret_ref"],
+            api_key_encrypted=node_config.get("api_key_encrypted"),
+            model_name=node_config["model_name"],
+            messages=prompt_messages,
+            temperature=node_config["temperature"],
+            top_p=node_config["top_p"],
+            max_tokens=node_config["max_tokens"],
+            timeout_seconds=node_config["timeout_seconds"] or 90,
+            response_format=node_config["response_format"],
+        )
+    except LlmCallError as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        _insert_buyer_intent_parse_trace(
+            db,
+            job=job,
+            buyer_intent_id=buyer_intent_id,
+            node_config=node_config,
+            status="failed",
+            input_json=input_json,
+            prompt_messages_json=_safe_prompt_messages_for_trace(prompt_messages),
+            raw_output_text=None,
+            parsed_output_json=None,
+            schema_validation_json={"valid": False, "error": str(exc)},
+            latency_ms=latency_ms,
+            error_code="llm_call_failed",
+            error_message=str(exc),
+        )
+        db.commit()
+        raise
+
+    parsed_output = llm_result.parsed_output_json
+    schema_validation = validator(parsed_output)
+    _insert_buyer_intent_parse_trace(
+        db,
+        job=job,
+        buyer_intent_id=buyer_intent_id,
+        node_config=node_config,
+        status="succeeded" if schema_validation["valid"] else "failed",
+        input_json=input_json,
+        prompt_messages_json=_safe_prompt_messages_for_trace(prompt_messages),
+        raw_output_text=llm_result.raw_output_text,
+        parsed_output_json=parsed_output,
+        schema_validation_json=schema_validation,
+        latency_ms=llm_result.latency_ms,
+        prompt_tokens=llm_result.prompt_tokens,
+        completion_tokens=llm_result.completion_tokens,
+        total_tokens=llm_result.total_tokens,
+        error_code=None if schema_validation["valid"] else "schema_validation_failed",
+        error_message=schema_validation.get("error"),
+    )
+    db.commit()
+    return parsed_output or {}, schema_validation
+
+
+def _validate_buyer_intent_semantic_output(parsed_output_json: dict[str, Any] | None) -> dict[str, Any]:
+    valid = isinstance(parsed_output_json, dict) and bool(parsed_output_json)
+    return {
+        "valid": valid,
+        "field_count": len(parsed_output_json or {}),
+        "error": None if valid else "Buyer intent semantic parser output must be a non-empty JSON object.",
+    }
+
+
+def _buyer_intent_field_contract() -> list[dict[str, Any]]:
+    return [
+        {
+            "field": indicator.column,
+            "label": indicator.label,
+            "value_kind": indicator.kind,
+            "target_field": indicator.target_column,
+            "operator": indicator.operator,
+            "default_effect": indicator.default_effect,
+            "scenario_allowed": indicator.scenario_allowed,
+            "multi_value": indicator.multi_value,
+            "enum_values": [value for value, _ in (indicator.enum_options or ())],
+        }
+        for indicator in indicators_for("buyer_intent")
+        if indicator.default_effect is not None
+    ]
+
+
+def _buyer_intent_enum_contract() -> dict[str, list[str]]:
+    return {
+        indicator.column: [value for value, _ in indicator.enum_options]
+        for indicator in indicators_for("buyer_intent")
+        if indicator.enum_options
+    }
+
+
+def _merge_confirmation_items(left: Any, right: Any) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in [*(left if isinstance(left, list) else []), *(right if isinstance(right, list) else [])]:
+        if not isinstance(item, dict):
+            continue
+        key = (
+            str(item.get("field") or ""),
+            str(item.get("evidence") or ""),
+            json.dumps(item.get("proposed_value"), ensure_ascii=False, sort_keys=True, default=str),
+        )
+        if key not in seen:
+            seen.add(key)
+            output.append(item)
+    return output
 
 MAX_PARSED_SCENARIOS = 6
 
@@ -193,20 +352,19 @@ def _replace_buyer_intent_scenarios(
     """
     if not isinstance(raw_scenarios, list):
         return 0
-    parsed: list[tuple[str, dict[str, Any], list[dict[str, Any]]]] = []
+    parsed: list[tuple[str, dict[str, Any], list[dict[str, Any]], dict[str, str]]] = []
     for index, item in enumerate(raw_scenarios[:MAX_PARSED_SCENARIOS]):
         if not isinstance(item, dict):
             continue
         raw_fields = item.get("fields") or item.get("conditions") or {}
         pending = _normalize_confirmation_items(item.get("needs_confirmation"), BUYER_INTENT_PARSE_FIELDS)
-        pending_fields = {entry["field"] for entry in pending}
-        if isinstance(raw_fields, dict):
-            raw_fields = {key: value for key, value in raw_fields.items() if key not in pending_fields}
+        raw_fields = _remove_pending_condition_values(raw_fields, pending)
         fields = _normalize_parsed_scenario_fields(db, raw_fields)
+        effects = normalize_condition_effects(item.get("condition_effects") or item.get("effects"))
         if not fields and not pending:
             continue
         label = str(item.get("label") or item.get("name") or f"方案{index + 1}").strip()[:120]
-        parsed.append((label, fields, pending))
+        parsed.append((label, fields, pending, effects))
 
     db.execute(
         text(
@@ -230,22 +388,23 @@ def _replace_buyer_intent_scenarios(
         db.commit()
         return 0
 
-    for sort_order, (label, fields, pending) in enumerate(parsed):
+    for sort_order, (label, fields, pending, effects) in enumerate(parsed):
         db.execute(
             text(
                 """
                 insert into buyer_intent_scenario (
                   team_id, workspace_id, buyer_intent_id, label, sort_order,
-                  fields_json, needs_confirmation_json, source, created_by, updated_by
+                  fields_json, needs_confirmation_json, condition_effects_json, source, created_by, updated_by
                 )
                 values (
                   :team_id, :workspace_id, :buyer_intent_id, :label, :sort_order,
-                  :fields_json, :needs_confirmation_json, 'parser', :user_id, :user_id
+                  :fields_json, :needs_confirmation_json, :condition_effects_json, 'parser', :user_id, :user_id
                 )
                 """
             ).bindparams(
                 bindparam("fields_json", type_=JSONB),
                 bindparam("needs_confirmation_json", type_=JSONB),
+                bindparam("condition_effects_json", type_=JSONB),
             ),
             {
                 "team_id": DEFAULT_TEAM_ID,
@@ -255,6 +414,7 @@ def _replace_buyer_intent_scenarios(
                 "sort_order": sort_order,
                 "fields_json": fields,
                 "needs_confirmation_json": pending,
+                "condition_effects_json": effects,
                 "user_id": SYSTEM_USER_ID,
             },
         )
@@ -265,6 +425,21 @@ def _replace_buyer_intent_scenarios(
 def _normalize_parsed_scenario_fields(db: Session, raw_fields: Any) -> dict[str, Any]:
     """Apply the same closed-taxonomy policy to fields nested in scenarios."""
     fields = normalize_scenario_fields(raw_fields)
+    if "acceptable_listed_status_json" in fields:
+        statuses = _normalize_acceptable_listed_statuses(fields["acceptable_listed_status_json"])
+        if statuses:
+            fields["acceptable_listed_status_json"] = statuses
+        else:
+            fields.pop("acceptable_listed_status_json", None)
+    if "preferred_listed_status" in fields:
+        listed_status = _normalize_listed_status(fields["preferred_listed_status"])
+        fields["preferred_listed_status"] = "pre_ipo" if listed_status == "preparing_listing" else listed_status
+    if "region_constraints_json" in fields:
+        regions, _ = normalize_buyer_region_constraints(fields["region_constraints_json"])
+        if regions:
+            fields["region_constraints_json"] = regions
+        else:
+            fields.pop("region_constraints_json", None)
     if "industries_json" in fields:
         normalized_l1, _ = normalize_l1_values(db, fields["industries_json"], fallback_unmapped=False)
         if normalized_l1:
@@ -307,7 +482,8 @@ def _get_buyer_intent_for_parse(db: Session, buyer_intent_id: UUID) -> dict[str,
               requires_control, requires_consolidation, accepts_minority_investment,
               desired_equity_ratio_min, desired_equity_ratio_max, equity_ratio_summary,
               equity_requirement_type, acceptable_control_paths_json,
-              preferred_listed_status, listing_board_requirement_summary, listing_market_region,
+              preferred_listed_status, acceptable_listed_status_json, condition_effects_json,
+              listing_board_requirement_summary, listing_market_region,
               acceptable_cash_flow_status_json, acceptable_profitability_status_json,
               requires_relocation, relocation_target_regions_json,
               requires_return_investment, return_investment_multiple,
@@ -417,6 +593,8 @@ BUYER_INTENT_PARSE_FIELDS = {
     "equity_requirement_type",
     "acceptable_control_paths_json",
     "preferred_listed_status",
+    "acceptable_listed_status_json",
+    "condition_effects_json",
     "listing_board_requirement_summary",
     "financing_stage_requirement_summary",
     "transaction_type",
@@ -447,6 +625,8 @@ BUYER_INTENT_PARSE_JSON_FIELDS = {
     "acceptable_profitability_status_json",
     "relocation_target_regions_json",
     "needs_confirmation_json",
+    "acceptable_listed_status_json",
+    "condition_effects_json",
 }
 
 BUYER_INTENT_PARSE_NUMERIC_FIELDS = {
@@ -573,16 +753,14 @@ def _normalize_buyer_intent_parse_changes(
     if raw_pending is None:
         raw_pending = candidate.get("needs_confirmation_json")
     pending = _normalize_confirmation_items(raw_pending, BUYER_INTENT_PARSE_FIELDS)
-    pending_fields = {item["field"] for item in pending}
+    candidate = _remove_pending_condition_values(candidate, pending)
+    notes.extend(f"held_for_confirmation:{item['field']}" for item in pending)
     changes: dict[str, Any] = {}
     for key, value in candidate.items():
         if key == "needs_confirmation_json":
             continue
         if key not in BUYER_INTENT_PARSE_FIELDS:
             notes.append(f"ignored_unsupported_field:{key}")
-            continue
-        if key in pending_fields:
-            notes.append(f"held_for_confirmation:{key}")
             continue
         if key in BUYER_INTENT_PARSE_NUMERIC_FIELDS:
             changes[key] = _optional_decimal(value)
@@ -591,7 +769,16 @@ def _normalize_buyer_intent_parse_changes(
             changes[key] = _normalize_yes_no_like(value)
             continue
         if key == "preferred_listed_status":
-            changes[key] = _normalize_listed_status(value)
+            normalized_listed = _normalize_listed_status(value)
+            changes[key] = "pre_ipo" if normalized_listed == "preparing_listing" else normalized_listed
+            continue
+        if key == "acceptable_listed_status_json":
+            normalized_statuses = _normalize_acceptable_listed_statuses(value)
+            changes[key] = normalized_statuses
+            changes["preferred_listed_status"] = normalized_statuses[0] if len(normalized_statuses) == 1 else "any"
+            continue
+        if key == "condition_effects_json":
+            changes[key] = normalize_condition_effects(value)
             continue
         if key == "equity_requirement_type":
             changes[key] = _normalize_equity_requirement_type(value)
@@ -637,12 +824,48 @@ def _normalize_buyer_intent_parse_changes(
     return {key: value for key, value in changes.items() if value is not None}, notes
 
 
+def _normalize_acceptable_listed_statuses(raw: Any) -> list[str]:
+    values = raw if isinstance(raw, list) else [raw]
+    output: list[str] = []
+    for value in values:
+        normalized = _normalize_listed_status(value)
+        if normalized == "preparing_listing":
+            normalized = "pre_ipo"
+        if normalized in {"listed", "unlisted", "pre_ipo"} and normalized not in output:
+            output.append(normalized)
+    return output
+
+
+def _remove_pending_condition_values(raw_fields: Any, pending: list[dict[str, Any]]) -> dict[str, Any]:
+    if not isinstance(raw_fields, dict):
+        return {}
+    output = dict(raw_fields)
+    for item in pending:
+        field = item["field"]
+        current = output.get(field)
+        proposed = item.get("proposed_value")
+        if isinstance(current, list) and proposed is not None:
+            proposed_items = proposed if isinstance(proposed, list) else [proposed]
+            proposed_json = {
+                json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+                for value in proposed_items
+            }
+            output[field] = [
+                value
+                for value in current
+                if json.dumps(value, ensure_ascii=False, sort_keys=True, default=str) not in proposed_json
+            ]
+        else:
+            output.pop(field, None)
+    return output
+
+
 def _normalize_confirmation_items(raw: Any, allowed_fields: set[str]) -> list[dict[str, Any]]:
     """Normalize parser questions without carrying a confidence score."""
     if not isinstance(raw, list):
         return []
     normalized: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     for item in raw:
         if not isinstance(item, dict):
             continue
@@ -651,16 +874,35 @@ def _normalize_confirmation_items(raw: Any, allowed_fields: set[str]) -> list[di
             continue
         reason = str(item.get("reason") or item.get("question") or "AI 无法确定唯一取值").strip()[:500]
         evidence = str(item.get("evidence") or item.get("source_text") or "").strip()[:1000]
-        key = (field, evidence)
-        if key in seen:
-            continue
-        seen.add(key)
         entry: dict[str, Any] = {"field": field, "reason": reason}
         if evidence:
             entry["evidence"] = evidence
         proposed_value = item.get("proposed_value", item.get("suggested_value", item.get("value")))
         if proposed_value is not None:
             entry["proposed_value"] = _json_safe_value(proposed_value)
+        uncertain_part = str(item.get("uncertain_part") or "").strip().lower()
+        if uncertain_part in {"field", "value", "operator", "unit", "effect", "scope", "taxonomy_mapping"}:
+            entry["uncertain_part"] = uncertain_part
+        operator = str(item.get("operator") or "").strip().lower()
+        if operator:
+            entry["operator"] = operator[:80]
+        effect = str(item.get("effect") or "").strip().lower()
+        if effect in {"required", "preferred", "deep_eval"}:
+            entry["effect"] = effect
+        scope = str(item.get("scope") or "").strip()
+        if scope:
+            entry["scope"] = scope[:120]
+        item_key = str(item.get("item_key") or "").strip()
+        if item_key:
+            entry["item_key"] = item_key[:200]
+        key = (
+            field,
+            item_key or evidence,
+            json.dumps(entry.get("proposed_value"), ensure_ascii=False, sort_keys=True, default=str),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
         normalized.append(entry)
     return normalized
 

@@ -515,10 +515,21 @@ def _get_model_node_config_by_id(db: Session, node_id: UUID) -> dict[str, Any]:
               provider.id as provider_config_id,
               provider.provider_name,
               provider.base_url,
-              provider.api_key_secret_ref, provider.api_key_encrypted
+              provider.api_key_secret_ref, provider.api_key_encrypted,
+              prompt.version as prompt_version,
+              prompt.system_prompt,
+              prompt.user_prompt_template,
+              prompt.variables_json,
+              prompt.output_schema_json
             from model_node_config node
             join model_provider_config provider
               on provider.id = node.provider_config_id
+            left join prompt_template prompt
+              on prompt.team_id = node.team_id
+             and prompt.workspace_id = node.workspace_id
+             and prompt.node_name = node.node_name
+             and prompt.is_default = true
+             and prompt.is_active = true
             where node.team_id = :team_id
               and node.workspace_id = :workspace_id
               and node.id = :node_id
@@ -667,13 +678,15 @@ def _fetch_buyer_intents(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
             select
               id, buyer_party_id, intent_name, status, contact_name,
               raw_requirement_text, intent_summary, industry_primary,
-              industry_secondary, industries_json, excluded_industries_json,
-              industry_focus_tags_json, region_scope_summary, min_revenue_yuan,
+              industry_secondary, industries_json, industry_l2_json, excluded_industries_json,
+              industry_focus_tags_json, region_scope_summary, region_constraints_json, min_revenue_yuan,
               min_net_profit_yuan, max_pe, max_ps, min_net_margin, min_gross_margin,
               min_valuation_yuan, max_valuation_yuan,
               min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
               requires_control, requires_consolidation,
               accepts_minority_investment, preferred_listed_status,
+              acceptable_listed_status_json, condition_effects_json,
+              requires_relocation, requires_return_investment, requires_team_retention,
               listing_board_requirement_summary, financing_stage_requirement_summary,
               transaction_type, transaction_types_json, premium_tolerance_summary,
               max_premium_rate, max_debt_ratio, debt_ratio_requirement_summary,

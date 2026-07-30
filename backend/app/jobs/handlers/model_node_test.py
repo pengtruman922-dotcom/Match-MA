@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
@@ -10,9 +11,13 @@ from backend.app.ai.embedding_client import (
     call_openai_compatible_embedding,
 )
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
+from backend.app.ai.prompting import render_template
 from backend.app.ai.ocr_client import OcrInput, build_attachment_ocr_input_json, call_attachment_ocr
 from backend.app.ai.rerank_client import RerankCallError, call_dashscope_compatible_rerank
 from backend.app.jobs.queue import JobClaim
+from backend.app.registry.indicators import indicators_for
+from backend.app.services.industry_taxonomy import industry_l1_prompt_list, industry_l2_prompt_list
+from backend.app.services.region_dictionary import PROVINCES
 
 from backend.app.jobs.handlers.common import (
     _get_model_node_config_by_id,
@@ -48,7 +53,7 @@ def _handle_model_chat_node_test(
     job: JobClaim,
     node_config: dict[str, Any],
 ) -> dict[str, object]:
-    messages = _model_node_test_messages(job, node_config)
+    messages = _model_node_test_messages(db, job, node_config)
     trace_type = "llm" if node_config["node_type"] == "llm" else str(node_config["node_type"])
     input_json = _model_node_test_input_json(
         job,
@@ -291,7 +296,11 @@ def _handle_model_ocr_node_test(
     )
     return _model_node_test_result(job, node_config, result.trace_status, output_json, result.latency_ms)
 
-def _model_node_test_messages(job: JobClaim, node_config: dict[str, Any]) -> list[dict[str, str]]:
+def _model_node_test_messages(
+    db: Session,
+    job: JobClaim,
+    node_config: dict[str, Any],
+) -> list[dict[str, str]]:
     messages = job.payload_json.get("messages")
     if isinstance(messages, list) and messages:
         output: list[dict[str, str]] = []
@@ -306,6 +315,24 @@ def _model_node_test_messages(job: JobClaim, node_config: dict[str, Any]) -> lis
             return output
 
     input_text = str(job.payload_json.get("input_text") or "")
+    user_prompt_template = str(node_config.get("user_prompt_template") or "").strip()
+    if user_prompt_template:
+        variables = _business_test_variables(
+            db,
+            node_name=str(node_config.get("node_name") or ""),
+            input_text=input_text,
+        )
+        messages: list[dict[str, str]] = []
+        system_prompt = render_template(node_config.get("system_prompt"), variables)
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append(
+            {
+                "role": "user",
+                "content": render_template(user_prompt_template, variables),
+            }
+        )
+        return messages
     if node_config.get("response_format") == "json_object":
         return [
             {"role": "system", "content": "You are a concise API connectivity tester. Output JSON only."},
@@ -315,6 +342,70 @@ def _model_node_test_messages(job: JobClaim, node_config: dict[str, Any]) -> lis
         {"role": "system", "content": "You are a concise API connectivity tester."},
         {"role": "user", "content": input_text or "Return exactly: ok"},
     ]
+
+
+def _business_test_variables(
+    db: Session,
+    *,
+    node_name: str,
+    input_text: str,
+) -> dict[str, Any]:
+    requirement = input_text.strip() or "关注医药与健康，营收不低于800万元，要求控股，长三角优先。"
+    semantic_sample = {
+        "intent_summary": "寻找医药与健康行业的控股型投资标的",
+        "conditions": [
+            {"field": "industries_json", "operator": "overlap", "value": ["医药与健康"], "effect": "required"},
+            {"field": "min_revenue_yuan", "operator": "gte", "value": 8000000, "effect": "required"},
+            {"field": "requires_control", "operator": "requirement_capability", "value": "yes", "effect": "required"},
+            {"field": "region_constraints_json", "operator": "region_any", "value": "长三角", "effect": "preferred"},
+        ],
+        "scenarios": [],
+        "needs_confirmation": [],
+    }
+    contract = [
+        {
+            "field": indicator.column,
+            "kind": indicator.kind,
+            "operator": indicator.operator,
+            "default_effect": indicator.default_effect,
+            "enum_values": [value for value, _ in (indicator.enum_options or ())],
+        }
+        for indicator in indicators_for("buyer_intent")
+        if indicator.group is not None
+    ]
+    mode = "target_to_buyer" if node_name.endswith("to_buyer") else "buyer_to_target"
+    anchor_context = (
+        "标的：某医疗器械企业；行业：医药与健康；营收1000万元；可控股：是。"
+        if mode == "target_to_buyer"
+        else "买家需求：医药与健康；最低营收800万元；必须可控股。"
+    )
+    candidates = [
+        {
+            "candidate_id": "test-candidate-1",
+            "name": "测试候选",
+            "rule_score": 86,
+            "known_matches": ["行业匹配", "营收达标", "可控股"],
+            "gaps": [],
+        }
+    ]
+    return {
+        "raw_requirement_text": requirement,
+        "buyer_profile_json": json.dumps({"buyer_name": "测试买家"}, ensure_ascii=False),
+        "semantic_parse_json": json.dumps(semantic_sample, ensure_ascii=False),
+        "field_contract_json": json.dumps(contract, ensure_ascii=False),
+        "industry_l1_list": industry_l1_prompt_list(db),
+        "industry_l2_list": industry_l2_prompt_list(db),
+        "province_list": "、".join(PROVINCES),
+        "enum_contract_json": json.dumps(
+            {item["field"]: item["enum_values"] for item in contract if item["enum_values"]},
+            ensure_ascii=False,
+        ),
+        "mode": mode,
+        "anchor_context": anchor_context,
+        "candidates_json": json.dumps(candidates, ensure_ascii=False),
+        "query": requirement,
+        "input_text": requirement,
+    }
 
 def _model_node_test_input_json(
     job: JobClaim,

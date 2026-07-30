@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
-from backend.app.registry.indicators import GROUPS, indicators_for
+from backend.app.registry.indicators import groups_for, indicators_for
 
 router = APIRouter(prefix="/meta", tags=["meta"])
 
@@ -24,7 +24,7 @@ def list_indicators(entity: str = "seller_target") -> dict[str, Any]:
     return {
         "groups": [
             {"key": group.key, "label": group.label, "section_code": group.section_code}
-            for group in GROUPS
+            for group in groups_for(entity)
         ],
         "indicators": [
             {
@@ -39,6 +39,16 @@ def list_indicators(entity: str = "seller_target") -> dict[str, Any]:
                 ],
                 "writable_by": sorted(ind.writable_by),
                 "fold_into": ind.fold_into,
+                "target_column": ind.target_column,
+                "operator": ind.operator,
+                "default_effect": ind.default_effect,
+                "effect_editable": ind.effect_editable,
+                "scenario_allowed": ind.scenario_allowed,
+                "multi_value": ind.multi_value,
+                "sql_recall": ind.sql_recall,
+                "deterministic_rank": ind.deterministic_rank,
+                "deep_eval": ind.deep_eval,
+                "editor": ind.editor,
             }
             for ind in indicators
             if ind.group is not None

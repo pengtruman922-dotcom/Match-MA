@@ -587,6 +587,8 @@ export const modelConfig = {
     apiRequest<ModelProviderConfig>(`/model-config/providers/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   updateNode: (id: string, data: Partial<ModelNodeConfig>) =>
     apiRequest<ModelNodeConfig>(`/model-config/nodes/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  createNode: (data: Record<string, unknown>) =>
+    apiRequest<ModelNodeConfig>('/model-config/nodes', { method: 'POST', body: JSON.stringify(data) }),
   createPrompt: (data: Record<string, unknown>) =>
     apiRequest<PromptTemplateConfig>('/model-config/prompts', { method: 'POST', body: JSON.stringify(data) }),
   listPrompts: (nodeName: string) =>
@@ -605,6 +607,14 @@ export const modelConfig = {
       method: 'POST',
       body: JSON.stringify({ input_text }),
     }),
+  nodeTestJob: (jobId: string) =>
+    apiRequest<{
+      job_id: string;
+      job_status: string;
+      error_code: string | null;
+      error_message: string | null;
+      latency_ms: number | null;
+    }>(`/model-config/node-test-jobs/${jobId}`),
 };
 
 export const indicatorRegistry = {

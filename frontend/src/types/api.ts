@@ -262,6 +262,18 @@ export interface BuyerIntentConfirmationItem {
   proposed_value?: unknown;
   reason: string;
   evidence?: string;
+  uncertain_part?: string;
+  operator?: string;
+  effect?: 'required' | 'preferred' | 'deep_eval';
+  scope?: string;
+  item_key?: string;
+}
+
+export interface BuyerRegionConstraint {
+  province: string;
+  city?: string;
+  district?: string;
+  effect: 'required' | 'preferred' | 'excluded';
 }
 
 export interface BuyerIntent {
@@ -281,7 +293,7 @@ export interface BuyerIntent {
   industry_focus_tags_json?: string[];
   region_scope_summary: string | null;
   parsed_requirement_json?: Record<string, unknown>;
-  region_constraints_json?: Array<unknown> | Record<string, unknown>;
+  region_constraints_json?: BuyerRegionConstraint[];
   min_revenue_yuan: string | null;
   min_net_profit_yuan: string | null;
   min_total_profit_yuan: string | null;
@@ -302,6 +314,8 @@ export interface BuyerIntent {
   equity_ratio_summary: string | null;
   equity_requirement_type: string | null;
   preferred_listed_status: string | null;
+  acceptable_listed_status_json?: string[];
+  condition_effects_json?: Record<string, 'required' | 'preferred' | 'deep_eval'>;
   listing_board_requirement_summary: string | null;
   financing_stage_requirement_summary: string | null;
   budget_min_yuan: string | null;
@@ -415,6 +429,32 @@ export interface ModelNodeConfig {
   };
 }
 
+export interface RequiredBusinessNodeStatus {
+  node_name: string;
+  label: string;
+  description: string;
+  fallback_node_name: string;
+  configured: boolean;
+  prompt_configured: boolean;
+  ready: boolean;
+  node_id: string | null;
+  model_name: string | null;
+  using_fallback: boolean;
+  fallback_ready: boolean;
+  effective_node_name: string | null;
+  test_summary: ModelNodeConfig['test_summary'] | null;
+  latest_test: Record<string, unknown> | null;
+  latest_production_call: {
+    status: string;
+    model_name: string | null;
+    latency_ms: number | null;
+    error_code: string | null;
+    error_message: string | null;
+    started_at: string | null;
+    finished_at: string | null;
+  } | null;
+}
+
 export interface ModelConfigSettingsPage {
   capabilities: {
     direct_key_encryption_configured?: boolean;
@@ -423,6 +463,7 @@ export interface ModelConfigSettingsPage {
   providers: ModelProviderConfig[];
   nodes: ModelNodeConfig[];
   prompts: PromptTemplateConfig[];
+  required_business_nodes: RequiredBusinessNodeStatus[];
   overview: Record<string, number>;
   security_note: string;
 }
@@ -533,6 +574,7 @@ export interface BuyerIntentCreate {
   excluded_industries_json?: string[];
   industry_focus_tags_json?: string[];
   region_scope_summary?: string;
+  region_constraints_json?: BuyerRegionConstraint[];
   min_revenue_yuan?: number;
   min_net_profit_yuan?: number;
   min_total_profit_yuan?: number;
@@ -553,6 +595,8 @@ export interface BuyerIntentCreate {
   equity_ratio_summary?: string;
   equity_requirement_type?: string;
   preferred_listed_status?: string;
+  acceptable_listed_status_json?: string[];
+  condition_effects_json?: Record<string, 'required' | 'preferred' | 'deep_eval'>;
   listing_board_requirement_summary?: string;
   financing_stage_requirement_summary?: string;
   budget_min_yuan?: number;
@@ -628,6 +672,7 @@ export interface BuyerIntentUpdate {
   excluded_industries_json?: string[];
   industry_focus_tags_json?: string[];
   region_scope_summary?: string | null;
+  region_constraints_json?: BuyerRegionConstraint[];
   min_revenue_yuan?: number | null;
   min_net_profit_yuan?: number | null;
   min_total_profit_yuan?: number | null;
@@ -648,6 +693,8 @@ export interface BuyerIntentUpdate {
   equity_ratio_summary?: string | null;
   equity_requirement_type?: string | null;
   preferred_listed_status?: string | null;
+  acceptable_listed_status_json?: string[];
+  condition_effects_json?: Record<string, 'required' | 'preferred' | 'deep_eval'>;
   listing_board_requirement_summary?: string | null;
   financing_stage_requirement_summary?: string | null;
   budget_min_yuan?: number | null;
@@ -1068,6 +1115,16 @@ export interface IndicatorMeta {
   enum_options: Array<{ value: string; label: string }>;
   writable_by: string[];
   fold_into: string | null;
+  target_column: string | null;
+  operator: string | null;
+  default_effect: 'required' | 'preferred' | 'deep_eval' | null;
+  effect_editable: boolean;
+  scenario_allowed: boolean;
+  multi_value: boolean;
+  sql_recall: boolean;
+  deterministic_rank: boolean;
+  deep_eval: boolean;
+  editor: string | null;
 }
 
 export interface IndicatorRegistryResponse {
@@ -1712,6 +1769,7 @@ export interface BuyerIntentScenario {
   active: boolean;
   fields_json: Record<string, unknown>;
   needs_confirmation_json: BuyerIntentConfirmationItem[];
+  condition_effects_json: Record<string, 'required' | 'preferred' | 'deep_eval'>;
   source: string;
   created_at: string;
   updated_at: string;
@@ -1723,6 +1781,7 @@ export interface BuyerIntentScenarioWrite {
   active: boolean;
   fields_json: Record<string, unknown>;
   needs_confirmation_json?: BuyerIntentConfirmationItem[];
+  condition_effects_json?: Record<string, 'required' | 'preferred' | 'deep_eval'>;
 }
 
 export interface RecommendationCandidateResponse {

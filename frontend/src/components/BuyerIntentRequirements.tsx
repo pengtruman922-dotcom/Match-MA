@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { Dispatch, ReactNode, SetStateAction } from 'react';
+import type { ReactNode } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
@@ -11,7 +11,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { buyerIntents, meta } from '../lib/api';
+import { buyerIntents, indicatorRegistry, meta } from '../lib/api';
 import type {
   BuyerIntent,
   BuyerIntentConfirmationItem,
@@ -19,42 +19,17 @@ import type {
   BuyerIntentScenario,
   BuyerIntentScenarioWrite,
   BuyerIntentUpdate,
+  BuyerRegionConstraint,
+  IndicatorGroupMeta,
+  IndicatorMeta,
+  IndicatorRegistryResponse,
   IndustryOptionsResponse,
 } from '../types/api';
-import { valueLabel } from '../lib/fieldLabels';
+import IndustryPairsEditor, { type IndustryPairValue } from './IndustryPairsEditor';
+import AdministrativeAreaPicker from './AdministrativeAreaPicker';
 
-type RuleRole = 'hard' | 'soft' | 'deep' | 'pending';
-
-interface SharedDraft {
-  intent_summary: string;
-  industries_json: string[];
-  industry_l2_json: string[];
-  excluded_industries_json: string[];
-  industry_focus_tags_json: string;
-  region_scope_summary: string;
-  min_revenue_yuan: string;
-  min_net_profit_yuan: string;
-  max_pe: string;
-  max_valuation_yuan: string;
-  requires_control: string;
-  requires_consolidation: string;
-  preferred_listed_status: string;
-  priority_summary: string;
-  preference_summary: string;
-  negative_summary: string;
-}
-
-const SCENARIO_FIELDS = [
-  'min_revenue_yuan',
-  'min_net_profit_yuan',
-  'max_pe',
-  'max_valuation_yuan',
-  'min_market_cap_yuan',
-  'max_market_cap_yuan',
-  'requires_control',
-  'requires_consolidation',
-  'preferred_listed_status',
-] as const;
+type ConditionEffect = 'required' | 'preferred' | 'deep_eval';
+type PendingItem = BuyerIntentConfirmationItem & { scopeLabel: string; scenario?: BuyerIntentScenario };
 
 export default function BuyerIntentRequirements({
   intent,
@@ -67,12 +42,14 @@ export default function BuyerIntentRequirements({
 }) {
   const [scenarios, setScenarios] = useState<BuyerIntentScenario[]>([]);
   const [taxonomy, setTaxonomy] = useState<IndustryOptionsResponse>({ l1: [], l2: [] });
+  const [registry, setRegistry] = useState<IndicatorRegistryResponse | null>(null);
   const [loadingScenarios, setLoadingScenarios] = useState(true);
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const [resolvingItem, setResolvingItem] = useState<string | null>(null);
-  const [draft, setDraft] = useState<SharedDraft>(() => sharedDraft(intent));
+  const [draft, setDraft] = useState<Record<string, unknown>>(() => intentDraft(intent));
+  const [effects, setEffects] = useState<Record<string, ConditionEffect>>(intent.condition_effects_json || {});
 
   const loadScenarios = useCallback(async () => {
     setLoadingScenarios(true);
@@ -84,14 +61,22 @@ export default function BuyerIntentRequirements({
   }, [intent.id]);
 
   useEffect(() => { void loadScenarios(); }, [loadScenarios]);
-  useEffect(() => { setDraft(sharedDraft(intent)); }, [intent]);
-  useEffect(() => { meta.industryOptions().then(setTaxonomy).catch(() => {}); }, []);
+  useEffect(() => {
+    setDraft(intentDraft(intent));
+    setEffects(intent.condition_effects_json || {});
+  }, [intent]);
+  useEffect(() => {
+    Promise.all([meta.industryOptions(), indicatorRegistry.list('buyer_intent')])
+      .then(([industryData, registryData]) => { setTaxonomy(industryData); setRegistry(registryData); })
+      .catch(() => {});
+  }, []);
 
-  const allPending = useMemo<Array<BuyerIntentConfirmationItem & { scope: string; scenario?: BuyerIntentScenario }>>(
+  const indicators = registry?.indicators || [];
+  const allPending = useMemo<PendingItem[]>(
     () => [
-      ...(intent.needs_confirmation_json || []).map((item) => ({ ...item, scope: '公共条件' })),
+      ...(intent.needs_confirmation_json || []).map((item) => ({ ...item, scopeLabel: '公共条件' })),
       ...scenarios.flatMap((scenario) =>
-        (scenario.needs_confirmation_json || []).map((item) => ({ ...item, scope: scenario.label, scenario })),
+        (scenario.needs_confirmation_json || []).map((item) => ({ ...item, scopeLabel: scenario.label, scenario })),
       ),
     ],
     [intent.needs_confirmation_json, scenarios],
@@ -100,24 +85,10 @@ export default function BuyerIntentRequirements({
   const saveShared = async () => {
     setSaving(true);
     try {
-      const payload: BuyerIntentUpdate = {
-        intent_summary: nullIfEmpty(draft.intent_summary),
-        industries_json: draft.industries_json,
-        industry_l2_json: draft.industry_l2_json,
-        excluded_industries_json: draft.excluded_industries_json,
-        industry_focus_tags_json: splitTerms(draft.industry_focus_tags_json),
-        region_scope_summary: nullIfEmpty(draft.region_scope_summary),
-        min_revenue_yuan: nullableNumber(draft.min_revenue_yuan),
-        min_net_profit_yuan: nullableNumber(draft.min_net_profit_yuan),
-        max_pe: nullableNumber(draft.max_pe),
-        max_valuation_yuan: nullableNumber(draft.max_valuation_yuan),
-        requires_control: draft.requires_control,
-        requires_consolidation: draft.requires_consolidation,
-        preferred_listed_status: draft.preferred_listed_status,
-        priority_summary: nullIfEmpty(draft.priority_summary),
-        preference_summary: nullIfEmpty(draft.preference_summary),
-        negative_summary: nullIfEmpty(draft.negative_summary),
-      };
+      const payload = {
+        ...cleanFields(draft, indicators, false),
+        condition_effects_json: effects,
+      } as BuyerIntentUpdate;
       await buyerIntents.update(intent.id, payload);
       setEditing(false);
       await onRefresh?.();
@@ -134,6 +105,7 @@ export default function BuyerIntentRequirements({
       sort_order: scenarios.length,
       active: true,
       fields_json: {},
+      condition_effects_json: {},
     });
     setScenarios((current) => [...current, created]);
   };
@@ -145,6 +117,7 @@ export default function BuyerIntentRequirements({
       active: scenario.active,
       fields_json: scenario.fields_json,
       needs_confirmation_json: scenario.needs_confirmation_json,
+      condition_effects_json: scenario.condition_effects_json,
     });
     setScenarios((current) => [...current, created]);
   };
@@ -169,33 +142,40 @@ export default function BuyerIntentRequirements({
   };
 
   const resolvePending = async (
-    item: BuyerIntentConfirmationItem & { scope: string; scenario?: BuyerIntentScenario },
-    applyProposedValue: boolean,
+    item: PendingItem,
+    action: 'apply' | 'discard' | 'deep_eval',
+    replacement?: unknown,
   ) => {
-    const key = `${item.scope}:${item.field}`;
+    const key = confirmationKey(item);
     setResolvingItem(key);
     try {
+      const proposed = replacement === undefined ? item.proposed_value : replacement;
       if (item.scenario) {
-        const nextPending = item.scenario.needs_confirmation_json.filter((entry) => !sameConfirmation(entry, item));
-        const nextFields = applyProposedValue
-          ? { ...item.scenario.fields_json, [item.field]: item.proposed_value }
-          : item.scenario.fields_json;
-        const updated = await buyerIntents.updateScenario(intent.id, item.scenario.id, {
-          label: item.scenario.label,
-          sort_order: item.scenario.sort_order,
-          active: item.scenario.active,
+        const scenario = item.scenario;
+        const nextPending = scenario.needs_confirmation_json.filter((entry) => !sameConfirmation(entry, item));
+        const currentValue = scenario.fields_json[item.field];
+        const nextFields = action === 'discard' || proposed === undefined
+          ? scenario.fields_json
+          : { ...scenario.fields_json, [item.field]: mergeProposedValue(currentValue, proposed) };
+        const nextEffects = action === 'deep_eval'
+          ? { ...scenario.condition_effects_json, [item.field]: 'deep_eval' as const }
+          : scenario.condition_effects_json;
+        const updated = await buyerIntents.updateScenario(intent.id, scenario.id, {
+          label: scenario.label,
+          sort_order: scenario.sort_order,
+          active: scenario.active,
           fields_json: nextFields,
           needs_confirmation_json: nextPending,
+          condition_effects_json: nextEffects,
         });
-        setScenarios((current) => current.map((scenario) => scenario.id === updated.id ? updated : scenario));
+        setScenarios((current) => current.map((entry) => entry.id === updated.id ? updated : entry));
       } else {
-        if (applyProposedValue) {
-          await buyerIntents.update(intent.id, { [item.field]: item.proposed_value } as BuyerIntentUpdate);
-        } else {
-          await buyerIntents.update(intent.id, {
-            needs_confirmation_json: (intent.needs_confirmation_json || []).filter((entry) => !sameConfirmation(entry, item)),
-          });
-        }
+        const nextPending = (intent.needs_confirmation_json || []).filter((entry) => !sameConfirmation(entry, item));
+        const currentValue = (intent as unknown as Record<string, unknown>)[item.field];
+        const payload: Record<string, unknown> = { needs_confirmation_json: nextPending };
+        if (action !== 'discard' && proposed !== undefined) payload[item.field] = mergeProposedValue(currentValue, proposed);
+        if (action === 'deep_eval') payload.condition_effects_json = { ...(intent.condition_effects_json || {}), [item.field]: 'deep_eval' };
+        await buyerIntents.update(intent.id, payload as BuyerIntentUpdate);
         await onRefresh?.();
       }
     } catch (error) {
@@ -203,6 +183,15 @@ export default function BuyerIntentRequirements({
     } finally {
       setResolvingItem(null);
     }
+  };
+
+  const modifyPending = (item: PendingItem) => {
+    const initial = item.proposed_value === undefined ? '' : JSON.stringify(item.proposed_value, null, 2);
+    const input = window.prompt('修改建议值。数组或对象请填写合法 JSON；普通文字可直接填写。', initial);
+    if (input === null) return;
+    let value: unknown = input;
+    try { value = JSON.parse(input); } catch { value = input.trim(); }
+    void resolvePending(item, 'apply', value);
   };
 
   const failedJob = parseStatus?.latest_job?.status === 'failed' ? parseStatus.latest_job : null;
@@ -231,14 +220,9 @@ export default function BuyerIntentRequirements({
       </div>
 
       {editing ? (
-        <SharedEditor draft={draft} setDraft={setDraft} taxonomy={taxonomy} saving={saving} onSave={saveShared} />
+        registry ? <ContractEditor groups={registry.groups} indicators={indicators} fields={draft} effects={effects} taxonomy={taxonomy} onFields={setDraft} onEffects={setEffects} saving={saving} onSave={saveShared} /> : <Loading label="正在读取字段契约" />
       ) : (
-        <section className="border border-gray-200">
-          <SectionHeader title="公共条件" subtitle="与下面任一启用方案共同生效" />
-          <div className="divide-y divide-gray-100 px-4">
-            {sharedConditionRows(intent).map((row) => <ConditionLine key={row.label} {...row} />)}
-          </div>
-        </section>
+        <ConditionDisplay title="公共条件" subtitle="与下面任一启用方案共同生效" groups={registry?.groups || []} indicators={indicators} fields={intent as unknown as Record<string, unknown>} effects={intent.condition_effects_json || {}} />
       )}
 
       <section className="space-y-3">
@@ -246,11 +230,13 @@ export default function BuyerIntentRequirements({
           <div><p className="text-xs font-semibold text-gray-500">需求方案</p><p className="mt-1 text-xs text-gray-400">匹配逻辑：公共条件 AND（任一启用方案）</p></div>
           <button type="button" onClick={() => void addScenario()} className="inline-flex items-center gap-1 border border-gray-200 px-3 py-1.5 text-xs text-gray-700 hover:border-brand-500 hover:text-brand-700"><Plus className="h-3.5 w-3.5" />新增方案</button>
         </div>
-        {loadingScenarios ? <Loading /> : scenarios.length ? scenarios.map((scenario) => (
+        {loadingScenarios ? <Loading label="正在读取方案" /> : scenarios.length ? scenarios.map((scenario) => (
           <ScenarioCard
             key={scenario.id}
             intentId={intent.id}
             scenario={scenario}
+            groups={registry?.groups || []}
+            indicators={indicators.filter((indicator) => indicator.scenario_allowed)}
             taxonomy={taxonomy}
             onSaved={(updated) => setScenarios((current) => current.map((item) => item.id === updated.id ? updated : item))}
             onCopy={() => void copyScenario(scenario)}
@@ -263,21 +249,23 @@ export default function BuyerIntentRequirements({
 
       <section className={`border ${allPending.length ? 'border-amber-200 bg-amber-50/40' : 'border-gray-200'}`}>
         <div className="flex items-center justify-between border-b border-inherit px-4 py-3">
-          <div><p className="text-sm font-semibold text-gray-900">待确认事项</p><p className="mt-0.5 text-xs text-gray-500">确认前不参加初筛和软排序，但会进入 AI 深评。</p></div>
+          <div><p className="text-sm font-semibold text-gray-900">待确认事项</p><p className="mt-0.5 text-xs text-gray-500">确认前仅隔离存疑项：不参加初筛和软排序，但原始内容仍进入 AI 深评。</p></div>
           <button type="button" onClick={() => void completeReview()} disabled={reviewing} className="inline-flex items-center gap-1 bg-brand-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">
             {reviewing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}{allPending.length ? '完成复核' : '标记已复核'}
           </button>
         </div>
         <div className="divide-y divide-amber-100 px-4">
           {allPending.length ? allPending.map((item, index) => (
-            <div key={`${item.scope}-${item.field}-${index}`} className="py-3 text-sm">
-              <div className="flex flex-wrap items-center gap-2"><RoleBadge role="pending" /><span className="font-medium text-gray-900">{item.scope} · {fieldLabel(item.field)}</span></div>
+            <div key={`${confirmationKey(item)}-${index}`} className="py-3 text-sm">
+              <div className="flex flex-wrap items-center gap-2"><EffectBadge effect="pending" /><span className="font-medium text-gray-900">{item.scopeLabel} · {indicatorLabel(indicators, item.field)}</span>{item.effect ? <EffectBadge effect={item.effect} /> : null}</div>
               <p className="mt-1 text-gray-700">{item.reason}</p>
-              {item.proposed_value !== undefined ? <p className="mt-1 text-xs text-gray-500">AI 建议值：{displayValue(item.proposed_value)}</p> : null}
+              {item.proposed_value !== undefined ? <p className="mt-1 whitespace-pre-wrap text-xs text-gray-500">AI 建议值：{displayUnknown(item.proposed_value)}</p> : null}
               {item.evidence ? <p className="mt-1 text-xs text-gray-500">原文：{item.evidence}</p> : null}
               <div className="mt-2 flex flex-wrap gap-2">
-                {item.proposed_value !== undefined ? <button type="button" disabled={resolvingItem === `${item.scope}:${item.field}`} onClick={() => void resolvePending(item, true)} className="border border-amber-300 bg-white px-2.5 py-1 text-xs text-amber-800 disabled:opacity-50">采纳建议值</button> : null}
-                <button type="button" disabled={resolvingItem === `${item.scope}:${item.field}`} onClick={() => void resolvePending(item, false)} className="border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-600 disabled:opacity-50">已核对，不设置该条件</button>
+                {item.proposed_value !== undefined ? <button type="button" disabled={resolvingItem === confirmationKey(item)} onClick={() => void resolvePending(item, 'apply')} className="border border-amber-300 bg-white px-2.5 py-1 text-xs text-amber-800 disabled:opacity-50">采纳建议值</button> : null}
+                {item.proposed_value !== undefined ? <button type="button" disabled={resolvingItem === confirmationKey(item)} onClick={() => modifyPending(item)} className="border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-600 disabled:opacity-50">修改并采纳</button> : null}
+                <button type="button" disabled={resolvingItem === confirmationKey(item)} onClick={() => void resolvePending(item, 'deep_eval')} className="border border-violet-200 bg-white px-2.5 py-1 text-xs text-violet-700 disabled:opacity-50">改为仅深评</button>
+                <button type="button" disabled={resolvingItem === confirmationKey(item)} onClick={() => void resolvePending(item, 'discard')} className="border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-600 disabled:opacity-50">不设置该条件</button>
               </div>
             </div>
           )) : <p className="py-4 text-sm text-gray-500">暂无待确认事项。</p>}
@@ -292,46 +280,105 @@ export default function BuyerIntentRequirements({
   );
 }
 
-function SharedEditor({ draft, setDraft, taxonomy, saving, onSave }: {
-  draft: SharedDraft;
-  setDraft: Dispatch<SetStateAction<SharedDraft>>;
+function ContractEditor({ groups, indicators, fields, effects, taxonomy, onFields, onEffects, saving, onSave }: {
+  groups: IndicatorGroupMeta[];
+  indicators: IndicatorMeta[];
+  fields: Record<string, unknown>;
+  effects: Record<string, ConditionEffect>;
   taxonomy: IndustryOptionsResponse;
+  onFields: (value: Record<string, unknown>) => void;
+  onEffects: (value: Record<string, ConditionEffect>) => void;
   saving: boolean;
   onSave: () => void;
 }) {
-  const set = <K extends keyof SharedDraft>(key: K, value: SharedDraft[K]) => setDraft((current) => ({ ...current, [key]: value }));
+  const setField = (field: string, value: unknown) => onFields({ ...fields, [field]: value });
+  const setFields = (changes: Record<string, unknown>) => onFields({ ...fields, ...changes });
+  const setEffect = (field: string, effect: ConditionEffect) => onEffects({ ...effects, [field]: effect });
   return (
-    <section className="space-y-4 border border-brand-200 bg-brand-50/20 p-4">
-      <TextArea label="需求摘要" value={draft.intent_summary} onChange={(value) => set('intent_summary', value)} />
-      <div className="grid gap-4 lg:grid-cols-3">
-        <MultiSelect label="一级目标行业（硬筛）" values={draft.industries_json} options={taxonomy.l1.map((item) => item.term)} onChange={(value) => set('industries_json', value)} />
-        <MultiSelect label="二级关注行业（软排）" values={draft.industry_l2_json} options={taxonomy.l2.map((item) => item.term)} onChange={(value) => set('industry_l2_json', value)} />
-        <MultiSelect label="排除行业（硬排除）" values={draft.excluded_industries_json} options={[...taxonomy.l1, ...taxonomy.l2].map((item) => item.term)} onChange={(value) => set('excluded_industries_json', value)} />
-      </div>
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        <Input label="地域范围（软排）" value={draft.region_scope_summary} onChange={(value) => set('region_scope_summary', value)} />
-        <Input label="最低营收（元）" type="number" value={draft.min_revenue_yuan} onChange={(value) => set('min_revenue_yuan', value)} />
-        <Input label="最低净利润（元）" type="number" value={draft.min_net_profit_yuan} onChange={(value) => set('min_net_profit_yuan', value)} />
-        <Input label="PE 上限" type="number" value={draft.max_pe} onChange={(value) => set('max_pe', value)} />
-        <Input label="估值上限（元）" type="number" value={draft.max_valuation_yuan} onChange={(value) => set('max_valuation_yuan', value)} />
-        <EnumSelect label="控股要求" value={draft.requires_control} options={YES_NO_OPTIONS} onChange={(value) => set('requires_control', value)} />
-        <EnumSelect label="并表要求" value={draft.requires_consolidation} options={YES_NO_OPTIONS} onChange={(value) => set('requires_consolidation', value)} />
-        <EnumSelect label="上市状态偏好" value={draft.preferred_listed_status} options={LISTED_OPTIONS} onChange={(value) => set('preferred_listed_status', value)} />
-      </div>
-      <Input label="字典外细分方向（以、或逗号分隔，仅深评）" value={draft.industry_focus_tags_json} onChange={(value) => set('industry_focus_tags_json', value)} />
-      <div className="grid gap-4 md:grid-cols-3">
-        <TextArea label="优先条件" value={draft.priority_summary} onChange={(value) => set('priority_summary', value)} />
-        <TextArea label="其他偏好" value={draft.preference_summary} onChange={(value) => set('preference_summary', value)} />
-        <TextArea label="排除与风险说明" value={draft.negative_summary} onChange={(value) => set('negative_summary', value)} />
-      </div>
-      <div className="flex justify-end"><button type="button" onClick={onSave} disabled={saving} className="inline-flex items-center gap-1 bg-brand-600 px-4 py-2 text-sm text-white disabled:opacity-50">{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}保存公共条件</button></div>
+    <section className="space-y-5 border border-brand-200 bg-brand-50/20 p-4">
+      {groups.map((group) => {
+        const groupIndicators = indicators.filter((indicator) => indicator.group === group.key);
+        if (!groupIndicators.length) return null;
+        return (
+          <div key={group.key} className="space-y-3">
+            <p className="border-b border-gray-200 pb-2 text-sm font-semibold text-gray-800">{group.label}</p>
+            {group.key === 'intent_scope' ? (
+              <IndustryFieldsEditor indicators={groupIndicators} fields={fields} effects={effects} taxonomy={taxonomy} setFields={setFields} setEffect={setEffect} />
+            ) : null}
+            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+              {groupIndicators.filter((indicator) => !INDUSTRY_FIELDS.has(indicator.column)).map((indicator) => (
+                <FieldEditor key={indicator.column} indicator={indicator} value={fields[indicator.column]} effect={effects[indicator.column] || indicator.default_effect || 'deep_eval'} onValue={(value) => setField(indicator.column, value)} onEffect={(effect) => setEffect(indicator.column, effect)} />
+              ))}
+            </div>
+          </div>
+        );
+      })}
+      <div className="flex justify-end"><button type="button" onClick={onSave} disabled={saving} className="inline-flex items-center gap-1 bg-brand-600 px-4 py-2 text-sm text-white disabled:opacity-50">{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}保存</button></div>
     </section>
   );
 }
 
-function ScenarioCard({ intentId, scenario, taxonomy, onSaved, onCopy, onDelete }: {
+const INDUSTRY_FIELDS = new Set(['industries_json', 'industry_l2_json', 'excluded_industries_json']);
+
+function IndustryFieldsEditor({ indicators, fields, effects, taxonomy, setFields, setEffect }: {
+  indicators: IndicatorMeta[];
+  fields: Record<string, unknown>;
+  effects: Record<string, ConditionEffect>;
+  taxonomy: IndustryOptionsResponse;
+  setFields: (fields: Record<string, unknown>) => void;
+  setEffect: (field: string, effect: ConditionEffect) => void;
+}) {
+  const l1Indicator = indicators.find((item) => item.column === 'industries_json');
+  const l2Indicator = indicators.find((item) => item.column === 'industry_l2_json');
+  const excludedIndicator = indicators.find((item) => item.column === 'excluded_industries_json');
+  const pairs = requirementPairs(fields, taxonomy);
+  const excludedPairs = industryTermsToPairs(stringArray(fields.excluded_industries_json), taxonomy);
+  return (
+    <div className="grid gap-4 xl:grid-cols-2">
+      {l1Indicator && l2Indicator ? <div><div className="mb-2 flex flex-wrap items-center justify-between gap-2"><span className="text-xs font-medium text-gray-600">可接受行业</span><div className="flex gap-2"><EffectSelect label="一级" value={effects.industries_json || l1Indicator.default_effect || 'required'} onChange={(value) => setEffect('industries_json', value)} /><EffectSelect label="二级" value={effects.industry_l2_json || l2Indicator.default_effect || 'preferred'} onChange={(value) => setEffect('industry_l2_json', value)} /></div></div><IndustryPairsEditor value={pairs} options={taxonomy} onChange={(value) => setFields({ industries_json: [...new Set(value.map((pair) => pair.l1))], industry_l2_json: [...new Set(value.flatMap((pair) => pair.l2 ? [pair.l2] : []))] })} /></div> : null}
+      {excludedIndicator ? <div><div className="mb-2 flex items-center justify-between gap-2"><span className="text-xs font-medium text-gray-600">排除行业</span><EffectBadge effect="required" /></div><IndustryPairsEditor value={excludedPairs} options={taxonomy} onChange={(value) => setFields({ excluded_industries_json: [...new Set(value.map((pair) => pair.l2 || pair.l1))] })} /></div> : null}
+    </div>
+  );
+}
+
+function FieldEditor({ indicator, value, effect, onValue, onEffect }: {
+  indicator: IndicatorMeta;
+  value: unknown;
+  effect: ConditionEffect;
+  onValue: (value: unknown) => void;
+  onEffect: (value: ConditionEffect) => void;
+}) {
+  const header = <div className="mb-1 flex items-center justify-between gap-2"><span className="text-xs font-medium text-gray-600">{indicator.label}</span>{indicator.effect_editable && indicator.editor !== 'region_multi' ? <EffectSelect value={effect} onChange={onEffect} /> : <EffectBadge effect={effectiveEffect(indicator, {}, value)} />}</div>;
+  if (indicator.editor === 'region_multi') return <div className="md:col-span-2 lg:col-span-3">{header}<RegionConstraintsEditor value={regionArray(value)} onChange={onValue} /></div>;
+  if (indicator.editor === 'multi_enum') return <div>{header}<CheckboxOptions value={stringArray(value)} options={indicator.enum_options} onChange={onValue} /></div>;
+  if (indicator.editor === 'tags') return <div>{header}<input className="input" value={stringArray(value).join('、')} onChange={(event) => onValue(splitTerms(event.target.value))} placeholder="多个值用顿号、逗号或换行分隔" /></div>;
+  if (indicator.kind === 'enum') return <div>{header}<select className="input" value={stringValue(value, 'unknown')} onChange={(event) => onValue(event.target.value)}>{indicator.enum_options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></div>;
+  if (indicator.kind === 'yuan' || indicator.kind === 'ratio') return <div>{header}<input className="input" type="number" value={stringValue(value)} onChange={(event) => onValue(event.target.value)} /></div>;
+  if (indicator.editor === 'textarea' || indicator.group === 'intent_notes') return <div className="md:col-span-2 lg:col-span-3">{header}<textarea className="input min-h-20 resize-y" value={stringValue(value)} onChange={(event) => onValue(event.target.value)} /></div>;
+  return <div>{header}<input className="input" value={stringValue(value)} onChange={(event) => onValue(event.target.value)} /></div>;
+}
+
+function RegionConstraintsEditor({ value, onChange }: { value: BuyerRegionConstraint[]; onChange: (value: BuyerRegionConstraint[]) => void }) {
+  return (
+    <div className="space-y-2 border border-gray-200 bg-gray-50 p-3">
+      {value.map((item, index) => (
+        <div key={`${item.province}-${item.city || ''}-${item.district || ''}-${index}`} className="grid gap-2 border-b border-gray-200 pb-2 lg:grid-cols-[1fr_8rem_auto]">
+          <AdministrativeAreaPicker value={item} onChange={(area) => onChange(value.map((entry, itemIndex) => itemIndex === index ? { ...area, effect: item.effect } : entry))} />
+          <select value={item.effect} onChange={(event) => onChange(value.map((entry, itemIndex) => itemIndex === index ? { ...entry, effect: event.target.value as BuyerRegionConstraint['effect'] } : entry))} className="border border-gray-200 bg-white px-2 py-1.5 text-xs"><option value="required">必须</option><option value="preferred">优先</option><option value="excluded">排除</option></select>
+          <button type="button" onClick={() => onChange(value.filter((_, itemIndex) => itemIndex !== index))} className="text-xs text-red-600">移除</button>
+        </div>
+      ))}
+      <button type="button" onClick={() => onChange([...value, { province: '', effect: 'preferred' }])} className="inline-flex items-center gap-1 text-xs text-brand-700"><Plus className="h-3.5 w-3.5" />添加地区</button>
+      <p className="text-[11px] text-gray-400">“全国”不生成地区条件；长三角、华东等由 AI 在规范化阶段展开为标准省份。</p>
+    </div>
+  );
+}
+
+function ScenarioCard({ intentId, scenario, groups, indicators, taxonomy, onSaved, onCopy, onDelete }: {
   intentId: string;
   scenario: BuyerIntentScenario;
+  groups: IndicatorGroupMeta[];
+  indicators: IndicatorMeta[];
   taxonomy: IndustryOptionsResponse;
   onSaved: (scenario: BuyerIntentScenario) => void;
   onCopy: () => void;
@@ -343,9 +390,10 @@ function ScenarioCard({ intentId, scenario, taxonomy, onSaved, onCopy, onDelete 
   const [sortOrder, setSortOrder] = useState(String(scenario.sort_order));
   const [active, setActive] = useState(scenario.active);
   const [fields, setFields] = useState<Record<string, unknown>>({ ...scenario.fields_json });
+  const [effects, setEffects] = useState<Record<string, ConditionEffect>>(scenario.condition_effects_json || {});
 
   useEffect(() => {
-    setLabel(scenario.label); setSortOrder(String(scenario.sort_order)); setActive(scenario.active); setFields({ ...scenario.fields_json });
+    setLabel(scenario.label); setSortOrder(String(scenario.sort_order)); setActive(scenario.active); setFields({ ...scenario.fields_json }); setEffects(scenario.condition_effects_json || {});
   }, [scenario]);
 
   const save = async () => {
@@ -355,8 +403,9 @@ function ScenarioCard({ intentId, scenario, taxonomy, onSaved, onCopy, onDelete 
         label: label.trim() || scenario.label,
         sort_order: Number(sortOrder) || 0,
         active,
-        fields_json: cleanScenarioFields(fields),
+        fields_json: cleanFields(fields, indicators, true),
         needs_confirmation_json: scenario.needs_confirmation_json,
+        condition_effects_json: effects,
       };
       onSaved(await buyerIntents.updateScenario(intentId, scenario.id, payload));
       setEditing(false);
@@ -368,117 +417,153 @@ function ScenarioCard({ intentId, scenario, taxonomy, onSaved, onCopy, onDelete 
   };
 
   if (!editing) {
-    const rows = scenarioConditionRows(scenario);
     return (
       <div className={`border ${scenario.active ? 'border-gray-200 bg-white' : 'border-gray-200 bg-gray-50 opacity-70'}`}>
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-100 px-4 py-3">
           <div className="flex items-center gap-2"><p className="text-sm font-semibold text-gray-900">{scenario.label}</p><StateBadge tone={scenario.active ? 'green' : 'gray'} text={scenario.active ? '启用' : '停用'} /><span className="text-xs text-gray-400">排序 {scenario.sort_order}</span></div>
           <div className="flex items-center gap-1"><IconButton title="复制" onClick={onCopy}><Copy className="h-3.5 w-3.5" /></IconButton><IconButton title="编辑" onClick={() => setEditing(true)}><Pencil className="h-3.5 w-3.5" /></IconButton><IconButton title="删除" onClick={onDelete}><Trash2 className="h-3.5 w-3.5" /></IconButton></div>
         </div>
-        <div className="divide-y divide-gray-100 px-4">{rows.length ? rows.map((row) => <ConditionLine key={row.label} {...row} />) : <p className="py-4 text-sm text-gray-500">该方案尚未设置差异化条件。</p>}</div>
+        <ConditionDisplay title="" subtitle="" groups={groups} indicators={indicators} fields={scenario.fields_json} effects={scenario.condition_effects_json || {}} compact />
         <p className="border-t border-gray-100 px-4 py-2 text-xs text-gray-400">有效画像 = 公共条件 + 本方案条件</p>
       </div>
     );
   }
 
-  const setField = (key: string, value: unknown) => setFields((current) => ({ ...current, [key]: value }));
   return (
     <div className="space-y-4 border border-brand-200 bg-brand-50/20 p-4">
-      <div className="grid gap-4 md:grid-cols-4">
-        <Input label="方案名称" value={label} onChange={setLabel} />
-        <Input label="排序" type="number" value={sortOrder} onChange={setSortOrder} />
-        <EnumSelect label="状态" value={active ? 'active' : 'inactive'} options={[['active', '启用'], ['inactive', '停用']]} onChange={(value) => setActive(value === 'active')} />
-        <MultiSelect label="一级行业（可覆盖公共条件）" values={stringArray(fields.industries_json)} options={taxonomy.l1.map((item) => item.term)} onChange={(value) => setField('industries_json', value)} />
-      </div>
-      <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-5">
-        <EnumSelect label="上市状态" value={stringValue(fields.preferred_listed_status, 'unknown')} options={LISTED_OPTIONS} onChange={(value) => setField('preferred_listed_status', value)} />
-        <Input label="最低营收（元）" type="number" value={stringValue(fields.min_revenue_yuan)} onChange={(value) => setField('min_revenue_yuan', value)} />
-        <Input label="最低净利润（元）" type="number" value={stringValue(fields.min_net_profit_yuan)} onChange={(value) => setField('min_net_profit_yuan', value)} />
-        <Input label="PE 上限" type="number" value={stringValue(fields.max_pe)} onChange={(value) => setField('max_pe', value)} />
-        <Input label="估值上限（元）" type="number" value={stringValue(fields.max_valuation_yuan)} onChange={(value) => setField('max_valuation_yuan', value)} />
-        <Input label="市值下限（元）" type="number" value={stringValue(fields.min_market_cap_yuan)} onChange={(value) => setField('min_market_cap_yuan', value)} />
-        <Input label="市值上限（元）" type="number" value={stringValue(fields.max_market_cap_yuan)} onChange={(value) => setField('max_market_cap_yuan', value)} />
-        <EnumSelect label="控股要求" value={stringValue(fields.requires_control, 'unknown')} options={YES_NO_OPTIONS} onChange={(value) => setField('requires_control', value)} />
-        <EnumSelect label="并表要求" value={stringValue(fields.requires_consolidation, 'unknown')} options={YES_NO_OPTIONS} onChange={(value) => setField('requires_consolidation', value)} />
-      </div>
-      <div className="flex justify-end gap-2"><button type="button" onClick={() => setEditing(false)} className="border border-gray-200 px-3 py-1.5 text-xs text-gray-600">取消</button><button type="button" onClick={() => void save()} disabled={saving} className="inline-flex items-center gap-1 bg-brand-600 px-3 py-1.5 text-xs text-white disabled:opacity-50">{saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}保存方案</button></div>
+      <div className="grid gap-4 md:grid-cols-3"><SimpleInput label="方案名称" value={label} onChange={setLabel} /><SimpleInput label="排序" type="number" value={sortOrder} onChange={setSortOrder} /><label className="block"><span className="mb-1 block text-xs font-medium text-gray-600">状态</span><select className="input" value={active ? 'active' : 'inactive'} onChange={(event) => setActive(event.target.value === 'active')}><option value="active">启用</option><option value="inactive">停用</option></select></label></div>
+      <ContractEditor groups={groups} indicators={indicators} fields={fields} effects={effects} taxonomy={taxonomy} onFields={setFields} onEffects={setEffects} saving={saving} onSave={() => void save()} />
+      <div className="flex justify-end"><button type="button" onClick={() => setEditing(false)} className="border border-gray-200 px-3 py-1.5 text-xs text-gray-600">取消</button></div>
     </div>
   );
 }
 
-function sharedConditionRows(intent: BuyerIntent) {
-  const rows = [
-    row('一级目标行业', join(intent.industries_json), 'hard' as RuleRole),
-    row('二级关注行业', join(intent.industry_l2_json), 'soft' as RuleRole),
-    row('排除行业', join(intent.excluded_industries_json), 'hard' as RuleRole),
-    row('地域范围', intent.region_scope_summary, 'soft' as RuleRole),
-    row('最低营收', moneyText(intent.min_revenue_yuan), 'hard' as RuleRole),
-    row('最低净利润', moneyText(intent.min_net_profit_yuan), 'hard' as RuleRole),
-    row('PE 上限', intent.max_pe, 'hard' as RuleRole),
-    row('估值上限', moneyText(intent.max_valuation_yuan), 'hard' as RuleRole),
-    row('控股要求', valueLabel('yes_no_like', intent.requires_control), 'hard' as RuleRole),
-    row('并表要求', valueLabel('yes_no_like', intent.requires_consolidation), 'hard' as RuleRole),
-    row('上市状态偏好', intent.preferred_listed_status ? valueLabel('preferred_listed_status', intent.preferred_listed_status) : null, 'soft' as RuleRole),
-    row('细分关注方向', join(intent.industry_focus_tags_json), 'deep' as RuleRole),
-    row('优先条件', intent.priority_summary, 'deep' as RuleRole),
-    row('其他偏好', intent.preference_summary, 'deep' as RuleRole),
-    row('风险与排除说明', intent.negative_summary, 'deep' as RuleRole),
-  ];
-  return rows.filter((item) => item.value && item.value !== '未知');
+function ConditionDisplay({ title, subtitle, groups, indicators, fields, effects, compact = false }: {
+  title: string;
+  subtitle: string;
+  groups: IndicatorGroupMeta[];
+  indicators: IndicatorMeta[];
+  fields: Record<string, unknown>;
+  effects: Record<string, ConditionEffect>;
+  compact?: boolean;
+}) {
+  const rows = indicators.map((indicator) => ({ indicator, value: fields[indicator.column], effect: effectiveEffect(indicator, effects, fields[indicator.column]) })).filter(({ value }) => hasValue(value));
+  return (
+    <section className={compact ? '' : 'border border-gray-200'}>
+      {title ? <SectionHeader title={title} subtitle={subtitle} /> : null}
+      {rows.length ? groups.map((group) => {
+        const groupRows = rows.filter(({ indicator }) => indicator.group === group.key);
+        if (!groupRows.length) return null;
+        return <div key={group.key} className="border-b border-gray-100 last:border-0"><p className="bg-gray-50 px-4 py-2 text-xs font-semibold text-gray-500">{group.label}</p><div className="divide-y divide-gray-100 px-4">{groupRows.map(({ indicator, value, effect }) => <ConditionLine key={indicator.column} label={indicator.label} value={formatFieldValue(indicator, value)} effect={effect} />)}</div></div>;
+      }) : <p className="px-4 py-4 text-sm text-gray-500">暂无结构化条件。</p>}
+    </section>
+  );
 }
 
-function scenarioConditionRows(scenario: BuyerIntentScenario) {
-  const fields = scenario.fields_json;
-  return [
-    row('一级目标行业', join(stringArray(fields.industries_json)), 'hard' as RuleRole),
-    row('上市状态', enumText(fields.preferred_listed_status, 'preferred_listed_status'), 'hard' as RuleRole),
-    row('最低营收', moneyText(fields.min_revenue_yuan as string | number | null), 'hard' as RuleRole),
-    row('最低净利润', moneyText(fields.min_net_profit_yuan as string | number | null), 'hard' as RuleRole),
-    row('PE 上限', fields.max_pe as string | number | null, 'hard' as RuleRole),
-    row('估值上限', moneyText(fields.max_valuation_yuan as string | number | null), 'hard' as RuleRole),
-    row('市值下限', moneyText(fields.min_market_cap_yuan as string | number | null), 'hard' as RuleRole),
-    row('市值上限', moneyText(fields.max_market_cap_yuan as string | number | null), 'hard' as RuleRole),
-    row('控股要求', enumText(fields.requires_control, 'yes_no_like'), 'hard' as RuleRole),
-    row('并表要求', enumText(fields.requires_consolidation, 'yes_no_like'), 'hard' as RuleRole),
-  ].filter((item) => item.value && item.value !== '未知');
+function ConditionLine({ label, value, effect }: { label: string; value: string; effect: ConditionEffect }) {
+  return <div className="flex items-start gap-3 py-2.5"><EffectBadge effect={effect} /><span className="w-32 shrink-0 text-xs text-gray-500">{label}</span><span className="min-w-0 whitespace-pre-wrap text-sm text-gray-800">{value}</span></div>;
 }
 
-function ConditionLine({ label, value, role }: { label: string; value: string | number | null | undefined; role: RuleRole }) {
-  return <div className="flex items-start gap-3 py-2.5"><RoleBadge role={role} /><span className="w-28 shrink-0 text-xs text-gray-500">{label}</span><span className="min-w-0 whitespace-pre-wrap text-sm text-gray-800">{value || '-'}</span></div>;
+function EffectBadge({ effect }: { effect: ConditionEffect | 'pending' }) {
+  const styles = { required: 'bg-red-50 text-red-700', preferred: 'bg-blue-50 text-blue-700', deep_eval: 'bg-violet-50 text-violet-700', pending: 'bg-amber-100 text-amber-800' };
+  const labels = { required: '必须', preferred: '优先', deep_eval: '仅深评', pending: '需要确认' };
+  return <span className={`w-16 shrink-0 px-1.5 py-0.5 text-center text-[11px] font-medium ${styles[effect]}`}>{labels[effect]}</span>;
 }
 
-function RoleBadge({ role }: { role: RuleRole }) {
-  const styles: Record<RuleRole, string> = { hard: 'bg-red-50 text-red-700', soft: 'bg-blue-50 text-blue-700', deep: 'bg-violet-50 text-violet-700', pending: 'bg-amber-100 text-amber-800' };
-  const labels: Record<RuleRole, string> = { hard: '硬筛', soft: '软排', deep: '深评', pending: '需要确认' };
-  return <span className={`w-16 shrink-0 px-1.5 py-0.5 text-center text-[11px] font-medium ${styles[role]}`}>{labels[role]}</span>;
+function EffectSelect({ value, onChange, label }: { value: ConditionEffect; onChange: (value: ConditionEffect) => void; label?: string }) {
+  return <label className="flex items-center gap-1 text-[11px] text-gray-500">{label ? <span>{label}</span> : null}<select value={value} onChange={(event) => onChange(event.target.value as ConditionEffect)} className="border border-gray-200 bg-white px-1.5 py-1 text-[11px]"><option value="required">必须</option><option value="preferred">优先</option><option value="deep_eval">仅深评</option></select></label>;
 }
 
+function CheckboxOptions({ value, options, onChange }: { value: string[]; options: Array<{ value: string; label: string }>; onChange: (value: string[]) => void }) {
+  return <div className="flex min-h-9 flex-wrap gap-2 border border-gray-200 bg-white p-2">{options.map((option) => <label key={option.value} className="inline-flex items-center gap-1 text-xs text-gray-700"><input type="checkbox" checked={value.includes(option.value)} onChange={() => onChange(value.includes(option.value) ? value.filter((item) => item !== option.value) : [...value, option.value])} />{option.label}</label>)}</div>;
+}
+
+function effectiveEffect(indicator: IndicatorMeta, effects: Record<string, ConditionEffect>, value: unknown): ConditionEffect {
+  if (effects[indicator.column]) return effects[indicator.column];
+  if (['requires_relocation', 'requires_return_investment', 'requires_team_retention'].includes(indicator.column)) {
+    if (value === 'required' || value === 'preferred') return value;
+    return 'deep_eval';
+  }
+  if (indicator.column === 'region_constraints_json') {
+    const regions = regionArray(value);
+    return regions.some((item) => item.effect === 'required' || item.effect === 'excluded') ? 'required' : 'preferred';
+  }
+  return indicator.default_effect || 'deep_eval';
+}
+
+function cleanFields(fields: Record<string, unknown>, indicators: IndicatorMeta[], scenario: boolean): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const indicator of indicators) {
+    const value = fields[indicator.column];
+    if (scenario && !hasValue(value)) continue;
+    if (scenario && indicator.kind === 'enum' && value === 'unknown') continue;
+    if (indicator.kind === 'yuan' || indicator.kind === 'ratio') {
+      const number = value === '' || value === null || value === undefined ? null : Number(value);
+      if (!scenario || Number.isFinite(number)) result[indicator.column] = Number.isFinite(number) ? number : null;
+    } else if (indicator.kind === 'text') {
+      result[indicator.column] = String(value || '').trim() || (scenario ? undefined : null);
+    } else if (indicator.kind === 'json' && indicator.multi_value) {
+      result[indicator.column] = Array.isArray(value) ? value : [];
+    } else if (value !== undefined) {
+      result[indicator.column] = value;
+    }
+  }
+  return Object.fromEntries(Object.entries(result).filter(([, value]) => value !== undefined));
+}
+
+function intentDraft(intent: BuyerIntent): Record<string, unknown> {
+  const source = intent as unknown as Record<string, unknown>;
+  return Object.fromEntries(Object.entries(source).map(([key, value]) => [key, value ?? (key.endsWith('_json') ? [] : '')]));
+}
+
+function requirementPairs(fields: Record<string, unknown>, taxonomy: IndustryOptionsResponse): IndustryPairValue[] {
+  const pairs: IndustryPairValue[] = stringArray(fields.industries_json).map((l1) => ({ l1 }));
+  for (const l2 of stringArray(fields.industry_l2_json)) {
+    const match = taxonomy.l2.find((item) => item.term === l2);
+    if (match) pairs.push({ l1: match.l1, l2 });
+  }
+  return uniquePairs(pairs);
+}
+
+function industryTermsToPairs(terms: string[], taxonomy: IndustryOptionsResponse): IndustryPairValue[] {
+  return uniquePairs(terms.map((term) => {
+    const l2 = taxonomy.l2.find((item) => item.term === term);
+    return l2 ? { l1: l2.l1, l2: l2.term } : { l1: term };
+  }));
+}
+
+function uniquePairs(pairs: IndustryPairValue[]): IndustryPairValue[] {
+  const seen = new Set<string>();
+  return pairs.filter((pair) => { const key = `${pair.l1}:${pair.l2 || ''}`; if (seen.has(key)) return false; seen.add(key); return true; });
+}
+
+function formatFieldValue(indicator: IndicatorMeta, value: unknown): string {
+  if (indicator.editor === 'region_multi') return regionArray(value).map((item) => `${item.province}${item.city || ''}${item.district || ''}（${item.effect === 'required' ? '必须' : item.effect === 'excluded' ? '排除' : '优先'}）`).join('、');
+  if (indicator.kind === 'yuan') return moneyText(value);
+  if (indicator.kind === 'enum') return indicator.enum_options.find((option) => option.value === value)?.label || String(value);
+  if (Array.isArray(value)) return value.map((item) => indicator.enum_options.find((option) => option.value === item)?.label || displayUnknown(item)).join('、');
+  return String(value);
+}
+
+function mergeProposedValue(current: unknown, proposed: unknown): unknown {
+  if (!Array.isArray(current)) return proposed;
+  const additions = Array.isArray(proposed) ? proposed : [proposed];
+  const seen = new Set(current.map((item) => JSON.stringify(item)));
+  return [...current, ...additions.filter((item) => { const key = JSON.stringify(item); if (seen.has(key)) return false; seen.add(key); return true; })];
+}
+
+function regionArray(value: unknown): BuyerRegionConstraint[] { return Array.isArray(value) ? value.filter((item): item is BuyerRegionConstraint => Boolean(item) && typeof item === 'object' && 'province' in item) : []; }
+function stringArray(value: unknown): string[] { return Array.isArray(value) ? value.map(String).filter(Boolean) : []; }
+function stringValue(value: unknown, fallback = ''): string { return value === null || value === undefined ? fallback : String(value); }
+function splitTerms(value: string): string[] { return [...new Set(value.split(/[、,，;；\n]/).map((item) => item.trim()).filter(Boolean))]; }
+function hasValue(value: unknown): boolean { return value !== null && value !== undefined && value !== '' && value !== 'unknown' && (!Array.isArray(value) || value.length > 0); }
+function moneyText(value: unknown): string { const number = Number(value); if (!Number.isFinite(number)) return String(value); if (Math.abs(number) < 10_000) return `${number.toFixed(0)}元`; if (Math.abs(number) < 100_000_000) return `${(number / 10_000).toFixed(0)}万`; return `${(number / 100_000_000).toFixed(1)}亿`; }
+function displayUnknown(value: unknown): string { return typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value); }
+function indicatorLabel(indicators: IndicatorMeta[], field: string): string { return indicators.find((indicator) => indicator.column === field)?.label || field; }
+function confirmationKey(item: PendingItem): string { return `${item.scopeLabel}:${item.item_key || item.field}:${item.uncertain_part || ''}`; }
+function sameConfirmation(left: BuyerIntentConfirmationItem, right: BuyerIntentConfirmationItem): boolean { if (left.item_key || right.item_key) return left.item_key === right.item_key; return left.field === right.field && (left.evidence || '') === (right.evidence || '') && left.reason === right.reason; }
 function SectionHeader({ title, subtitle }: { title: string; subtitle: string }) { return <div className="border-b border-gray-100 px-4 py-3"><p className="text-sm font-semibold text-gray-900">{title}</p><p className="mt-0.5 text-xs text-gray-400">{subtitle}</p></div>; }
 function StateBadge({ tone, text }: { tone: 'amber' | 'green' | 'gray'; text: string }) { const style = tone === 'amber' ? 'bg-amber-50 text-amber-700' : tone === 'green' ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-600'; return <span className={`px-2 py-0.5 text-xs font-medium ${style}`}>{text}</span>; }
 function IconButton({ title, onClick, children }: { title: string; onClick: () => void; children: ReactNode }) { return <button type="button" title={title} onClick={onClick} className="p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700">{children}</button>; }
-function Loading() { return <div className="flex items-center justify-center border border-gray-100 py-8 text-sm text-gray-400"><Loader2 className="mr-2 h-4 w-4 animate-spin" />正在读取方案</div>; }
-
-function Input({ label, value, onChange, type = 'text' }: { label: string; value: string; onChange: (value: string) => void; type?: string }) { return <label className="block"><span className="mb-1 block text-xs font-medium text-gray-600">{label}</span><input type={type} className="input" value={value} onChange={(event) => onChange(event.target.value)} /></label>; }
-function TextArea({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) { return <label className="block"><span className="mb-1 block text-xs font-medium text-gray-600">{label}</span><textarea className="input min-h-20 resize-y" value={value} onChange={(event) => onChange(event.target.value)} /></label>; }
-function EnumSelect({ label, value, options, onChange }: { label: string; value: string; options: string[][]; onChange: (value: string) => void }) { return <label className="block"><span className="mb-1 block text-xs font-medium text-gray-600">{label}</span><select className="input" value={value} onChange={(event) => onChange(event.target.value)}>{options.map(([key, text]) => <option key={key} value={key}>{text}</option>)}</select></label>; }
-function MultiSelect({ label, values, options, onChange }: { label: string; values: string[]; options: string[]; onChange: (value: string[]) => void }) { return <label className="block"><span className="mb-1 block text-xs font-medium text-gray-600">{label}</span><select multiple className="input min-h-28" value={values} onChange={(event) => onChange(Array.from(event.currentTarget.selectedOptions, (option) => option.value))}>{options.map((option) => <option key={option} value={option}>{option}</option>)}</select><span className="mt-1 block text-[11px] text-gray-400">按 Ctrl / Command 可多选</span></label>; }
-
-const YES_NO_OPTIONS = [['unknown', '未要求'], ['yes', '是'], ['no', '否'], ['likely', '倾向是']];
-const LISTED_OPTIONS = [['unknown', '未要求'], ['any', '均可'], ['listed', '已上市'], ['unlisted', '未上市'], ['preparing_listing', '准备上市'], ['pre_ipo', 'Pre-IPO']];
-
-function sharedDraft(intent: BuyerIntent): SharedDraft { return {
-  intent_summary: intent.intent_summary || '', industries_json: intent.industries_json || [], industry_l2_json: intent.industry_l2_json || [], excluded_industries_json: intent.excluded_industries_json || [], industry_focus_tags_json: (intent.industry_focus_tags_json || []).join('、'), region_scope_summary: intent.region_scope_summary || '', min_revenue_yuan: stringValue(intent.min_revenue_yuan), min_net_profit_yuan: stringValue(intent.min_net_profit_yuan), max_pe: stringValue(intent.max_pe), max_valuation_yuan: stringValue(intent.max_valuation_yuan), requires_control: intent.requires_control || 'unknown', requires_consolidation: intent.requires_consolidation || 'unknown', preferred_listed_status: intent.preferred_listed_status || 'unknown', priority_summary: intent.priority_summary || '', preference_summary: intent.preference_summary || '', negative_summary: intent.negative_summary || '',
-}; }
-function cleanScenarioFields(fields: Record<string, unknown>) { const result: Record<string, unknown> = {}; for (const key of SCENARIO_FIELDS) { const value = fields[key]; if (value === '' || value === undefined || value === null || value === 'unknown') continue; result[key] = key.includes('_yuan') || key === 'max_pe' ? Number(value) : value; } const industries = stringArray(fields.industries_json); if (industries.length) result.industries_json = industries; return result; }
-function row(label: string, value: string | number | null | undefined, role: RuleRole) { return { label, value, role }; }
-function join(value: string[] | null | undefined) { return value?.filter(Boolean).join('、') || null; }
-function stringArray(value: unknown): string[] { return Array.isArray(value) ? value.map(String).filter(Boolean) : []; }
-function stringValue(value: unknown, fallback = ''): string { return value === null || value === undefined ? fallback : String(value); }
-function nullableNumber(value: string): number | null { if (!value.trim()) return null; const parsed = Number(value); return Number.isFinite(parsed) ? parsed : null; }
-function nullIfEmpty(value: string): string | null { return value.trim() || null; }
-function splitTerms(value: string): string[] { return [...new Set(value.split(/[、,，;；\n]/).map((item) => item.trim()).filter(Boolean))]; }
-function moneyText(value: string | number | null | undefined): string | null { if (value === null || value === undefined || value === '') return null; const number = Number(value); if (!Number.isFinite(number)) return String(value); if (Math.abs(number) < 10_000) return `${number.toFixed(0)}元`; if (Math.abs(number) < 100_000_000) return `${(number / 10_000).toFixed(0)}万`; return `${(number / 100_000_000).toFixed(1)}亿`; }
-function enumText(value: unknown, field: string): string | null { return value ? valueLabel(field, String(value)) : null; }
-function displayValue(value: unknown): string { return typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value); }
-function sameConfirmation(left: BuyerIntentConfirmationItem, right: BuyerIntentConfirmationItem): boolean { return left.field === right.field && (left.evidence || '') === (right.evidence || '') && left.reason === right.reason; }
-function fieldLabel(field: string): string { const labels: Record<string, string> = { industries_json: '一级目标行业', industry_l2_json: '二级关注行业', min_revenue_yuan: '最低营收', min_net_profit_yuan: '最低净利润', max_pe: 'PE 上限', max_valuation_yuan: '估值上限', max_market_cap_yuan: '市值上限', requires_control: '控股要求', requires_consolidation: '并表要求', preferred_listed_status: '上市状态' }; return labels[field] || field; }
+function Loading({ label }: { label: string }) { return <div className="flex items-center justify-center border border-gray-100 py-8 text-sm text-gray-400"><Loader2 className="mr-2 h-4 w-4 animate-spin" />{label}</div>; }
+function SimpleInput({ label, value, onChange, type = 'text' }: { label: string; value: string; onChange: (value: string) => void; type?: string }) { return <label className="block"><span className="mb-1 block text-xs font-medium text-gray-600">{label}</span><input type={type} className="input" value={value} onChange={(event) => onChange(event.target.value)} /></label>; }

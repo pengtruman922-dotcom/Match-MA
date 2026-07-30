@@ -28,6 +28,17 @@ class Indicator:
     # this declaration so a new enum cannot silently render as an English code.
     enum_options: tuple[tuple[str, str], ...] | None = None
     fold_into: str | None = None
+    # Buyer-demand comparison contract. Seller facts leave these values empty.
+    target_column: str | None = None
+    operator: str | None = None
+    default_effect: str | None = None
+    effect_editable: bool = False
+    scenario_allowed: bool = False
+    multi_value: bool = False
+    sql_recall: bool = False
+    deterministic_rank: bool = False
+    deep_eval: bool = True
+    editor: str | None = None
 
 
 GROUPS: tuple[IndicatorGroup, ...] = (
@@ -36,6 +47,13 @@ GROUPS: tuple[IndicatorGroup, ...] = (
     IndicatorGroup("tech_team", "技术与团队", "tech_team"),
     IndicatorGroup("ops_quality", "经营质量", "ops_quality"),
     IndicatorGroup("deal_terms", "交易属性与出售诉求", "deal_terms"),
+)
+
+BUYER_GROUPS: tuple[IndicatorGroup, ...] = (
+    IndicatorGroup("intent_scope", "需求方向", ""),
+    IndicatorGroup("intent_financial", "经营与财务", ""),
+    IndicatorGroup("intent_deal", "交易与能力要求", ""),
+    IndicatorGroup("intent_notes", "深评与补充", ""),
 )
 
 _PARSE = frozenset({"parse"})
@@ -68,6 +86,12 @@ _TRANSFER_FLEXIBILITY = (
 _PE_SOURCE = (("user_input", "人工录入"), ("document", "文件"), ("calculated", "计算"), ("research", "调研"), ("unknown", "未知"))
 _EARNOUT = (("none", "无"), ("low", "低"), ("medium", "中"), ("high", "高"), ("unknown", "未知"))
 _MARKET_REGION = (("domestic", "境内"), ("overseas", "境外"), ("unknown", "未知"))
+_REQUIREMENT_STRENGTH = (
+    ("required", "必须满足"),
+    ("preferred", "优先满足"),
+    ("not_required", "不作要求"),
+    ("unknown", "需要确认"),
+)
 
 
 SELLER_TARGET_INDICATORS: tuple[Indicator, ...] = (
@@ -132,52 +156,66 @@ SELLER_TARGET_INDICATORS: tuple[Indicator, ...] = (
 )
 
 _BI_PARSE = frozenset({"parse"})
+_BI_WRITE = frozenset({"parse", "manual"})
 _BI_EQUITY_TYPE = (("control_required", "要求控股"), ("consolidation_required", "要求并表"), ("minority_acceptable", "可少数股权"), ("minority_only", "仅少数股权"), ("flexible", "可协商"), ("specific_range", "明确范围"), ("unknown", "未知"))
-_BI_LISTED = (("listed", "已上市"), ("preparing_listing", "筹备上市"), ("pre_ipo", "Pre-IPO"), ("unlisted", "未上市"), ("any", "不限"), ("unknown", "未知"))
+_BI_LISTED = (("listed", "已上市"), ("unlisted", "未上市"), ("pre_ipo", "拟上市"), ("any", "不限"), ("unknown", "未知"))
+_BI_LISTED_ACCEPTABLE = (("listed", "已上市"), ("unlisted", "未上市"), ("pre_ipo", "拟上市"))
 
 BUYER_INTENT_INDICATORS: tuple[Indicator, ...] = (
-    Indicator("intent_summary", "需求摘要", None, "text", writable_by=_BI_PARSE),
+    Indicator("intent_summary", "需求摘要", "intent_scope", "text", writable_by=_BI_WRITE, default_effect="deep_eval", editor="textarea"),
     Indicator("raw_requirement_text", "原始需求", None, "text", writable_by=_BI_PARSE),
     Indicator("industry_primary", "行业原文（一级）", None, "text", writable_by=_BI_PARSE),
     Indicator("industry_secondary", "行业原文（二级）", None, "text", writable_by=_BI_PARSE),
-    Indicator("industries_json", "关注行业", None, "json", writable_by=_BI_PARSE),
-    Indicator("industry_focus_tags_json", "细分赛道", None, "json", writable_by=_BI_PARSE),
-    Indicator("excluded_industries_json", "排除行业", None, "json", writable_by=_BI_PARSE),
-    Indicator("region_scope_summary", "地域范围", None, "text", writable_by=_BI_PARSE),
-    Indicator("min_revenue_yuan", "最低营收", None, "yuan", writable_by=_BI_PARSE),
-    Indicator("min_net_profit_yuan", "最低净利润", None, "yuan", writable_by=_BI_PARSE),
-    Indicator("min_total_profit_yuan", "最低利润总额", None, "yuan", writable_by=_BI_PARSE),
-    Indicator("min_net_margin", "最低净利率", None, "ratio", writable_by=_BI_PARSE),
-    Indicator("min_gross_margin", "最低毛利率", None, "ratio", writable_by=_BI_PARSE),
-    Indicator("max_pe", "PE 上限", None, "ratio", writable_by=_BI_PARSE),
-    Indicator("max_ps", "PS 上限", None, "ratio", writable_by=_BI_PARSE),
-    Indicator("min_valuation_yuan", "最低估值", None, "yuan", writable_by=_BI_PARSE),
-    Indicator("max_valuation_yuan", "最高估值", None, "yuan", writable_by=_BI_PARSE),
-    Indicator("min_market_cap_yuan", "最低市值", None, "yuan", writable_by=_BI_PARSE),
-    Indicator("max_market_cap_yuan", "最高市值", None, "yuan", writable_by=_BI_PARSE),
-    Indicator("market_cap_range_summary", "市值范围", None, "text", writable_by=_BI_PARSE),
-    Indicator("requires_control", "控股要求", None, "enum", writable_by=_BI_PARSE, enum_options=_YES_NO_LIKE),
-    Indicator("requires_consolidation", "并表要求", None, "enum", writable_by=_BI_PARSE, enum_options=_YES_NO_LIKE),
-    Indicator("accepts_minority_investment", "接受少数股权", None, "enum", writable_by=_BI_PARSE, enum_options=_YES_NO_LIKE),
-    Indicator("equity_requirement_type", "股权诉求类型", None, "enum", writable_by=_BI_PARSE, enum_options=_BI_EQUITY_TYPE),
-    Indicator("desired_equity_ratio_min", "期望股比下限", None, "ratio", writable_by=_BI_PARSE),
-    Indicator("desired_equity_ratio_max", "期望股比上限", None, "ratio", writable_by=_BI_PARSE),
-    Indicator("equity_ratio_summary", "股权比例", None, "text", writable_by=_BI_PARSE),
-    Indicator("preferred_listed_status", "上市要求", None, "enum", writable_by=_BI_PARSE, enum_options=_BI_LISTED),
-    Indicator("listing_board_requirement_summary", "上市板块要求", None, "text", writable_by=_BI_PARSE),
-    Indicator("financing_stage_requirement_summary", "融资阶段要求", None, "text", writable_by=_BI_PARSE),
-    Indicator("transaction_type", "交易方式", None, "text", writable_by=_BI_PARSE),
-    Indicator("transaction_types_json", "交易方式（多值）", None, "json", writable_by=_BI_PARSE),
-    Indicator("max_premium_rate", "溢价上限", None, "ratio", writable_by=_BI_PARSE),
-    Indicator("premium_tolerance_summary", "溢价要求", None, "text", writable_by=_BI_PARSE),
-    Indicator("max_debt_ratio", "负债率上限", None, "ratio", writable_by=_BI_PARSE),
-    Indicator("debt_ratio_requirement_summary", "负债率要求", None, "text", writable_by=_BI_PARSE),
-    Indicator("major_risk_tolerance_summary", "风险容忍", None, "text", writable_by=_BI_PARSE),
-    Indicator("buyer_industry_advantage_summary", "产业优势", None, "text", writable_by=_BI_PARSE),
-    Indicator("priority_summary", "优先条件", None, "text", writable_by=_BI_PARSE),
-    Indicator("preference_summary", "其他偏好", None, "text", writable_by=_BI_PARSE),
-    Indicator("negative_summary", "排除项", None, "text", writable_by=_BI_PARSE),
-    Indicator("unknown_summary", "待确认", None, "text", writable_by=_BI_PARSE),
+    Indicator("industries_json", "可接受一级行业", "intent_scope", "json", screening=True, writable_by=_BI_WRITE, target_column="industry_pairs_json.l1", operator="overlap", default_effect="required", effect_editable=True, scenario_allowed=True, multi_value=True, sql_recall=True, deterministic_rank=True, editor="industry"),
+    Indicator("industry_l2_json", "二级关注行业", "intent_scope", "json", screening=True, writable_by=_BI_WRITE, target_column="industry_pairs_json.l2", operator="overlap", default_effect="preferred", effect_editable=True, scenario_allowed=True, multi_value=True, deterministic_rank=True, editor="industry_l2"),
+    Indicator("excluded_industries_json", "排除行业", "intent_scope", "json", screening=True, writable_by=_BI_WRITE, target_column="industry_pairs_json", operator="not_overlap", default_effect="required", effect_editable=False, scenario_allowed=True, multi_value=True, sql_recall=True, deterministic_rank=True, editor="industry"),
+    Indicator("industry_focus_tags_json", "字典外细分方向", "intent_notes", "json", writable_by=_BI_WRITE, default_effect="deep_eval", scenario_allowed=True, multi_value=True, editor="tags"),
+    Indicator("region_scope_summary", "地域摘要（兼容）", "intent_scope", "text", writable_by=_BI_WRITE, default_effect="deep_eval", scenario_allowed=True, editor="text"),
+    Indicator("region_constraints_json", "可接受地区", "intent_scope", "json", screening=True, writable_by=_BI_WRITE, target_column="location_province,location_city,location_district", operator="region_any", default_effect="preferred", effect_editable=True, scenario_allowed=True, multi_value=True, deterministic_rank=True, editor="region_multi"),
+    Indicator("min_revenue_yuan", "最低营收", "intent_financial", "yuan", screening=True, writable_by=_BI_WRITE, target_column="current_revenue_yuan", operator="gte", default_effect="required", effect_editable=True, scenario_allowed=True, sql_recall=True, deterministic_rank=True),
+    Indicator("min_net_profit_yuan", "最低净利润", "intent_financial", "yuan", screening=True, writable_by=_BI_WRITE, target_column="current_net_profit_yuan", operator="gte", default_effect="required", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
+    Indicator("min_total_profit_yuan", "最低利润总额", "intent_financial", "yuan", screening=True, writable_by=_BI_WRITE, target_column="current_total_profit_yuan", operator="gte", default_effect="preferred", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
+    Indicator("min_net_margin", "最低净利率", "intent_financial", "ratio", screening=True, writable_by=_BI_WRITE, target_column="current_net_profit_yuan/current_revenue_yuan", operator="gte", default_effect="preferred", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
+    Indicator("min_gross_margin", "最低毛利率", "intent_financial", "ratio", writable_by=_BI_WRITE, default_effect="deep_eval", effect_editable=True, scenario_allowed=True),
+    Indicator("max_pe", "PE 上限", "intent_financial", "ratio", screening=True, writable_by=_BI_WRITE, target_column="pe_ratio", operator="lte", default_effect="required", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
+    Indicator("max_ps", "PS 上限", "intent_financial", "ratio", screening=True, writable_by=_BI_WRITE, target_column="market_cap_yuan/current_revenue_yuan", operator="lte", default_effect="preferred", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
+    Indicator("min_valuation_yuan", "最低估值", "intent_financial", "yuan", screening=True, writable_by=_BI_WRITE, target_column="valuation_yuan", operator="gte", default_effect="preferred", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
+    Indicator("max_valuation_yuan", "最高估值", "intent_financial", "yuan", screening=True, writable_by=_BI_WRITE, target_column="valuation_yuan", operator="lte", default_effect="required", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
+    Indicator("min_market_cap_yuan", "最低市值", "intent_financial", "yuan", screening=True, writable_by=_BI_WRITE, target_column="market_cap_yuan", operator="gte", default_effect="preferred", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
+    Indicator("max_market_cap_yuan", "最高市值", "intent_financial", "yuan", screening=True, writable_by=_BI_WRITE, target_column="market_cap_yuan", operator="lte", default_effect="preferred", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
+    Indicator("market_cap_range_summary", "市值范围说明", "intent_notes", "text", writable_by=_BI_WRITE, default_effect="deep_eval", scenario_allowed=True),
+    Indicator("max_debt_ratio", "负债率上限", "intent_financial", "ratio", screening=True, writable_by=_BI_WRITE, target_column="current_debt_ratio", operator="lte", default_effect="preferred", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
+    Indicator("acceptable_cash_flow_status_json", "可接受现金流状态", "intent_financial", "json", screening=True, writable_by=_BI_WRITE, target_column="cash_flow_status", operator="in", default_effect="preferred", effect_editable=True, scenario_allowed=True, multi_value=True, deterministic_rank=True, editor="multi_enum", enum_options=_CASH_FLOW),
+    Indicator("acceptable_profitability_status_json", "可接受盈利状态", "intent_financial", "json", screening=True, writable_by=_BI_WRITE, target_column="profitability_status", operator="in", default_effect="preferred", effect_editable=True, scenario_allowed=True, multi_value=True, deterministic_rank=True, editor="multi_enum", enum_options=_PROFITABILITY),
+    Indicator("requires_control", "控股要求", "intent_deal", "enum", screening=True, writable_by=_BI_WRITE, target_column="can_control", operator="requirement_capability", default_effect="required", effect_editable=True, scenario_allowed=True, sql_recall=True, deterministic_rank=True, enum_options=_YES_NO_LIKE),
+    Indicator("requires_consolidation", "并表要求", "intent_deal", "enum", screening=True, writable_by=_BI_WRITE, target_column="can_consolidate", operator="requirement_capability", default_effect="required", effect_editable=True, scenario_allowed=True, deterministic_rank=True, enum_options=_YES_NO_LIKE),
+    Indicator("accepts_minority_investment", "接受少数股权", "intent_deal", "enum", writable_by=_BI_WRITE, target_column="accepts_minority_investment", operator="requirement_capability", default_effect="preferred", effect_editable=True, scenario_allowed=True, deterministic_rank=True, enum_options=_YES_NO_LIKE),
+    Indicator("equity_requirement_type", "股权诉求类型", "intent_deal", "enum", writable_by=_BI_WRITE, default_effect="deep_eval", scenario_allowed=True, enum_options=_BI_EQUITY_TYPE),
+    Indicator("desired_equity_ratio_min", "期望股比下限", "intent_deal", "ratio", screening=True, writable_by=_BI_WRITE, target_column="transfer_ratio_max", operator="gte", default_effect="required", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
+    Indicator("desired_equity_ratio_max", "期望股比上限", "intent_deal", "ratio", screening=True, writable_by=_BI_WRITE, target_column="transfer_ratio_min", operator="lte", default_effect="required", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
+    Indicator("equity_ratio_summary", "股权比例说明", "intent_notes", "text", writable_by=_BI_WRITE, default_effect="deep_eval", scenario_allowed=True),
+    Indicator("acceptable_listed_status_json", "可接受上市状态", "intent_deal", "json", screening=True, writable_by=_BI_WRITE, target_column="listed_status", operator="in", default_effect="preferred", effect_editable=True, scenario_allowed=True, multi_value=True, deterministic_rank=True, editor="multi_enum", enum_options=_BI_LISTED_ACCEPTABLE),
+    Indicator("preferred_listed_status", "上市要求（兼容字段）", None, "enum", writable_by=_BI_PARSE, enum_options=_BI_LISTED),
+    Indicator("listing_market_region", "上市地要求", "intent_deal", "enum", screening=True, writable_by=_BI_WRITE, target_column="listing_market_region", operator="eq", default_effect="required", effect_editable=True, scenario_allowed=True, deterministic_rank=True, enum_options=_MARKET_REGION),
+    Indicator("requires_relocation", "迁址要求", "intent_deal", "enum", screening=True, writable_by=_BI_WRITE, target_column="accepts_relocation", operator="requirement_capability", default_effect="preferred", scenario_allowed=True, deterministic_rank=True, enum_options=_REQUIREMENT_STRENGTH),
+    Indicator("requires_return_investment", "返投要求", "intent_deal", "enum", screening=True, writable_by=_BI_WRITE, target_column="accepts_return_investment", operator="requirement_capability", default_effect="preferred", scenario_allowed=True, deterministic_rank=True, enum_options=_REQUIREMENT_STRENGTH),
+    Indicator("requires_team_retention", "团队留任要求", "intent_deal", "enum", screening=True, writable_by=_BI_WRITE, target_column="management_retention_possible", operator="requirement_capability", default_effect="preferred", scenario_allowed=True, deterministic_rank=True, enum_options=_REQUIREMENT_STRENGTH),
+    Indicator("earnout_requirement", "对赌要求", "intent_deal", "enum", writable_by=_BI_WRITE, default_effect="deep_eval", scenario_allowed=True, enum_options=_REQUIREMENT_STRENGTH),
+    Indicator("return_investment_multiple", "返投倍数", "intent_deal", "ratio", writable_by=_BI_WRITE, default_effect="deep_eval", scenario_allowed=True),
+    Indicator("listing_board_requirement_summary", "上市板块要求", "intent_notes", "text", writable_by=_BI_WRITE, default_effect="deep_eval", scenario_allowed=True),
+    Indicator("financing_stage_requirement_summary", "融资阶段要求", "intent_notes", "text", writable_by=_BI_WRITE, default_effect="deep_eval", scenario_allowed=True),
+    Indicator("transaction_type", "交易方式", "intent_notes", "text", writable_by=_BI_WRITE, default_effect="deep_eval", scenario_allowed=True),
+    Indicator("transaction_types_json", "交易方式（多值）", "intent_notes", "json", writable_by=_BI_WRITE, default_effect="deep_eval", scenario_allowed=True, multi_value=True, editor="tags"),
+    Indicator("max_premium_rate", "溢价上限", "intent_deal", "ratio", writable_by=_BI_WRITE, default_effect="deep_eval", effect_editable=True, scenario_allowed=True),
+    Indicator("premium_tolerance_summary", "溢价要求", "intent_notes", "text", writable_by=_BI_WRITE, default_effect="deep_eval", scenario_allowed=True),
+    Indicator("debt_ratio_requirement_summary", "负债率要求说明", "intent_notes", "text", writable_by=_BI_WRITE, default_effect="deep_eval", scenario_allowed=True),
+    Indicator("major_risk_tolerance_summary", "风险容忍", "intent_notes", "text", writable_by=_BI_WRITE, default_effect="deep_eval", scenario_allowed=True),
+    Indicator("buyer_industry_advantage_summary", "产业优势", "intent_notes", "text", writable_by=_BI_WRITE, default_effect="deep_eval", scenario_allowed=True),
+    Indicator("priority_summary", "优先条件", "intent_notes", "text", writable_by=_BI_WRITE, default_effect="deep_eval", scenario_allowed=True),
+    Indicator("preference_summary", "其他偏好", "intent_notes", "text", writable_by=_BI_WRITE, default_effect="deep_eval", scenario_allowed=True),
+    Indicator("negative_summary", "排除项", "intent_notes", "text", writable_by=_BI_WRITE, default_effect="deep_eval", scenario_allowed=True),
+    Indicator("unknown_summary", "待确认说明", "intent_notes", "text", writable_by=_BI_WRITE, default_effect="deep_eval", scenario_allowed=True),
+    Indicator("condition_effects_json", "条件作用", None, "json", writable_by=_BI_WRITE),
     Indicator("status", "状态", None, "enum", writable_by=_BI_PARSE, enum_options=(("active", "进行中"), ("paused", "暂停"), ("closed", "已结束"))),
     Indicator("pause_reason", "暂停原因", None, "text", writable_by=_BI_PARSE),
 )
@@ -193,6 +231,14 @@ def indicators_for(entity: str = "seller_target") -> tuple[Indicator, ...]:
         return _BY_ENTITY[entity]
     except KeyError:
         raise ValueError(f"registry does not cover entity {entity!r}") from None
+
+
+def groups_for(entity: str = "seller_target") -> tuple[IndicatorGroup, ...]:
+    if entity == "seller_target":
+        return GROUPS
+    if entity == "buyer_intent":
+        return BUYER_GROUPS
+    raise ValueError(f"registry does not cover entity {entity!r}")
 
 
 def indicator_by_column(entity: str, column: str) -> Indicator:
