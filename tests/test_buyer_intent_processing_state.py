@@ -3,13 +3,12 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
 
+from backend.app.jobs.handlers import attachment_ocr
+from backend.app.jobs.queue import JobClaim
 from backend.app.services.buyer_intent_processing_state import (
     compute_buyer_intent_processing_state,
 )
 from backend.app.services.json_values import json_safe_value
-from backend.app.jobs.handlers import attachment_ocr
-from backend.app.jobs.queue import JobClaim
-
 
 ROOT = Path(__file__).resolve().parents[1]
 INTENT_ID = UUID("00000000-0000-0000-0000-000000000101")
@@ -140,7 +139,8 @@ def test_stuck_repair_is_dry_run_by_default_and_preserves_audit_rows() -> None:
 
     assert "class StuckProcessingRepairRequest" in source
     assert "apply: bool = False" in source
-    assert 'metadata_json = metadata_json || jsonb_build_object' in source
+    assert "metadata_json = metadata_json || :metadata_patch" in source
+    assert 'bindparam("metadata_patch", type_=JSONB)' in source
     assert "delete from attachment" not in source
 
 

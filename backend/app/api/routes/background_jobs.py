@@ -195,21 +195,20 @@ def repair_stuck_processing(
                     """
                     update attachment
                     set parse_status = 'failed',
-                        metadata_json = metadata_json || jsonb_build_object(
-                          'stuck_state_repaired_at', now()::text,
-                          'stuck_state_repair_job_id', :job_id_text,
-                          'last_ocr_status', 'failed',
-                          'last_ocr_error', :error_message
-                        )
+                        metadata_json = metadata_json || :metadata_patch
                     where id = :attachment_id
                       and team_id = :team_id and workspace_id = :workspace_id
                       and parse_status in ('pending', 'parsing')
                     """
-                ),
+                ).bindparams(bindparam("metadata_patch", type_=JSONB)),
                 {
                     "attachment_id": row["id"],
-                    "job_id_text": str(row["failed_job_id"]),
-                    "error_message": row.get("error_message"),
+                    "metadata_patch": {
+                        "stuck_state_repaired_at": _utc_now_text(),
+                        "stuck_state_repair_job_id": str(row["failed_job_id"]),
+                        "last_ocr_status": "failed",
+                        "last_ocr_error": row.get("error_message"),
+                    },
                     "team_id": DEFAULT_TEAM_ID,
                     "workspace_id": DEFAULT_WORKSPACE_ID,
                 },
@@ -221,21 +220,20 @@ def repair_stuck_processing(
                     """
                     update business_update
                     set processing_status = 'failed',
-                        metadata_json = metadata_json || jsonb_build_object(
-                          'stuck_state_repaired_at', now()::text,
-                          'stuck_state_repair_job_id', :job_id_text,
-                          'last_processing_result', 'failed',
-                          'last_error_message', :error_message
-                        )
+                        metadata_json = metadata_json || :metadata_patch
                     where id = :business_update_id
                       and team_id = :team_id and workspace_id = :workspace_id
                       and processing_status = 'processing'
                     """
-                ),
+                ).bindparams(bindparam("metadata_patch", type_=JSONB)),
                 {
                     "business_update_id": row["id"],
-                    "job_id_text": str(row["failed_job_id"]),
-                    "error_message": row.get("error_message"),
+                    "metadata_patch": {
+                        "stuck_state_repaired_at": _utc_now_text(),
+                        "stuck_state_repair_job_id": str(row["failed_job_id"]),
+                        "last_processing_result": "failed",
+                        "last_error_message": row.get("error_message"),
+                    },
                     "team_id": DEFAULT_TEAM_ID,
                     "workspace_id": DEFAULT_WORKSPACE_ID,
                 },
