@@ -229,6 +229,13 @@ class RecommendationCandidateOut(BaseModel):
     gap_summary: str | None
     risk_summary: str | None
     evidence_json: dict[str, Any]
+    match_state: str | None = None
+    known_count: int = 0
+    missing_dimensions: list[str] = Field(default_factory=list)
+    best_scenario_id: str | None = None
+    best_scenario_label: str | None = None
+    matched_scenarios: list[str] = Field(default_factory=list)
+    matched_scenario_labels: list[str] = Field(default_factory=list)
     deep_eval: dict[str, Any] | None = None
     selected: bool = False
     selected_item_id: UUID | None = None

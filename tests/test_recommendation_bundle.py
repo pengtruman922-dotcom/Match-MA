@@ -2,6 +2,7 @@
 
 from backend.app.api.routes.recommendations import (
     DEEP_EVAL_CANDIDATE_LIMIT,
+    RecommendationCandidateOut,
     _build_recommendation_rerank_status,
     _candidate_targets_for_intent,
     _enqueue_recommendation_rerank_job,
@@ -22,6 +23,20 @@ from backend.app.services.recommendation_flow import (
 
 SELLER_TARGET_ID = "5e415f59-79ba-44b3-9d48-519092ffa07b"
 BUYER_INTENT_ID = "8ff4bc53-047c-47be-b9b8-a3c465a519a1"
+
+
+def test_candidate_response_contract_keeps_scenario_matching_metadata() -> None:
+    expected_fields = {
+        "match_state",
+        "known_count",
+        "missing_dimensions",
+        "best_scenario_id",
+        "best_scenario_label",
+        "matched_scenarios",
+        "matched_scenario_labels",
+    }
+
+    assert expected_fields <= set(RecommendationCandidateOut.model_fields)
 
 
 def test_extract_candidate_sets_prefers_explicit_message_types() -> None:
