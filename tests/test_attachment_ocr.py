@@ -4,6 +4,7 @@ from uuid import UUID
 
 from backend.app.api.routes.attachments import (
     _attachment_parse_readiness,
+    _attachment_retry_context_values,
     _attachment_upload_policy,
     _compact_child_parse_job,
     _compact_ocr_job,
@@ -120,6 +121,25 @@ def test_attachment_mock_text_prefers_job_payload() -> None:
     )
 
     assert text == "payload text"
+
+
+def test_buyer_attachment_retry_restores_linked_intent_parse_context() -> None:
+    context = _attachment_retry_context_values(
+        {
+            "business_update_id": BUSINESS_UPDATE_ID,
+            "latest_payload_json": {
+                "auto_parse_linked_objects": False,
+                "parse_entity_types": [],
+            },
+            "is_buyer_intake": True,
+        }
+    )
+
+    assert context == {
+        "business_update_id": BUSINESS_UPDATE_ID,
+        "auto_parse_linked_objects": True,
+        "parse_entity_types": ["buyer_intent"],
+    }
 
 
 def test_attachment_mock_text_falls_back_to_metadata() -> None:

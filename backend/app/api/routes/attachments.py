@@ -3,13 +3,22 @@ from typing import Any
 from urllib.parse import quote
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
 from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
-from backend.app.config import get_settings
 from backend.app.api.authn import CurrentUser
 from backend.app.api.routes.utils import (
     attachment_visible_sql,
@@ -19,19 +28,23 @@ from backend.app.api.routes.utils import (
     owner_scope_required,
     recommendation_report_visible_sql,
 )
+from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 from backend.app.services.attachment_storage import (
-    AttachmentNotFoundError,
-    AttachmentStorageError,
-    AttachmentTooLargeError,
     TEXT_FILE_EXTENSIONS,
     TEXT_MIME_PREFIXES,
     TEXT_MIME_TYPES,
+    AttachmentNotFoundError,
+    AttachmentStorageError,
+    AttachmentTooLargeError,
     read_attachment_bytes,
     save_upload_file,
 )
-from backend.app.services.image_inputs import is_supported_multimodal_image, multimodal_image_constraints
+from backend.app.services.image_inputs import (
+    is_supported_multimodal_image,
+    multimodal_image_constraints,
+)
 
 router = APIRouter(prefix="/attachments", tags=["attachments"])
 
@@ -644,14 +657,8 @@ def _attachment_retry_context(db: Session, attachment_id: UUID) -> dict[str, Any
             select
               coalesce(latest.payload_json ->> 'business_update_id', linked.business_update_id::text)
                 as business_update_id,
-              coalesce((latest.payload_json ->> 'auto_parse_linked_objects')::boolean, false)
-                or coalesce(linked.is_buyer_intake, false) as auto_parse_linked_objects,
-              case
-                when jsonb_typeof(latest.payload_json -> 'parse_entity_types') = 'array'
-                  then latest.payload_json -> 'parse_entity_types'
-                when coalesce(linked.is_buyer_intake, false) then '["buyer_intent"]'::jsonb
-                else '[]'::jsonb
-              end as parse_entity_types
+              latest.payload_json as latest_payload_json,
+              coalesce(linked.is_buyer_intake, false) as is_buyer_intake
             from (select 1) seed
             left join lateral (
               select payload_json
@@ -667,8 +674,7 @@ def _attachment_retry_context(db: Session, attachment_id: UUID) -> dict[str, Any
             left join lateral (
               select
                 bu.id as business_update_id,
-                (bu.metadata_json ->> 'source' = 'frontend_buyer_create_modal'
-                  and jsonb_array_length(bu.bound_buyer_intent_ids_json) > 0) as is_buyer_intake
+                jsonb_array_length(bu.bound_buyer_intent_ids_json) > 0 as is_buyer_intake
               from attachment_link al
               join business_update bu on bu.id = al.entity_id
               where al.team_id = :team_id
@@ -686,10 +692,27 @@ def _attachment_retry_context(db: Session, attachment_id: UUID) -> dict[str, Any
             "attachment_id": attachment_id,
         },
     ).mappings().one()
+    return _attachment_retry_context_values(row)
+
+
+def _attachment_retry_context_values(row: dict[str, Any]) -> dict[str, Any]:
+    latest_payload = row.get("latest_payload_json")
+    latest_payload = latest_payload if isinstance(latest_payload, dict) else {}
+    is_buyer_intake = bool(row.get("is_buyer_intake"))
+    raw_parse_types = latest_payload.get("parse_entity_types")
+    parse_types = (
+        [str(item) for item in raw_parse_types if str(item).strip()]
+        if isinstance(raw_parse_types, list)
+        else []
+    )
+    if is_buyer_intake and "buyer_intent" not in parse_types:
+        parse_types.append("buyer_intent")
     return {
         "business_update_id": row.get("business_update_id"),
-        "auto_parse_linked_objects": bool(row.get("auto_parse_linked_objects")),
-        "parse_entity_types": row.get("parse_entity_types") or [],
+        "auto_parse_linked_objects": bool(
+            latest_payload.get("auto_parse_linked_objects") or is_buyer_intake
+        ),
+        "parse_entity_types": parse_types,
     }
 
 
