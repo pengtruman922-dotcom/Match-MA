@@ -35,6 +35,8 @@ import type {
   BuyerIntentSuggestion,
   BuyerIntent,
   BuyerIntentCreate,
+  BuyerIntentScenario,
+  BuyerIntentScenarioWrite,
   BuyerIntentTargetExclusion,
   BuyerIntentUpdate,
   BuyerIntentParseJob,
@@ -230,6 +232,25 @@ export const buyerIntents = {
   parseStatus: (id: string) => apiRequest<BuyerIntentParseStatus>(`/buyer-intents/${id}/parse-status`),
   update: (id: string, data: BuyerIntentUpdate) =>
     apiRequest<BuyerIntent>(`/buyer-intents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  review: (id: string, clearConfirmations = false) =>
+    apiRequest<BuyerIntent>(`/buyer-intents/${id}/review`, {
+      method: 'POST',
+      body: JSON.stringify({ clear_confirmations: clearConfirmations }),
+    }),
+  scenarios: (id: string) =>
+    apiRequest<BuyerIntentScenario[]>(`/buyer-intents/${id}/scenarios`),
+  createScenario: (id: string, data: BuyerIntentScenarioWrite) =>
+    apiRequest<BuyerIntentScenario>(`/buyer-intents/${id}/scenarios`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  updateScenario: (id: string, scenarioId: string, data: BuyerIntentScenarioWrite) =>
+    apiRequest<BuyerIntentScenario>(`/buyer-intents/${id}/scenarios/${scenarioId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  deleteScenario: (id: string, scenarioId: string) =>
+    apiRequest<void>(`/buyer-intents/${id}/scenarios/${scenarioId}`, { method: 'DELETE' }),
   delete: (id: string) => apiRequest<{ status: string }>(`/buyer-intents/${id}`, { method: 'DELETE' }),
   bulkDelete: (ids: string[]) =>
     apiRequest<BuyerBulkDeleteResponse>('/buyer-intents/bulk-delete', {

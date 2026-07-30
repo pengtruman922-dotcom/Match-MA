@@ -208,6 +208,7 @@ def apply_buyer_intent_update_action(
         "acceptable_cash_flow_status_json",
         "acceptable_profitability_status_json",
         "relocation_target_regions_json",
+        "needs_confirmation_json",
     }
     bind_params = [bindparam(field, type_=JSONB) for field in diff if field in json_fields]
     if bind_params:

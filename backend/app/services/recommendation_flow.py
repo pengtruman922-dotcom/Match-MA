@@ -21,6 +21,7 @@ from backend.app.services.industry_taxonomy import classify_terms, load_term_lev
 from backend.app.services.recommendation_conditions import (
     merge_scenario_into_anchor,
     normalize_scenario_fields,
+    suppress_pending_confirmation_fields,
 )
 
 # 分片并发后单请求不再承担全部候选，预算可以放宽到三片（见 handlers/recommendation.py）。
@@ -1299,9 +1300,75 @@ def _candidate_intents_for_target(
     limit: int,
     semantic_query_lines: list[str] | None = None,
 ) -> list[dict[str, Any]]:
+    params: dict[str, Any] = {
+        "team_id": DEFAULT_TEAM_ID,
+        "workspace_id": DEFAULT_WORKSPACE_ID,
+        "seller_target_id": target.get("id"),
+    }
+    where = [
+        "bi.team_id = :team_id",
+        "bi.workspace_id = :workspace_id",
+        "bi.deleted_at is null",
+        "bi.status = 'active'",
+    ]
+    scenario_exists = """
+        exists(
+          select 1 from buyer_intent_scenario bis_prefilter
+          where bis_prefilter.buyer_intent_id = bi.id
+            and bis_prefilter.team_id = bi.team_id
+            and bis_prefilter.workspace_id = bi.workspace_id
+            and bis_prefilter.deleted_at is null
+            and bis_prefilter.active = true
+        )
+    """
+    pending_field = lambda field: f"""
+        exists(
+          select 1 from jsonb_array_elements(bi.needs_confirmation_json) pending
+          where pending ->> 'field' = '{field}'
+        )
+    """
+
+    target_l1_values, _ = _target_industry_values(target)
+    if target_l1_values:
+        params["target_industry_l1"] = list(target_l1_values)
+        where.append(
+            f"""(
+              {scenario_exists}
+              or {pending_field('industries_json')}
+              or jsonb_array_length(bi.industries_json) = 0
+              or exists(
+                select 1 from jsonb_array_elements_text(bi.industries_json) required_industry(value)
+                where required_industry.value = any(:target_industry_l1)
+              )
+            )"""
+        )
+
+    target_revenue = _optional_decimal(target.get("current_revenue_yuan"))
+    if target_revenue is not None:
+        params["target_revenue_yuan"] = target_revenue
+        where.append(
+            f"""(
+              {scenario_exists}
+              or {pending_field('min_revenue_yuan')}
+              or bi.min_revenue_yuan is null
+              or bi.min_revenue_yuan <= :target_revenue_yuan
+            )"""
+        )
+
+    if str(target.get("can_control") or "").strip().lower() == "no":
+        where.append(
+            f"""(
+              {scenario_exists}
+              or {pending_field('requires_control')}
+              or bi.requires_control not in ('yes', 'likely')
+              or bi.accepts_minority_investment in ('yes', 'likely')
+            )"""
+        )
+
+    where_sql = " and ".join(where)
     rows = db.execute(
         text(
-            """
+            f"""
             select
               bi.id as buyer_intent_id,
               bi.intent_name as buyer_intent_name,
@@ -1344,6 +1411,7 @@ def _candidate_intents_for_target(
               bi.priority_summary,
               bi.preference_summary,
               bi.industry_focus_tags_json,
+              bi.needs_confirmation_json,
               exists(
                 select 1
                 from buyer_intent_target_exclusion x
@@ -1354,18 +1422,11 @@ def _candidate_intents_for_target(
               ) as is_excluded
             from buyer_intent bi
             left join buyer_party bp on bp.id = bi.buyer_party_id
-            where bi.team_id = :team_id
-              and bi.workspace_id = :workspace_id
-              and bi.deleted_at is null
-              and bi.status = 'active'
+            where {where_sql}
             order by bi.updated_at desc
             """
         ),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "seller_target_id": target.get("id"),
-        },
+        params,
     ).mappings().all()
 
     term_levels = load_term_levels(db)
@@ -1378,8 +1439,10 @@ def _candidate_intents_for_target(
         if item.pop("is_excluded"):
             excluded_count += 1
             continue
+        item["id"] = item["buyer_intent_id"]
         item["excluded_terms_resolved"] = classify_terms(item.get("excluded_industries_json"), term_levels)
-        rule_score, evidence, gaps, meta = _score_target_against_intent(target, item)
+        scenarios = _effective_scenarios(db, item)
+        rule_score, evidence, gaps, meta = _score_against_scenarios(target, item, scenarios)
         if meta["state"] == CANDIDATE_STATE_CONFLICT:
             conflict_count += 1
             continue
@@ -1433,7 +1496,7 @@ def _load_intent_scenarios(db: Session, buyer_intent_id: Any) -> list[dict[str, 
     rows = db.execute(
         text(
             """
-            select id, label, sort_order, fields_json
+            select id, label, sort_order, fields_json, needs_confirmation_json
             from buyer_intent_scenario
             where buyer_intent_id = :buyer_intent_id
               and team_id = :team_id
@@ -1454,6 +1517,7 @@ def _load_intent_scenarios(db: Session, buyer_intent_id: Any) -> list[dict[str, 
             "id": str(row["id"]),
             "label": row["label"],
             "fields": normalize_scenario_fields(row["fields_json"]),
+            "needs_confirmation": row.get("needs_confirmation_json") or [],
         }
         for row in rows
     ]
@@ -1475,7 +1539,7 @@ def _effective_scenarios(
     if disabled_scenario_ids:
         scenarios = [item for item in scenarios if item["id"] not in disabled_scenario_ids]
     if not scenarios:
-        return [{"id": None, "label": None, "fields": {}}]
+        return [{"id": None, "label": None, "fields": {}, "needs_confirmation": []}]
     return scenarios
 
 
@@ -1493,9 +1557,20 @@ def _score_against_scenarios(
     best: tuple[float, list[str], list[str], dict[str, Any]] | None = None
     matched: list[str] = []
     matched_labels: list[str] = []
+    effective_base = suppress_pending_confirmation_fields(intent)
     for scenario in scenarios:
         merged_intent = (
-            merge_scenario_into_anchor(intent, scenario["fields"]) if scenario["fields"] else intent
+            merge_scenario_into_anchor(effective_base, scenario["fields"])
+            if scenario["fields"]
+            else effective_base
+        )
+        merged_intent = {
+            **merged_intent,
+            "_scenario_fields": set(scenario["fields"]),
+        }
+        merged_intent = suppress_pending_confirmation_fields(
+            merged_intent,
+            scenario.get("needs_confirmation"),
         )
         score, evidence, gaps, meta = _score_target_against_intent(target, merged_intent)
         meta = {**meta, "scenario_id": scenario["id"], "scenario_label": scenario["label"]}
@@ -1859,9 +1934,6 @@ def _intent_industry_list(intent: dict[str, Any]) -> list[str]:
     return []
 
 
-DESCRIPTIVE_EXCLUSION_MIN_LENGTH = 2
-
-
 def _target_industry_values(target: dict[str, Any]) -> tuple[set[str], set[str]]:
     """Return all canonical L1/L2 values with a pre-migration fallback."""
     l1_values: set[str] = set()
@@ -1956,9 +2028,8 @@ def _excluded_industry_hit(target: dict[str, Any], intent: dict[str, Any]) -> st
     ``excluded_terms_resolved`` is precomputed per request against the industry
     dictionary (see ``classify_terms``): L1 terms compare against the target's
     industry_l1 and L2 terms against industry_l2, both exactly. Terms the
-    dictionary does not know fall back to substring search over the descriptive
-    fields, which is why very short terms are skipped there — "电" would
-    otherwise exclude every 电子/电力 target.
+    dictionary does not know are deliberately left to deep evaluation: an
+    unmapped free-text phrase must not become a hard exclusion by substring.
     """
     values = intent.get("excluded_industries_json")
     if not isinstance(values, list) or not values:
@@ -1975,15 +2046,6 @@ def _excluded_industry_hit(target: dict[str, Any], intent: dict[str, Any]) -> st
         if term and term in industry_l2_values:
             return term
 
-    descriptive = "／".join(
-        str(target.get(key) or "")
-        for key in ("business_summary",)
-    )
-    for term in resolved.get("unresolved") or []:
-        if len(term) < DESCRIPTIVE_EXCLUSION_MIN_LENGTH:
-            continue
-        if term in industry_l1_values or term in industry_l2_values or term in descriptive:
-            return term
     return None
 
 
@@ -2092,30 +2154,28 @@ def _score_target_against_intent(
         else:
             add_dimension(12, "mismatch", dimension="区域", gap_text="区域不符合买家范围，需人工复核")
 
-    # 财务门槛：净利润 + 营收。两个门槛都提出时按“任一达标”弱化处理（买家常用或条件）
+    # 财务门槛逐项生效。真正的 OR 必须由显式方案表达；含糊的复合描述
+    # 留在深评，不能由规则层自行推断成“营收或利润任一达标”。
     min_profit = _optional_decimal(intent.get("min_net_profit_yuan"))
     target_profit = _optional_decimal(target.get("current_net_profit_yuan"))
     min_revenue = _optional_decimal(intent.get("min_revenue_yuan"))
     target_revenue = _optional_decimal(target.get("current_revenue_yuan"))
     profit_ok = target_profit is not None and min_profit is not None and target_profit >= min_profit
     revenue_ok = target_revenue is not None and min_revenue is not None and target_revenue >= min_revenue
-    both_thresholds = min_profit is not None and min_revenue is not None
     if min_profit is not None:
         if target_profit is None:
             add_dimension(16, "unknown", dimension="净利润", gap_text="标的净利润缺失")
         elif profit_ok:
             add_dimension(16, "match", dimension="净利润", match_text="净利润达到门槛")
         else:
-            softened = both_thresholds and revenue_ok
-            add_dimension(16, "mismatch", dimension="净利润", gap_text="净利润低于买家门槛", gate=not softened)
+            add_dimension(16, "mismatch", dimension="净利润", gap_text="净利润低于买家门槛", gate=True)
     if min_revenue is not None:
         if target_revenue is None:
             add_dimension(12, "unknown", dimension="营收", gap_text="标的营收缺失")
         elif revenue_ok:
             add_dimension(12, "match", dimension="营收", match_text="营收达到门槛")
         else:
-            softened = both_thresholds and profit_ok
-            add_dimension(12, "mismatch", dimension="营收", gap_text="营收低于买家门槛", gate=not softened)
+            add_dimension(12, "mismatch", dimension="营收", gap_text="营收低于买家门槛", gate=True)
 
     # 整体价值轴（C-a）：买家的估值区间比标的“100% 股权价值”。
     # 上市看市值、非上市看估值；两者同口径可互相兜底。
@@ -2300,7 +2360,8 @@ def _score_target_against_intent(
         else:
             add_dimension(6, "mismatch", dimension="上市地", gap_text="上市地不符合买家要求", gate=True)
 
-    # 上市状态偏好（不沉底）
+    # 上市状态：公共层字段是偏好；方案层字段用于区分“上市方案 OR
+    # 非上市方案”，因此是该方案的门槛。
     preferred_listed_status = intent.get("preferred_listed_status")
     if preferred_listed_status and preferred_listed_status not in {"any", "unknown"}:
         target_listed_status = target.get("listed_status")
@@ -2309,7 +2370,15 @@ def _score_target_against_intent(
         ):
             add_dimension(8, "match", dimension="上市状态", match_text="上市状态符合偏好")
         elif target_listed_status and target_listed_status != "unknown":
-            add_dimension(8, "mismatch", dimension="上市状态", gap_text="上市状态不符合偏好")
+            add_dimension(
+                8,
+                "mismatch",
+                dimension="上市状态",
+                gap_text="上市状态不符合方案要求"
+                if "preferred_listed_status" in (intent.get("_scenario_fields") or set())
+                else "上市状态不符合偏好",
+                gate="preferred_listed_status" in (intent.get("_scenario_fields") or set()),
+            )
         else:
             add_dimension(8, "unknown", dimension="上市状态", gap_text="标的上市状态缺失")
 

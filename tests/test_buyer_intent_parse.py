@@ -51,6 +51,39 @@ def test_buyer_intent_parse_output_validation_requires_supported_fields() -> Non
     assert invalid["valid"] is False
 
 
+def test_pending_confirmation_field_is_stored_but_not_applied() -> None:
+    changes, notes = _normalize_buyer_intent_parse_changes(
+        {
+            "fields": {
+                "industries_json": ["医药与健康"],
+                "min_revenue_yuan": 5_000_000,
+            },
+            "needs_confirmation": [
+                {
+                    "field": "min_revenue_yuan",
+                    "proposed_value": 5_000_000,
+                    "reason": "原文单位不明确",
+                    "evidence": "营收至少500",
+                    "confidence": 0.4,
+                }
+            ],
+        },
+        "医药与健康，营收至少500",
+    )
+
+    assert changes["industries_json"] == ["医药与健康"]
+    assert "min_revenue_yuan" not in changes
+    assert changes["needs_confirmation_json"] == [
+        {
+            "field": "min_revenue_yuan",
+            "proposed_value": 5_000_000,
+            "reason": "原文单位不明确",
+            "evidence": "营收至少500",
+        }
+    ]
+    assert "held_for_confirmation:min_revenue_yuan" in notes
+
+
 def test_buyer_intent_parse_changes_normalize_common_enums_and_numbers() -> None:
     changes, notes = _normalize_buyer_intent_parse_changes(
         {

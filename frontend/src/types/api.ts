@@ -257,6 +257,13 @@ export interface BuyerPartyCreate {
   owner_user_id?: string | null;
 }
 
+export interface BuyerIntentConfirmationItem {
+  field: string;
+  proposed_value?: unknown;
+  reason: string;
+  evidence?: string;
+}
+
 export interface BuyerIntent {
   id: string;
   buyer_party_id: string | null;
@@ -269,9 +276,12 @@ export interface BuyerIntent {
   industry_primary: string | null;
   industry_secondary: string | null;
   industries_json?: string[];
+  industry_l2_json: string[] | null;
   excluded_industries_json?: string[];
   industry_focus_tags_json?: string[];
   region_scope_summary: string | null;
+  parsed_requirement_json?: Record<string, unknown>;
+  region_constraints_json?: Array<unknown> | Record<string, unknown>;
   min_revenue_yuan: string | null;
   min_net_profit_yuan: string | null;
   min_total_profit_yuan: string | null;
@@ -294,7 +304,6 @@ export interface BuyerIntent {
   preferred_listed_status: string | null;
   listing_board_requirement_summary: string | null;
   financing_stage_requirement_summary: string | null;
-  industry_l2_json: string[] | null;
   budget_min_yuan: string | null;
   budget_max_yuan: string | null;
   acceptable_cash_flow_status_json: string[] | null;
@@ -314,6 +323,9 @@ export interface BuyerIntent {
   debt_ratio_requirement_summary: string | null;
   major_risk_tolerance_summary: string | null;
   buyer_industry_advantage_summary: string | null;
+  needs_confirmation_json?: BuyerIntentConfirmationItem[];
+  reviewed_at?: string | null;
+  reviewed_by?: string | null;
   negative_summary: string | null;
   priority_summary: string | null;
   preference_summary: string | null;
@@ -514,7 +526,11 @@ export interface BuyerIntentCreate {
   buyer_party_id?: string;
   contact_name?: string;
   raw_requirement_text?: string;
+  intent_summary?: string;
   industry_primary?: string;
+  industries_json?: string[];
+  industry_l2_json?: string[];
+  excluded_industries_json?: string[];
   industry_focus_tags_json?: string[];
   region_scope_summary?: string;
   min_revenue_yuan?: number;
@@ -539,7 +555,6 @@ export interface BuyerIntentCreate {
   preferred_listed_status?: string;
   listing_board_requirement_summary?: string;
   financing_stage_requirement_summary?: string;
-  industry_l2_json?: string[];
   budget_min_yuan?: number;
   budget_max_yuan?: number;
   acceptable_cash_flow_status_json?: string[];
@@ -559,8 +574,11 @@ export interface BuyerIntentCreate {
   debt_ratio_requirement_summary?: string;
   major_risk_tolerance_summary?: string;
   buyer_industry_advantage_summary?: string;
+  needs_confirmation_json?: BuyerIntentConfirmationItem[];
   negative_summary?: string;
+  priority_summary?: string;
   preference_summary?: string;
+  unknown_summary?: string;
 }
 
 export interface BuyerIntentParseJob {
@@ -601,55 +619,61 @@ export interface BuyerIntentParseStatus {
 export interface BuyerIntentUpdate {
   intent_name?: string;
   status?: string;
-  contact_name?: string;
-  raw_requirement_text?: string;
-  industry_primary?: string;
+  contact_name?: string | null;
+  raw_requirement_text?: string | null;
+  intent_summary?: string | null;
+  industry_primary?: string | null;
+  industries_json?: string[];
+  industry_l2_json?: string[];
+  excluded_industries_json?: string[];
   industry_focus_tags_json?: string[];
-  region_scope_summary?: string;
-  min_revenue_yuan?: number;
-  min_net_profit_yuan?: number;
-  min_total_profit_yuan?: number;
-  max_pe?: number;
-  max_ps?: number;
-  min_net_margin?: number;
-  min_gross_margin?: number;
-  min_valuation_yuan?: number;
-  max_valuation_yuan?: number;
-  min_market_cap_yuan?: number;
-  max_market_cap_yuan?: number;
-  market_cap_range_summary?: string;
+  region_scope_summary?: string | null;
+  min_revenue_yuan?: number | null;
+  min_net_profit_yuan?: number | null;
+  min_total_profit_yuan?: number | null;
+  max_pe?: number | null;
+  max_ps?: number | null;
+  min_net_margin?: number | null;
+  min_gross_margin?: number | null;
+  min_valuation_yuan?: number | null;
+  max_valuation_yuan?: number | null;
+  min_market_cap_yuan?: number | null;
+  max_market_cap_yuan?: number | null;
+  market_cap_range_summary?: string | null;
   requires_control?: string;
   requires_consolidation?: string;
   accepts_minority_investment?: string;
-  desired_equity_ratio_min?: number;
-  desired_equity_ratio_max?: number;
-  equity_ratio_summary?: string;
-  equity_requirement_type?: string;
-  preferred_listed_status?: string;
-  listing_board_requirement_summary?: string;
-  financing_stage_requirement_summary?: string;
-  industry_l2_json?: string[];
-  budget_min_yuan?: number;
-  budget_max_yuan?: number;
+  desired_equity_ratio_min?: number | null;
+  desired_equity_ratio_max?: number | null;
+  equity_ratio_summary?: string | null;
+  equity_requirement_type?: string | null;
+  preferred_listed_status?: string | null;
+  listing_board_requirement_summary?: string | null;
+  financing_stage_requirement_summary?: string | null;
+  budget_min_yuan?: number | null;
+  budget_max_yuan?: number | null;
   acceptable_cash_flow_status_json?: string[];
   acceptable_profitability_status_json?: string[];
   requires_relocation?: string;
   relocation_target_regions_json?: string[];
   requires_return_investment?: string;
-  return_investment_multiple?: number;
+  return_investment_multiple?: number | null;
   requires_team_retention?: string;
   earnout_requirement?: string;
-  listing_market_region?: string;
-  transaction_type?: string;
+  listing_market_region?: string | null;
+  transaction_type?: string | null;
   transaction_types_json?: string[] | Record<string, unknown>;
-  premium_tolerance_summary?: string;
-  max_premium_rate?: number;
-  max_debt_ratio?: number;
-  debt_ratio_requirement_summary?: string;
-  major_risk_tolerance_summary?: string;
-  buyer_industry_advantage_summary?: string;
-  negative_summary?: string;
-  preference_summary?: string;
+  premium_tolerance_summary?: string | null;
+  max_premium_rate?: number | null;
+  max_debt_ratio?: number | null;
+  debt_ratio_requirement_summary?: string | null;
+  major_risk_tolerance_summary?: string | null;
+  buyer_industry_advantage_summary?: string | null;
+  needs_confirmation_json?: BuyerIntentConfirmationItem[];
+  negative_summary?: string | null;
+  priority_summary?: string | null;
+  preference_summary?: string | null;
+  unknown_summary?: string | null;
   pause_reason?: string;
   owner_user_id?: string | null;
 }
@@ -1687,9 +1711,18 @@ export interface BuyerIntentScenario {
   sort_order: number;
   active: boolean;
   fields_json: Record<string, unknown>;
+  needs_confirmation_json: BuyerIntentConfirmationItem[];
   source: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface BuyerIntentScenarioWrite {
+  label: string;
+  sort_order: number;
+  active: boolean;
+  fields_json: Record<string, unknown>;
+  needs_confirmation_json?: BuyerIntentConfirmationItem[];
 }
 
 export interface RecommendationCandidateResponse {

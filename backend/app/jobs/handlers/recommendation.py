@@ -933,7 +933,7 @@ def _get_candidate_search_doc_text(db: Session, *, mode: str, candidate: dict[st
                 """
                 select
                   intent_name, raw_requirement_text, intent_summary,
-                  industry_primary, industry_secondary, industries_json,
+                  industry_primary, industry_secondary, industries_json, industry_l2_json,
                   excluded_industries_json, industry_focus_tags_json,
                   region_scope_summary, region_constraints_json,
                   min_revenue_yuan, min_net_profit_yuan, min_total_profit_yuan,
@@ -946,7 +946,22 @@ def _get_candidate_search_doc_text(db: Session, *, mode: str, candidate: dict[st
                   financing_stage_requirement_summary, transaction_type, transaction_types_json,
                   premium_tolerance_summary, max_premium_rate, max_debt_ratio,
                   debt_ratio_requirement_summary, major_risk_tolerance_summary,
-                  negative_summary, priority_summary, preference_summary, unknown_summary
+                  negative_summary, priority_summary, preference_summary, unknown_summary,
+                  needs_confirmation_json,
+                  coalesce((
+                    select jsonb_agg(
+                      jsonb_build_object(
+                        'id', scenario.id,
+                        'label', scenario.label,
+                        'fields', scenario.fields_json,
+                        'needs_confirmation', scenario.needs_confirmation_json
+                      ) order by scenario.sort_order, scenario.created_at
+                    )
+                    from buyer_intent_scenario scenario
+                    where scenario.buyer_intent_id = buyer_intent.id
+                      and scenario.deleted_at is null
+                      and scenario.active = true
+                  ), '[]'::jsonb) as scenarios_json
                 from buyer_intent
                 where id = :buyer_intent_id
                   and team_id = :team_id

@@ -163,7 +163,10 @@ function CandidateRow({
   startingProgress: boolean;
   readOnly: boolean;
 }) {
+  const [showComparison, setShowComparison] = useState(false);
   const progressPath = candidate.detailPath ? `${candidate.detailPath}?tab=progress` : null;
+  const matches = Array.isArray(candidate.evidence.matches) ? candidate.evidence.matches.map(String) : [];
+  const gaps = Array.isArray(candidate.evidence.gaps) ? candidate.evidence.gaps.map(String) : [];
   return (
     <div className={`px-4 py-3 ${candidate.selected ? 'bg-emerald-50/50' : ''}`}>
       <div className="flex items-start justify-between gap-2">
@@ -217,6 +220,7 @@ function CandidateRow({
         </span>
       </div>
       <div className="ml-6 mt-1 space-y-0.5 text-xs text-gray-600">
+        <p className="text-gray-500">初筛情况：{matches.length} 项满足 · {candidate.missingDimensions.length} 项未知 · 0 项冲突</p>
         {candidate.deepEvalReason && <p className="font-medium text-gray-800">AI 评估: {candidate.deepEvalReason}</p>}
         {candidate.matchSummary && <p className="text-emerald-700">匹配: {candidate.matchSummary}</p>}
         {candidate.gapSummary && <p className="text-amber-700">缺口: {candidate.gapSummary}</p>}
@@ -232,6 +236,18 @@ function CandidateRow({
           <p className="text-gray-500">待确认: {candidate.missingDimensions.join('、')}</p>
         )}
         {candidate.riskSummary && <p className="text-gray-400">风险: {candidate.riskSummary}</p>}
+      </div>
+      <div className="ml-6 mt-1.5">
+        <button type="button" onClick={() => setShowComparison((value) => !value)} className="text-xs text-brand-600 hover:underline">
+          {showComparison ? '收起对比' : '完整对比'}
+        </button>
+        {showComparison ? (
+          <div className="mt-2 grid gap-3 border border-gray-100 bg-gray-50 p-3 text-xs md:grid-cols-3">
+            <ComparisonList title="明确满足" tone="green" items={matches} empty="暂无明确满足项" />
+            <ComparisonList title="软性不足/需核对" tone="amber" items={gaps} empty="暂无已知不足" />
+            <ComparisonList title="标的信息未知" tone="gray" items={candidate.missingDimensions} empty="暂无未知项" />
+          </div>
+        ) : null}
       </div>
       {interactive && !readOnly && (
         <div className="ml-6 mt-1.5 flex flex-wrap items-center gap-2">
@@ -282,4 +298,9 @@ function CandidateRow({
       )}
     </div>
   );
+}
+
+function ComparisonList({ title, tone, items, empty }: { title: string; tone: 'green' | 'amber' | 'gray'; items: string[]; empty: string }) {
+  const color = tone === 'green' ? 'text-emerald-700' : tone === 'amber' ? 'text-amber-700' : 'text-gray-600';
+  return <div><p className={`font-medium ${color}`}>{title}</p>{items.length ? <ul className="mt-1 space-y-1">{items.map((item, index) => <li key={`${item}-${index}`}>· {item}</li>)}</ul> : <p className="mt-1 text-gray-400">{empty}</p>}</div>;
 }

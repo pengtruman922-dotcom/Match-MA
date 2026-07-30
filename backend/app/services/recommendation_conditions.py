@@ -25,20 +25,34 @@ QUERY_PARSER_NODE_NAME = "recommendation_query_parser"
 # Every field here maps 1:1 onto the anchor keys read by the rule scorer.
 OVERRIDE_FIELD_KINDS: dict[str, str] = {
     "industries_json": "industry_list",
+    "industry_l2_json": "industry_list",
     "excluded_industries_json": "industry_list",
     "region_scope_summary": "text",
     "min_net_profit_yuan": "number",
     "min_revenue_yuan": "number",
+    "min_total_profit_yuan": "number",
     "min_valuation_yuan": "number",
     "max_valuation_yuan": "number",
     "max_pe": "number",
+    "max_ps": "number",
+    "min_net_margin": "number",
+    "min_gross_margin": "number",
     "min_market_cap_yuan": "number",
     "max_market_cap_yuan": "number",
     "requires_control": "yes_no",
     "requires_consolidation": "yes_no",
+    "accepts_minority_investment": "yes_no",
     "desired_equity_ratio_min": "number",
+    "desired_equity_ratio_max": "number",
     "preferred_listed_status": "listed_status",
+    "listing_market_region": "listing_market_region",
     "max_debt_ratio": "number",
+    "acceptable_cash_flow_status_json": "string_list",
+    "acceptable_profitability_status_json": "string_list",
+    "requires_relocation": "requirement_strength",
+    "requires_return_investment": "requirement_strength",
+    "requires_team_retention": "requirement_strength",
+    "earnout_requirement": "requirement_strength",
 }
 
 FIELD_LABELS: dict[str, str] = {
@@ -61,6 +75,8 @@ FIELD_LABELS: dict[str, str] = {
 
 _LISTED_STATUS_VALUES = {"listed", "unlisted", "preparing_listing", "pre_ipo", "any", "unknown"}
 _YES_NO_VALUES = {"yes", "no", "unknown"}
+_LISTING_MARKET_REGION_VALUES = {"domestic", "overseas", "unknown"}
+_REQUIREMENT_STRENGTH_VALUES = {"required", "preferred", "not_required", "unknown"}
 
 
 def _coerce_value(kind: str, value: Any) -> Any | None:
@@ -79,7 +95,13 @@ def _coerce_value(kind: str, value: Any) -> Any | None:
     if kind == "listed_status":
         text_value = str(value or "").strip().lower()
         return text_value if text_value in _LISTED_STATUS_VALUES else None
-    if kind == "industry_list":
+    if kind == "listing_market_region":
+        text_value = str(value or "").strip().lower()
+        return text_value if text_value in _LISTING_MARKET_REGION_VALUES else None
+    if kind == "requirement_strength":
+        text_value = str(value or "").strip().lower()
+        return text_value if text_value in _REQUIREMENT_STRENGTH_VALUES else None
+    if kind in {"industry_list", "string_list"}:
         if isinstance(value, str):
             item = value.strip()
             return [item] if item else None
@@ -282,6 +304,37 @@ def merge_scenario_into_anchor(anchor: dict[str, Any], scenario_fields: Any) -> 
     for field, value in (scenario_fields or {}).items():
         merged[field] = value
     return merged
+
+
+def confirmation_field_names(raw: Any) -> set[str]:
+    """Return fields whose parser suggestions are still awaiting a human decision."""
+    if not isinstance(raw, list):
+        return set()
+    return {
+        str(item.get("field") or "").strip()
+        for item in raw
+        if isinstance(item, dict) and str(item.get("field") or "").strip()
+    }
+
+
+def suppress_pending_confirmation_fields(
+    anchor: dict[str, Any],
+    extra_confirmations: Any = None,
+) -> dict[str, Any]:
+    """Make pending fields invisible to deterministic screening and ranking.
+
+    The original anchor remains intact for LLM deep evaluation. This helper is
+    only applied to the copy passed into the rule scorer.
+    """
+    effective = dict(anchor)
+    pending_fields = confirmation_field_names(anchor.get("needs_confirmation_json"))
+    pending_fields.update(confirmation_field_names(extra_confirmations))
+    for field in pending_fields:
+        kind = OVERRIDE_FIELD_KINDS.get(field)
+        effective[field] = [] if kind in {"industry_list", "string_list"} else None
+        if field == "industries_json":
+            effective["industry_primary"] = None
+    return effective
 
 
 def merge_condition_overrides(existing: Any, parse_result: dict[str, Any]) -> dict[str, Any]:

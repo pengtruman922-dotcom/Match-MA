@@ -16,8 +16,10 @@ from backend.app.services.search_docs import (
 )
 from backend.app.services.recommendation_conditions import normalize_scenario_fields
 from backend.app.services.industry_taxonomy import (
+    classify_terms,
     industry_l1_prompt_list,
     industry_l2_prompt_list,
+    load_term_levels,
     normalize_excluded_terms,
     normalize_l2_values,
     normalize_l1_values,
@@ -191,17 +193,20 @@ def _replace_buyer_intent_scenarios(
     """
     if not isinstance(raw_scenarios, list):
         return 0
-    parsed: list[tuple[str, dict[str, Any]]] = []
+    parsed: list[tuple[str, dict[str, Any], list[dict[str, Any]]]] = []
     for index, item in enumerate(raw_scenarios[:MAX_PARSED_SCENARIOS]):
         if not isinstance(item, dict):
             continue
-        fields = normalize_scenario_fields(item.get("fields") or item.get("conditions") or {})
-        if not fields:
+        raw_fields = item.get("fields") or item.get("conditions") or {}
+        pending = _normalize_confirmation_items(item.get("needs_confirmation"), BUYER_INTENT_PARSE_FIELDS)
+        pending_fields = {entry["field"] for entry in pending}
+        if isinstance(raw_fields, dict):
+            raw_fields = {key: value for key, value in raw_fields.items() if key not in pending_fields}
+        fields = _normalize_parsed_scenario_fields(db, raw_fields)
+        if not fields and not pending:
             continue
         label = str(item.get("label") or item.get("name") or f"方案{index + 1}").strip()[:120]
-        parsed.append((label, fields))
-    if len(parsed) < 2:
-        return 0
+        parsed.append((label, fields, pending))
 
     db.execute(
         text(
@@ -221,20 +226,27 @@ def _replace_buyer_intent_scenarios(
             "workspace_id": DEFAULT_WORKSPACE_ID,
         },
     )
-    for sort_order, (label, fields) in enumerate(parsed):
+    if len(parsed) < 2:
+        db.commit()
+        return 0
+
+    for sort_order, (label, fields, pending) in enumerate(parsed):
         db.execute(
             text(
                 """
                 insert into buyer_intent_scenario (
                   team_id, workspace_id, buyer_intent_id, label, sort_order,
-                  fields_json, source, created_by, updated_by
+                  fields_json, needs_confirmation_json, source, created_by, updated_by
                 )
                 values (
                   :team_id, :workspace_id, :buyer_intent_id, :label, :sort_order,
-                  :fields_json, 'parser', :user_id, :user_id
+                  :fields_json, :needs_confirmation_json, 'parser', :user_id, :user_id
                 )
                 """
-            ).bindparams(bindparam("fields_json", type_=JSONB)),
+            ).bindparams(
+                bindparam("fields_json", type_=JSONB),
+                bindparam("needs_confirmation_json", type_=JSONB),
+            ),
             {
                 "team_id": DEFAULT_TEAM_ID,
                 "workspace_id": DEFAULT_WORKSPACE_ID,
@@ -242,11 +254,40 @@ def _replace_buyer_intent_scenarios(
                 "label": label,
                 "sort_order": sort_order,
                 "fields_json": fields,
+                "needs_confirmation_json": pending,
                 "user_id": SYSTEM_USER_ID,
             },
         )
     db.commit()
     return len(parsed)
+
+
+def _normalize_parsed_scenario_fields(db: Session, raw_fields: Any) -> dict[str, Any]:
+    """Apply the same closed-taxonomy policy to fields nested in scenarios."""
+    fields = normalize_scenario_fields(raw_fields)
+    if "industries_json" in fields:
+        normalized_l1, _ = normalize_l1_values(db, fields["industries_json"], fallback_unmapped=False)
+        if normalized_l1:
+            fields["industries_json"] = normalized_l1
+        else:
+            fields.pop("industries_json", None)
+    if "industry_l2_json" in fields:
+        normalized_l2, _ = normalize_l2_values(db, fields["industry_l2_json"])
+        if normalized_l2:
+            fields["industry_l2_json"] = normalized_l2
+        else:
+            fields.pop("industry_l2_json", None)
+    if "excluded_industries_json" in fields:
+        classified = classify_terms(
+            normalize_excluded_terms(fields["excluded_industries_json"]),
+            load_term_levels(db),
+        )
+        effective_exclusions = classified["l1"] + classified["l2"]
+        if effective_exclusions:
+            fields["excluded_industries_json"] = effective_exclusions
+        else:
+            fields.pop("excluded_industries_json", None)
+    return fields
 
 
 def _get_buyer_intent_for_parse(db: Session, buyer_intent_id: UUID) -> dict[str, Any]:
@@ -275,7 +316,8 @@ def _get_buyer_intent_for_parse(db: Session, buyer_intent_id: UUID) -> dict[str,
               premium_tolerance_summary, max_premium_rate, max_debt_ratio,
               debt_ratio_requirement_summary, major_risk_tolerance_summary,
               buyer_industry_advantage_summary, negative_summary,
-              priority_summary, preference_summary, unknown_summary
+              priority_summary, preference_summary, unknown_summary,
+              needs_confirmation_json, reviewed_at, reviewed_by
             from buyer_intent
             where id = :buyer_intent_id
               and team_id = :team_id
@@ -389,6 +431,7 @@ BUYER_INTENT_PARSE_FIELDS = {
     "priority_summary",
     "preference_summary",
     "unknown_summary",
+    "needs_confirmation_json",
 }
 
 BUYER_INTENT_PARSE_JSON_FIELDS = {
@@ -403,6 +446,7 @@ BUYER_INTENT_PARSE_JSON_FIELDS = {
     "acceptable_cash_flow_status_json",
     "acceptable_profitability_status_json",
     "relocation_target_regions_json",
+    "needs_confirmation_json",
 }
 
 BUYER_INTENT_PARSE_NUMERIC_FIELDS = {
@@ -496,6 +540,8 @@ def _validate_buyer_intent_parse_output(parsed_output_json: dict[str, Any] | Non
         return {"valid": False, "error": "LLM output is not a JSON object."}
     if "fields" in parsed_output_json and not isinstance(parsed_output_json["fields"], dict):
         return {"valid": False, "error": "Buyer intent parser output field 'fields' must be an object."}
+    if "needs_confirmation" in parsed_output_json and not isinstance(parsed_output_json["needs_confirmation"], list):
+        return {"valid": False, "error": "Buyer intent parser output field 'needs_confirmation' must be an array."}
     candidate = parsed_output_json.get("fields", parsed_output_json)
     if not isinstance(candidate, dict):
         return {"valid": False, "error": "Buyer intent parser output must be an object."}
@@ -503,6 +549,9 @@ def _validate_buyer_intent_parse_output(parsed_output_json: dict[str, Any] | Non
     party = parsed_output_json.get("buyer_party")
     if isinstance(party, dict):
         allowed_count += len([key for key in party if key in BUYER_PARTY_PARSE_FIELDS])
+    allowed_count += len(
+        _normalize_confirmation_items(parsed_output_json.get("needs_confirmation"), BUYER_INTENT_PARSE_FIELDS)
+    )
     return {
         "valid": allowed_count > 0,
         "field_count": allowed_count,
@@ -520,10 +569,20 @@ def _normalize_buyer_intent_parse_changes(
         return {}, []
 
     notes: list[str] = []
+    raw_pending = parsed_output_json.get("needs_confirmation")
+    if raw_pending is None:
+        raw_pending = candidate.get("needs_confirmation_json")
+    pending = _normalize_confirmation_items(raw_pending, BUYER_INTENT_PARSE_FIELDS)
+    pending_fields = {item["field"] for item in pending}
     changes: dict[str, Any] = {}
     for key, value in candidate.items():
+        if key == "needs_confirmation_json":
+            continue
         if key not in BUYER_INTENT_PARSE_FIELDS:
             notes.append(f"ignored_unsupported_field:{key}")
+            continue
+        if key in pending_fields:
+            notes.append(f"held_for_confirmation:{key}")
             continue
         if key in BUYER_INTENT_PARSE_NUMERIC_FIELDS:
             changes[key] = _optional_decimal(value)
@@ -568,6 +627,7 @@ def _normalize_buyer_intent_parse_changes(
                 notes.append(f"dropped_{field}:source_mentions_valuation_not_market_cap")
 
     changes["raw_requirement_text"] = raw_requirement_text
+    changes["needs_confirmation_json"] = pending
     if "parsed_requirement_json" not in changes:
         changes["parsed_requirement_json"] = {
             "source": "buyer_intent_parser",
@@ -576,29 +636,81 @@ def _normalize_buyer_intent_parse_changes(
         }
     return {key: value for key, value in changes.items() if value is not None}, notes
 
+
+def _normalize_confirmation_items(raw: Any, allowed_fields: set[str]) -> list[dict[str, Any]]:
+    """Normalize parser questions without carrying a confidence score."""
+    if not isinstance(raw, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        field = str(item.get("field") or item.get("field_name") or "").strip()
+        if field not in allowed_fields or field == "needs_confirmation_json":
+            continue
+        reason = str(item.get("reason") or item.get("question") or "AI 无法确定唯一取值").strip()[:500]
+        evidence = str(item.get("evidence") or item.get("source_text") or "").strip()[:1000]
+        key = (field, evidence)
+        if key in seen:
+            continue
+        seen.add(key)
+        entry: dict[str, Any] = {"field": field, "reason": reason}
+        if evidence:
+            entry["evidence"] = evidence
+        proposed_value = item.get("proposed_value", item.get("suggested_value", item.get("value")))
+        if proposed_value is not None:
+            entry["proposed_value"] = _json_safe_value(proposed_value)
+        normalized.append(entry)
+    return normalized
+
 def _normalize_buyer_intent_industry_changes(db: Session, changes: dict[str, Any]) -> list[str]:
     """Map parser industry output onto the closed L1 dictionary in place."""
     notes: list[str] = []
+    semantic_focus_terms: list[str] = []
+    for value in changes.get("industry_focus_tags_json") or []:
+        term = str(value or "").strip()
+        if term and term not in semantic_focus_terms:
+            semantic_focus_terms.append(term)
     if "industries_json" in changes:
-        normalized, industry_notes = normalize_l1_values(db, changes["industries_json"])
+        raw_l1 = [str(value).strip() for value in changes["industries_json"] if str(value or "").strip()]
+        normalized, industry_notes = normalize_l1_values(
+            db,
+            changes["industries_json"],
+            fallback_unmapped=False,
+        )
         notes.extend(industry_notes)
         if normalized:
             changes["industries_json"] = normalized
         else:
             changes.pop("industries_json", None)
+        mapped_l1 = set(normalized)
+        for term in raw_l1:
+            if resolve_l1(db, term) is None and term not in mapped_l1 and term not in semantic_focus_terms:
+                semantic_focus_terms.append(term)
     if "industry_l2_json" in changes:
         # L2 是筛选字段，只保留字典里真实存在的赛道；写不进字典的细分方向
         # （醋酸下游、偏光膜这类产品级说法）留给深评，不污染 SQL。
-        normalized_l2, l2_notes = normalize_l2_values(db, changes["industry_l2_json"])
+        raw_l2 = [str(value).strip() for value in changes["industry_l2_json"] if str(value or "").strip()]
+        normalized_l2, l2_notes = normalize_l2_values(db, raw_l2)
         notes.extend(l2_notes)
         if normalized_l2:
             changes["industry_l2_json"] = normalized_l2
         else:
             changes.pop("industry_l2_json", None)
+        for term in raw_l2:
+            if term not in normalized_l2 and term not in semantic_focus_terms:
+                semantic_focus_terms.append(term)
     if "excluded_industries_json" in changes:
         cleaned = normalize_excluded_terms(changes["excluded_industries_json"])
-        if cleaned:
-            changes["excluded_industries_json"] = cleaned
+        classified = classify_terms(cleaned, load_term_levels(db))
+        effective_exclusions = classified["l1"] + classified["l2"]
+        for term in classified["unresolved"]:
+            notes.append(f"excluded_industry_unmapped:{term[:50]}")
+            if term not in semantic_focus_terms:
+                semantic_focus_terms.append(term)
+        if effective_exclusions:
+            changes["excluded_industries_json"] = effective_exclusions
         else:
             changes.pop("excluded_industries_json", None)
     if "industry_focus_tags_json" in changes:
@@ -613,6 +725,8 @@ def _normalize_buyer_intent_industry_changes(db: Session, changes: dict[str, Any
             changes["industry_focus_tags_json"] = tags
         else:
             changes.pop("industry_focus_tags_json", None)
+    if semantic_focus_terms:
+        changes["industry_focus_tags_json"] = semantic_focus_terms[:50]
     if "industries_json" not in changes and changes.get("industry_primary"):
         l1_name = resolve_l1(db, changes["industry_primary"])
         if l1_name:
@@ -632,7 +746,12 @@ def _apply_buyer_intent_parse_changes(
         return []
 
     set_clauses = [f"{field} = :{field}" for field in diff]
-    set_clauses.extend(["updated_at = now()", "updated_by = :updated_by"])
+    set_clauses.extend([
+        "reviewed_at = null",
+        "reviewed_by = null",
+        "updated_at = now()",
+        "updated_by = :updated_by",
+    ])
     statement = text(
         f"""
         update buyer_intent

@@ -14,6 +14,8 @@ from backend.app.api.routes.recommendations import (
 from backend.app.services.recommendation_flow import (
     OTHER_BUYER_PROGRESS_STATUSES,
     _apply_semantic_keyword_match,
+    _candidate_intents_for_target,
+    _score_against_scenarios,
     _semantic_query_terms,
 )
 
@@ -329,6 +331,7 @@ def test_score_excluded_industry_is_a_conflict() -> None:
         {
             "industries_json": ["能源"],
             "excluded_industries_json": ["风电"],
+            "excluded_terms_resolved": {"l1": [], "l2": ["风电"], "unresolved": []},
             "min_net_profit_yuan": 100_000_000,
         },
     )
@@ -388,7 +391,7 @@ def test_score_multi_industry_secondary_track_and_region_group() -> None:
     assert 85 <= score <= 95
 
 
-def test_score_financial_or_semantics_softens_single_miss() -> None:
+def test_financial_thresholds_are_and_without_explicit_scenarios() -> None:
     score, evidence, gaps, meta = _score_target_against_intent(
         {
             "industry_l1": "制造与工业",
@@ -402,10 +405,35 @@ def test_score_financial_or_semantics_softens_single_miss() -> None:
         },
     )
 
-    # 营收达标、净利润未达标：记 gap 但不算冲突（买家常用或条件）
+    # 规则层不得自行推断 OR；真正的 OR 由两条显式方案表达。
     assert "净利润低于买家门槛" in gaps
-    assert meta["conflicts"] == []
-    assert meta["state"] != "conflict"
+    assert meta["conflicts"] == ["净利润低于买家门槛"]
+    assert meta["state"] == "conflict"
+
+
+def test_pending_confirmation_fields_do_not_screen_or_rank() -> None:
+    score, evidence, gaps, meta = _score_against_scenarios(
+        {
+            "industry_l1": "医药与健康",
+            "current_revenue_yuan": 8_000_000,
+            "can_control": "yes",
+        },
+        {
+            "industries_json": ["医药与健康"],
+            "min_revenue_yuan": 10_000_000,
+            "requires_control": "yes",
+            "needs_confirmation_json": [
+                {"field": "min_revenue_yuan", "reason": "单位待确认"}
+            ],
+        },
+        [{"id": None, "label": None, "fields": {}, "needs_confirmation": []}],
+    )
+
+    assert meta["state"] == "compatible"
+    assert "营收低于买家门槛" not in gaps
+    assert "营收达到门槛" not in evidence
+    assert "满足控股要求" in evidence
+    assert score == 100
 
 
 def test_rerank_status_without_job_is_not_requested() -> None:
@@ -528,6 +556,91 @@ def _target_row(**overrides) -> dict:
     }
     row.update(overrides)
     return row
+
+
+def _reverse_pool_db(rows: list[dict], scenarios: list[dict] | None = None) -> object:
+    class _Result:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def mappings(self):
+            return self
+
+        def all(self):
+            return self._payload
+
+    class _Db:
+        statements: list[str]
+        candidate_params: dict
+
+        def __init__(self):
+            self.statements = []
+            self.candidate_params = {}
+
+        def execute(self, statement, params=None):
+            sql = str(statement)
+            self.statements.append(sql)
+            if "from buyer_intent_scenario" in sql and "bis_prefilter" not in sql:
+                return _Result(scenarios or [])
+            if "industry_taxonomy" in sql or "buyer_seller_relation" in sql:
+                return _Result([])
+            if "from buyer_intent bi" in sql:
+                self.candidate_params = params or {}
+            return _Result(rows)
+
+    return _Db()
+
+
+def _intent_row(intent_id: str, name: str, min_revenue: int | None, *, pending=False) -> dict:
+    return {
+        "buyer_intent_id": intent_id,
+        "buyer_intent_name": name,
+        "buyer_party_id": None,
+        "buyer_name": name,
+        "industries_json": ["医药与健康"],
+        "industry_l2_json": [],
+        "excluded_industries_json": [],
+        "min_revenue_yuan": min_revenue,
+        "requires_control": "yes",
+        "accepts_minority_investment": "unknown",
+        "needs_confirmation_json": (
+            [{"field": "min_revenue_yuan", "reason": "单位待确认"}] if pending else []
+        ),
+        "is_excluded": False,
+    }
+
+
+def test_reverse_recommendation_uses_inverse_thresholds_and_ignores_pending_fields() -> None:
+    db = _reverse_pool_db(
+        [
+            _intent_row("00000000-0000-0000-0000-000000000501", "营收500万", 5_000_000),
+            _intent_row("00000000-0000-0000-0000-000000000502", "营收1000万", 10_000_000),
+            _intent_row(
+                "00000000-0000-0000-0000-000000000503",
+                "营收待确认",
+                10_000_000,
+                pending=True,
+            ),
+        ]
+    )
+
+    result = _candidate_intents_for_target(
+        db,
+        {
+            "id": SELLER_TARGET_ID,
+            "target_name": "医药标的",
+            "industry_l1": "医药与健康",
+            "current_revenue_yuan": 8_000_000,
+            "can_control": "yes",
+        },
+        20,
+    )
+
+    names = {candidate["buyer_intent_name"] for candidate in result["candidates"]}
+    assert names == {"营收500万", "营收待确认"}
+    candidate_sql = next(sql for sql in db.statements if "from buyer_intent bi" in sql)
+    assert "bi.min_revenue_yuan <= :target_revenue_yuan" in candidate_sql
+    assert db.candidate_params["target_revenue_yuan"] == 8_000_000
 
 
 def test_candidate_pool_scans_everything_and_reports_the_funnel() -> None:

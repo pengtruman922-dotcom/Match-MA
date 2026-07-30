@@ -78,7 +78,12 @@ def resolve_l1(db: Session, term: Any) -> str | None:
     return str(row) if row else None
 
 
-def normalize_l1_values(db: Session, values: Any) -> tuple[list[str], list[str]]:
+def normalize_l1_values(
+    db: Session,
+    values: Any,
+    *,
+    fallback_unmapped: bool = True,
+) -> tuple[list[str], list[str]]:
     """Normalize a list of industry terms to unique L1 categories.
 
     Unmappable terms fall back to FALLBACK_L1 and are reported in notes so the
@@ -95,6 +100,8 @@ def normalize_l1_values(db: Session, values: Any) -> tuple[list[str], list[str]]
         l1_name = resolve_l1(db, text_value)
         if l1_name is None:
             notes.append(f"industry_unmapped:{text_value[:50]}")
+            if not fallback_unmapped:
+                continue
             l1_name = FALLBACK_L1
         if l1_name not in normalized:
             normalized.append(l1_name)

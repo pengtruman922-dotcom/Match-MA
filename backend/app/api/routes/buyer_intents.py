@@ -40,6 +40,9 @@ class BuyerIntentCreate(BaseModel):
     intent_summary: str | None = None
     industry_primary: str | None = None
     industry_secondary: str | None = None
+    industries_json: list[Any] | None = None
+    industry_l2_json: list[Any] | None = None
+    excluded_industries_json: list[Any] | None = None
     industry_focus_tags_json: list[Any] | None = None
     region_scope_summary: str | None = None
     parsed_requirement_json: dict[str, Any] | None = None
@@ -75,6 +78,18 @@ class BuyerIntentCreate(BaseModel):
     debt_ratio_requirement_summary: str | None = None
     major_risk_tolerance_summary: str | None = None
     buyer_industry_advantage_summary: str | None = None
+    acceptable_cash_flow_status_json: list[Any] | None = None
+    acceptable_profitability_status_json: list[Any] | None = None
+    requires_relocation: str = "unknown"
+    relocation_target_regions_json: list[Any] | None = None
+    requires_return_investment: str = "unknown"
+    return_investment_multiple: Decimal | None = None
+    requires_team_retention: str = "unknown"
+    earnout_requirement: str = "unknown"
+    listing_market_region: str | None = None
+    budget_min_yuan: Decimal | None = None
+    budget_max_yuan: Decimal | None = None
+    needs_confirmation_json: list[Any] | None = None
     negative_summary: str | None = None
     priority_summary: str | None = None
     preference_summary: str | None = None
@@ -93,6 +108,7 @@ class BuyerIntentOut(BaseModel):
     industry_primary: str | None
     industry_secondary: str | None
     industries_json: list[Any] = []
+    industry_l2_json: list[Any] = []
     excluded_industries_json: list[Any] = []
     industry_focus_tags_json: list[Any] = []
     region_scope_summary: str | None
@@ -129,6 +145,20 @@ class BuyerIntentOut(BaseModel):
     debt_ratio_requirement_summary: str | None
     major_risk_tolerance_summary: str | None
     buyer_industry_advantage_summary: str | None
+    acceptable_cash_flow_status_json: list[Any] = []
+    acceptable_profitability_status_json: list[Any] = []
+    requires_relocation: str
+    relocation_target_regions_json: list[Any] = []
+    requires_return_investment: str
+    return_investment_multiple: Decimal | None
+    requires_team_retention: str
+    earnout_requirement: str
+    listing_market_region: str | None
+    budget_min_yuan: Decimal | None
+    budget_max_yuan: Decimal | None
+    needs_confirmation_json: list[Any] = []
+    reviewed_at: str | None = None
+    reviewed_by: UUID | None = None
     negative_summary: str | None
     priority_summary: str | None
     preference_summary: str | None
@@ -156,6 +186,7 @@ class BuyerIntentUpdate(BaseModel):
     industry_primary: str | None = None
     industry_secondary: str | None = None
     industries_json: list[Any] | None = None
+    industry_l2_json: list[Any] | None = None
     excluded_industries_json: list[Any] | None = None
     industry_focus_tags_json: list[Any] | None = None
     region_scope_summary: str | None = None
@@ -192,6 +223,18 @@ class BuyerIntentUpdate(BaseModel):
     debt_ratio_requirement_summary: str | None = None
     major_risk_tolerance_summary: str | None = None
     buyer_industry_advantage_summary: str | None = None
+    acceptable_cash_flow_status_json: list[Any] | None = None
+    acceptable_profitability_status_json: list[Any] | None = None
+    requires_relocation: str | None = None
+    relocation_target_regions_json: list[Any] | None = None
+    requires_return_investment: str | None = None
+    return_investment_multiple: Decimal | None = None
+    requires_team_retention: str | None = None
+    earnout_requirement: str | None = None
+    listing_market_region: str | None = None
+    budget_min_yuan: Decimal | None = None
+    budget_max_yuan: Decimal | None = None
+    needs_confirmation_json: list[Any] | None = None
     negative_summary: str | None = None
     priority_summary: str | None = None
     preference_summary: str | None = None
@@ -202,6 +245,10 @@ class BuyerIntentUpdate(BaseModel):
 class BuyerIntentParseRequest(BaseModel):
     raw_requirement_text: str | None = Field(default=None, min_length=1)
     force: bool = False
+
+
+class BuyerIntentReviewRequest(BaseModel):
+    clear_confirmations: bool = False
 
 
 class BuyerIntentParseJobOut(BaseModel):
@@ -262,7 +309,8 @@ BUYER_INTENT_OUT_COLUMNS = """
               bi.id, bi.buyer_party_id, bp.buyer_name as buyer_name, bi.intent_name, bi.status, bi.contact_name,
               bi.raw_requirement_text, bi.intent_summary, bi.parsed_requirement_json,
               bi.industry_primary, bi.industry_secondary,
-              bi.industries_json, bi.excluded_industries_json, bi.industry_focus_tags_json,
+              bi.industries_json, bi.industry_l2_json,
+              bi.excluded_industries_json, bi.industry_focus_tags_json,
               bi.region_scope_summary,
               bi.region_constraints_json, bi.min_revenue_yuan, bi.min_net_profit_yuan,
               bi.min_total_profit_yuan, bi.max_pe, bi.max_ps,
@@ -277,6 +325,12 @@ BUYER_INTENT_OUT_COLUMNS = """
               bi.transaction_type, bi.transaction_types_json, bi.premium_tolerance_summary,
               bi.max_premium_rate, bi.max_debt_ratio, bi.debt_ratio_requirement_summary,
               bi.major_risk_tolerance_summary, bi.buyer_industry_advantage_summary,
+              bi.acceptable_cash_flow_status_json, bi.acceptable_profitability_status_json,
+              bi.requires_relocation, bi.relocation_target_regions_json,
+              bi.requires_return_investment, bi.return_investment_multiple,
+              bi.requires_team_retention, bi.earnout_requirement,
+              bi.listing_market_region, bi.budget_min_yuan, bi.budget_max_yuan,
+              bi.needs_confirmation_json, bi.reviewed_at::text as reviewed_at, bi.reviewed_by,
               bi.negative_summary, bi.priority_summary, bi.preference_summary, bi.unknown_summary,
               bi.owner_user_id,
               (select au.name from app_user au where au.id = bi.owner_user_id) as owner_name,
@@ -306,7 +360,8 @@ def create_buyer_intent(
             insert into buyer_intent (
               team_id, workspace_id, buyer_party_id, owner_user_id,
               intent_name, contact_name, raw_requirement_text, intent_summary,
-              parsed_requirement_json, industry_primary, industry_secondary, industry_focus_tags_json,
+              parsed_requirement_json, industry_primary, industry_secondary,
+              industries_json, industry_l2_json, excluded_industries_json, industry_focus_tags_json,
               region_scope_summary, region_constraints_json,
               min_revenue_yuan, min_net_profit_yuan, min_total_profit_yuan,
               max_pe, max_ps, min_net_margin, min_gross_margin,
@@ -319,14 +374,21 @@ def create_buyer_intent(
               financing_stage_requirement_summary, transaction_type, transaction_types_json,
               premium_tolerance_summary, max_premium_rate, max_debt_ratio,
               debt_ratio_requirement_summary, major_risk_tolerance_summary,
-              buyer_industry_advantage_summary, negative_summary, priority_summary,
+              buyer_industry_advantage_summary,
+              acceptable_cash_flow_status_json, acceptable_profitability_status_json,
+              requires_relocation, relocation_target_regions_json,
+              requires_return_investment, return_investment_multiple,
+              requires_team_retention, earnout_requirement, listing_market_region,
+              budget_min_yuan, budget_max_yuan, needs_confirmation_json,
+              negative_summary, priority_summary,
               preference_summary, unknown_summary,
               created_by, updated_by
             )
             values (
               :team_id, :workspace_id, :buyer_party_id, :owner_user_id,
               :intent_name, :contact_name, :raw_requirement_text, :intent_summary,
-              :parsed_requirement_json, :industry_primary, :industry_secondary, :industry_focus_tags_json,
+              :parsed_requirement_json, :industry_primary, :industry_secondary,
+              :industries_json, :industry_l2_json, :excluded_industries_json, :industry_focus_tags_json,
               :region_scope_summary, :region_constraints_json,
               :min_revenue_yuan, :min_net_profit_yuan, :min_total_profit_yuan,
               :max_pe, :max_ps, :min_net_margin, :min_gross_margin,
@@ -339,7 +401,13 @@ def create_buyer_intent(
               :financing_stage_requirement_summary, :transaction_type, :transaction_types_json,
               :premium_tolerance_summary, :max_premium_rate, :max_debt_ratio,
               :debt_ratio_requirement_summary, :major_risk_tolerance_summary,
-              :buyer_industry_advantage_summary, :negative_summary, :priority_summary,
+              :buyer_industry_advantage_summary,
+              :acceptable_cash_flow_status_json, :acceptable_profitability_status_json,
+              :requires_relocation, :relocation_target_regions_json,
+              :requires_return_investment, :return_investment_multiple,
+              :requires_team_retention, :earnout_requirement, :listing_market_region,
+              :budget_min_yuan, :budget_max_yuan, :needs_confirmation_json,
+              :negative_summary, :priority_summary,
               :preference_summary, :unknown_summary,
               :created_by, :updated_by
             )
@@ -347,10 +415,17 @@ def create_buyer_intent(
             """
         ).bindparams(
             bindparam("parsed_requirement_json", type_=JSONB),
+            bindparam("industries_json", type_=JSONB),
+            bindparam("industry_l2_json", type_=JSONB),
+            bindparam("excluded_industries_json", type_=JSONB),
             bindparam("industry_focus_tags_json", type_=JSONB),
             bindparam("region_constraints_json", type_=JSONB),
             bindparam("acceptable_control_paths_json", type_=JSONB),
             bindparam("transaction_types_json", type_=JSONB),
+            bindparam("acceptable_cash_flow_status_json", type_=JSONB),
+            bindparam("acceptable_profitability_status_json", type_=JSONB),
+            bindparam("relocation_target_regions_json", type_=JSONB),
+            bindparam("needs_confirmation_json", type_=JSONB),
         ),
         _buyer_intent_params(payload, current_user, db),
     ).mappings().one()
@@ -884,6 +959,21 @@ def update_buyer_intent(
     if "intent_name" in changes and changes["intent_name"] is not None:
         changes["intent_name"] = changes["intent_name"].strip()
 
+    # Editing a field is the human resolution of a parser question about that
+    # field. Keep unrelated questions, but do not leave the edited condition in
+    # the "pending and therefore inactive" state.
+    if "needs_confirmation_json" not in changes:
+        pending = original.get("needs_confirmation_json")
+        if isinstance(pending, list):
+            resolved_fields = set(changes)
+            remaining = [
+                item
+                for item in pending
+                if not isinstance(item, dict) or str(item.get("field") or "") not in resolved_fields
+            ]
+            if remaining != pending:
+                changes["needs_confirmation_json"] = remaining
+
     if not changes:
         return original
 
@@ -911,9 +1001,15 @@ def update_buyer_intent(
         "acceptable_control_paths_json",
         "transaction_types_json",
         "industries_json",
+        "industry_l2_json",
         "excluded_industries_json",
         "industry_focus_tags_json",
+        "acceptable_cash_flow_status_json",
+        "acceptable_profitability_status_json",
+        "relocation_target_regions_json",
+        "needs_confirmation_json",
     }
+
     bind_params = [bindparam(field, type_=JSONB) for field in changes if field in json_fields]
     if bind_params:
         statement = statement.bindparams(*bind_params)
@@ -947,6 +1043,97 @@ def update_buyer_intent(
 
     db.commit()
     return updated
+
+
+@router.post("/{buyer_intent_id}/review", response_model=BuyerIntentOut)
+def review_buyer_intent(
+    buyer_intent_id: UUID,
+    payload: BuyerIntentReviewRequest,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    intent = _get_buyer_intent_or_404(db, buyer_intent_id)
+    ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
+    pending = intent.get("needs_confirmation_json")
+    scenario_pending_count = db.execute(
+        text(
+            """
+            select count(*)
+            from buyer_intent_scenario
+            where buyer_intent_id = :buyer_intent_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+              and jsonb_array_length(needs_confirmation_json) > 0
+            """
+        ),
+        {
+            "buyer_intent_id": buyer_intent_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).scalar_one()
+    if (pending or scenario_pending_count) and not payload.clear_confirmations:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Resolve or explicitly clear pending confirmation items before completing review.",
+        )
+
+    db.execute(
+        text(
+            """
+            update buyer_intent
+            set needs_confirmation_json = case
+                  when :clear_confirmations then '[]'::jsonb
+                  else needs_confirmation_json
+                end,
+                reviewed_at = now(),
+                reviewed_by = :reviewed_by,
+                updated_at = now(),
+                updated_by = :reviewed_by
+            where id = :buyer_intent_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ),
+        {
+            "buyer_intent_id": buyer_intent_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "reviewed_by": current_user.user_id,
+            "clear_confirmations": payload.clear_confirmations,
+        },
+    )
+    if payload.clear_confirmations:
+        db.execute(
+            text(
+                """
+                update buyer_intent_scenario
+                set needs_confirmation_json = '[]'::jsonb,
+                    updated_at = now(),
+                    updated_by = :reviewed_by
+                where buyer_intent_id = :buyer_intent_id
+                  and team_id = :team_id
+                  and workspace_id = :workspace_id
+                  and deleted_at is null
+                """
+            ),
+            {
+                "buyer_intent_id": buyer_intent_id,
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+                "reviewed_by": current_user.user_id,
+            },
+        )
+    create_search_doc_rebuild_job(
+        db,
+        entity_type="buyer_intent",
+        entity_id=buyer_intent_id,
+        source="buyer_intent_review",
+    )
+    db.commit()
+    return _get_buyer_intent_or_404(db, buyer_intent_id)
 
 
 @router.delete("/{buyer_intent_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -1090,6 +1277,9 @@ def _buyer_intent_params(payload: BuyerIntentCreate, current_user: AuthContext, 
         "parsed_requirement_json": payload.parsed_requirement_json or {},
         "industry_primary": payload.industry_primary,
         "industry_secondary": payload.industry_secondary,
+        "industries_json": payload.industries_json or [],
+        "industry_l2_json": payload.industry_l2_json or [],
+        "excluded_industries_json": payload.excluded_industries_json or [],
         "industry_focus_tags_json": payload.industry_focus_tags_json or [],
         "region_scope_summary": payload.region_scope_summary,
         "region_constraints_json": payload.region_constraints_json or [],
@@ -1124,6 +1314,18 @@ def _buyer_intent_params(payload: BuyerIntentCreate, current_user: AuthContext, 
         "debt_ratio_requirement_summary": payload.debt_ratio_requirement_summary,
         "major_risk_tolerance_summary": payload.major_risk_tolerance_summary,
         "buyer_industry_advantage_summary": payload.buyer_industry_advantage_summary,
+        "acceptable_cash_flow_status_json": payload.acceptable_cash_flow_status_json or [],
+        "acceptable_profitability_status_json": payload.acceptable_profitability_status_json or [],
+        "requires_relocation": payload.requires_relocation,
+        "relocation_target_regions_json": payload.relocation_target_regions_json or [],
+        "requires_return_investment": payload.requires_return_investment,
+        "return_investment_multiple": payload.return_investment_multiple,
+        "requires_team_retention": payload.requires_team_retention,
+        "earnout_requirement": payload.earnout_requirement,
+        "listing_market_region": payload.listing_market_region,
+        "budget_min_yuan": payload.budget_min_yuan,
+        "budget_max_yuan": payload.budget_max_yuan,
+        "needs_confirmation_json": payload.needs_confirmation_json or [],
         "negative_summary": payload.negative_summary,
         "priority_summary": payload.priority_summary,
         "preference_summary": payload.preference_summary,
@@ -1311,6 +1513,7 @@ class BuyerIntentScenarioOut(BaseModel):
     sort_order: int
     active: bool
     fields_json: dict[str, Any]
+    needs_confirmation_json: list[Any] = []
     source: str
     created_at: str
     updated_at: str
@@ -1322,6 +1525,7 @@ class BuyerIntentScenarioWrite(BaseModel):
     active: bool = True
     # 只接受条件白名单里的字段；越权字段在 normalize_scenario_fields 中被丢弃。
     fields_json: dict[str, Any] = Field(default_factory=dict)
+    needs_confirmation_json: list[Any] = Field(default_factory=list)
 
 
 @router.get("/{buyer_intent_id}/scenarios", response_model=list[BuyerIntentScenarioOut])
@@ -1336,7 +1540,8 @@ def list_buyer_intent_scenarios(
         text(
             """
             select
-              id, buyer_intent_id, label, sort_order, active, fields_json, source,
+              id, buyer_intent_id, label, sort_order, active, fields_json,
+              needs_confirmation_json, source,
               created_at::text as created_at, updated_at::text as updated_at
             from buyer_intent_scenario
             where buyer_intent_id = :buyer_intent_id
@@ -1373,17 +1578,21 @@ def create_buyer_intent_scenario(
             """
             insert into buyer_intent_scenario (
               team_id, workspace_id, buyer_intent_id, label, sort_order, active,
-              fields_json, source, created_by, updated_by
+              fields_json, needs_confirmation_json, source, created_by, updated_by
             )
             values (
               :team_id, :workspace_id, :buyer_intent_id, :label, :sort_order, :active,
-              :fields_json, 'manual', :user_id, :user_id
+              :fields_json, :needs_confirmation_json, 'manual', :user_id, :user_id
             )
             returning
-              id, buyer_intent_id, label, sort_order, active, fields_json, source,
+              id, buyer_intent_id, label, sort_order, active, fields_json,
+              needs_confirmation_json, source,
               created_at::text as created_at, updated_at::text as updated_at
             """
-        ).bindparams(bindparam("fields_json", type_=JSONB)),
+        ).bindparams(
+            bindparam("fields_json", type_=JSONB),
+            bindparam("needs_confirmation_json", type_=JSONB),
+        ),
         {
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
@@ -1392,6 +1601,7 @@ def create_buyer_intent_scenario(
             "sort_order": payload.sort_order,
             "active": payload.active,
             "fields_json": normalize_scenario_fields(payload.fields_json),
+            "needs_confirmation_json": payload.needs_confirmation_json,
             "user_id": current_user.user_id,
         },
     ).mappings().one()
@@ -1417,6 +1627,7 @@ def update_buyer_intent_scenario(
                 sort_order = :sort_order,
                 active = :active,
                 fields_json = :fields_json,
+                needs_confirmation_json = :needs_confirmation_json,
                 updated_at = now(),
                 updated_by = :user_id
             where id = :scenario_id
@@ -1425,10 +1636,14 @@ def update_buyer_intent_scenario(
               and workspace_id = :workspace_id
               and deleted_at is null
             returning
-              id, buyer_intent_id, label, sort_order, active, fields_json, source,
+              id, buyer_intent_id, label, sort_order, active, fields_json,
+              needs_confirmation_json, source,
               created_at::text as created_at, updated_at::text as updated_at
             """
-        ).bindparams(bindparam("fields_json", type_=JSONB)),
+        ).bindparams(
+            bindparam("fields_json", type_=JSONB),
+            bindparam("needs_confirmation_json", type_=JSONB),
+        ),
         {
             "scenario_id": scenario_id,
             "buyer_intent_id": buyer_intent_id,
@@ -1438,6 +1653,7 @@ def update_buyer_intent_scenario(
             "sort_order": payload.sort_order,
             "active": payload.active,
             "fields_json": normalize_scenario_fields(payload.fields_json),
+            "needs_confirmation_json": payload.needs_confirmation_json,
             "user_id": current_user.user_id,
         },
     ).mappings().one_or_none()
