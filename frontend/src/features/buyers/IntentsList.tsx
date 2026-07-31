@@ -16,6 +16,7 @@ import PaginationFooter from '../../components/PaginationFooter';
 import ListToolbar from './ListToolbar';
 import CreateIntentModal from './CreateIntentModal';
 import BusinessUpdateDrawer from '../../components/BusinessUpdateDrawer';
+import { useTableViewportHeight } from '../../hooks/useTableViewportHeight';
 import UpdateEntryMenu from '../../components/UpdateEntryMenu';
 import {
   EMPTY_INTENT_FILTER_OPTIONS,
@@ -69,7 +70,10 @@ export default function IntentsList({
   const visibleIds = useMemo(() => items.map((item) => item.id), [items]);
   const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
   const selectedCount = selectedIds.size;
+  // 批量操作条的出现/消失会把表格整体上下推，需要重算表格区高度。
+  const hasSelection = selectedCount > 0;
   const activeFilterCount = INTENT_FILTERS.filter((key) => Boolean(filters[key])).length;
+  const { ref: tableWrapRef, maxHeight: tableMaxHeight } = useTableViewportHeight([hasSelection, loading]);
 
   const updateFilters = useCallback((patch: Partial<BuyerIntentFilters>, options?: { replace?: boolean }) => {
     const next = new URLSearchParams(searchParams);
@@ -282,7 +286,12 @@ export default function IntentsList({
         />
       )}
 
-      <div className="bg-white border border-gray-200 overflow-x-auto">
+      {/* 与标的列表同一套范式：表格区限高自滚 + 表头吸顶，高度由共用 hook 动态计算。 */}
+      <div
+        ref={tableWrapRef}
+        style={{ maxHeight: tableMaxHeight }}
+        className="min-h-[320px] overflow-auto border border-gray-200 bg-white"
+      >
         {/*
           colgroup 合计 1368px == min-w，因此发生横向滚动时（容器 < 1368）列宽恰为声明值，
           冻结列的 sticky 偏移量精确；容器更宽时列会等比放大，但那时没有横滚，sticky 不激活。
@@ -299,17 +308,23 @@ export default function IntentsList({
             <col className="w-[88px]" />
             <col className="w-60" />
           </colgroup>
-          <thead>
-            <tr className="border-b border-gray-100 bg-gray-50">
-              <th className="sticky left-0 z-30 bg-gray-50 px-4 py-3 text-left"><input type="checkbox" disabled={visibleIds.length === 0} checked={allVisibleSelected} onChange={toggleSelectAllVisible} aria-label="选择当前页买家意向" className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600" /></th>
-              <th className="sticky left-12 z-30 bg-gray-50 px-4 py-3 text-left font-medium text-gray-600">需求名称</th>
-              <th className="sticky left-[240px] z-30 bg-gray-50 px-4 py-3 text-left font-medium text-gray-600">买家名称</th>
+          {/*
+            z 层级四层，缺一层横滚时表头冻结列会被表体冻结列盖住：
+            普通 td auto < 冻结 td z-20 < 吸顶 th z-30 < 冻结+吸顶 th z-40。
+            border-collapse: collapse 下 sticky 元素的 border 不跟随粘滞，
+            表头下边框改用 inset shadow 画。
+          */}
+          <thead className="sticky top-0 z-30">
+            <tr className="bg-gray-50 shadow-[inset_0_-1px_0_rgb(243,244,246)]">
+              <th className="sticky left-0 top-0 z-40 bg-gray-50 px-4 py-3 text-left"><input type="checkbox" disabled={visibleIds.length === 0} checked={allVisibleSelected} onChange={toggleSelectAllVisible} aria-label="选择当前页买家意向" className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600" /></th>
+              <th className="sticky left-12 top-0 z-40 bg-gray-50 px-4 py-3 text-left font-medium text-gray-600">需求名称</th>
+              <th className="sticky left-[240px] top-0 z-40 bg-gray-50 px-4 py-3 text-left font-medium text-gray-600">买家名称</th>
               <th className="text-left px-4 py-3 font-medium text-gray-600">关键需求</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">解析状态</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">推荐状态</th>
               <th className="text-left px-4 py-3 font-medium text-gray-600">负责人</th>
               <th className="text-left px-4 py-3 font-medium text-gray-600">最近更新</th>
-              <th className="sticky right-0 z-30 bg-gray-50 px-2 py-3 text-center font-medium text-gray-600">操作</th>
+              <th className="sticky right-0 top-0 z-40 bg-gray-50 px-2 py-3 text-center font-medium text-gray-600">操作</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">

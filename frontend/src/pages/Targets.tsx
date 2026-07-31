@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Plus, Search, Tag } from 'lucide-react';
 import { research, sellerTargets, users } from '../lib/api';
 import BatchResearchDialog from '../features/targets/BatchResearchDialog';
+import { useTableViewportHeight } from '../hooks/useTableViewportHeight';
 import { isAdmin } from '../lib/auth';
 import type {
   AppUserOption,
@@ -53,8 +54,6 @@ export default function Targets() {
   const [updateDrawer, setUpdateDrawer] = useState<{ open: boolean; scope: BusinessUpdateProcessingScope; targetId?: string; targetName?: string }>({ open: false, scope: 'basic_info' });
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const pollCursorRef = useRef(0);
-  const tableWrapRef = useRef<HTMLDivElement | null>(null);
-  const [tableMaxHeight, setTableMaxHeight] = useState<number | undefined>(undefined);
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const admin = isAdmin();
@@ -72,21 +71,7 @@ export default function Targets() {
   const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
   const activeFilterCount = activeTargetFilterCount(filters);
 
-  // 表格区高度按容器实际位置算，而不是写死一个偏移量：工具栏在窄屏会换行、
-  // 批量操作条会出现/消失，写死偏移会让横向滚动条掉出视口。
-  useLayoutEffect(() => {
-    const recompute = () => {
-      const el = tableWrapRef.current;
-      if (!el) return;
-      // 用未滚动时的绝对位置，避免高度随页面滚动来回跳。
-      const absoluteTop = el.getBoundingClientRect().top + window.scrollY;
-      const next = Math.max(320, Math.round(window.innerHeight - absoluteTop - 72));
-      setTableMaxHeight((prev) => (prev === next ? prev : next));
-    };
-    recompute();
-    window.addEventListener('resize', recompute);
-    return () => window.removeEventListener('resize', recompute);
-  }, [hasSelection, loading]);
+  const { ref: tableWrapRef, maxHeight: tableMaxHeight } = useTableViewportHeight([hasSelection, loading]);
 
   const updateFilters = useCallback((patch: Partial<TargetFilters>, options?: { replace?: boolean }) => {
     const next = new URLSearchParams(searchParams);
