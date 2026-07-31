@@ -35,6 +35,39 @@ export function isActiveParseStatus(status: BuyerIntentParseStatus): boolean {
   return status.processing_state.overall_status === 'processing';
 }
 
+/** 必须条件实心、优先条件描边。 */
+function ChipTag({ chip }: { chip: RequirementChip }) {
+  const style = chip.effect === 'required'
+    ? 'bg-gray-100 text-gray-700'
+    : 'border border-gray-200 bg-white text-gray-500';
+  return <span title={chip.title} className={`inline-block max-w-full truncate px-1.5 py-0.5 text-[11px] leading-4 ${style}`}>{chip.label}</span>;
+}
+
+export function RequirementCell({ item }: { item: BuyerIntent }) {
+  const { industry, conditions } = requirementChips(item);
+
+  if (!industry.length && !conditions.length) {
+    const raw = item.raw_requirement_text?.trim();
+    if (raw) {
+      return <p className="line-clamp-2 text-xs italic leading-5 text-gray-400" title={raw}>{raw}</p>;
+    }
+    return <span className="text-xs text-gray-300">暂无结构化条件</span>;
+  }
+
+  return (
+    <div className="space-y-1">
+      <div className="flex flex-wrap items-center gap-1">
+        {industry.length
+          ? industry.map((chip) => <ChipTag key={chip.key} chip={chip} />)
+          : <span className="text-[11px] text-gray-300">行业未设置</span>}
+      </div>
+      <div className="flex flex-wrap items-center gap-1">
+        {conditions.map((chip) => <ChipTag key={chip.key} chip={chip} />)}
+      </div>
+    </div>
+  );
+}
+
 export function IntentStatusBadge({ status }: { status: string }) {
   const color = status === 'active'
     ? 'bg-emerald-50 text-emerald-700'
@@ -56,35 +89,89 @@ export function dedupMatchLabel(value: string): string {
   return value;
 }
 
-export function listingRequirementLabel(item: BuyerIntent): string {
-  const parts = [item.preferred_listed_status ? valueLabel('preferred_listed_status', item.preferred_listed_status) : null, item.listing_board_requirement_summary, item.financing_stage_requirement_summary].filter(Boolean);
-  return parts.length ? parts.join(' / ') : '-';
+export type RequirementChip = { key: string; label: string; effect: 'required' | 'preferred'; title: string };
+
+/**
+ * 各维度的默认匹配作用，来源是 backend/app/registry/indicators.py 的 BUYER_INDICATORS
+ * default_effect。这里是有意的复制：列表页不加载指标契约接口。改契约默认值时需同步这里。
+ */
+const DEFAULT_EFFECTS = {
+  industries_json: 'required',
+  industry_l2_json: 'preferred',
+  acceptable_listed_status_json: 'preferred',
+  min_revenue_yuan: 'required',
+  min_net_profit_yuan: 'required',
+  region_constraints_json: 'preferred',
+} as const;
+
+type ChipColumn = keyof typeof DEFAULT_EFFECTS;
+
+/** 返回该维度的生效作用；deep_eval 表示不进列表。 */
+function resolveEffect(item: BuyerIntent, column: ChipColumn): 'required' | 'preferred' | 'deep_eval' {
+  return item.condition_effects_json?.[column] || DEFAULT_EFFECTS[column];
 }
 
-export function marketCapRangeLabel(item: BuyerIntent): string {
-  if (item.market_cap_range_summary) return item.market_cap_range_summary;
-  const min = item.min_market_cap_yuan ? `${(Number(item.min_market_cap_yuan) / 100000000).toFixed(1)}亿` : '';
-  const max = item.max_market_cap_yuan ? `${(Number(item.max_market_cap_yuan) / 100000000).toFixed(1)}亿` : '';
-  if (min && max) return `${min}-${max}`;
-  if (min) return `≥${min}`;
-  if (max) return `≤${max}`;
-  return '-';
+/** 多值维度收敛成「前 2 个 + N」，title 保留全量。 */
+function collapseValues(values: string[], max = 2): { label: string; title: string } | null {
+  const cleaned = Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
+  if (!cleaned.length) return null;
+  const shown = cleaned.slice(0, max).join('、');
+  return {
+    label: cleaned.length > max ? `${shown} +${cleaned.length - max}` : shown,
+    title: cleaned.join('、'),
+  };
 }
 
-export function compactRequirementNotes(item: BuyerIntent): string {
-  const industry = [item.industry_primary, item.industry_secondary].filter(Boolean).join('/');
-  const profit = item.min_net_profit_yuan ? `净利≥${formatCompactMoney(Number(item.min_net_profit_yuan))}` : null;
-  const marketCap = marketCapRangeLabel(item);
-  const parts = [
-    industry || null,
-    item.region_scope_summary,
-    listingRequirementLabel(item) !== '-' ? listingRequirementLabel(item) : null,
-    profit,
-    item.max_pe ? `PE≤${Number(item.max_pe).toFixed(0)}` : null,
-    marketCap !== '-' ? `市值${marketCap}` : null,
-    item.max_debt_ratio ? `负债率≤${Number(item.max_debt_ratio).toFixed(0)}%` : null,
-    item.max_premium_rate ? `溢价≤${Number(item.max_premium_rate).toFixed(0)}%` : item.premium_tolerance_summary,
-    item.major_risk_tolerance_summary,
-  ].filter(Boolean);
-  return parts.length ? parts.join(' · ') : '暂无关键门槛';
+function shortProvince(value: string): string {
+  return value.replace(/(省|市|自治区|特别行政区|壮族|回族|维吾尔)/g, '') || value;
+}
+
+function chip(
+  item: BuyerIntent,
+  column: ChipColumn,
+  key: string,
+  build: () => { label: string; title: string } | null,
+): RequirementChip | null {
+  const effect = resolveEffect(item, column);
+  if (effect === 'deep_eval') return null;
+  const built = build();
+  if (!built) return null;
+  return { key, label: built.label, effect, title: built.title };
+}
+
+/**
+ * 关键需求列的 5 个维度、2 行。只消费需求字段契约内的列，
+ * 不再读 industry_primary / industry_secondary / region_scope_summary / preferred_listed_status
+ * 这些不在契约里、详情页也编辑不到的影子列。
+ */
+export function requirementChips(item: BuyerIntent): { industry: RequirementChip[]; conditions: RequirementChip[] } {
+  const industry = [
+    chip(item, 'industries_json', 'industry_l1', () => collapseValues(item.industries_json || [])),
+    chip(item, 'industry_l2_json', 'industry_l2', () => collapseValues(item.industry_l2_json || [])),
+  ].filter(Boolean) as RequirementChip[];
+
+  const conditions = [
+    chip(item, 'acceptable_listed_status_json', 'listed', () => {
+      const labels = (item.acceptable_listed_status_json || []).map((value) => valueLabel('preferred_listed_status', value));
+      return collapseValues(labels, 3);
+    }),
+    chip(item, 'min_revenue_yuan', 'revenue', () => {
+      if (!item.min_revenue_yuan) return null;
+      const text = `营收≥${formatCompactMoney(Number(item.min_revenue_yuan))}`;
+      return { label: text, title: text };
+    }),
+    chip(item, 'min_net_profit_yuan', 'profit', () => {
+      if (!item.min_net_profit_yuan) return null;
+      const text = `净利≥${formatCompactMoney(Number(item.min_net_profit_yuan))}`;
+      return { label: text, title: text };
+    }),
+    chip(item, 'region_constraints_json', 'region', () => {
+      const provinces = (item.region_constraints_json || [])
+        .filter((constraint) => constraint.effect !== 'excluded')
+        .map((constraint) => shortProvince(constraint.province || ''));
+      return collapseValues(provinces);
+    }),
+  ].filter(Boolean) as RequirementChip[];
+
+  return { industry, conditions };
 }

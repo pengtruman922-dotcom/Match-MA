@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Plus, Search, Tag } from 'lucide-react';
 import { research, sellerTargets, users } from '../lib/api';
@@ -24,7 +24,9 @@ import RegionFilter from '../features/targets/RegionFilter';
 import {
   activeTargetFilterCount,
   isParsingTarget,
-  PAGE_SIZE,
+  PAGE_SIZE_OPTIONS,
+  PARSE_POLL_BATCH_SIZE,
+  storePageSize,
   PARSE_POLL_INTERVAL_MS,
   readTargetFilters,
   SEARCH_FIELD_LABELS,
@@ -50,6 +52,9 @@ export default function Targets() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [updateDrawer, setUpdateDrawer] = useState<{ open: boolean; scope: BusinessUpdateProcessingScope; targetId?: string; targetName?: string }>({ open: false, scope: 'basic_info' });
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const pollCursorRef = useRef(0);
+  const tableWrapRef = useRef<HTMLDivElement | null>(null);
+  const [tableMaxHeight, setTableMaxHeight] = useState<number | undefined>(undefined);
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const admin = isAdmin();
@@ -59,11 +64,29 @@ export default function Targets() {
   const [batchResearching, setBatchResearching] = useState(false);
   const [researchDialogOpen, setResearchDialogOpen] = useState(false);
 
-  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const pageCount = Math.max(1, Math.ceil(total / filters.pageSize));
   const visibleIds = useMemo(() => items.map((item) => item.id), [items]);
   const selectedCount = selectedIds.size;
+  // 批量操作条的出现/消失会把表格整体上下推，需要重算表格区高度。
+  const hasSelection = selectedCount > 0;
   const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
   const activeFilterCount = activeTargetFilterCount(filters);
+
+  // 表格区高度按容器实际位置算，而不是写死一个偏移量：工具栏在窄屏会换行、
+  // 批量操作条会出现/消失，写死偏移会让横向滚动条掉出视口。
+  useLayoutEffect(() => {
+    const recompute = () => {
+      const el = tableWrapRef.current;
+      if (!el) return;
+      // 用未滚动时的绝对位置，避免高度随页面滚动来回跳。
+      const absoluteTop = el.getBoundingClientRect().top + window.scrollY;
+      const next = Math.max(320, Math.round(window.innerHeight - absoluteTop - 72));
+      setTableMaxHeight((prev) => (prev === next ? prev : next));
+    };
+    recompute();
+    window.addEventListener('resize', recompute);
+    return () => window.removeEventListener('resize', recompute);
+  }, [hasSelection, loading]);
 
   const updateFilters = useCallback((patch: Partial<TargetFilters>, options?: { replace?: boolean }) => {
     const next = new URLSearchParams(searchParams);
@@ -76,6 +99,10 @@ export default function Targets() {
     if ('district' in patch) setOrDelete(next, 'district', patch.district);
     if ('status' in patch) setOrDelete(next, 'status', patch.status);
     if ('owner' in patch) setOrDelete(next, 'owner', patch.owner);
+    if (patch.pageSize !== undefined) {
+      next.set('pageSize', String(patch.pageSize));
+      storePageSize(patch.pageSize);
+    }
     if (patch.page !== undefined) {
       if (patch.page <= 1) next.delete('page');
       else next.set('page', String(patch.page));
@@ -96,8 +123,8 @@ export default function Targets() {
         district: filters.district || undefined,
         status: filters.status || undefined,
         owner: filters.owner || undefined,
-        limit: PAGE_SIZE,
-        offset: (filters.page - 1) * PAGE_SIZE,
+        limit: filters.pageSize,
+        offset: (filters.page - 1) * filters.pageSize,
       })
       .then((response) => {
         setItems(response.items);
@@ -126,7 +153,15 @@ export default function Targets() {
     const activeIds = items.filter(isParsingTarget).map((item) => item.id);
     if (activeIds.length === 0) return;
     const timer = window.setInterval(() => {
-      Promise.all(activeIds.map((id) => sellerTargets.get(id).catch(() => null))).then((rows) => {
+      // 每轮只查一个固定大小的窗口，窗口在轮次之间轮转：请求数与每页条数解耦，
+      // 超出窗口的行在后续轮次里依次刷新到。
+      let batch = activeIds;
+      if (activeIds.length > PARSE_POLL_BATCH_SIZE) {
+        const start = pollCursorRef.current % activeIds.length;
+        batch = Array.from({ length: PARSE_POLL_BATCH_SIZE }, (_, index) => activeIds[(start + index) % activeIds.length]);
+        pollCursorRef.current = start + PARSE_POLL_BATCH_SIZE;
+      }
+      Promise.all(batch.map((id) => sellerTargets.get(id).catch(() => null))).then((rows) => {
         const updates = rows.filter((row): row is SellerTarget => row !== null);
         if (!updates.length) return;
         setItems((prev) => {
@@ -455,11 +490,25 @@ export default function Targets() {
       )}
 
       <div>
-        <div className="bg-white border border-gray-200 overflow-x-auto">
+        {/*
+          表格区独立限高滚动：横向滚动条固定在容器底部，不必下翻整页才能够到；
+          配合 thead sticky top-0，横向拖动时列名不丢。min-h 兜底防止小屏只剩两三行。
+        */}
+        <div
+          ref={tableWrapRef}
+          style={{ maxHeight: tableMaxHeight }}
+          className="min-h-[320px] overflow-auto border border-gray-200 bg-white"
+        >
           <table className="w-max min-w-full text-sm">
-            <thead>
-              <tr className="border-b border-gray-100 bg-gray-50">
-                <th className="sticky left-0 z-30 w-12 bg-gray-50 px-4 py-3 text-left">
+            {/*
+              z 层级四层，缺一层横滚时表头冻结列会被表体冻结列盖住：
+              普通 td auto < 冻结 td z-20 < 吸顶 th z-30 < 冻结+吸顶 th z-40。
+              border-collapse: collapse 下 sticky 元素的 border 不跟随粘滞，
+              表头下边框改用 inset shadow 画。
+            */}
+            <thead className="sticky top-0 z-30">
+              <tr className="bg-gray-50 shadow-[inset_0_-1px_0_rgb(243,244,246)]">
+                <th className="sticky left-0 top-0 z-40 w-12 bg-gray-50 px-4 py-3 text-left">
                   <input
                     type="checkbox"
                     checked={allVisibleSelected}
@@ -468,7 +517,7 @@ export default function Targets() {
                     className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600"
                   />
                 </th>
-                <th className="sticky left-12 z-20 w-[220px] bg-gray-50 text-left px-4 py-3 font-medium text-gray-600">标的名称</th>
+                <th className="sticky left-12 top-0 z-40 w-[220px] bg-gray-50 text-left px-4 py-3 font-medium text-gray-600">标的名称</th>
                 <th className="w-20 max-w-20 text-left px-3 py-3 font-medium text-gray-600">标的主体</th>
                 <th className="w-[100px] text-center px-4 py-3 font-medium text-gray-600">状态</th>
                 <th className="w-[100px] text-center px-4 py-3 font-medium text-gray-600">AI 处理</th>
@@ -486,7 +535,7 @@ export default function Targets() {
                 <th className="w-[76px] text-center px-4 py-3 font-medium text-gray-600">并表</th>
                 <th className="w-[200px] text-left px-4 py-3 font-medium text-gray-600">最近推进</th>
                 <th className="w-[100px] text-left px-4 py-3 font-medium text-gray-600">负责人</th>
-                <th className="sticky right-0 z-20 w-[210px] bg-gray-50 text-left px-4 py-3 font-medium text-gray-600">操作</th>
+                <th className="sticky right-0 top-0 z-40 w-[210px] bg-gray-50 text-left px-4 py-3 font-medium text-gray-600">操作</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -516,7 +565,15 @@ export default function Targets() {
             </tbody>
           </table>
         </div>
-        <PaginationFooter page={filters.page} pageCount={pageCount} pageSize={PAGE_SIZE} loading={loading} onPageChange={(page) => updateFilters({ page })} />
+        <PaginationFooter
+          page={filters.page}
+          pageCount={pageCount}
+          pageSize={filters.pageSize}
+          loading={loading}
+          onPageChange={(page) => updateFilters({ page })}
+          pageSizeOptions={PAGE_SIZE_OPTIONS}
+          onPageSizeChange={(pageSize) => updateFilters({ pageSize, page: 1 })}
+        />
       </div>
 
       {showCreateModal && (

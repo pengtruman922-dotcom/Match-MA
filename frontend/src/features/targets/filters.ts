@@ -1,7 +1,29 @@
 import type { SellerTarget, SellerTargetSearchField } from '../../types/api';
 
 export const PAGE_SIZE = 20;
+export const PAGE_SIZE_OPTIONS = [20, 50, 100];
 export const PARSE_POLL_INTERVAL_MS = 4000;
+/** 每轮轮询的请求数上限，与每页条数解耦；超出的行按轮次轮转刷新。 */
+export const PARSE_POLL_BATCH_SIZE = 20;
+
+const PAGE_SIZE_STORAGE_KEY = 'targets.pageSize';
+
+function readStoredPageSize(): number {
+  try {
+    const stored = Number(window.localStorage.getItem(PAGE_SIZE_STORAGE_KEY));
+    return PAGE_SIZE_OPTIONS.includes(stored) ? stored : PAGE_SIZE;
+  } catch {
+    return PAGE_SIZE;
+  }
+}
+
+export function storePageSize(pageSize: number): void {
+  try {
+    window.localStorage.setItem(PAGE_SIZE_STORAGE_KEY, String(pageSize));
+  } catch {
+    // 隐私模式下 localStorage 不可写；URL 参数仍然生效，忽略即可。
+  }
+}
 
 export function isParsingTarget(item: SellerTarget): boolean {
   return ['parsing', 'research_queued', 'researching', 'research_mapping'].includes(item.ai_processing_state);
@@ -34,12 +56,16 @@ export type TargetFilters = {
   status: string;
   owner: string;
   page: number;
+  pageSize: number;
 };
 
 export function readTargetFilters(searchParams: URLSearchParams): TargetFilters {
   const searchFieldParam = searchParams.get('searchField');
   const searchField = isSellerTargetSearchField(searchFieldParam) ? searchFieldParam : undefined;
   const page = Math.max(1, Number(searchParams.get('page') || '1') || 1);
+  // URL 参数 > localStorage > 默认 20；非法值一律回落到 20。
+  const pageSizeParam = Number(searchParams.get('pageSize'));
+  const pageSize = PAGE_SIZE_OPTIONS.includes(pageSizeParam) ? pageSizeParam : readStoredPageSize();
   return {
     q: searchParams.get('q') || '',
     searchField,
@@ -51,6 +77,7 @@ export function readTargetFilters(searchParams: URLSearchParams): TargetFilters 
     status: searchParams.get('status') || '',
     owner: searchParams.get('owner') || '',
     page,
+    pageSize,
   };
 }
 

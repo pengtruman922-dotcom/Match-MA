@@ -11,7 +11,27 @@ import { setOrDelete } from '../../lib/utils';
 export type BuyerSuggestion = BuyerIntentSuggestion | BuyerPartySuggestion;
 
 export const PAGE_SIZE = 20;
+export const PAGE_SIZE_OPTIONS = [20, 50, 100];
 export const INTENT_PARSE_STATUS_POLL_INTERVAL_MS = 5000;
+
+const PAGE_SIZE_STORAGE_KEY = 'buyerIntents.pageSize';
+
+function readStoredPageSize(): number {
+  try {
+    const stored = Number(window.localStorage.getItem(PAGE_SIZE_STORAGE_KEY));
+    return PAGE_SIZE_OPTIONS.includes(stored) ? stored : PAGE_SIZE;
+  } catch {
+    return PAGE_SIZE;
+  }
+}
+
+export function storeIntentPageSize(pageSize: number): void {
+  try {
+    window.localStorage.setItem(PAGE_SIZE_STORAGE_KEY, String(pageSize));
+  } catch {
+    // 隐私模式下 localStorage 不可写；URL 参数仍然生效，忽略即可。
+  }
+}
 export const UPLOAD_POLICY_TIMEOUT_MS = 12000;
 
 export type BuyerIntentFilters = {
@@ -24,6 +44,7 @@ export type BuyerIntentFilters = {
   requiresConsolidation: string;
   owner: string;
   page: number;
+  pageSize: number;
 };
 
 export type BuyerPartyFilters = {
@@ -73,7 +94,10 @@ export const PARTY_SEARCH_FIELD_LABELS: Record<BuyerPartySearchField | 'all', st
 
 export function readIntentFilters(searchParams: URLSearchParams): BuyerIntentFilters {
   const searchFieldParam = searchParams.get('searchField');
-  return { q: searchParams.get('q') || '', searchField: isBuyerIntentSearchField(searchFieldParam) ? searchFieldParam : undefined, industry: searchParams.get('industry') || '', region: searchParams.get('region') || '', status: searchParams.get('status') || '', listedStatus: searchParams.get('listedStatus') || '', requiresConsolidation: searchParams.get('requiresConsolidation') || '', owner: searchParams.get('owner') || '', page: Math.max(1, Number(searchParams.get('page') || '1') || 1) };
+  // URL 参数 > localStorage > 默认 20；非法值一律回落到 20。
+  const pageSizeParam = Number(searchParams.get('pageSize'));
+  const pageSize = PAGE_SIZE_OPTIONS.includes(pageSizeParam) ? pageSizeParam : readStoredPageSize();
+  return { q: searchParams.get('q') || '', searchField: isBuyerIntentSearchField(searchFieldParam) ? searchFieldParam : undefined, industry: searchParams.get('industry') || '', region: searchParams.get('region') || '', status: searchParams.get('status') || '', listedStatus: searchParams.get('listedStatus') || '', requiresConsolidation: searchParams.get('requiresConsolidation') || '', owner: searchParams.get('owner') || '', page: Math.max(1, Number(searchParams.get('page') || '1') || 1), pageSize };
 }
 
 export function readPartyFilters(searchParams: URLSearchParams): BuyerPartyFilters {

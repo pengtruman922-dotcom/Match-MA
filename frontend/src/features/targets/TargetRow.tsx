@@ -54,7 +54,7 @@ export default function TargetRow({
           className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600"
         />
       </td>
-      <td className="sticky left-12 z-10 bg-white px-4 py-3 group-hover:bg-brand-50">
+      <td className="sticky left-12 z-20 bg-white px-4 py-3 group-hover:bg-brand-50">
         <ClampedLink to={`/targets/${item.id}`} value={item.target_name} className="font-medium text-gray-900 hover:text-brand-600 transition-colors" />
         {isParsingTarget(item) ? (
           <p className="mt-1 text-xs italic text-sky-500">摘要生成中...</p>
@@ -92,7 +92,7 @@ export default function TargetRow({
       <td className="px-4 py-3 text-gray-600">
         {item.owner_name ? <ClampedText value={item.owner_name} /> : <span className="text-gray-300">未指派</span>}
       </td>
-      <td className="sticky right-0 z-10 bg-white px-4 py-3 group-hover:bg-brand-50">
+      <td className="sticky right-0 z-20 bg-white px-4 py-3 group-hover:bg-brand-50">
         <div className="flex items-center gap-1 whitespace-nowrap">
           <UpdateEntryMenu compact onSelect={onOpenUpdateDrawer} />
           <Link

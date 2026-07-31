@@ -373,8 +373,10 @@ export interface BuyerIntent {
   priority_summary: string | null;
   preference_summary: string | null;
   unknown_summary: string | null;
+  acceptable_control_paths_json?: string[];
   owner_user_id?: string | null;
   owner_name?: string | null;
+  scenario_labels?: string[];
   created_at: string;
   updated_at: string;
   processing_state?: BuyerIntentProcessingState | null;

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { Sparkles } from 'lucide-react';
+import { Loader2, Sparkles, Trash2 } from 'lucide-react';
 import { buyerIntents, users } from '../../lib/api';
 import { isAdmin } from '../../lib/auth';
 import type {
@@ -22,15 +22,17 @@ import {
   INTENT_FILTERS,
   INTENT_PARSE_STATUS_POLL_INTERVAL_MS,
   INTENT_SEARCH_FIELD_LABELS,
-  PAGE_SIZE,
+  PAGE_SIZE_OPTIONS,
   readIntentFilters,
   setOrDelete,
+  storeIntentPageSize,
   type BuyerIntentFilters,
 } from './filters';
+import ScenarioBadge from './ScenarioBadge';
 import {
-  compactRequirementNotes,
   IntentStatusBadge,
   ParseStatusBadge,
+  RequirementCell,
 } from './presentation';
 
 export default function IntentsList({
@@ -56,13 +58,14 @@ export default function IntentsList({
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const admin = isAdmin();
   const [ownerOptions, setOwnerOptions] = useState<AppUserOption[]>([]);
   const [assignOwnerId, setAssignOwnerId] = useState('');
   const [assigning, setAssigning] = useState(false);
   const [updateDrawer, setUpdateDrawer] = useState<{ item: BuyerIntent; scope: BusinessUpdateProcessingScope } | null>(null);
 
-  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const pageCount = Math.max(1, Math.ceil(total / filters.pageSize));
   const visibleIds = useMemo(() => items.map((item) => item.id), [items]);
   const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
   const selectedCount = selectedIds.size;
@@ -79,6 +82,10 @@ export default function IntentsList({
     if ('listedStatus' in patch) setOrDelete(next, 'listedStatus', patch.listedStatus);
     if ('requiresConsolidation' in patch) setOrDelete(next, 'requiresConsolidation', patch.requiresConsolidation);
     if ('owner' in patch) setOrDelete(next, 'owner', patch.owner);
+    if (patch.pageSize !== undefined) {
+      next.set('pageSize', String(patch.pageSize));
+      storeIntentPageSize(patch.pageSize);
+    }
     if (patch.page !== undefined) {
       if (patch.page <= 1) next.delete('page');
       else next.set('page', String(patch.page));
@@ -98,8 +105,8 @@ export default function IntentsList({
         listed_status: filters.listedStatus || undefined,
         requires_consolidation: filters.requiresConsolidation || undefined,
         owner: filters.owner || undefined,
-        limit: PAGE_SIZE,
-        offset: (filters.page - 1) * PAGE_SIZE,
+        limit: filters.pageSize,
+        offset: (filters.page - 1) * filters.pageSize,
       })
       .then((response) => {
         setItems(response.items);
@@ -178,6 +185,20 @@ export default function IntentsList({
       else next.delete(id);
       return next;
     });
+  };
+
+  const handleDelete = async (item: BuyerIntent) => {
+    if (!window.confirm(`确认删除需求「${item.intent_name}」？删除后不会出现在列表和推荐候选里。`)) return;
+    setDeletingId(item.id);
+    try {
+      await buyerIntents.delete(item.id);
+      await buyerIntents.filterOptions().then(setFilterOptions).catch(() => {});
+      fetchData();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '删除失败');
+    } finally {
+      setDeletingId(null);
+    }
   };
 
   const handleBulkDelete = async () => {
@@ -262,29 +283,33 @@ export default function IntentsList({
       )}
 
       <div className="bg-white border border-gray-200 overflow-x-auto">
-        <table className="w-full min-w-[1160px] table-fixed text-sm">
+        {/*
+          colgroup 合计 1368px == min-w，因此发生横向滚动时（容器 < 1368）列宽恰为声明值，
+          冻结列的 sticky 偏移量精确；容器更宽时列会等比放大，但那时没有横滚，sticky 不激活。
+        */}
+        <table className="w-full min-w-[1368px] table-fixed text-sm">
           <colgroup>
             <col className="w-12" />
-            <col className="w-64" />
-            <col className="w-40" />
-            <col className="w-72" />
+            <col className="w-48" />
+            <col className="w-28" />
+            <col className="w-96" />
+            <col className="w-28" />
             <col className="w-24" />
             <col className="w-24" />
-            <col className="w-28" />
-            <col className="w-28" />
-            <col className="w-28" />
+            <col className="w-[88px]" />
+            <col className="w-60" />
           </colgroup>
           <thead>
             <tr className="border-b border-gray-100 bg-gray-50">
-              <th className="text-left px-4 py-3 w-12"><input type="checkbox" disabled={visibleIds.length === 0} checked={allVisibleSelected} onChange={toggleSelectAllVisible} aria-label="选择当前页买家意向" className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600" /></th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600">需求名称</th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600">买家名称</th>
+              <th className="sticky left-0 z-30 bg-gray-50 px-4 py-3 text-left"><input type="checkbox" disabled={visibleIds.length === 0} checked={allVisibleSelected} onChange={toggleSelectAllVisible} aria-label="选择当前页买家意向" className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600" /></th>
+              <th className="sticky left-12 z-30 bg-gray-50 px-4 py-3 text-left font-medium text-gray-600">需求名称</th>
+              <th className="sticky left-[240px] z-30 bg-gray-50 px-4 py-3 text-left font-medium text-gray-600">买家名称</th>
               <th className="text-left px-4 py-3 font-medium text-gray-600">关键需求</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">解析状态</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">推荐状态</th>
               <th className="text-left px-4 py-3 font-medium text-gray-600">负责人</th>
               <th className="text-left px-4 py-3 font-medium text-gray-600">最近更新</th>
-              <th className="text-center px-4 py-3 font-medium text-gray-600">操作</th>
+              <th className="sticky right-0 z-30 bg-gray-50 px-2 py-3 text-center font-medium text-gray-600">操作</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
@@ -299,13 +324,23 @@ export default function IntentsList({
                 selected={selectedIds.has(item.id)}
                 onSelectedChange={(checked) => toggleSelected(item.id, checked)}
                 onRecord={(scope) => setUpdateDrawer({ item, scope })}
+                onDelete={() => handleDelete(item)}
+                deleting={deletingId === item.id}
               />
             ))}
           </tbody>
         </table>
       </div>
 
-      <PaginationFooter page={filters.page} pageCount={pageCount} pageSize={PAGE_SIZE} loading={loading} onPageChange={(page) => updateFilters({ page })} />
+      <PaginationFooter
+        page={filters.page}
+        pageCount={pageCount}
+        pageSize={filters.pageSize}
+        loading={loading}
+        onPageChange={(page) => updateFilters({ page })}
+        pageSizeOptions={PAGE_SIZE_OPTIONS}
+        onPageSizeChange={(pageSize) => updateFilters({ pageSize, page: 1 })}
+      />
 
       {externalShowCreate && <CreateIntentModal onClose={onExternalCreateClose} onCreated={() => { onExternalCreateClose(); onCreated(); fetchData(); }} />}
       {updateDrawer ? <BusinessUpdateDrawer
@@ -326,25 +361,47 @@ function IntentRow({
   selected,
   onSelectedChange,
   onRecord,
+  onDelete,
+  deleting,
 }: {
   item: BuyerIntent;
   selected: boolean;
   onSelectedChange: (checked: boolean) => void;
   onRecord: (scope: BusinessUpdateProcessingScope) => void;
+  onDelete: () => void;
+  deleting: boolean;
 }) {
+  const frozen = 'bg-white group-hover:bg-brand-50';
   return (
-    <tr className="h-[72px] transition-colors hover:bg-brand-50/30">
-      <td className="px-4 py-3 align-middle"><input type="checkbox" checked={selected} onChange={(event) => onSelectedChange(event.target.checked)} aria-label={`选择${item.intent_name}`} className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600" /></td>
-      <td className="px-4 py-3 align-middle">
+    <tr className="group h-[88px] transition-colors hover:bg-brand-50/30">
+      <td className={`sticky left-0 z-20 px-4 py-3 align-middle ${frozen}`}><input type="checkbox" checked={selected} onChange={(event) => onSelectedChange(event.target.checked)} aria-label={`选择${item.intent_name}`} className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600" /></td>
+      <td className={`sticky left-12 z-20 px-4 py-3 align-middle ${frozen}`}>
         <Link to={`/buyer-intents/${item.id}`} className="line-clamp-2 font-medium leading-5 text-gray-900 transition-colors hover:text-brand-600" title={item.intent_name}>{item.intent_name}</Link>
+        <ScenarioBadge intentId={item.id} labels={item.scenario_labels || []} />
       </td>
-      <td className="px-4 py-3 align-middle text-gray-700"><p className="line-clamp-2 leading-5" title={item.buyer_name || '未关联买家'}>{item.buyer_name || <span className="text-amber-600">未关联买家</span>}</p></td>
-      <td className="px-4 py-3 align-middle text-gray-600"><p className="line-clamp-2 leading-5" title={compactRequirementNotes(item)}>{compactRequirementNotes(item) || '-'}</p></td>
+      <td className={`sticky left-[240px] z-20 px-4 py-3 align-middle text-gray-700 ${frozen}`}><p className="line-clamp-2 leading-5" title={item.buyer_name || '未关联买家'}>{item.buyer_name || <span className="text-amber-600">未关联买家</span>}</p></td>
+      <td className="px-4 py-3 align-middle text-gray-600"><RequirementCell item={item} /></td>
       <td className="px-4 py-3 text-center align-middle"><ParseStatusBadge item={item} /></td>
       <td className="px-4 py-3 text-center align-middle"><IntentStatusBadge status={item.status} /></td>
       <td className="px-4 py-3 align-middle text-gray-600"><p className="line-clamp-2" title={item.owner_name || '未指派'}>{item.owner_name || <span className="text-gray-300">未指派</span>}</p></td>
       <td className="whitespace-nowrap px-4 py-3 align-middle text-gray-500">{shortDate(item.updated_at)}</td>
-      <td className="px-4 py-3 align-middle"><div className="flex items-center justify-center gap-1"><UpdateEntryMenu compact onSelect={onRecord} /><Link to={`/recommendations?mode=buyer-to-target&intentId=${item.id}`} className="inline-flex items-center gap-1 px-2 py-1 text-xs text-brand-600 transition-colors hover:bg-brand-50"><Sparkles className="h-3 w-3" />推荐标的</Link></div></td>
+      <td className={`sticky right-0 z-20 px-2 py-3 align-middle ${frozen}`}>
+        <div className="flex items-center justify-center gap-1 whitespace-nowrap">
+          <UpdateEntryMenu compact onSelect={onRecord} />
+          <Link to={`/recommendations?mode=buyer-to-target&intentId=${item.id}`} className="inline-flex items-center gap-1 px-2 py-1 text-xs text-brand-600 transition-colors hover:bg-brand-50"><Sparkles className="h-3 w-3" />推荐标的</Link>
+          {isAdmin() && (
+            <button
+              type="button"
+              onClick={onDelete}
+              disabled={deleting}
+              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50"
+            >
+              {deleting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+              删除
+            </button>
+          )}
+        </div>
+      </td>
     </tr>
   );
 }

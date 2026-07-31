@@ -191,6 +191,7 @@ class BuyerIntentOut(BaseModel):
     unknown_summary: str | None
     owner_user_id: UUID | None = None
     owner_name: str | None = None
+    scenario_labels: list[str] = []
     created_at: str
     updated_at: str
     processing_state: dict[str, Any] | None = None
@@ -342,6 +343,11 @@ class BuyerIntentBulkDeleteOut(BaseModel):
     skipped_ids: list[UUID]
 
 
+# jsonb 展开前的防御性收敛：列里存了非数组时 jsonb_array_elements* 会在运行时报错，
+# 用它兜成空数组，避免单条脏数据把整个列表或筛选项接口打成 500。
+_JSONB_ARRAY = "case when jsonb_typeof({column}) = 'array' then {column} else '[]'::jsonb end"
+
+
 BUYER_INTENT_OUT_COLUMNS = """
               bi.id, bi.buyer_party_id, bp.buyer_name as buyer_name, bi.intent_name, bi.status, bi.contact_name,
               bi.raw_requirement_text, bi.intent_summary, bi.parsed_requirement_json,
@@ -372,6 +378,13 @@ BUYER_INTENT_OUT_COLUMNS = """
               bi.negative_summary, bi.priority_summary, bi.preference_summary, bi.unknown_summary,
               bi.owner_user_id,
               (select au.name from app_user au where au.id = bi.owner_user_id) as owner_name,
+              (select coalesce(jsonb_agg(s.label order by s.sort_order, s.created_at), '[]'::jsonb)
+                 from buyer_intent_scenario s
+                where s.buyer_intent_id = bi.id
+                  and s.team_id = bi.team_id
+                  and s.workspace_id = bi.workspace_id
+                  and s.active
+                  and s.deleted_at is null) as scenario_labels,
               bi.created_at::text as created_at, bi.updated_at::text as updated_at
 """
 
@@ -497,6 +510,7 @@ def list_buyer_intents(
     industry: str | None = Query(default=None, max_length=200),
     region: str | None = Query(default=None, max_length=200),
     status: Literal["active", "paused", "closed"] | None = Query(default=None),
+    # 保持宽松：过期书签里的旧值（如 any/unknown）自然匹配 0 行，好过 422 被前端吞掉。
     listed_status: str | None = Query(default=None, max_length=80),
     requires_consolidation: Literal["yes", "no", "likely", "unknown"] | None = Query(default=None),
     owner: str | None = Query(default=None, max_length=50),
@@ -534,16 +548,24 @@ def list_buyer_intents(
         where.append("bi.buyer_party_id = :buyer_party_id")
         params["buyer_party_id"] = buyer_party_id
     if industry:
-        where.append("concat_ws(' / ', nullif(bi.industry_primary, ''), nullif(bi.industry_secondary, '')) = :industry")
+        where.append("bi.industries_json ? :industry")
         params["industry"] = industry
     if region:
-        where.append("bi.region_scope_summary = :region")
+        where.append(
+            "exists ("
+            "select 1 from jsonb_array_elements("
+            + _JSONB_ARRAY.format(column="bi.region_constraints_json")
+            + ") rc "
+            "where rc->>'province' = :region "
+            "and coalesce(rc->>'effect', 'preferred') <> 'excluded'"
+            ")"
+        )
         params["region"] = region
     if status:
         where.append("bi.status = :status")
         params["status"] = status
     if listed_status:
-        where.append("bi.preferred_listed_status = :listed_status")
+        where.append("bi.acceptable_listed_status_json ? :listed_status")
         params["listed_status"] = listed_status
     if requires_consolidation:
         where.append("bi.requires_consolidation = :requires_consolidation")
@@ -591,22 +613,24 @@ def list_buyer_intents(
 def buyer_intent_filter_options(current_user: CurrentUser, db: Session = Depends(get_db)) -> dict[str, Any]:
     params = {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID}
     scope_clause = ""
+    # Same predicate, aliased form for the queries that join buyer_intent as bi.
+    scope_clause_bi = ""
     if owner_scope_required(current_user):
         params["scope_user_id"] = current_user.user_id
         scope_clause = "and owner_user_id = :scope_user_id"
+        scope_clause_bi = "and bi.owner_user_id = :scope_user_id"
     industries = _filter_options(
         db,
         f"""
-        select
-          concat_ws(' / ', nullif(industry_primary, ''), nullif(industry_secondary, '')) as value,
-          count(*) as count
-        from buyer_intent
-        where team_id = :team_id
-          and workspace_id = :workspace_id
-          and deleted_at is null
-          {scope_clause}
-          and concat_ws(' / ', nullif(industry_primary, ''), nullif(industry_secondary, '')) <> ''
-        group by value
+        select ind.value as value, count(distinct bi.id) as count
+        from buyer_intent bi
+        cross join lateral jsonb_array_elements_text({_JSONB_ARRAY.format(column="bi.industries_json")}) as ind(value)
+        where bi.team_id = :team_id
+          and bi.workspace_id = :workspace_id
+          and bi.deleted_at is null
+          {scope_clause_bi}
+          and nullif(ind.value, '') is not null
+        group by ind.value
         order by count desc, value asc
         limit 80
         """,
@@ -615,15 +639,17 @@ def buyer_intent_filter_options(current_user: CurrentUser, db: Session = Depends
     regions = _filter_options(
         db,
         f"""
-        select region_scope_summary as value, count(*) as count
-        from buyer_intent
-        where team_id = :team_id
-          and workspace_id = :workspace_id
-          and deleted_at is null
-          {scope_clause}
-          and nullif(region_scope_summary, '') is not null
-        group by region_scope_summary
-        order by count desc, region_scope_summary asc
+        select rc.elem->>'province' as value, count(distinct bi.id) as count
+        from buyer_intent bi
+        cross join lateral jsonb_array_elements({_JSONB_ARRAY.format(column="bi.region_constraints_json")}) as rc(elem)
+        where bi.team_id = :team_id
+          and bi.workspace_id = :workspace_id
+          and bi.deleted_at is null
+          {scope_clause_bi}
+          and nullif(rc.elem->>'province', '') is not null
+          and coalesce(rc.elem->>'effect', 'preferred') <> 'excluded'
+        group by rc.elem->>'province'
+        order by count desc, value asc
         limit 80
         """,
         params,
@@ -646,23 +672,22 @@ def buyer_intent_filter_options(current_user: CurrentUser, db: Session = Depends
     listed_statuses = _filter_options(
         db,
         f"""
-        select preferred_listed_status as value, count(*) as count
-        from buyer_intent
-        where team_id = :team_id
-          and workspace_id = :workspace_id
-          and deleted_at is null
-          {scope_clause}
-          and nullif(preferred_listed_status, '') is not null
-        group by preferred_listed_status
-        order by count desc, preferred_listed_status asc
+        select st.value as value, count(distinct bi.id) as count
+        from buyer_intent bi
+        cross join lateral jsonb_array_elements_text({_JSONB_ARRAY.format(column="bi.acceptable_listed_status_json")}) as st(value)
+        where bi.team_id = :team_id
+          and bi.workspace_id = :workspace_id
+          and bi.deleted_at is null
+          {scope_clause_bi}
+          and nullif(st.value, '') is not null
+        group by st.value
+        order by count desc, value asc
         """,
         params,
         labels={
             "listed": "已上市",
             "unlisted": "未上市",
             "pre_ipo": "拟上市",
-            "any": "均可",
-            "unknown": "未知",
         },
     )
     consolidation_requirements = _filter_options(
