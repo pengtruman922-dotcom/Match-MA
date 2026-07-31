@@ -4,10 +4,11 @@ name: match-ma
 # 用 YAML 锚点保证它们的环境变量完全一致 —— 尤其
 # MODEL_SECRET_ENCRYPTION_KEY 与 S3 配置一旦不一致，worker 会解不出模型密钥、
 # 读不到附件。
+# 注意：本锚点**不带 build**。镜像只由 migrate 服务构建一次，其余服务复用
+# 同名本地镜像 —— 否则 compose 会把 6 个后端服务当成 6 个构建目标并发执行，
+# 同时跑 6 份 pip install，在小内存机器上会直接把机器挤爆。
+# 因此必须先 `docker compose build` 再 `up`。
 x-backend: &backend
-  build:
-    context: ..
-    dockerfile: deploy/Dockerfile.backend
   image: match-ma-backend:latest
   restart: unless-stopped
   env_file:
