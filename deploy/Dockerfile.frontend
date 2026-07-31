@@ -1,0 +1,21 @@
+# Match-MA 前端镜像：Node 构建 Vite 产物 -> Caddy 托管并反代 /api 到后端。
+# 构建上下文是仓库根目录（见 docker-compose.yml 的 context: ..）。
+FROM node:20-slim AS build
+
+WORKDIR /app/frontend
+
+# VITE_API_BASE_URL 是构建期变量，会被烧进 JS 产物。
+# 默认相对路径 = 与 API 同源（Caddy 反代），免 CORS。改地址必须重新 build。
+ARG VITE_API_BASE_URL=/api/v1
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
+
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+COPY frontend/ ./
+RUN npm run build
+
+FROM caddy:2-alpine
+
+COPY deploy/Caddyfile /etc/caddy/Caddyfile
+COPY --from=build /app/frontend/dist /srv/dist

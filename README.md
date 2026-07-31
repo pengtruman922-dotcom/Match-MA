@@ -17,12 +17,13 @@ backend/app/          FastAPI 应用
   jobs/               后台任务队列与 handler
   services/           业务服务（附件存储、行业字典、搜索文档等）
   ai/                 模型客户端（LLM / OCR / embedding / rerank / Doc2X）
-  worker.py           worker 入口（--queue llm|ocr|default）
+  worker.py           worker 入口（--queue llm|ocr|research）
 database/migrations/  SQL 迁移（编号递增，经 backend/app/migration_sql.py 切分后由 Alembic 执行）
 alembic/versions/     与 SQL 迁移一一对应的 Alembic 壳
 frontend/             React 前端
 tests/                pytest 测试（不依赖真实数据库）
-scripts/              部署与 API 验证脚本
+scripts/              Railway 部署与 API 验证脚本
+deploy/               自建 Docker Compose 部署（与 Railway 并存，互不影响）
 docs/                 产品与技术设计文档（v0.1 系列）
 ```
 
@@ -47,7 +48,11 @@ npm run typecheck            # 类型检查
 npm run build                # 生产构建
 ```
 
-## 部署（Railway）
+## 部署
+
+两套部署并存、共享同一份代码，差异只在环境变量与进程启动方式。边界：`deploy/**` 只服务自建，`railway*.toml` 与 `scripts/railway_*.py` 只服务 Railway。
+
+### Railway（生产，推送 main 自动部署）
 
 生产 API：`https://match-ma-production.up.railway.app/api/v1`
 
@@ -55,10 +60,17 @@ npm run build                # 生产构建
 | --- | --- | --- |
 | API | `railway.toml` | preDeploy 跑迁移（`scripts/railway_predeploy.py`），迁移失败会阻断部署 |
 | 前端 | `frontend/railway.toml` + Caddy | 静态托管 |
-| worker-llm | `railway.worker-llm.toml` | 消费 `llm` 队列（解析、推荐深评、报告生成） |
+| worker-llm | `railway.worker-llm.toml` | 消费 `llm` 队列（解析、推荐深评、报告生成、embedding、rerank） |
 | worker-ocr | `railway.worker-ocr.toml` | 消费 `ocr` 队列（附件 OCR） |
+| worker-research | `railway.worker-research.toml` | 消费 `research` 队列（调研 Agent）；多副本，stale 窗口 1800s |
 
 部署后先轮询 `/api/v1/health` 确认返回的 commit hash 已切换，再验证业务行为；hash 长时间不变通常是 preDeploy 迁移失败。
+
+### 自建 Docker Compose（手动部署）
+
+`deploy/docker-compose.yml` 一台机器起全套：`db`(pgvector/pg17) + `minio` + `migrate` + `api` + 3 个 worker + `web`(Caddy，前端与 `/api` 反代同源)。数据库必须带 `vector` 与 `pg_trgm` 扩展。
+
+操作手册见 [deploy/README.md](deploy/README.md)，方案背景见 `平台优化方案/自建部署实施方案0729.md`。
 
 ## 迁移注意事项
 

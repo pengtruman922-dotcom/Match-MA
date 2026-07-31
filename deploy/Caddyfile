@@ -1,0 +1,30 @@
+# Match-MA 自建部署入口：静态前端 + /api 反向代理，前后端同源。
+{
+	admin off
+	# IP 直连测试阶段关闭自动 HTTPS。绑域名时删掉这行，并把下面的 :80 换成域名。
+	auto_https off
+}
+
+:80 {
+	encode gzip
+	root * /srv/dist
+
+	# 后端 API：同源转发，前端因此可用相对路径 /api/v1，无需任何 CORS 配置。
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+
+	# Vite 产物带内容哈希，可长期强缓存。
+	@assets path /assets/*
+	handle @assets {
+		header Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
+
+	# SPA 路由回退：未命中的路径一律交给 index.html。
+	handle {
+		try_files {path} /index.html
+		header Cache-Control "no-cache, no-store, must-revalidate"
+		file_server
+	}
+}

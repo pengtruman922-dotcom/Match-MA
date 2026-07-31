@@ -1,0 +1,164 @@
+name: match-ma
+
+# 后端 API 与 3 个 worker 共用同一镜像与同一份配置。
+# 用 YAML 锚点保证它们的环境变量完全一致 —— 尤其
+# MODEL_SECRET_ENCRYPTION_KEY 与 S3 配置一旦不一致，worker 会解不出模型密钥、
+# 读不到附件。
+x-backend: &backend
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile.backend
+  image: match-ma-backend:latest
+  restart: unless-stopped
+  env_file:
+    - .env
+  environment:
+    # DATABASE_URL 由 POSTGRES_* 自动拼装，避免与 db 服务的密码写岔。
+    DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-match_ma}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 未设置}@db:5432/${POSTGRES_DB:-match_ma}
+    # 附件存储：默认 MinIO(S3)。在 .env 里改成 local 即切回本地卷。
+    ATTACHMENT_STORAGE_BACKEND: ${ATTACHMENT_STORAGE_BACKEND:-s3}
+    ATTACHMENT_STORAGE_DIR: /app/storage/attachments
+    ATTACHMENT_S3_ENDPOINT_URL: http://minio:9000
+    ATTACHMENT_S3_BUCKET: ${MINIO_BUCKET:-match-ma-attachments}
+    ATTACHMENT_S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?MINIO_ROOT_USER 未设置}
+    ATTACHMENT_S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD 未设置}
+    ATTACHMENT_S3_REGION: us-east-1
+    # MinIO 必须走 path-style 寻址。
+    ATTACHMENT_S3_FORCE_PATH_STYLE: "true"
+  volumes:
+    # 本地卷模式的落盘点；MinIO 模式下不写入，保留以便随时切回。
+    - attachments:/app/storage/attachments
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    minio-init:
+      condition: service_completed_successfully
+
+services:
+  # ---------------------------------------------------------------- 数据库
+  db:
+    # 必须用 pgvector 镜像：baseline 依赖 vector 扩展与 vector(1024) 列。
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-match_ma}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 未设置}
+      POSTGRES_DB: ${POSTGRES_DB:-match_ma}
+      TZ: Asia/Shanghai
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # 只绑到宿主机回环地址：本机可 pg_dump / SSH 隧道连，公网不可达。
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-match_ma} -d ${POSTGRES_DB:-match_ma}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # ------------------------------------------------------------ 对象存储
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER 未设置}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD 未设置}
+      TZ: Asia/Shanghai
+    volumes:
+      - minio-data:/data
+    # 控制台同样只绑回环：用 SSH 隧道访问，不暴露公网。
+    ports:
+      - "127.0.0.1:9001:9001"
+
+  # 一次性建桶。轮询重试直到 MinIO 就绪，跑完退出。
+  minio-init:
+    image: minio/mc:latest
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_started
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER 未设置}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD 未设置}
+      MINIO_BUCKET: ${MINIO_BUCKET:-match-ma-attachments}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        until mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"; do
+          echo "等待 MinIO 就绪..."; sleep 2;
+        done
+        mc mb --ignore-existing local/"$$MINIO_BUCKET"
+        echo "bucket 就绪: $$MINIO_BUCKET"
+
+  # ---------------------------------------------------------------- 迁移
+  # 独占迁移：API 与 worker 都等它成功退出后才启动，避免多容器并发跑 alembic。
+  migrate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+    image: match-ma-backend:latest
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-match_ma}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 未设置}@db:5432/${POSTGRES_DB:-match_ma}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # ------------------------------------------------------------ 应用进程
+  api:
+    <<: *backend
+    command: ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/api/v1/health", timeout=5)
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  worker-llm:
+    <<: *backend
+    command: ["python", "-m", "backend.app.worker", "--queue", "llm", "--sleep", "2"]
+
+  worker-ocr:
+    <<: *backend
+    command: ["python", "-m", "backend.app.worker", "--queue", "ocr", "--sleep", "2"]
+
+  worker-research:
+    <<: *backend
+    # 调研任务单次 5~15 分钟，stale 窗口必须盖得住，否则多副本互相判死。
+    # 扩副本：docker compose up -d --scale worker-research=N
+    command: ["python", "-m", "backend.app.worker", "--queue", "research", "--sleep", "5", "--stale-after", "1800"]
+
+  # ------------------------------------------------- 前端 + 唯一对外入口
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api/v1}
+    image: match-ma-web:latest
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  pgdata:
+  minio-data:
+  attachments:
+  caddy-data:
+  caddy-config:
