@@ -148,7 +148,15 @@ def mark_job_succeeded(
                 updated_at = now(),
                 error_code = null,
                 error_message = null,
-                error_detail_json = '{}'::jsonb
+                -- 成功会清空 error_message，于是"重试过、上一次为什么失败"就此
+                -- 失传，只剩 attempt_count 一个光秃秃的数字。失败历史必须留下。
+                error_detail_json = case
+                  when error_detail_json ? 'previous_failures'
+                  then jsonb_build_object(
+                    'previous_failures', error_detail_json -> 'previous_failures'
+                  )
+                  else '{}'::jsonb
+                end
             where id = :job_id
             """
         ).bindparams(bindparam("result_json", type_=JSONB)),
@@ -187,7 +195,16 @@ def mark_job_failed(
                 updated_at = now(),
                 error_code = :error_code,
                 error_message = :error_message,
-                error_detail_json = :error_detail_json
+                error_detail_json = :error_detail_json || jsonb_build_object(
+                  'previous_failures',
+                  coalesce(error_detail_json -> 'previous_failures', '[]'::jsonb)
+                    || jsonb_build_array(jsonb_build_object(
+                         'attempt', attempt_count,
+                         'error_code', :error_code,
+                         'error_message', left(:error_message, 2000),
+                         'recorded_at', now()::text
+                       ))
+                )
             where id = :job_id
             """
         ).bindparams(bindparam("error_detail_json", type_=JSONB)),

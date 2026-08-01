@@ -92,6 +92,12 @@ def call_openai_compatible_chat(
         raise LlmCallError(f"LLM HTTP {exc.code}: {error_body}") from exc
     except error.URLError as exc:
         raise LlmCallError(f"LLM request failed: {exc.reason}") from exc
+    except (TimeoutError, ConnectionError) as exc:
+        # 读超时从 urlopen 抛的是裸 TimeoutError（OSError 子类），不是 URLError。
+        # 不包起来它就绕过了调用方的 except LlmCallError —— 失败分支写 trace 的
+        # 代码不会执行，一次 15 分钟的挂死最后什么记录都不留。
+        # `from exc` 必须保留：重试判定靠 __cause__ 链认出 TimeoutError。
+        raise LlmCallError(f"LLM request timed out or dropped after {timeout_seconds}s: {exc!r}") from exc
 
     latency_ms = int((time.perf_counter() - started) * 1000)
     try:
