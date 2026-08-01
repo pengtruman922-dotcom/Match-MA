@@ -76,9 +76,16 @@ export default function OcrProviderSection() {
       <p className="mt-2 text-xs text-gray-400">
         超时 {data.upload_timeout_seconds}s · 轮询间隔 {data.poll_interval_seconds}s · 最长等待 {data.max_wait_seconds}s
         （运维调参，仍由环境变量给）。
-        {data.source === 'environment'
-          ? ' 当前配置来自环境变量；在上方「模型配置」新增一条 OCR 配置后即可在此维护，改 Key 不再需要重新部署。'
-          : null}
+      </p>
+      {data.source === 'environment' ? (
+        <p className="mt-1 text-xs text-amber-700">
+          当前配置来自环境变量，而这里读到的是 <b>API 服务</b>的环境 —— OCR 任务跑在 worker-ocr 服务上，
+          两边的环境变量各自独立，上面的状态未必等于 worker 的真实情况。
+          在「模型配置」新增一条 OCR 配置后，两个服务读同一份，这里的状态才是权威的，改 Key 也不再需要重新部署。
+        </p>
+      ) : null}
+      <p className="mt-1 text-xs text-gray-400">
+        带文字层的 PDF 和 Office 文件直接抽取文本，不经过 OCR 服务；只有扫描件与图片才会调用它。
       </p>
     </section>
   );
