@@ -57,9 +57,19 @@ def test_queue_summary_names_include_default_worker_queues() -> None:
     names = _queue_summary_names(["custom", "llm"], include_empty=True)
 
     # research 是独立队列：调研单次 5~15 分钟，不与解析/抽取/深评抢 llm 的槽位。
-    assert names[:6] == ["llm", "research", "ocr", "embedding", "rerank", "default"]
+    assert names[:4] == ["llm", "research", "ocr", "default"]
     assert "custom" in names
     assert names.count("llm") == 1
+    # 已下线的 worker 队列不再无条件占位。
+    assert "embedding" not in names
+    assert "rerank" not in names
+
+
+def test_queue_summary_names_still_surface_retired_queues_with_history() -> None:
+    # 历史作业仍在 embedding 队列里，必须照常出现，否则旧记录会从任务中心消失。
+    names = _queue_summary_names(["embedding"], include_empty=True)
+
+    assert "embedding" in names
 
 
 def test_queue_summary_names_can_exclude_empty_defaults() -> None:

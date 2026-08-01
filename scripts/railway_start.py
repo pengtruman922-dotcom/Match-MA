@@ -21,10 +21,6 @@ def main() -> None:
             sys.executable, "-m", "backend.app.worker",
             "--queue", "research", "--sleep", "5", "--stale-after", "1800",
         ])
-    if role == "worker-embedding":
-        _exec([sys.executable, "-m", "backend.app.worker", "--queue", "embedding", "--sleep", "2"])
-    if role == "worker-rerank":
-        _exec([sys.executable, "-m", "backend.app.worker", "--queue", "rerank", "--sleep", "2"])
     if role == "worker-ocr":
         _exec([sys.executable, "-m", "backend.app.worker", "--queue", "ocr", "--sleep", "2"])
 
@@ -44,10 +40,8 @@ def main() -> None:
 def _infer_role(service_name_lower: str) -> str:
     # Keep service-name inference as a fallback; Railway variables can set
     # MATCH_MA_SERVICE_ROLE explicitly when config-as-code hides start command.
-    if "worker" in service_name_lower and "embedding" in service_name_lower:
-        return "worker-embedding"
-    if "worker" in service_name_lower and "rerank" in service_name_lower:
-        return "worker-rerank"
+    # embedding / rerank worker 服务已在 Railway 上删除，队列不再有任务写入，
+    # 这里也不再保留对应角色 —— 现存队列只有 llm / ocr / research 三个。
     if "worker" in service_name_lower and "ocr" in service_name_lower:
         return "worker-ocr"
     if "worker" in service_name_lower and "research" in service_name_lower:

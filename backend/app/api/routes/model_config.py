@@ -49,7 +49,9 @@ NODE_TYPES = {"llm", "embedding", "ocr", "rerank", "research", "parser"}
 OUTPUT_MODES = {"text", "json", "embedding", "file", "mixed"}
 TEMPLATE_ENGINES = {"jinja", "plain", "custom"}
 PROMPT_EDITABLE_NODE_TYPES = {"llm", "parser", "research"}
-TESTABLE_NODE_TYPES = {"llm", "parser", "research", "embedding", "rerank", "ocr"}
+# 异步节点测试要靠 worker 消费，因此只有实际存在 worker 的队列对应的类型可测。
+# embedding / rerank 的 worker 已下线，把它们留在这里会让测试任务永久排队。
+TESTABLE_NODE_TYPES = {"llm", "parser", "research", "ocr"}
 CHAT_NODE_TYPES = {"llm", "parser", "research"}
 
 
@@ -1378,10 +1380,6 @@ def _validate_prompt_payload(db: Session, node_name: str, template_engine: str |
 def _queue_name_for_node_test(node_type: str) -> str:
     if node_type in CHAT_NODE_TYPES:
         return "llm"
-    if node_type == "embedding":
-        return "embedding"
-    if node_type == "rerank":
-        return "rerank"
     if node_type == "ocr":
         return "ocr"
     raise HTTPException(

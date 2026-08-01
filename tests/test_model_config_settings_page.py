@@ -117,10 +117,12 @@ def test_settings_node_summary_hides_prompt_editor_for_rerank() -> None:
         test_records=[],
     )
 
-    assert summary["test_supported"] is True
-    assert summary["queue_name"] == "rerank"
+    # rerank worker 已下线：节点既不可编 Prompt，也不再支持异步测试。
+    assert summary["test_supported"] is False
+    assert summary["queue_name"] is None
     assert summary["ui"]["show_prompt_editor"] is False
     assert summary["ui"]["show_sampling_options"] is False
+    assert summary["ui"]["show_test_button"] is False
 
 
 def test_settings_page_overview_counts_nodes_and_tests() -> None:
@@ -149,5 +151,9 @@ def test_settings_page_overview_counts_nodes_and_tests() -> None:
 
 
 def test_safe_queue_name_for_node_type() -> None:
-    assert _safe_queue_name_for_node_type("embedding") == "embedding"
+    assert _safe_queue_name_for_node_type("llm") == "llm"
+    assert _safe_queue_name_for_node_type("ocr") == "ocr"
+    # 已下线的 worker 队列必须返回 None，否则测试任务会被投进无人消费的队列。
+    assert _safe_queue_name_for_node_type("embedding") is None
+    assert _safe_queue_name_for_node_type("rerank") is None
     assert _safe_queue_name_for_node_type("unknown") is None

@@ -288,7 +288,10 @@ def create_search_doc_rebuild_job(
     *,
     entity_type: str,
     entity_id: UUID,
-    queue_name: str = "embedding",
+    # 重建只做数据库文本拼接，不调用任何模型；队列名仅决定由哪个 worker 池执行。
+    # 历史上它进 embedding 队列是因为文档要拿去算向量，推荐 v3 之后改为直接作为
+    # LLM 上下文，专用 embedding worker 也已下线，因此改走 llm 队列。
+    queue_name: str = "llm",
     source: str = "search_doc_rebuild",
 ) -> dict[str, Any]:
     if entity_type == "seller_target":

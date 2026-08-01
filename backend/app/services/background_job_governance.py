@@ -309,7 +309,9 @@ def _failure_summary_totals(
 
 
 def _queue_summary_names(queue_names: Any, *, include_empty: bool) -> list[str]:
-    defaults = ["llm", "research", "ocr", "embedding", "rerank", "default"]
+    # 只列现存 worker 的队列。embedding / rerank 的 worker 已下线，留在默认清单里
+    # 会让任务中心永久显示两张空卡片；历史作业仍会通过 queue_names 自然带出来。
+    defaults = ["llm", "research", "ocr", "default"]
     names = list(dict.fromkeys([*defaults, *[str(item) for item in queue_names]]))
     return names if include_empty else [name for name in names if name not in defaults or name in queue_names]
 
