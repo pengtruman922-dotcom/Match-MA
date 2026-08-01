@@ -102,6 +102,20 @@ class _IndustryLookupDb:
         raise AssertionError(f"Unexpected industry query: {sql}")
 
 
+
+class _NoOcrRowDb:
+    """OCR 配置行不存在时的最小 db 替身：解析器会回落到环境变量。"""
+
+    def execute(self, *args, **kwargs):  # noqa: D401 - 只需要满足调用形状
+        class _Result:
+            def mappings(self):
+                return self
+
+            def one_or_none(self):
+                return None
+
+        return _Result()
+
 def test_attachment_mock_text_prefers_job_payload() -> None:
     job = JobClaim(
         id=JOB_ID,
@@ -200,7 +214,7 @@ def test_attachment_upload_policy_explains_pdf_image_and_ocr(monkeypatch) -> Non
     monkeypatch.setenv("ATTACHMENT_S3_ACCESS_KEY_ID", "ak")
     monkeypatch.setenv("ATTACHMENT_S3_SECRET_ACCESS_KEY", "sk")
 
-    policy = _attachment_upload_policy()
+    policy = _attachment_upload_policy(_NoOcrRowDb())
 
     try:
         assert policy["max_upload_bytes"] > 0

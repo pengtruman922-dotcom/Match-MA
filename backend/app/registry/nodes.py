@@ -28,6 +28,11 @@ LIFECYCLES: tuple[str, ...] = ("active", "retired")
 #   solo —— 各自独立，配一个生效一个（推荐的两个方向深评）
 UNDERSTUDY_KINDS: tuple[str, ...] = ("and", "solo")
 
+# model        —— 绑模型、（多数）吃提示词的真 AI 节点，在「AI 节点」tab 管理
+# external_api —— 第三方 API 集成（OCR 走 doc2x），不绑模型、不吃提示词，
+#                 配置和搜索工具一样放在「模型与搜索」tab
+NODE_KINDS: tuple[str, ...] = ("model", "external_api")
+
 
 @dataclass(frozen=True)
 class NodeSpec:
@@ -38,6 +43,7 @@ class NodeSpec:
     # 并且会落进 ai_trace.trace_type，所以不能靠名字猜。
     node_type: str
     description: str
+    kind: str = "model"
     # handler 实际喂进来的业务数据，面向管理员的中文描述。
     # 与 prompt_variables 是两回事：OCR 没有 Prompt，但有附件输入。
     runtime_inputs: tuple[str, ...] = ()
@@ -251,7 +257,10 @@ NODES: tuple[NodeSpec, ...] = (
         label="附件 OCR",
         domain="common",
         node_type="ocr",
-        description="调用多模态模型识别附件内容，产出供后续解析使用的文本。",
+        # 它不是 AI 节点：不绑模型、不吃提示词，只是一次 doc2x HTTP 调用。
+        # model_node_config 里那行历史配置上绑的模型从来没被调用过。
+        kind="external_api",
+        description="调用第三方 OCR 服务（doc2x）识别附件内容，产出供后续解析使用的文本。",
         runtime_inputs=("附件文件（图片 / PDF 页）",),
         prompt_variables=(),
         prompt_required=False,
@@ -376,11 +385,25 @@ def all_nodes() -> tuple[NodeSpec, ...]:
 
 
 def active_nodes() -> tuple[NodeSpec, ...]:
-    """设置页展示的目录，按 sort_order 排序。"""
+    """在用的完整目录（含第三方 API 集成），按 sort_order 排序。"""
     return tuple(sorted(
         (spec for spec in NODES if spec.lifecycle == "active"),
         key=lambda spec: spec.sort_order,
     ))
+
+
+def ai_nodes() -> tuple[NodeSpec, ...]:
+    """「AI 节点」tab 管理的那批：绑模型、可配提示词。
+
+    不含 external_api —— OCR 这类第三方集成没有模型可选、没有提示词可编，
+    放进 AI 节点列表只会让管理员以为那里的模型选择有意义。
+    """
+    return tuple(spec for spec in active_nodes() if spec.kind == "model")
+
+
+def external_api_nodes() -> tuple[NodeSpec, ...]:
+    """第三方 API 集成，配置在「模型与搜索」tab。"""
+    return tuple(spec for spec in active_nodes() if spec.kind == "external_api")
 
 
 def node_by_name(node_name: str) -> NodeSpec | None:

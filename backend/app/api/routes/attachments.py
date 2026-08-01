@@ -31,6 +31,7 @@ from backend.app.api.routes.utils import (
 from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
+from backend.app.services.ocr_provider import ocr_provider_status
 from backend.app.services.attachment_storage import (
     TEXT_FILE_EXTENSIONS,
     TEXT_MIME_PREFIXES,
@@ -455,8 +456,8 @@ def list_attachments(
 
 
 @router.get("/upload-policy", response_model=AttachmentUploadPolicyOut)
-def get_attachment_upload_policy() -> dict[str, Any]:
-    return _attachment_upload_policy()
+def get_attachment_upload_policy(db: Session = Depends(get_db)) -> dict[str, Any]:
+    return _attachment_upload_policy(db)
 
 
 @router.get("/{attachment_id}", response_model=AttachmentOut)
@@ -735,11 +736,13 @@ def _upload_failure_detail(exc: Exception) -> dict[str, Any]:
     }
 
 
-def _attachment_upload_policy() -> dict[str, Any]:
+def _attachment_upload_policy(db: Session) -> dict[str, Any]:
     settings = get_settings()
     max_upload_mb = round(settings.attachment_max_upload_bytes / 1024 / 1024, 2)
-    ocr_provider = settings.ocr_provider.strip().lower()
-    doc2x_configured = bool(settings.effective_doc2x_api_key)
+    # OCR 是第三方 API 集成，配置在设置页「模型与搜索」，环境变量兜底。
+    ocr = ocr_provider_status(db)
+    ocr_provider = ocr["adapter"]
+    doc2x_configured = ocr["key_configured"]
     object_storage_configured = settings.effective_attachment_storage_backend in {"s3", "railway_s3"}
     image_constraints = multimodal_image_constraints(
         max_count=settings.image_multimodal_max_count,
@@ -793,7 +796,7 @@ def _attachment_upload_policy() -> dict[str, Any]:
             "provider": ocr_provider,
             "doc2x": {
                 "configured": doc2x_configured,
-                "model": settings.doc2x_model,
+                "model": ocr["model"],
                 "upload_timeout_seconds": settings.doc2x_upload_timeout_seconds,
                 "poll_interval_seconds": settings.doc2x_poll_interval_seconds,
                 "max_wait_seconds": settings.doc2x_max_wait_seconds,

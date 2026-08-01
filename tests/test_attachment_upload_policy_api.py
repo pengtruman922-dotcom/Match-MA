@@ -1,7 +1,22 @@
 from fastapi.testclient import TestClient
 
 from backend.app.config import get_settings
+from backend.app.db import get_db
 from backend.app.main import create_app
+
+
+class _NoOcrRowDb:
+    """OCR 配置行不存在时的最小 db 替身：解析器会回落到环境变量。"""
+
+    def execute(self, *args, **kwargs):
+        class _Result:
+            def mappings(self):
+                return self
+
+            def one_or_none(self):
+                return None
+
+        return _Result()
 
 
 def test_attachment_upload_policy_endpoint_returns_frontend_rules(monkeypatch) -> None:
@@ -9,7 +24,9 @@ def test_attachment_upload_policy_endpoint_returns_frontend_rules(monkeypatch) -
     monkeypatch.setenv("OCR_PROVIDER", "doc2x")
     monkeypatch.setenv("DOC2X_API_KEY", "sk-test")
     get_settings.cache_clear()
-    client = TestClient(create_app())
+    app = create_app()
+    app.dependency_overrides[get_db] = lambda: _NoOcrRowDb()
+    client = TestClient(app)
 
     response = client.get("/api/v1/attachments/upload-policy")
 

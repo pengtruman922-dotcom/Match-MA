@@ -9,6 +9,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from backend.app.ai.doc2x_client import Doc2xCallError, poll_doc2x_status, submit_doc2x_pdf
+from backend.app.services.ocr_provider import resolve_ocr_provider
 from backend.app.ai.ocr_client import OcrInput, build_attachment_ocr_input_json, call_attachment_ocr
 from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
@@ -193,9 +194,10 @@ def _handle_attachment_ocr_poll(db: Session, job: JobClaim) -> dict[str, object]
     uid = str(job.payload_json.get("doc2x_uid") or "").strip()
     if not uid:
         raise ValueError("attachment_ocr_poll job requires doc2x_uid.")
-    doc2x_api_key = settings.effective_doc2x_api_key
+    ocr_config = resolve_ocr_provider(db)
+    doc2x_api_key = ocr_config.api_key
     if not doc2x_api_key:
-        raise ValueError("DOC2X_API_KEY is required for Doc2X OCR polling.")
+        raise ValueError("Doc2X API key is not configured (settings page or DOC2X_SECRET).")
 
     started_at = float(job.payload_json.get("doc2x_started_epoch") or time.time())
     elapsed_seconds = int(time.time() - started_at)
@@ -222,7 +224,7 @@ def _handle_attachment_ocr_poll(db: Session, job: JobClaim) -> dict[str, object]
 
     try:
         status_result = poll_doc2x_status(
-            base_url=settings.doc2x_base_url,
+            base_url=ocr_config.base_url,
             api_key=doc2x_api_key,
             uid=uid,
             timeout_seconds=30,
@@ -262,7 +264,7 @@ def _handle_attachment_ocr_poll(db: Session, job: JobClaim) -> dict[str, object]
                 "provider_config_id": None,
                 "node_config_id": None,
                 "provider_name": "doc2x",
-                "model_name": settings.doc2x_model,
+                "model_name": ocr_config.model,
                 "node_name": "ocr_attachment_parser",
             },
             status="succeeded",
@@ -314,7 +316,7 @@ def _handle_attachment_ocr_poll(db: Session, job: JobClaim) -> dict[str, object]
                 "provider_config_id": None,
                 "node_config_id": None,
                 "provider_name": "doc2x",
-                "model_name": settings.doc2x_model,
+                "model_name": ocr_config.model,
                 "node_name": "ocr_attachment_parser",
             },
             status="failed",
@@ -352,7 +354,7 @@ def _handle_attachment_ocr_poll(db: Session, job: JobClaim) -> dict[str, object]
         extracted_text=extracted_text,
         error_message=None if extracted_text else "Doc2X returned no markdown text.",
         parser_name="doc2x",
-        parser_version=settings.doc2x_model,
+        parser_version=ocr_config.model,
         text_path=text_path,
         markdown_path=text_path,
         page_count=status_result.page_count,
@@ -405,7 +407,7 @@ def _handle_attachment_ocr_poll(db: Session, job: JobClaim) -> dict[str, object]
             "provider_config_id": None,
             "node_config_id": None,
             "provider_name": "doc2x",
-            "model_name": settings.doc2x_model,
+            "model_name": ocr_config.model,
             "node_name": "ocr_attachment_parser",
         },
         status="succeeded" if extracted_text else "skipped",
@@ -627,18 +629,19 @@ def _handle_pdf_attachment_ocr(
             "business_update_process_job": business_update_process_job,
         }
 
-    if settings.ocr_provider.strip().lower() != "doc2x":
+    ocr_config = resolve_ocr_provider(db)
+    if ocr_config.adapter != "doc2x":
         return None
-    doc2x_api_key = settings.effective_doc2x_api_key
+    doc2x_api_key = ocr_config.api_key
     if not doc2x_api_key:
-        raise ValueError("DOC2X_API_KEY is required when OCR_PROVIDER=doc2x.")
+        raise ValueError("Doc2X API key is not configured (settings page or DOC2X_SECRET).")
 
     try:
         submit_result = submit_doc2x_pdf(
-            base_url=settings.doc2x_base_url,
+            base_url=ocr_config.base_url,
             api_key=doc2x_api_key,
             file_bytes=file_bytes,
-            model=settings.doc2x_model,
+            model=ocr_config.model,
             timeout_seconds=settings.doc2x_upload_timeout_seconds,
         )
     except Doc2xCallError as exc:
@@ -689,7 +692,7 @@ def _handle_pdf_attachment_ocr(
         node_config={
             **node_config,
             "provider_name": "doc2x",
-            "model_name": settings.doc2x_model,
+            "model_name": ocr_config.model,
         },
         status="succeeded",
         input_json={

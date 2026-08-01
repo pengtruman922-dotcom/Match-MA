@@ -9,6 +9,7 @@ from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 from backend.app.registry.indicators import groups_for, indicators_for
 from backend.app.registry.nodes import must_configure_node_names, retired_node_names
+from backend.app.services.ocr_provider import ocr_provider_status
 
 router = APIRouter(prefix="/meta", tags=["meta"])
 
@@ -289,6 +290,8 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
         and not buyer_intent_suggestion_allowed
     )
 
+    ocr_status = ocr_provider_status(db)
+
     return {
         "status": "ok" if ok else "degraded",
         "version": _version_payload(),
@@ -312,10 +315,11 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
             "s3_secret_key_configured": bool(settings.effective_attachment_s3_secret_access_key),
         },
         "ocr": {
-            "provider": settings.ocr_provider,
-            "doc2x_configured": bool(settings.effective_doc2x_api_key),
-            "doc2x_base_url_configured": bool(settings.doc2x_base_url),
-            "doc2x_model": settings.doc2x_model,
+            "provider": ocr_status["adapter"],
+            "doc2x_configured": ocr_status["key_configured"],
+            "doc2x_base_url_configured": bool(ocr_status["base_url"]),
+            "doc2x_model": ocr_status["model"],
+            "config_source": ocr_status["source"],
             "pdf_text_detection_page_limit": settings.pdf_text_detection_page_limit,
             "pdf_text_detection_min_chars": settings.pdf_text_detection_min_chars,
         },

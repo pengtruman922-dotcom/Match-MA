@@ -18,6 +18,7 @@ from backend.app.api.authn import CurrentUser, require_admin
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 from backend.app.services.model_secrets import model_secret_encryption_configured
+from backend.app.services.ocr_provider import ocr_provider_status
 from backend.app.services.search_providers import available_adapters
 from backend.app.services.search_service import get_default_search_provider, test_search_provider
 
@@ -145,3 +146,24 @@ def test_search_connectivity(
             )
         provider = dict(row)
     return test_search_provider(provider, query=payload.query, api_key=payload.api_key)
+
+
+# --------------------------------------------------------------------------
+# OCR 服务商
+#
+# 与搜索工具同构：配置行本身通过 /model-config/providers 建（provider_type='ocr'），
+# 这里只提供当前生效状态。OCR 不是 AI 节点 —— 它不绑模型、不吃提示词。
+# --------------------------------------------------------------------------
+
+
+@router.get("/ocr-config/overview")
+def ocr_config_overview(
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    require_admin(current_user)
+    status_payload = ocr_provider_status(db)
+    return {
+        **status_payload,
+        "direct_key_encryption_configured": model_secret_encryption_configured(),
+    }
