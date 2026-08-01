@@ -11,7 +11,16 @@ from sqlalchemy.orm import Session
 from backend.app.ai.embedding_client import EmbeddingCallError, call_openai_compatible_embedding
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
 from backend.app.ai.prompting import extract_template_variables, render_template
+from backend.app.ai.prompting import extract_template_variables
 from backend.app.ai.rerank_client import RerankCallError, call_dashscope_compatible_rerank
+from backend.app.registry.nodes import (
+    PROMPT_VARIABLE_LABELS,
+    NodeSpec,
+    active_nodes,
+    all_node_names,
+    node_by_name,
+    understudy_nodes,
+)
 from backend.app.api.authn import CurrentUser, require_admin
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
@@ -164,6 +173,21 @@ class NodeUpdate(BaseModel):
     is_active: bool | None = None
     is_default: bool | None = None
     metadata_json: dict[str, Any] | None = None
+
+
+class CatalogNodeConfigIn(BaseModel):
+    """设置页对目录节点的配置。
+
+    node_name 由路径给出且必须命中代码目录；node_type / output_mode /
+    response_format 一律取自注册表，调用方不能传 —— 节点是代码资产，
+    设置页只负责挑模型和调参数。
+    """
+
+    provider_config_id: UUID
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    top_p: float | None = Field(default=None, ge=0, le=1)
+    max_tokens: int | None = Field(default=None, ge=1)
+    timeout_seconds: int | None = Field(default=None, ge=1, le=3600)
 
 
 class NodeOut(BaseModel):
@@ -328,35 +352,8 @@ class ModelConfigSettingsPageOut(BaseModel):
     overview: dict[str, Any]
     quick_actions: list[dict[str, Any]]
     required_business_nodes: list[dict[str, Any]]
+    prompt_variable_labels: dict[str, str]
     security_note: str
-
-
-REQUIRED_BUSINESS_NODE_SPECS: tuple[dict[str, str], ...] = (
-    {
-        "node_name": "buyer_intent_semantic_parser",
-        "label": "买家需求语义解析",
-        "description": "理解原始材料并拆解公共条件、方案、条件作用和证据。",
-        "fallback_node_name": "buyer_intent_parser",
-    },
-    {
-        "node_name": "buyer_intent_normalizer",
-        "label": "买家需求字段规范化",
-        "description": "结合字段契约、行业字典、行政区划和枚举规则校验标准化。",
-        "fallback_node_name": "buyer_intent_parser",
-    },
-    {
-        "node_name": "recommendation_deep_eval_to_target",
-        "label": "推荐深评·为买家找标的",
-        "description": "固定买家需求，深度评价候选标的。",
-        "fallback_node_name": "recommendation_deep_eval",
-    },
-    {
-        "node_name": "recommendation_deep_eval_to_buyer",
-        "label": "推荐深评·为标的找买家",
-        "description": "固定标的画像，深度评价候选买家需求。",
-        "fallback_node_name": "recommendation_deep_eval",
-    },
-)
 
 
 @router.get("/capabilities")
@@ -398,21 +395,54 @@ def get_model_config_settings_page(
         nodes=nodes,
         tests_per_node=tests_per_node,
     )
-    latest_production_calls = _latest_production_calls_for_required_nodes(db)
+    # 目录节点 ∪ 库里实际存在的节点：未建配置的目录节点也要能查到生产调用，
+    # 未登记的节点同样照常出现（注册表是装饰，不是过滤器）。
+    known_node_names = sorted(all_node_names() | {str(node["node_name"]) for node in nodes})
+    latest_production_calls = _latest_production_calls(db, node_names=known_node_names)
+    def default_prompt_of(node_name: str | None) -> dict[str, Any] | None:
+        if not node_name:
+            return None
+        return next(
+            (p for p in prompts_by_node_name.get(node_name, []) if p.get("is_default") and p.get("is_active")),
+            None,
+        )
+
+    def understudy_prompt_for(node_name: str) -> dict[str, Any] | None:
+        spec = node_by_name(node_name)
+        return default_prompt_of(spec.understudy) if spec else None
+
     enriched_nodes = [
         _settings_node_summary(
             node,
             prompts=prompts_by_node_name.get(str(node["node_name"]), []),
             test_records=node_test_records.get(str(node["id"]), []),
+            latest_production_call=latest_production_calls.get(str(node["node_name"])),
+            understudy_prompt=understudy_prompt_for(str(node["node_name"])),
         )
         for node in nodes
     ]
+    # overview 描述的是「库里有什么」，所以只统计真实存在的配置，
+    # 下面追加的目录占位行不参与计数。
     overview = _settings_page_overview(
         providers=providers,
         nodes=enriched_nodes,
         prompts=prompts,
         node_test_records=node_test_records,
     )
+    # 代码目录里存在、但尚未建配置的节点，同样进 nodes 数组（configured=false）。
+    # 设置页据此把它们排进统一列表，不再需要独立的「必需节点」卡片区。
+    configured_names = {str(node["node_name"]) for node in nodes}
+    catalog_nodes = [
+        _settings_node_summary(
+            _catalog_placeholder_row(spec),
+            prompts=prompts_by_node_name.get(spec.node_name, []),
+            test_records=[],
+            latest_production_call=latest_production_calls.get(spec.node_name),
+            understudy_prompt=default_prompt_of(spec.understudy),
+        )
+        for spec in active_nodes()
+        if spec.node_name not in configured_names
+    ]
     required_business_nodes = _required_business_node_statuses(
         nodes=enriched_nodes,
         prompts_by_node_name=prompts_by_node_name,
@@ -421,13 +451,15 @@ def get_model_config_settings_page(
     return {
         "capabilities": get_model_config_capabilities(),
         "providers": providers,
-        "nodes": enriched_nodes,
+        "nodes": [*enriched_nodes, *catalog_nodes],
         "prompts": prompts,
         "prompts_by_node_name": prompts_by_node_name,
         "node_test_records": node_test_records,
         "overview": overview,
         "quick_actions": _settings_page_quick_actions(overview),
         "required_business_nodes": required_business_nodes,
+        # Prompt 变量的中文说明也来自代码目录，前端不再维护一份字典。
+        "prompt_variable_labels": dict(PROMPT_VARIABLE_LABELS),
         "security_note": "Environment references are preferred. Direct API keys are encrypted and never returned.",
     }
 
@@ -692,6 +724,107 @@ def create_node(payload: NodeCreate, db: Session = Depends(get_db)) -> dict[str,
             """
         ).bindparams(bindparam("metadata_json", type_=JSONB)),
         {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID, **node_data, "created_by": DEFAULT_ADMIN_USER_ID},
+    ).mappings().one()
+    db.commit()
+    return _with_prompt_capability(row)
+
+
+@router.put("/nodes/by-name/{node_name}", response_model=NodeOut)
+def upsert_catalog_node(
+    node_name: str,
+    payload: CatalogNodeConfigIn,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """为代码目录里的节点写配置：已有则更新，没有则建号。
+
+    设置页只走这个入口 —— 「建配置」和「改配置」对管理员是同一件事。
+    node_name 必须命中注册表，因此不存在「新建任意节点」这种操作。
+    """
+    spec = node_by_name(node_name)
+    if spec is None or spec.lifecycle != "active":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown AI node: {node_name}. Nodes are fixed by the code catalog.",
+        )
+    model = _get_provider_or_404(db, payload.provider_config_id)
+    if not model["is_active"]:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Selected model is inactive.",
+        )
+
+    existing = db.execute(
+        text(
+            """
+            select id
+            from model_node_config
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and node_name = :node_name
+              and is_default = true
+            limit 1
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "node_name": node_name,
+        },
+    ).mappings().one_or_none()
+
+    if existing:
+        row = _update_node_row(
+            db,
+            node_id=existing["id"],
+            data={
+                "provider_config_id": payload.provider_config_id,
+                "model_name": model["model_name"],
+                "temperature": payload.temperature,
+                "top_p": payload.top_p,
+                "max_tokens": payload.max_tokens,
+                "timeout_seconds": payload.timeout_seconds or spec.default_timeout_seconds,
+                "is_active": True,
+                "is_default": True,
+            },
+        )
+        db.commit()
+        return _with_prompt_capability(row)
+
+    _clear_default_node(db, node_name)
+    row = db.execute(
+        _node_returning_statement(
+            """
+            insert into model_node_config (
+              team_id, workspace_id, node_name, node_type, provider_config_id,
+              model_name, temperature, top_p, max_tokens, timeout_seconds,
+              response_format, output_mode, embedding_dimension,
+              is_active, is_default, created_by, metadata_json
+            )
+            values (
+              :team_id, :workspace_id, :node_name, :node_type, :provider_config_id,
+              :model_name, :temperature, :top_p, :max_tokens, :timeout_seconds,
+              :response_format, :output_mode, null,
+              true, true, :created_by, :metadata_json
+            )
+            """
+        ).bindparams(bindparam("metadata_json", type_=JSONB)),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "node_name": node_name,
+            # 结构化字段全部来自代码目录，调用方无从干预。
+            "node_type": spec.node_type,
+            "provider_config_id": payload.provider_config_id,
+            "model_name": model["model_name"],
+            "temperature": payload.temperature if payload.temperature is not None else spec.default_temperature,
+            "top_p": payload.top_p if payload.top_p is not None else spec.default_top_p,
+            "max_tokens": payload.max_tokens,
+            "timeout_seconds": payload.timeout_seconds or spec.default_timeout_seconds,
+            "response_format": spec.response_format,
+            "output_mode": spec.output_mode,
+            "created_by": DEFAULT_ADMIN_USER_ID,
+            "metadata_json": {"source": "ai_settings_catalog_upsert"},
+        },
     ).mappings().one()
     db.commit()
     return _with_prompt_capability(row)
@@ -1022,17 +1155,108 @@ def _node_test_records_for_settings_page(
     return records
 
 
+def _prompt_seed(
+    spec: NodeSpec | None,
+    *,
+    has_own_prompt: bool,
+    understudy_prompt: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """未发布提示词的节点，给一个「从代跑节点复制」的起点。
+
+    只有当代跑节点模板用到的变量全都在本节点的输入里时，复制才是安全的。
+    否则复制过来的模板会引用本节点收不到的变量 —— 渲染时它们会变成 "null"
+    字面量塞进提示词，是个比空白更糟的起点。这种情况仍然返回结构，但
+    compatible=false，并列出多余变量，好让页面说清楚为什么不能复制。
+    """
+    if spec is None or has_own_prompt or not spec.understudy or not understudy_prompt:
+        return None
+    used = extract_template_variables(
+        understudy_prompt.get("system_prompt"),
+        understudy_prompt.get("user_prompt_template"),
+    )
+    extra = [name for name in used if name not in spec.prompt_variables]
+    compatible = not extra
+    return {
+        "source_node_name": spec.understudy,
+        "source_version": understudy_prompt.get("version"),
+        "compatible": compatible,
+        "extra_variables": extra,
+        "system_prompt": understudy_prompt.get("system_prompt") if compatible else None,
+        "user_prompt_template": understudy_prompt.get("user_prompt_template") if compatible else None,
+        "output_schema_json": understudy_prompt.get("output_schema_json") if compatible else None,
+    }
+
+
+def _catalog_placeholder_row(spec: NodeSpec) -> dict[str, Any]:
+    """把目录节点伪装成一行「空配置」，好让它走与真实节点完全相同的组装路径。
+
+    结构化字段取自注册表：管理员在设置页选完模型直接保存，不需要再填这些。
+    """
+    return {
+        "id": None,
+        "node_name": spec.node_name,
+        "node_type": spec.node_type,
+        "provider_config_id": None,
+        "provider_name": None,
+        "provider_type": None,
+        "base_url": None,
+        "api_key_secret_ref": None,
+        "model_name": None,
+        "temperature": spec.default_temperature,
+        "top_p": spec.default_top_p,
+        "max_tokens": None,
+        "timeout_seconds": spec.default_timeout_seconds,
+        "response_format": spec.response_format,
+        "output_mode": spec.output_mode,
+        "embedding_dimension": None,
+        "is_active": False,
+        "is_default": False,
+        "prompt_editable": spec.node_type in PROMPT_EDITABLE_NODE_TYPES,
+        "created_at": None,
+        "updated_at": None,
+        "metadata_json": {},
+    }
+
+
 def _settings_node_summary(
     node: dict[str, Any],
     *,
     prompts: list[dict[str, Any]],
     test_records: list[dict[str, Any]],
+    latest_production_call: dict[str, Any] | None = None,
+    understudy_prompt: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     default_prompt = next((prompt for prompt in prompts if prompt.get("is_default")), None)
     latest_test = test_records[0] if test_records else None
     latest_test_status = latest_test.get("job_status") if latest_test else None
+    node_name = str(node.get("node_name"))
+    spec = node_by_name(node_name)
     return {
         **node,
+        # 目录信息。未登记节点 label 回落到 node_name 并标 registered=False，
+        # 但**照常返回** —— 隐式过滤正是 OCR 节点从设置页消失的根因。
+        "label": spec.label if spec else node_name,
+        "domain": spec.domain if spec else "common",
+        "description": spec.description if spec else "",
+        "runtime_inputs": list(spec.runtime_inputs) if spec else [],
+        "prompt_variables": list(spec.prompt_variables) if spec else [],
+        "prompt_required": spec.prompt_required if spec else True,
+        "understudy": spec.understudy if spec else None,
+        "understudy_kind": spec.understudy_kind if spec else None,
+        "understudy_group": list(spec.understudy_group) if spec else [],
+        "lifecycle": spec.lifecycle if spec else "active",
+        "sort_order": spec.sort_order if spec else 999,
+        "registered": spec is not None,
+        # 目录节点没有数据库行时也会出现在 nodes 里，靠这个字段区分。
+        "configured": node.get("id") is not None,
+        # 代码目录与库里的 node_type 不一致时必须显式暴露，不能靠库值静默运行。
+        "type_mismatch": bool(spec and spec.node_type != str(node.get("node_type"))),
+        "latest_production_call": latest_production_call,
+        "prompt_seed": _prompt_seed(
+            spec,
+            has_own_prompt=default_prompt is not None,
+            understudy_prompt=understudy_prompt,
+        ),
         "test_supported": node.get("node_type") in TESTABLE_NODE_TYPES,
         "queue_name": _safe_queue_name_for_node_type(str(node.get("node_type"))),
         "prompt_versions": [
@@ -1090,24 +1314,28 @@ def _required_business_node_statuses(
             for prompt in prompts_by_node_name.get(node_name, [])
         )
 
-    two_stage_ready = all(
-        name in default_nodes and prompt_ready(name)
-        for name in ("buyer_intent_semantic_parser", "buyer_intent_normalizer")
-    )
+    def node_ready(node_name: str) -> bool:
+        return node_name in default_nodes and prompt_ready(node_name)
+
     statuses: list[dict[str, Any]] = []
-    for spec in REQUIRED_BUSINESS_NODE_SPECS:
-        node_name = spec["node_name"]
-        fallback_name = spec["fallback_node_name"]
+    for spec in understudy_nodes():
+        node_name = spec.node_name
+        fallback_name = spec.understudy or ""
         configured = node_name in default_nodes
         has_prompt = prompt_ready(node_name)
         ready = configured and has_prompt
-        if node_name.startswith("buyer_intent_"):
-            ready = ready and two_stage_ready
-        fallback_ready = fallback_name in default_nodes and prompt_ready(fallback_name)
+        # "and" 组必须整组就绪才生效：只配一个，运行时仍然全部由代跑节点承担。
+        # 组成员来自注册表，不再靠 node_name 前缀猜。
+        if spec.understudy_kind == "and":
+            ready = ready and all(node_ready(name) for name in spec.understudy_group)
+        fallback_ready = node_ready(fallback_name)
         node = default_nodes.get(node_name)
         statuses.append(
             {
-                **spec,
+                "node_name": node_name,
+                "label": spec.label,
+                "description": spec.description,
+                "fallback_node_name": fallback_name,
                 "configured": configured,
                 "prompt_configured": has_prompt,
                 "ready": ready,
@@ -1124,8 +1352,14 @@ def _required_business_node_statuses(
     return statuses
 
 
-def _latest_production_calls_for_required_nodes(db: Session) -> dict[str, dict[str, Any]]:
-    node_names = [spec["node_name"] for spec in REQUIRED_BUSINESS_NODE_SPECS]
+def _latest_production_calls(db: Session, *, node_names: list[str]) -> dict[str, dict[str, Any]]:
+    """每个节点在真实业务链路里的最近一次调用。
+
+    必须排除节点业务测试产生的 trace —— 管理员正是靠这一列判断节点在生产中
+    是否健康，混进测试记录就失去意义。
+    """
+    if not node_names:
+        return {}
     rows = db.execute(
         text(
             """

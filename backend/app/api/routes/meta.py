@@ -8,6 +8,7 @@ from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 from backend.app.registry.indicators import groups_for, indicators_for
+from backend.app.registry.nodes import must_configure_node_names, retired_node_names
 
 router = APIRouter(prefix="/meta", tags=["meta"])
 
@@ -182,26 +183,20 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
         """,
         enabled=table_checks["model_provider_config"],
     )
+    # 节点清单来自 registry/nodes.py，不再硬编码 —— 历史上这里和下面的
+    # default_prompts 各抄了一份 8 节点清单，新增节点时无人同步，长期低报。
+    required_node_names = sorted(must_configure_node_names())
     default_llm_nodes = _count_by_query(
         db,
         """
         select count(distinct node_name)
         from model_node_config
-        where node_name in (
-            'business_update_extractor',
-            'seller_target_parser',
-            'seller_target_update_parser',
-            'buyer_intent_parser',
-            'buyer_intent_update_parser',
-            'relation_followup_draft_parser',
-            'recommendation_deep_eval',
-            'recommendation_report_writer'
-          )
-          and node_type in ('llm', 'parser')
+        where node_name = any(:node_names)
           and is_default = true
           and is_active = true
         """,
         enabled=table_checks["model_node_config"],
+        params={"node_names": required_node_names},
     )
     default_deep_eval_nodes = _count_by_query(
         db,
@@ -232,34 +227,23 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
         """
         select count(*)
         from model_node_config
-        where node_name in (
-            'embedding_seller_doc',
-            'embedding_buyer_intent',
-            'recommendation_reranker'
-          )
+        where node_name = any(:node_names)
           and is_active = true
         """,
         enabled=table_checks["model_node_config"],
+        params={"node_names": sorted(retired_node_names())},
     )
     default_prompts = _count_by_query(
         db,
         """
         select count(distinct node_name)
         from prompt_template
-        where node_name in (
-            'business_update_extractor',
-            'seller_target_parser',
-            'seller_target_update_parser',
-            'buyer_intent_parser',
-            'buyer_intent_update_parser',
-            'relation_followup_draft_parser',
-            'recommendation_deep_eval',
-            'recommendation_report_writer'
-          )
+        where node_name = any(:node_names)
           and is_default = true
           and is_active = true
         """,
         enabled=table_checks["prompt_template"],
+        params={"node_names": required_node_names},
     )
     real_business_update_prompt = _row_exists(
         db,
@@ -298,7 +282,8 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
         and default_deep_eval_nodes >= 1
         and default_ocr_nodes >= 1
         and active_retired_recommendation_nodes == 0
-        and default_prompts >= 8
+        # 阈值随目录走，不再写死 8 —— 写死的那个从加节点起就再没对过。
+        and default_prompts >= len(required_node_names)
         and real_business_update_prompt
         and buyer_intent_update_allowed
         and not buyer_intent_suggestion_allowed
@@ -378,10 +363,16 @@ def _table_exists(db: Session, table_name: str) -> bool:
     return result.scalar_one() is not None
 
 
-def _count_by_query(db: Session, query: str, *, enabled: bool) -> int:
+def _count_by_query(
+    db: Session,
+    query: str,
+    *,
+    enabled: bool,
+    params: dict[str, Any] | None = None,
+) -> int:
     if not enabled:
         return 0
-    return int(db.execute(text(query)).scalar_one())
+    return int(db.execute(text(query), params or {}).scalar_one())
 
 
 def _row_exists(db: Session, query: str, *, enabled: bool) -> bool:

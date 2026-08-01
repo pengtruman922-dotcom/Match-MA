@@ -25,6 +25,7 @@ from backend.app.api.routes.utils import (
     write_action_logs_for_diff,
 )
 from backend.app.db import get_db
+from backend.app.registry.nodes import buyer_parse_node_names
 from backend.app.services.recommendation_conditions import normalize_condition_effects, normalize_scenario_fields
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 from backend.app.services.buyer_intent_processing_state import buyer_intent_processing_states
@@ -1518,7 +1519,7 @@ def _latest_parse_trace(db: Session, buyer_intent_id: UUID) -> dict[str, Any] | 
             from ai_trace
             where team_id = :team_id
               and workspace_id = :workspace_id
-              and node_name in ('buyer_intent_parser', 'buyer_intent_semantic_parser', 'buyer_intent_normalizer')
+              and node_name = any(:buyer_parse_node_names)
               and entity_type = 'buyer_intent'
               and entity_id = :buyer_intent_id
             order by started_at desc
@@ -1529,6 +1530,7 @@ def _latest_parse_trace(db: Session, buyer_intent_id: UUID) -> dict[str, Any] | 
             "buyer_intent_id": buyer_intent_id,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
+            "buyer_parse_node_names": list(buyer_parse_node_names()),
         },
     ).mappings().one_or_none()
     return dict(row) if row else None

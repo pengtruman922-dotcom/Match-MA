@@ -9,6 +9,7 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+from backend.app.registry.nodes import buyer_parse_node_names
 
 ACTIVE_JOB_STATUSES = {"queued", "running", "retry_waiting"}
 FAILED_JOB_STATUSES = {"failed", "canceled", "cancelled"}
@@ -148,7 +149,7 @@ def buyer_intent_processing_states(
                 select 1 from ai_trace trace
                 where trace.team_id = bi.team_id and trace.workspace_id = bi.workspace_id
                   and trace.entity_type = 'buyer_intent' and trace.entity_id = bi.id
-                  and trace.node_name in ('buyer_intent_parser', 'buyer_intent_semantic_parser', 'buyer_intent_normalizer')
+                  and trace.node_name = any(:buyer_parse_node_names)
                   and trace.status = 'succeeded'
               ) as has_success_trace,
               exists (
@@ -168,7 +169,12 @@ def buyer_intent_processing_states(
               and bi.id in :entity_ids
             """
         ).bindparams(bindparam("entity_ids", expanding=True)),
-        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID, "entity_ids": tuple(intent_ids)},
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "entity_ids": tuple(intent_ids),
+            "buyer_parse_node_names": list(buyer_parse_node_names()),
+        },
     ).mappings().all()
     evidence_by_intent = {str(row["entity_id"]): dict(row) for row in evidence_rows}
 

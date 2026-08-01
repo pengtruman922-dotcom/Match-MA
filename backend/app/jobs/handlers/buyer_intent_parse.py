@@ -39,6 +39,7 @@ from backend.app.jobs.handlers.traces import (
 )
 from backend.app.jobs.queue import JobClaim
 from backend.app.registry.indicators import indicators_for
+from backend.app.registry.nodes import buyer_intent_legacy_node_name, buyer_intent_two_stage_node_names
 from backend.app.services.industry_taxonomy import (
     classify_terms,
     industry_l1_prompt_list,
@@ -70,8 +71,9 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
     if not raw_requirement_text.strip():
         raise ValueError("buyer_intent_parse job requires raw_requirement_text.")
 
-    semantic_node = _optional_node_config(db, "buyer_intent_semantic_parser")
-    normalizer_node = _optional_node_config(db, "buyer_intent_normalizer")
+    semantic_name, normalizer_name = buyer_intent_two_stage_node_names()
+    semantic_node = _optional_node_config(db, semantic_name)
+    normalizer_node = _optional_node_config(db, normalizer_name)
     semantic_output_json: dict[str, Any] | None = None
     pipeline_mode = "two_stage" if semantic_node and normalizer_node else "legacy_fallback"
 
@@ -126,7 +128,7 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
         )
         node_config = normalizer_node
     else:
-        node_config = _get_default_node_config(db, "buyer_intent_parser")
+        node_config = _get_default_node_config(db, buyer_intent_legacy_node_name())
         parsed_output_json, schema_validation_json = _call_buyer_intent_node(
             db,
             job=job,

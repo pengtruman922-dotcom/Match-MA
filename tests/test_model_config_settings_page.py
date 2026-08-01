@@ -1,12 +1,20 @@
-from uuid import UUID
+from uuid import UUID, uuid4
+
+import pytest
+from fastapi import HTTPException
 
 from backend.app.api.routes.model_config import (
+    CatalogNodeConfigIn,
+    _catalog_placeholder_row,
+    _prompt_seed,
     _group_prompts_by_node_name,
     _safe_queue_name_for_node_type,
     _settings_node_summary,
     _settings_page_overview,
     _required_business_node_statuses,
+    upsert_catalog_node,
 )
+from backend.app.registry.nodes import node_by_name
 
 NODE_ID = UUID("00000000-0000-0000-0000-000000000001")
 PROMPT_ID = UUID("00000000-0000-0000-0000-000000000002")
@@ -157,3 +165,136 @@ def test_safe_queue_name_for_node_type() -> None:
     assert _safe_queue_name_for_node_type("embedding") is None
     assert _safe_queue_name_for_node_type("rerank") is None
     assert _safe_queue_name_for_node_type("unknown") is None
+
+
+def test_catalog_placeholder_looks_like_an_unconfigured_node() -> None:
+    """未建配置的目录节点也要能进 nodes 数组，且结构化参数取自代码目录。"""
+    spec = node_by_name("buyer_intent_semantic_parser")
+    assert spec is not None
+
+    summary = _settings_node_summary(
+        _catalog_placeholder_row(spec),
+        prompts=[],
+        test_records=[],
+        latest_production_call=None,
+    )
+
+    assert summary["configured"] is False
+    assert summary["id"] is None
+    assert summary["model_name"] is None
+    assert summary["label"] == "买家需求语义解析"
+    assert summary["domain"] == "buyer"
+    # 结构化字段来自注册表，管理员只需要挑模型。
+    assert summary["node_type"] == spec.node_type
+    assert summary["output_mode"] == spec.output_mode
+    assert summary["response_format"] == spec.response_format
+    assert summary["timeout_seconds"] == spec.default_timeout_seconds
+    # 「与」组关系必须下发，否则设置页写不出「需与 XX 同时就绪」。
+    assert summary["understudy"] == "buyer_intent_parser"
+    assert summary["understudy_kind"] == "and"
+    assert summary["understudy_group"] == ["buyer_intent_normalizer"]
+
+
+def test_configured_node_is_marked_configured() -> None:
+    summary = _settings_node_summary(
+        {"id": NODE_ID, "node_name": "seller_target_parser", "node_type": "llm",
+         "is_active": True, "is_default": True, "prompt_editable": True},
+        prompts=[],
+        test_records=[],
+    )
+
+    assert summary["configured"] is True
+    assert summary["registered"] is True
+
+
+@pytest.mark.parametrize(
+    "node_name",
+    [
+        "not_a_real_node",              # 目录里没有
+        "recommendation_reranker",      # 已退役，不允许再建配置
+    ],
+)
+def test_catalog_upsert_rejects_nodes_outside_the_catalog(node_name: str) -> None:
+    """节点是代码资产：设置页不能凭任意 node_name 创建节点。"""
+    payload = CatalogNodeConfigIn(provider_config_id=uuid4())
+
+    with pytest.raises(HTTPException) as excinfo:
+        upsert_catalog_node(node_name, payload, db=None)
+
+    assert excinfo.value.status_code == 404
+
+
+def test_catalog_upsert_payload_cannot_carry_structural_fields() -> None:
+    """node_type / output_mode / response_format 不在请求体里，调用方无从干预。"""
+    fields = set(CatalogNodeConfigIn.model_fields)
+
+    assert fields == {"provider_config_id", "temperature", "top_p", "max_tokens", "timeout_seconds"}
+
+
+def _understudy_prompt(system: str | None, user: str | None, version: str = "v0.7.0") -> dict:
+    return {"version": version, "system_prompt": system, "user_prompt_template": user,
+            "output_schema_json": {"type": "object"}}
+
+
+def test_prompt_seed_offers_copy_when_variables_are_covered() -> None:
+    """方向深评与共用深评的变量完全相同，复制过来就能改，是个真起点。"""
+    spec = node_by_name("recommendation_deep_eval_to_target")
+    assert spec is not None
+
+    seed = _prompt_seed(
+        spec,
+        has_own_prompt=False,
+        understudy_prompt=_understudy_prompt(
+            "你是评估助手。方向：{{ mode }}",
+            "{{ anchor_context }}\n候选：{{ candidates_json }}",
+            version="v0.2.0",
+        ),
+    )
+
+    assert seed is not None
+    assert seed["compatible"] is True
+    assert seed["source_node_name"] == "recommendation_deep_eval"
+    assert seed["source_version"] == "v0.2.0"
+    assert seed["extra_variables"] == []
+    assert seed["user_prompt_template"] is not None
+
+
+def test_prompt_seed_refuses_copy_when_understudy_uses_unavailable_variables() -> None:
+    """买家新建解析会拿到行业字典，语义解析节点不会。
+
+    照抄会把 {{ industry_l1_list }} 带进一个收不到该变量的节点，渲染时变成
+    "null" 字面量塞给模型 —— 比空白更糟，所以只给理由不给内容。
+    """
+    spec = node_by_name("buyer_intent_semantic_parser")
+    assert spec is not None
+
+    seed = _prompt_seed(
+        spec,
+        has_own_prompt=False,
+        understudy_prompt=_understudy_prompt(
+            None,
+            "行业：{{ industry_l1_list }}\n材料：{{ raw_requirement_text }}",
+        ),
+    )
+
+    assert seed is not None
+    assert seed["compatible"] is False
+    assert seed["extra_variables"] == ["industry_l1_list"]
+    # 不兼容时绝不下发内容，避免页面「不小心」把它填进编辑器。
+    assert seed["system_prompt"] is None
+    assert seed["user_prompt_template"] is None
+
+
+def test_prompt_seed_is_absent_when_not_applicable() -> None:
+    semantic = node_by_name("buyer_intent_semantic_parser")
+    standalone = node_by_name("seller_target_parser")
+    assert semantic is not None and standalone is not None
+
+    # 已经有自己的提示词
+    assert _prompt_seed(semantic, has_own_prompt=True, understudy_prompt=_understudy_prompt(None, "{{ raw_requirement_text }}")) is None
+    # 代跑节点也没发布提示词
+    assert _prompt_seed(semantic, has_own_prompt=False, understudy_prompt=None) is None
+    # 本来就没有代跑节点
+    assert _prompt_seed(standalone, has_own_prompt=False, understudy_prompt=_understudy_prompt(None, "x")) is None
+    # 未登记节点
+    assert _prompt_seed(None, has_own_prompt=False, understudy_prompt=_understudy_prompt(None, "x")) is None

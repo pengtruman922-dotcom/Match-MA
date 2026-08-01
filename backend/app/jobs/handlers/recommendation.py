@@ -11,6 +11,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
+from backend.app.registry.nodes import deep_eval_node_by_mode, deep_eval_understudy_node_name
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
 from backend.app.jobs.queue import JobClaim
 
@@ -249,12 +250,10 @@ DEEP_EVAL_SHARD_SIZE = 15
 DEEP_EVAL_MAX_WORKERS = 4
 
 # 方向专属 prompt 节点；未在设置页建号时回落到共用节点，行为与改造前一致。
-DEEP_EVAL_NODE_BY_MODE = {
-    "buyer_to_target": "recommendation_deep_eval_to_target",
-    "target_to_buyer": "recommendation_deep_eval_to_buyer",
-}
+# 映射与回落目标都来自代码目录 registry/nodes.py，此处不再各自声明一份。
+DEEP_EVAL_NODE_BY_MODE = deep_eval_node_by_mode()
 
-DEEP_EVAL_FALLBACK_NODE = "recommendation_deep_eval"
+DEEP_EVAL_FALLBACK_NODE = deep_eval_understudy_node_name()
 
 
 def _get_deep_eval_node_config(db: Session, mode: str) -> dict[str, Any]:
