@@ -23,6 +23,17 @@ class PdfInspectionResult:
         return self.pdf_kind == "text_pdf"
 
 
+@dataclass(frozen=True)
+class PdfTextResult:
+    """整篇正文。和检测结果分开，免得采样又被当成正文用。"""
+
+    page_count: int | None
+    extracted_text: str
+    extracted_char_count: int
+    truncated: bool
+    error_message: str | None = None
+
+
 def inspect_pdf_text_layer(
     file_bytes: bytes,
     *,
@@ -30,6 +41,12 @@ def inspect_pdf_text_layer(
     min_total_chars: int = 200,
     max_chars: int = 200_000,
 ) -> PdfInspectionResult:
+    """判断这个 PDF 有没有文字层 —— **只是判断**。
+
+    为了快，它只采样前 ``page_limit`` 页。``extracted_text`` 是这个判断的
+    副产品，是**样本不是正文**：拿它落库会把第 6 页以后整段丢掉。要正文请调
+    :func:`extract_pdf_text`。
+    """
     try:
         from pypdf import PdfReader
     except ModuleNotFoundError as exc:  # pragma: no cover - dependency check
@@ -69,4 +86,46 @@ def inspect_pdf_text_layer(
         extracted_text=extracted_text,
         extracted_char_count=char_count,
         threshold_chars=min_total_chars,
+    )
+
+
+def extract_pdf_text(file_bytes: bytes, *, max_chars: int = 200_000) -> PdfTextResult:
+    """抽整篇正文，不采样。
+
+    ``truncated`` 只在真的撞上 ``max_chars`` 时为 True —— 截断必须是可见的，
+    这正是之前那次静默丢数据的教训。
+    """
+    try:
+        from pypdf import PdfReader
+    except ModuleNotFoundError as exc:  # pragma: no cover - dependency check
+        raise PdfInspectionError("pypdf is required for PDF text extraction.") from exc
+
+    try:
+        reader = PdfReader(BytesIO(file_bytes))
+        page_count = len(reader.pages)
+        parts: list[str] = []
+        for page in reader.pages:
+            text = page.extract_text() or ""
+            if text.strip():
+                parts.append(text.strip())
+            if sum(len(item) for item in parts) >= max_chars:
+                break
+    except Exception as exc:
+        return PdfTextResult(
+            page_count=None,
+            extracted_text="",
+            extracted_char_count=0,
+            truncated=False,
+            error_message=str(exc),
+        )
+
+    extracted_text = "\n\n".join(parts).strip()
+    truncated = len(extracted_text) > max_chars
+    if truncated:
+        extracted_text = extracted_text[:max_chars]
+    return PdfTextResult(
+        page_count=page_count,
+        extracted_text=extracted_text,
+        extracted_char_count=len(extracted_text),
+        truncated=truncated,
     )

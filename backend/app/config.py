@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     attachment_storage_dir: str = "storage/attachments"
     attachment_max_upload_bytes: int = 25 * 1024 * 1024
     attachment_text_capture_max_bytes: int = 200_000
+    # 附件正文送进解析提示词的上限。落库存全文（上面那个天花板），进模型再收一道：
+    # 一份 10 页年报约 1.4 万字，6 万字够放几份长材料又不至于顶爆上下文。
+    attachment_prompt_text_max_chars: int = 60_000
     attachment_s3_endpoint_url: str | None = None
     attachment_s3_region: str = "auto"
     attachment_s3_bucket: str | None = None

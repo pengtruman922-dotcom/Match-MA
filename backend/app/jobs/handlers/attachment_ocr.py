@@ -18,7 +18,7 @@ from backend.app.services.attachment_storage import (
     save_generated_text,
 )
 from backend.app.services.office_inspection import inspect_office_text, office_document_kind
-from backend.app.services.pdf_inspection import inspect_pdf_text_layer
+from backend.app.services.pdf_inspection import extract_pdf_text, inspect_pdf_text_layer
 from backend.app.services.business_update_flow import _enqueue_business_update_process_job
 
 from backend.app.jobs.handlers.business_update import (
@@ -531,29 +531,47 @@ def _handle_pdf_attachment_ocr(
     )
 
     if inspection.is_text_pdf:
+        # 检测只采样前几页；正文必须重新整篇抽一次，否则第 6 页以后的内容
+        # （年报里财务数据往往就在那）永远进不了解析。
+        document = extract_pdf_text(file_bytes, max_chars=settings.attachment_text_capture_max_bytes)
+        document_text = document.extracted_text or inspection.extracted_text
+        _patch_attachment_metadata(
+            db,
+            attachment_id,
+            {
+                "last_pdf_text_extraction": {
+                    "page_count": document.page_count,
+                    "extracted_char_count": document.extracted_char_count,
+                    "truncated": document.truncated,
+                    "max_chars": settings.attachment_text_capture_max_bytes,
+                    "error_message": document.error_message,
+                    "fell_back_to_detection_sample": not document.extracted_text,
+                },
+            },
+        )
         text_path = _save_ocr_text_artifact(
             attachment_id=attachment_id,
             parsed_document_id=None,
-            content=inspection.extracted_text,
+            content=document_text,
             suffix="pdf-text.txt",
         )
         parsed_document_id = _insert_parsed_document_for_ocr(
             db,
             attachment_id=attachment_id,
             parse_status="parsed",
-            extracted_text=inspection.extracted_text,
+            extracted_text=document_text,
             error_message=None,
             parser_name="pdf_text_layer",
             parser_version="pypdf",
             text_path=text_path,
-            page_count=inspection.page_count,
+            page_count=document.page_count or inspection.page_count,
         )
         evidence_id = _insert_ocr_evidence_span(
             db,
             attachment_id=attachment_id,
             parsed_document_id=parsed_document_id,
             job_id=job.id,
-            text_excerpt=inspection.extracted_text,
+            text_excerpt=document_text,
         )
         _update_attachment_parse_terminal(
             db,
@@ -562,7 +580,7 @@ def _handle_pdf_attachment_ocr(
             job_id=job.id,
             parsed_document_id=parsed_document_id,
             evidence_id=evidence_id,
-            text_length=len(inspection.extracted_text),
+            text_length=len(document_text),
             metadata_patch={
                 "last_ocr_provider": "pdf_text_layer",
                 "last_pdf_kind": inspection.pdf_kind,
@@ -575,14 +593,14 @@ def _handle_pdf_attachment_ocr(
             attachment_id=attachment_id,
             parsed_document_id=parsed_document_id,
             evidence_id=evidence_id,
-            extracted_text=inspection.extracted_text,
+            extracted_text=document_text,
         )
         business_update_process_job = _enqueue_business_update_process_after_ocr(
             db,
             job=job,
             attachment_id=attachment_id,
             evidence_id=evidence_id,
-            extracted_text=inspection.extracted_text,
+            extracted_text=document_text,
         )
         _insert_ocr_trace(
             db,
@@ -600,8 +618,13 @@ def _handle_pdf_attachment_ocr(
                     "extracted_char_count": inspection.extracted_char_count,
                     "threshold_chars": inspection.threshold_chars,
                 },
+                "pdf_text_extraction": {
+                    "page_count": document.page_count,
+                    "extracted_char_count": document.extracted_char_count,
+                    "truncated": document.truncated,
+                },
             },
-            raw_output_text=inspection.extracted_text,
+            raw_output_text=document_text,
             parsed_output_json={
                 "execution_mode": "pdf_text_layer",
                 "pdf_kind": inspection.pdf_kind,
@@ -622,7 +645,9 @@ def _handle_pdf_attachment_ocr(
             "pdf_kind": inspection.pdf_kind,
             "parsed_document_id": str(parsed_document_id),
             "evidence_id": str(evidence_id),
-            "text_length": len(inspection.extracted_text),
+            "text_length": len(document_text),
+            "page_count": document.page_count,
+            "text_truncated": document.truncated,
             "touched_seller_target_count": touched_seller_target_count,
             "child_parse_jobs": child_parse_jobs,
             "child_parse_job_count": len(child_parse_jobs),
@@ -1137,7 +1162,9 @@ def _insert_ocr_evidence_span(
     job_id: UUID,
     text_excerpt: str,
 ) -> UUID:
-    excerpt = _truncate_text(text_excerpt, 2000) or ""
+    # 这里存的是附件正文，下游解析读的就是它 —— 曾经的 2000 字上限把 10 页年报
+    # 砍成 2 页，财务表整段丢失。上限只保留和抽取端同一个天花板做兜底。
+    excerpt = _truncate_text(text_excerpt, get_settings().attachment_text_capture_max_bytes) or ""
     row = db.execute(
         text(
             """
@@ -1393,6 +1420,8 @@ def _enqueue_linked_parse_jobs_after_ocr(
         if not readiness["all_terminal"] or not readiness["combined_text"]:
             return []
         parse_text = str(readiness["combined_text"])
+    # 落库存全文，进提示词再收一道：两个上限各管各的，谁也不该替对方做决定。
+    parse_text = _truncate_text(parse_text, get_settings().attachment_prompt_text_max_chars) or ""
     if not parse_text:
         return []
 

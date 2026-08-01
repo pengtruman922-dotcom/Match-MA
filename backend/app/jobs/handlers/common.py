@@ -635,7 +635,14 @@ def _fetch_seller_targets(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
             select
               id, target_name, target_type, target_subject_name, industry_l1, industry_l2, industry_pairs_json,
               location_province, location_city, location_district, listed_status,
-              current_revenue_yuan, current_net_profit_yuan, valuation_yuan,
+              -- 这份清单就是模型的字段词汇表：提示词让它"use canonical fields from
+              -- context"，没出现在这里的字段它根本不知道存在。财务几项曾经缺席，
+              -- 结果年报摆在面前也只写得出行业和地区。
+              current_revenue_yuan, current_net_profit_yuan, current_total_profit_yuan,
+              current_assets_yuan, current_debt_ratio, current_operating_cash_flow_yuan,
+              financial_period_label, market_cap_yuan,
+              profitability_status, cash_flow_status, operation_stability_status,
+              valuation_yuan,
               valuation_date, asking_price_yuan, asking_price_date, pe_ratio, is_for_sale, can_control,
               can_consolidate, business_summary, transaction_summary, risk_summary
             from seller_target

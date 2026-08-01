@@ -1626,7 +1626,7 @@ def _compact_log_evidence(log: dict[str, Any]) -> dict[str, Any] | None:
         return None
     return {
         "id": log.get("evidence_id"),
-        "text_excerpt": log.get("evidence_text_excerpt"),
+        "text_excerpt": _truncate_review_text(log.get("evidence_text_excerpt"), 500),
         "attachment_id": log.get("evidence_attachment_id"),
         "parsed_document_id": log.get("evidence_parsed_document_id"),
         "page_no": log.get("evidence_page_no"),

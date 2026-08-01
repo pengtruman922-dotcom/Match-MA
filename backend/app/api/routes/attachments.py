@@ -1546,7 +1546,8 @@ def _compact_evidence_span(evidence: dict[str, Any]) -> dict[str, Any]:
         "attachment_id": evidence.get("attachment_id"),
         "parsed_document_id": evidence.get("parsed_document_id"),
         "page_no": evidence.get("page_no"),
-        "text_excerpt": evidence.get("text_excerpt"),
+        # 证据现在存的是附件全文，这里只给展示用的开头几百字。
+        "text_excerpt": _truncate_text(evidence.get("text_excerpt"), 500),
         "char_start": evidence.get("char_start"),
         "char_end": evidence.get("char_end"),
         "created_at": evidence.get("created_at"),

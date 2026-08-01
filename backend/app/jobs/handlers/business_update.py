@@ -447,18 +447,39 @@ def _build_business_update_attachment_context(
             )
 
     attachments = list(attachments_by_id.values())
+    # 附件正文按总预算裁剪，而不是每段各截一刀 —— 一份长材料不该因为固定的
+    # 单段上限而丢掉后半篇。裁剪必须留痕，下面会写进 combined_text_truncated。
+    remaining = get_settings().attachment_prompt_text_max_chars
+    combined_truncated = False
     combined_parts: list[str] = []
     for attachment in attachments:
         for evidence in attachment.get("evidence_spans", []):
-            text_excerpt = _truncate_text(evidence.get("text_excerpt"), 4000)
-            if text_excerpt:
-                combined_parts.append(
-                    "[Attachment evidence "
-                    f"{evidence['evidence_id']} from {attachment.get('file_name')}]\n{text_excerpt}"
-                )
+            body = str(evidence.get("text_excerpt") or "").strip()
+            if not body:
+                continue
+            if remaining <= 0 or len(body) > remaining:
+                combined_truncated = True
+                body = body[:remaining] if remaining > 0 else ""
+            if not body:
+                continue
+            remaining -= len(body)
+            combined_parts.append(
+                "[Attachment evidence "
+                f"{evidence['evidence_id']} from {attachment.get('file_name')}]\n{body}"
+            )
+
+    # context_json 和 raw_text 都会渲进提示词。正文只在 raw_text 里放一份，
+    # context 这边退回定位信息，否则同一份文档要在提示词里出现两遍。
+    for attachment in attachments:
+        for evidence in attachment.get("evidence_spans", []):
+            full_text = str(evidence.get("text_excerpt") or "")
+            evidence["text_excerpt"] = _truncate_text(full_text, 200)
+            evidence["text_char_count"] = len(full_text)
+
     return {
         "attachments": attachments,
         "combined_text": "\n\n".join(combined_parts),
+        "combined_text_truncated": combined_truncated,
         "evidence_ids": evidence_ids,
     }
 

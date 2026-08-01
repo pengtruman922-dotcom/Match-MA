@@ -125,7 +125,9 @@ def list_field_sources(
               ev.id as ev_id, ev.source_type as ev_source_type, ev.source_id as ev_source_id,
               ev.attachment_id as ev_attachment_id, ev.parsed_document_id as ev_parsed_document_id,
               ev.page_no as ev_page_no, ev.slide_no as ev_slide_no, ev.sheet_name as ev_sheet_name,
-              ev.cell_range as ev_cell_range, ev.text_excerpt as ev_text_excerpt,
+              ev.cell_range as ev_cell_range,
+              -- 证据存的是附件全文，字段溯源只需要展示用的开头。
+              left(ev.text_excerpt, 500) as ev_text_excerpt,
               ev.char_start as ev_char_start, ev.char_end as ev_char_end,
               ev.created_at::text as ev_created_at,
               rp.id as rp_id, rp.job_id as rp_job_id, rp.source_type as rp_source_type,
