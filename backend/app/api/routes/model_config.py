@@ -16,7 +16,7 @@ from backend.app.ai.rerank_client import RerankCallError, call_dashscope_compati
 from backend.app.registry.nodes import (
     PROMPT_VARIABLE_LABELS,
     NodeSpec,
-    active_nodes,
+    ai_nodes,
     all_node_names,
     node_by_name,
     understudy_nodes,
@@ -440,7 +440,7 @@ def get_model_config_settings_page(
             latest_production_call=latest_production_calls.get(spec.node_name),
             understudy_prompt=default_prompt_of(spec.understudy),
         )
-        for spec in active_nodes()
+        for spec in ai_nodes()
         if spec.node_name not in configured_names
     ]
     required_business_nodes = _required_business_node_statuses(
@@ -938,6 +938,53 @@ def update_node(node_id: UUID, payload: NodeUpdate, db: Session = Depends(get_db
     return row
 
 
+@router.delete("/models/{provider_id}/permanent", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/providers/{provider_id}/permanent", status_code=status.HTTP_204_NO_CONTENT)
+def delete_provider_permanently(provider_id: UUID, db: Session = Depends(get_db)) -> None:
+    """物理删除一条模型配置。
+
+    只对「谁都不引用」的配置放行：节点引用会让配置在页面上突然失去模型，
+    ai_trace 引用一旦断开，历史调用就再也查不到当时用的是什么配置。
+    两处外键都是 NO ACTION，硬删会被数据库直接拒绝 —— 这里提前查清楚，
+    好给出能看懂的理由，而不是一个 500。
+    """
+    _get_provider_or_404(db, provider_id)
+    node_count = int(
+        db.execute(
+            text("select count(*) from model_node_config where provider_config_id = :pid"),
+            {"pid": provider_id},
+        ).scalar_one()
+        or 0
+    )
+    if node_count:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"该配置仍被 {node_count} 个节点引用，请先把节点改绑其他模型。",
+        )
+    trace_count = int(
+        db.execute(
+            text("select count(*) from ai_trace where provider_config_id = :pid"),
+            {"pid": provider_id},
+        ).scalar_one()
+        or 0
+    )
+    if trace_count:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"该配置有 {trace_count} 条历史调用记录，只能停用，不能删除。",
+        )
+    db.execute(
+        text(
+            """
+            delete from model_provider_config
+            where id = :pid and team_id = :team_id and workspace_id = :workspace_id
+            """
+        ),
+        {"pid": provider_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    )
+    db.commit()
+
+
 @router.delete("/nodes/{node_id}", response_model=NodeOut)
 def deactivate_node(node_id: UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
     _get_node_or_404(db, node_id)
@@ -1245,6 +1292,7 @@ def _settings_node_summary(
         "understudy_kind": spec.understudy_kind if spec else None,
         "understudy_group": list(spec.understudy_group) if spec else [],
         "lifecycle": spec.lifecycle if spec else "active",
+        "kind": spec.kind if spec else "model",
         "sort_order": spec.sort_order if spec else 999,
         "registered": spec is not None,
         # 目录节点没有数据库行时也会出现在 nodes 里，靠这个字段区分。
@@ -1603,10 +1651,28 @@ def _validate_node_payload(data: dict[str, Any]) -> None:
 
 
 def _validate_prompt_payload(db: Session, node_name: str, template_engine: str | None) -> None:
+    """节点是否存在由代码目录说了算，不由「库里有没有配置行」说了算。
+
+    旧实现要求先有默认模型节点才能写提示词，于是目录里已声明、但还没选模型的
+    节点根本没法准备提示词 —— 只能先建号，而建号那一刻节点就生效了。
+    两件事应该能分开做：先写好提示词，再决定什么时候选模型启用它。
+    未登记的历史节点仍按库里的配置放行，避免锁死存量数据。
+    """
     _validate_choice("template_engine", template_engine, TEMPLATE_ENGINES)
+    spec = node_by_name(node_name)
+    if spec is not None:
+        if spec.lifecycle != "active" or not spec.prompt_required:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Prompt editing is not supported for node {node_name}.",
+            )
+        return
     node = _get_default_node_by_name(db, node_name)
     if node is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Default model node not found for prompt.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown AI node: {node_name}. Nodes are fixed by the code catalog.",
+        )
     if node["node_type"] not in PROMPT_EDITABLE_NODE_TYPES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Prompt editing is disabled for node_type={node['node_type']}.")
 

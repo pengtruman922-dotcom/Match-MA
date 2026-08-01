@@ -34,11 +34,12 @@ export default function NodeList({
     [nodes],
   );
 
-  // 唯一的隐藏依据是代码目录的 lifecycle；不按 node_type 过滤 —— 那正是
-  // 附件 OCR 节点整行从设置页消失的原因。
+  // 隐藏依据只有两条，都来自代码目录：已退役、以及不是模型驱动的节点
+  // （OCR 走第三方 API，配置在「模型与搜索」）。**不按 node_type 过滤** ——
+  // 那正是附件 OCR 曾经整行从设置页消失的原因。
   const catalog = useMemo(
     () => nodes
-      .filter((node) => node.lifecycle !== 'retired')
+      .filter((node) => node.lifecycle !== 'retired' && node.kind !== 'external_api')
       .sort((a, b) => a.sort_order - b.sort_order),
     [nodes],
   );

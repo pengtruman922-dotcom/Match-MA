@@ -476,6 +476,8 @@ export interface ModelNodeConfig {
   understudy_kind: 'and' | 'solo' | null;
   understudy_group: string[];
   lifecycle: 'active' | 'retired';
+  /** model = 绑模型的 AI 节点；external_api = 第三方 API 集成（OCR），在「模型与搜索」维护。 */
+  kind: 'model' | 'external_api';
   sort_order: number;
   /** 库里有、代码目录没有的节点：照常显示并标「未登记」，不得据此过滤。 */
   registered: boolean;

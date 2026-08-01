@@ -7,6 +7,7 @@ from backend.app.api.routes.model_config import (
     CatalogNodeConfigIn,
     _catalog_placeholder_row,
     _prompt_seed,
+    _validate_prompt_payload,
     _group_prompts_by_node_name,
     _safe_queue_name_for_node_type,
     _settings_node_summary,
@@ -298,3 +299,24 @@ def test_prompt_seed_is_absent_when_not_applicable() -> None:
     assert _prompt_seed(standalone, has_own_prompt=False, understudy_prompt=_understudy_prompt(None, "x")) is None
     # 未登记节点
     assert _prompt_seed(None, has_own_prompt=False, understudy_prompt=_understudy_prompt(None, "x")) is None
+
+
+def test_prompt_can_be_written_before_a_model_is_picked() -> None:
+    """目录里已声明、还没选模型的节点必须能先准备提示词。
+
+    旧实现要求先有默认模型节点，于是「写提示词」和「启用节点」被绑死：
+    建号那一刻节点就生效了，没法先把提示词准备好再决定何时启用。
+    """
+    # db 传 None 即可证明它没走库查询这条路。
+    _validate_prompt_payload(None, "buyer_intent_semantic_parser", "jinja")
+    _validate_prompt_payload(None, "recommendation_deep_eval_to_target", "jinja")
+
+
+def test_prompt_is_rejected_for_nodes_that_have_none() -> None:
+    with pytest.raises(HTTPException) as excinfo:
+        _validate_prompt_payload(None, "ocr_attachment_parser", "jinja")
+    assert excinfo.value.status_code == 400
+
+    with pytest.raises(HTTPException) as excinfo:
+        _validate_prompt_payload(None, "embedding_seller_doc", "jinja")
+    assert excinfo.value.status_code == 400

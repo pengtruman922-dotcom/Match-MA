@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { AlertCircle, CheckCircle2, ChevronDown, ChevronRight, Loader2, Pencil, Plus, RefreshCw, TestTube2 } from 'lucide-react';
+import OcrProviderSection from './OcrProviderSection';
 import SearchProviderSection from './SearchProviderSection';
 import { modelConfig } from '../../lib/api';
 import type { ModelConnectionTestResult, ModelNodeConfig, ModelProviderConfig } from '../../types/api';
@@ -44,6 +45,21 @@ export default function ModelSection({
       await onRefresh();
     } catch (error) {
       alert(error instanceof Error ? error.message : '停用模型配置失败');
+    } finally {
+      setPendingId(null);
+    }
+  };
+
+  const remove = async (model: ModelProviderConfig) => {
+    if (!window.confirm(`彻底删除「${model.provider_name}」？此操作不可撤销。
+
+仅当没有节点引用、也没有历史调用记录时才能删除。`)) return;
+    setPendingId(model.id);
+    try {
+      await modelConfig.deleteModelPermanently(model.id);
+      await onRefresh();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : '删除模型配置失败');
     } finally {
       setPendingId(null);
     }
@@ -120,9 +136,14 @@ export default function ModelSection({
                     <Td>{model.key_display}</Td>
                     <Td>{usageByProvider[model.id] ? `${usageByProvider[model.id]} 个节点` : <span className="text-gray-400">未引用</span>}</Td>
                     <Td>
-                      <button type="button" onClick={() => void reactivate(model)} disabled={pendingId === model.id} className="text-xs text-brand-700 disabled:text-gray-300">
-                        {pendingId === model.id ? '处理中...' : '重新启用'}
-                      </button>
+                      <div className="flex items-center gap-3">
+                        <button type="button" onClick={() => void reactivate(model)} disabled={pendingId === model.id} className="text-xs text-brand-700 disabled:text-gray-300">
+                          {pendingId === model.id ? '处理中...' : '重新启用'}
+                        </button>
+                        <button type="button" onClick={() => void remove(model)} disabled={pendingId === model.id} className="text-xs text-red-600 disabled:text-gray-300">
+                          删除
+                        </button>
+                      </div>
                     </Td>
                   </tr>
                 ))
@@ -133,6 +154,8 @@ export default function ModelSection({
       </section>
 
       <SearchProviderSection />
+
+      <OcrProviderSection />
 
       {editing ? (
         <ModelEditor

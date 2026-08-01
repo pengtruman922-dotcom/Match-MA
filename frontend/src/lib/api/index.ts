@@ -572,8 +572,12 @@ export const modelConfig = {
     api_key?: string | null;
     is_active?: boolean;
   }) => apiRequest<ModelProviderConfig>(`/model-config/models/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  /** 停用：置 is_active=false，历史调用记录保留，可重新启用。 */
   deleteModel: (id: string) =>
     apiRequest<ModelProviderConfig>(`/model-config/models/${id}`, { method: 'DELETE' }),
+  /** 物理删除：仅当无节点引用且无历史调用记录时放行，否则后端返回 409。 */
+  deleteModelPermanently: (id: string) =>
+    apiRequest<void>(`/model-config/models/${id}/permanent`, { method: 'DELETE' }),
   testModelDraft: (data: {
     provider_config_id?: string | null;
     model_name: string;
