@@ -84,12 +84,14 @@ GitHub Actions（`.github/workflows/ci.yml`）在每次推送 main 和 PR 时自
 
 ## 文档
 
-`docs/` 下为 v0.1 系列设计文档，入口：
+三份文档各管一件事，不重叠：
 
-- `docs/prd_v0.1.md`：产品需求
-- `docs/confirmed_product_and_tech_plan_v0.1.md`：已确认的产品与技术方案（最全）
-- `docs/data_model_v0.1.md` / `docs/postgres_schema_v0.1.md`：数据模型与 schema
-- `docs/ai_task_architecture_v0.1.md`：AI 后台任务架构
-- 其余按文件名对应各功能域（推荐、附件 OCR、后台任务、模型配置等）
+- `docs/系统总纲.md` —— **图纸（权威）**：业务流程、领域模型、技术决策、死表判决、待办。做跨模块改动前先读它。
+- `AGENTS.md` —— **硬规则**：部署拓扑、Git 规则、测试与验证、数据库迁移、同步约束。跨工具单一真源。
+- `docs/代码地图.md` —— **代码在哪**：仓库结构、后端分层、路由/任务/队列速查、「改 X 看哪里」。
+
+`平台优化方案/*.md` 是施工单（进行中与历史），与图纸冲突时以图纸为准。
+
+早期的 24 份 `*_v0.1.md` 设计草案已于 2026-08-01 清理 —— 它们描述的表（`buyer_intent_constraint`、`seller_target_risk`、`search_doc` 等）已不存在，留着会成为与现状冲突的第二真源。考古用 `git log -- docs/`。
 
 API 端点以代码为准（`backend/app/api/routes/`），或启动服务后查看 `/docs`（FastAPI 自动文档）。
