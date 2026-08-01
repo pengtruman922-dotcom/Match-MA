@@ -591,8 +591,20 @@ export const modelConfig = {
     apiRequest<ModelProviderConfig>(`/model-config/providers/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   updateNode: (id: string, data: Partial<ModelNodeConfig>) =>
     apiRequest<ModelNodeConfig>(`/model-config/nodes/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  createNode: (data: Record<string, unknown>) =>
-    apiRequest<ModelNodeConfig>('/model-config/nodes', { method: 'POST', body: JSON.stringify(data) }),
+  /**
+   * 为代码目录里的节点写配置：已有则更新，没有则建号。
+   * 节点集合由后端注册表固定，前端无法创建任意节点。
+   */
+  saveCatalogNode: (nodeName: string, data: {
+    provider_config_id: string;
+    temperature?: number | null;
+    top_p?: number | null;
+    max_tokens?: number | null;
+    timeout_seconds?: number | null;
+  }) => apiRequest<ModelNodeConfig>(
+    `/model-config/nodes/by-name/${encodeURIComponent(nodeName)}`,
+    { method: 'PUT', body: JSON.stringify(data) },
+  ),
   createPrompt: (data: Record<string, unknown>) =>
     apiRequest<PromptTemplateConfig>('/model-config/prompts', { method: 'POST', body: JSON.stringify(data) }),
   listPrompts: (nodeName: string) =>

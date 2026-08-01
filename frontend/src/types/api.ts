@@ -429,6 +429,8 @@ export interface PromptTemplateConfig {
   system_prompt: string | null;
   user_prompt_template: string | null;
   output_schema_json: Record<string, unknown>;
+  /** 死存储：不会注入模型。非空时设置页才提示，见 AGENTS.md。 */
+  few_shot_examples_json: unknown[];
   variables_json: unknown[];
   is_active: boolean;
   is_default: boolean;
@@ -436,12 +438,13 @@ export interface PromptTemplateConfig {
 }
 
 export interface ModelNodeConfig {
-  id: string;
+  /** 未建配置的目录节点为 null —— 节点存在与否由代码目录决定，不由数据库。 */
+  id: string | null;
   node_name: string;
   node_type: string;
-  provider_config_id: string;
+  provider_config_id: string | null;
   provider_name: string | null;
-  model_name: string;
+  model_name: string | null;
   temperature: number | string | null;
   top_p: number | string | null;
   max_tokens: number | null;
@@ -459,6 +462,52 @@ export interface ModelNodeConfig {
     latest_error_code: string | null;
     latest_error_message: string | null;
   };
+  /** 以下字段来自后端节点目录 backend/app/registry/nodes.py，前端不再维护任何节点字典。 */
+  label: string;
+  domain: 'target' | 'buyer' | 'recommendation' | 'common';
+  description: string;
+  /** 运行时吃什么，已是中文，直接渲染。与 prompt_variables 不是一回事。 */
+  runtime_inputs: string[];
+  prompt_variables: string[];
+  prompt_required: boolean;
+  /** 本节点缺配置时替它干活的节点。 */
+  understudy: string | null;
+  /** and = 同组全就绪才生效（只配一个等于没配）；solo = 各自独立。 */
+  understudy_kind: 'and' | 'solo' | null;
+  understudy_group: string[];
+  lifecycle: 'active' | 'retired';
+  sort_order: number;
+  /** 库里有、代码目录没有的节点：照常显示并标「未登记」，不得据此过滤。 */
+  registered: boolean;
+  configured: boolean;
+  /** 库里的 node_type 与代码目录不一致，需要显式提示，不能静默按库值运行。 */
+  type_mismatch: boolean;
+  latest_production_call: NodeProductionCall | null;
+  latest_test: Record<string, unknown> | null;
+  /** 未发布提示词时，可从代跑节点复制的起点；变量不兼容时只给理由不给内容。 */
+  prompt_seed: PromptSeed | null;
+}
+
+export interface PromptSeed {
+  source_node_name: string;
+  source_version: string | null;
+  /** 代跑节点模板用到的变量是否都在本节点的输入里。false 时不下发内容。 */
+  compatible: boolean;
+  /** 代跑节点用到、但本节点收不到的变量。 */
+  extra_variables: string[];
+  system_prompt: string | null;
+  user_prompt_template: string | null;
+  output_schema_json: Record<string, unknown> | null;
+}
+
+export interface NodeProductionCall {
+  status: string;
+  model_name: string | null;
+  latency_ms: number | null;
+  error_code: string | null;
+  error_message: string | null;
+  started_at: string | null;
+  finished_at: string | null;
 }
 
 export interface RequiredBusinessNodeStatus {
@@ -476,15 +525,7 @@ export interface RequiredBusinessNodeStatus {
   effective_node_name: string | null;
   test_summary: ModelNodeConfig['test_summary'] | null;
   latest_test: Record<string, unknown> | null;
-  latest_production_call: {
-    status: string;
-    model_name: string | null;
-    latency_ms: number | null;
-    error_code: string | null;
-    error_message: string | null;
-    started_at: string | null;
-    finished_at: string | null;
-  } | null;
+  latest_production_call: NodeProductionCall | null;
 }
 
 export interface ModelConfigSettingsPage {
@@ -496,6 +537,8 @@ export interface ModelConfigSettingsPage {
   nodes: ModelNodeConfig[];
   prompts: PromptTemplateConfig[];
   required_business_nodes: RequiredBusinessNodeStatus[];
+  /** Prompt 变量名 → 中文说明，来自后端节点目录。 */
+  prompt_variable_labels: Record<string, string>;
   overview: Record<string, number>;
   security_note: string;
 }
