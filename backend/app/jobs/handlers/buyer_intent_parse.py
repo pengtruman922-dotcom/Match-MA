@@ -42,6 +42,7 @@ from backend.app.registry.indicators import indicators_for
 from backend.app.registry.nodes import buyer_intent_legacy_node_name, buyer_intent_two_stage_node_names
 from backend.app.services.buyer_intent_industry import normalize_buyer_intent_industry_changes
 from backend.app.services.listed_status import legacy_listed_status
+from backend.app.services.profile_sections import apply_profile_section, normalize_profile_section_items
 from backend.app.services.industry_taxonomy import (
     classify_terms,
     industry_l1_prompt_list,
@@ -195,6 +196,12 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
             normalization_notes,
             source_context,
         )
+    section_count = _apply_buyer_intent_profile_sections(
+        db,
+        buyer_intent_id=buyer_intent_id,
+        raw_sections=(parsed_output_json or {}).get("profile_sections"),
+        normalization_notes=normalization_notes,
+    )
     scenario_count = _replace_buyer_intent_scenarios(
         db,
         buyer_intent_id=buyer_intent_id,
@@ -210,6 +217,7 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
         "applied_buyer_party_fields": [],
         "buyer_party_field_count": 0,
         "scenario_count": scenario_count,
+        "profile_section_count": section_count,
         "trace_created": True,
         "model_name": node_config["model_name"],
         "prompt_version": node_config["prompt_version"],
@@ -331,21 +339,61 @@ def _validate_buyer_intent_semantic_output(parsed_output_json: dict[str, Any] | 
     }
 
 
+def _apply_buyer_intent_profile_sections(
+    db: Session,
+    *,
+    buyer_intent_id: UUID,
+    raw_sections: Any,
+    normalization_notes: list[str],
+) -> int:
+    """把模型产出的模块「其他」落库。
+
+    标准化不了、也不适合拿去初筛的说法归这里 —— 它随搜索文档进深评，
+    不进规则打分。栏目码由 BUYER_PROFILE_SECTIONS 校验，写错的整条丢弃并留痕。
+    """
+    sections, notes = normalize_profile_section_items(raw_sections, entity_type="buyer_intent")
+    normalization_notes.extend(notes)
+    for section in sections:
+        apply_profile_section(
+            db,
+            entity_type="buyer_intent",
+            entity_id=buyer_intent_id,
+            section_code=section["section_code"],
+            info_status="filled",
+            content_text=section["content_text"],
+            source_type="buyer_intent_parse",
+            source_excerpt=section.get("source_excerpt"),
+            as_of_date=section.get("as_of_date"),
+            review_status="auto_accepted",
+            user_id=SYSTEM_USER_ID,
+            log_source_type="buyer_intent_parse",
+        )
+    return len(sections)
+
+
 def _buyer_intent_field_contract() -> list[dict[str, Any]]:
+    """模型能写的全部买家字段，注册表派生。
+
+    筛选条件按 default_effect 过滤过一次，于是描述字段（溢价要求、风险容忍这些）
+    整组对模型不可见，它们也就永远写不进来。现在按「可写」筛，
+    ``is_condition`` 告诉模型这一条是参与初筛的门槛还是只供深评阅读的描述。
+    """
     return [
         {
             "field": indicator.column,
             "label": indicator.label,
+            "module": indicator.group,
             "value_kind": indicator.kind,
             "target_field": indicator.target_column,
             "operator": indicator.operator,
+            "is_condition": indicator.default_effect is not None,
             "default_effect": indicator.default_effect,
             "scenario_allowed": indicator.scenario_allowed,
             "multi_value": indicator.multi_value,
             "enum_values": [value for value, _ in (indicator.enum_options or ())],
         }
         for indicator in indicators_for("buyer_intent")
-        if indicator.default_effect is not None
+        if "parse" in indicator.writable_by
     ]
 
 
