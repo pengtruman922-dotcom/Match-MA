@@ -171,3 +171,68 @@ def test_manual_write_is_recorded_with_the_real_actor(recorded) -> None:
         search_doc_source="t",
     )
     assert recorded["sources"]["created_by"] == actor
+
+
+def test_one_bad_value_no_longer_throws_away_the_good_ones(recorded) -> None:
+    """一次 LLM 抽取是一袋互相独立的主张。
+
+    改前：`current_debt_ratio` 写成 999 会抛 FieldWriteError，同批另外两个好字段
+    跟着一起丢，整个 action 失败。
+    """
+    db = _Db({"business_summary": "旧", "listed_status": "unknown", "current_debt_ratio": None})
+    rejected: dict[str, str] = {}
+
+    applied = write_seller_target_fields(
+        db,
+        uuid4(),
+        {
+            "business_summary": "新",
+            "listed_status": "listed",
+            "current_debt_ratio": 999,          # 超出 0~100
+            "profitability_status": "很赚钱",    # 不是合法枚举
+            "not_a_column": "x",                # 根本不是指标
+        },
+        provenance=WriteProvenance(source_type="manual_edit", writer="manual", actor_user_id=uuid4()),
+        search_doc_source="t",
+        rejected_fields=rejected,
+    )
+
+    assert set(applied) == {"business_summary", "listed_status"}
+    assert set(rejected) == {"current_debt_ratio", "profitability_status", "not_a_column"}
+    assert "between 0 and 100" in rejected["current_debt_ratio"]
+
+
+def test_collector_absent_keeps_the_strict_contract() -> None:
+    """自己拼 changes 的调用方不传收集器，坏字段仍然当场炸 —— 那是代码 bug。"""
+
+    class _Boom:
+        def execute(self, *a, **k):
+            raise AssertionError("must reject before touching the db")
+
+    with pytest.raises(FieldWriteError):
+        write_seller_target_fields(
+            _Boom(),
+            uuid4(),
+            {"current_debt_ratio": 999},
+            provenance=WriteProvenance(source_type="manual_edit", writer="manual", actor_user_id=uuid4()),
+            search_doc_source="t",
+        )
+
+
+def test_all_fields_rejected_writes_nothing(recorded) -> None:
+    class _Boom:
+        def execute(self, *a, **k):
+            raise AssertionError("nothing survived validation, so nothing should be read or written")
+
+    rejected: dict[str, str] = {}
+    applied = write_seller_target_fields(
+        _Boom(),
+        uuid4(),
+        {"current_debt_ratio": 999},
+        provenance=WriteProvenance(source_type="manual_edit", writer="manual", actor_user_id=uuid4()),
+        search_doc_source="t",
+        rejected_fields=rejected,
+    )
+
+    assert applied == []
+    assert set(rejected) == {"current_debt_ratio"}

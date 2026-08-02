@@ -180,28 +180,51 @@ def write_seller_target_fields(
     *,
     provenance: WriteProvenance,
     search_doc_source: str,
+    rejected_fields: dict[str, str] | None = None,
 ) -> list[str]:
     """Apply normalized field changes to a seller_target, audited and sourced.
 
     The writer is the validation boundary as well as the audit boundary. It
     validates each declared column, the provenance's write authority, and the
     value kind before writing only actual differences.
+
+    Pass ``rejected_fields`` to collect per-field validation failures instead of
+    aborting: a batch from an LLM is a bag of independent claims, and one badly
+    formatted number should not throw away the eight fields that were fine.
+    Callers that hand-build their changes leave it None and keep the strict
+    all-or-nothing contract, because for them a bad field is a code bug.
     """
     if not changes:
         return []
-    unknown = set(changes) - _seller_target_columns()
-    if unknown:
-        raise FieldWriteError(f"Not writable seller_target indicators: {sorted(unknown)}")
+
+    def _reject(column: str, reason: str) -> None:
+        if rejected_fields is None:
+            raise FieldWriteError(reason)
+        rejected_fields[column] = reason
 
     writer = _writer_from_provenance(provenance)
     if not writer:
+        # Not data-dependent: a caller passed a provenance the writer registry
+        # does not know. Always a bug, never a bad LLM value.
         raise FieldWriteError(f"Unknown field writer for source: {provenance.source_type}")
+
+    known_columns = _seller_target_columns()
     normalized_changes: dict[str, Any] = {}
     for column, value in changes.items():
+        if column not in known_columns:
+            _reject(column, f"Not writable seller_target indicators: {[column]}")
+            continue
         indicator = indicator_by_column("seller_target", column)
         if writer not in indicator.writable_by:
-            raise FieldWriteError(f"{writer} may not write seller_target.{column}")
-        normalized_changes[column] = _normalize_value(db, indicator, value)
+            _reject(column, f"{writer} may not write seller_target.{column}")
+            continue
+        try:
+            normalized_changes[column] = _normalize_value(db, indicator, value)
+        except FieldWriteError as exc:
+            _reject(column, str(exc))
+
+    if not normalized_changes:
+        return []
 
     original = _load_current(db, seller_target_id, list(normalized_changes))
     diff = diff_payload(original, normalized_changes)

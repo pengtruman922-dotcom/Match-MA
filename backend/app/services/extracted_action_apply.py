@@ -55,10 +55,14 @@ def apply_seller_fact_update_action(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No supported changes to apply.")
     changes = _seller_target_changes_with_parse_completion(original, changes)
     source_context = _action_source_context(action, default_source_label="Business update extracted action")
+    # 一次 action 是一袋互相独立的主张。一个数字格式不对，不该把同批另外八个
+    # 好字段一起扔掉 —— 被拒的字段记进 action，可查、可复核，但不阻断其余写入。
+    rejected_fields: dict[str, str] = {}
     applied_fields = write_seller_target_fields(
         db,
         seller_target_id,
         changes,
+        rejected_fields=rejected_fields,
         provenance=WriteProvenance(
             source_type="extracted_action",
             actor_user_id=actor_user_id,
@@ -116,6 +120,8 @@ def apply_seller_fact_update_action(
             applied_by=actor_user_id,
         )
         applied_fields.append("lifecycle_status")
+    if rejected_fields:
+        _record_rejected_fields(db, action["id"], rejected_fields)
     if not applied_fields:
         _mark_action_applied(db, action["id"], review_status="auto_accepted")
         _refresh_business_update_status(db, action["business_update_id"])
@@ -126,6 +132,7 @@ def apply_seller_fact_update_action(
             "entity_type": "seller_target",
             "entity_id": seller_target_id,
             "applied_fields": [],
+            "rejected_fields": rejected_fields,
         }
 
     _mark_action_applied(db, action["id"], review_status="auto_accepted" if not require_accepted else None)
@@ -138,7 +145,37 @@ def apply_seller_fact_update_action(
         "entity_type": "seller_target",
         "entity_id": seller_target_id,
         "applied_fields": applied_fields,
+        "rejected_fields": rejected_fields,
     }
+
+
+def _record_rejected_fields(
+    db: Session,
+    extracted_action_id: UUID,
+    rejected_fields: dict[str, str],
+) -> None:
+    """把被拒字段挂到 action 上。
+
+    静默丢弃比整批失败更糟 —— 落在这里，复核页和 debug 都能看到模型给了什么、
+    为什么没写进去，也是判断提示词该怎么改的唯一证据。
+    """
+    db.execute(
+        text(
+            """
+            update extracted_action
+            set metadata_json = metadata_json || :metadata_patch
+            where id = :extracted_action_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+        {
+            "extracted_action_id": extracted_action_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "metadata_patch": {"rejected_fields": rejected_fields},
+        },
+    )
 
 
 def apply_buyer_intent_update_action(
