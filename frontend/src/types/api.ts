@@ -1228,7 +1228,13 @@ export interface FieldValueSource {
   created_by: string | null;
   created_by_name: string | null;
   evidence_span?: {
+    id?: string | null;
     attachment_id?: string | null;
+    parsed_document_id?: string | null;
+    page_no?: number | null;
+    text_excerpt?: string | null;
+    char_start?: number | null;
+    char_end?: number | null;
   } | null;
   research_evidence?: {
     proposal_id: string | null;

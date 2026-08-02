@@ -3,6 +3,8 @@ import type { ReactNode } from 'react';
 import {
   AlertCircle,
   Check,
+  ChevronDown,
+  ChevronRight,
   Copy,
   Loader2,
   Pencil,
@@ -10,7 +12,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { buyerIntents, indicatorRegistry, meta } from '../lib/api';
+import { buyerIntents, fieldSources, indicatorRegistry, meta, profileSections } from '../lib/api';
 import type {
   BuyerIntent,
   BuyerIntentConfirmationItem,
@@ -22,11 +24,17 @@ import type {
   IndicatorMeta,
   IndicatorRegistryResponse,
   IndustryOptionsResponse,
+  FieldValueSource,
+  ProfileSection,
 } from '../types/api';
 import IndustryPairsEditor, { type IndustryPairValue } from './IndustryPairsEditor';
+import { hasReadableEvidence, sourceDetailText } from '../features/shared/fieldSource';
+import { fieldLabel } from '../lib/fieldLabels';
 import AdministrativeAreaPicker from './AdministrativeAreaPicker';
 
-type ConditionEffect = 'required' | 'preferred' | 'deep_eval';
+// 规则只有两态：必须（初筛硬门槛）、优先（只影响排序）。
+// 标准化不了、不适合初筛的内容不再逐字段标「仅深评」，统一进模块的「其他」。
+type ConditionEffect = 'required' | 'preferred';
 type PendingItem = BuyerIntentConfirmationItem & { scopeLabel: string; scenario?: BuyerIntentScenario };
 type ConditionRowDefinition = {
   key: string;
@@ -49,6 +57,20 @@ export default function BuyerIntentRequirements({
   const [registry, setRegistry] = useState<IndicatorRegistryResponse | null>(null);
   const [loadingScenarios, setLoadingScenarios] = useState(true);
   const [resolvingItem, setResolvingItem] = useState<string | null>(null);
+  const [sections, setSections] = useState<Record<string, ProfileSection>>({});
+  const [sources, setSources] = useState<FieldValueSource[]>([]);
+  const [openEvidence, setOpenEvidence] = useState<FieldValueSource | null>(null);
+
+  const loadSideData = useCallback(async () => {
+    const [sectionData, sourceData] = await Promise.all([
+      profileSections.list('buyer_intent', intent.id).catch(() => null),
+      fieldSources.list({ entity_type: 'buyer_intent', entity_id: intent.id, limit: 200 }).catch(() => []),
+    ]);
+    if (sectionData) {
+      setSections(Object.fromEntries(sectionData.sections.map((item) => [item.section_code, item])));
+    }
+    setSources(sourceData);
+  }, [intent.id]);
 
   const loadScenarios = useCallback(async () => {
     setLoadingScenarios(true);
@@ -60,6 +82,7 @@ export default function BuyerIntentRequirements({
   }, [intent.id]);
 
   useEffect(() => { void loadScenarios(); }, [loadScenarios]);
+  useEffect(() => { void loadSideData(); }, [loadSideData]);
   useEffect(() => {
     Promise.all([meta.industryOptions(), indicatorRegistry.list('buyer_intent')])
       .then(([industryData, registryData]) => { setTaxonomy(industryData); setRegistry(registryData); })
@@ -67,6 +90,14 @@ export default function BuyerIntentRequirements({
   }, []);
 
   const indicators = registry?.indicators || [];
+  // 一个字段可能被写过多次，接口按时间倒序返回，第一条就是当前值的来源。
+  const sourceByField = useMemo(() => {
+    const map = new Map<string, FieldValueSource>();
+    for (const source of sources) {
+      if (!map.has(source.field_path)) map.set(source.field_path, source);
+    }
+    return map;
+  }, [sources]);
   const commonPending = useMemo<PendingItem[]>(
     () => (intent.needs_confirmation_json || []).map((item) => ({ ...item, scopeLabel: '公共条件' })),
     [intent.needs_confirmation_json],
@@ -122,7 +153,7 @@ export default function BuyerIntentRequirements({
 
   const resolvePending = async (
     item: PendingItem,
-    action: 'apply' | 'discard' | 'deep_eval',
+    action: 'apply' | 'discard',
     replacement?: unknown,
   ) => {
     const key = confirmationKey(item);
@@ -136,16 +167,13 @@ export default function BuyerIntentRequirements({
         const nextFields = action === 'discard' || proposed === undefined
           ? scenario.fields_json
           : { ...scenario.fields_json, [item.field]: mergeProposedValue(currentValue, proposed) };
-        const nextEffects = action === 'deep_eval'
-          ? { ...scenario.condition_effects_json, [item.field]: 'deep_eval' as const }
-          : scenario.condition_effects_json;
         const updated = await buyerIntents.updateScenario(intent.id, scenario.id, {
           label: scenario.label,
           sort_order: scenario.sort_order,
           active: scenario.active,
           fields_json: nextFields,
           needs_confirmation_json: nextPending,
-          condition_effects_json: nextEffects,
+          condition_effects_json: scenario.condition_effects_json,
         });
         setScenarios((current) => current.map((entry) => entry.id === updated.id ? updated : entry));
       } else {
@@ -153,12 +181,6 @@ export default function BuyerIntentRequirements({
         const currentValue = (intent as unknown as Record<string, unknown>)[item.field];
         const payload: Record<string, unknown> = { needs_confirmation_json: nextPending };
         if (action !== 'discard' && proposed !== undefined) payload[item.field] = mergeProposedValue(currentValue, proposed);
-        if (action === 'deep_eval') {
-          payload.condition_effects_json = {
-            ...(intent.condition_effects_json || {}),
-            [item.field]: 'deep_eval',
-          };
-        }
         await buyerIntents.update(intent.id, payload as BuyerIntentUpdate);
         await onRefresh?.();
       }
@@ -208,6 +230,21 @@ export default function BuyerIntentRequirements({
           taxonomy={taxonomy}
           pending={commonPending}
           resolvingItem={resolvingItem}
+          sourceByField={sourceByField}
+          onShowEvidence={setOpenEvidence}
+          notesByGroup={Object.fromEntries(registry.groups.map((group) => [
+            group.key,
+            <ModuleNotes
+              key={group.key}
+              intentId={intent.id}
+              sectionCode={group.section_code || group.key}
+              label={group.label}
+              descriptiveIndicators={indicators.filter((item) => item.group === group.key && !isConditionIndicator(item))}
+              fields={intent as unknown as Record<string, unknown>}
+              section={sections[group.section_code || group.key]}
+              onSaved={loadSideData}
+            />,
+          ]))}
           onSave={saveSharedConditions}
           onResolvePending={resolvePending}
           onModifyPending={modifyPending}
@@ -239,6 +276,8 @@ export default function BuyerIntentRequirements({
         )}
       </section>
 
+      {openEvidence ? <EvidencePopover source={openEvidence} onClose={() => setOpenEvidence(null)} /> : null}
+
       <section>
         <p className="mb-2 text-xs font-semibold text-gray-500">原始需求材料</p>
         <p className="max-h-72 overflow-y-auto whitespace-pre-wrap bg-gray-50 px-4 py-3 text-sm leading-6 text-gray-700">{intent.raw_requirement_text || '暂无原始需求材料'}</p>
@@ -258,6 +297,9 @@ function InlineConditionEditor({
   pending,
   resolvingItem,
   showEmpty = true,
+  notesByGroup,
+  sourceByField,
+  onShowEvidence,
   onSave,
   onResolvePending,
   onModifyPending,
@@ -272,11 +314,17 @@ function InlineConditionEditor({
   pending: PendingItem[];
   resolvingItem: string | null;
   showEmpty?: boolean;
+  /** 每个模块底部那块「其他」，由调用方渲染 —— 方案卡片没有。 */
+  notesByGroup?: Record<string, ReactNode>;
+  /** 字段当前值的出处。方案卡片不传：方案条件是人配的，没有独立溯源。 */
+  sourceByField?: Map<string, FieldValueSource>;
+  onShowEvidence?: (source: FieldValueSource) => void;
   onSave: (changes: Record<string, unknown>, effectChanges: Record<string, ConditionEffect>) => Promise<void>;
-  onResolvePending: (item: PendingItem, action: 'apply' | 'discard' | 'deep_eval', replacement?: unknown) => Promise<void>;
+  onResolvePending: (item: PendingItem, action: 'apply' | 'discard', replacement?: unknown) => Promise<void>;
   onModifyPending: (item: PendingItem) => void;
 }) {
   const rows = useMemo(() => conditionRows(indicators), [indicators]);
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [draftFields, setDraftFields] = useState<Record<string, unknown>>({});
   const [draftEffects, setDraftEffects] = useState<Record<string, ConditionEffect>>({});
@@ -339,10 +387,25 @@ function InlineConditionEditor({
 
       {groups.map((group) => {
         const groupRows = rows.filter((row) => row.group === group.key && isVisible(row));
-        if (!groupRows.length) return null;
+        const groupAllRows = rows.filter((row) => row.group === group.key);
+        const filled = groupAllRows.filter((row) => row.indicators.some((indicator) => hasValue(fields[indicator.column]))).length;
+        const notes = notesByGroup?.[group.key];
+        if (!groupRows.length && !notes) return null;
+        const collapsed = collapsedGroups[group.key] ?? false;
         return (
           <div key={group.key} className="border-b border-gray-100 last:border-0">
-            <p className="bg-gray-50 px-4 py-2 text-xs font-semibold text-gray-500">{group.label}</p>
+            <button
+              type="button"
+              onClick={() => setCollapsedGroups((prev) => ({ ...prev, [group.key]: !collapsed }))}
+              className="flex w-full items-center justify-between bg-gray-50 px-4 py-2 text-left hover:bg-gray-100"
+            >
+              <span className="flex items-center gap-1.5 text-xs font-semibold text-gray-600">
+                {collapsed ? <ChevronRight className="h-3.5 w-3.5 text-gray-400" /> : <ChevronDown className="h-3.5 w-3.5 text-gray-400" />}
+                {group.label}
+              </span>
+              <span className="text-[11px] text-gray-400">{filled}/{groupAllRows.length} 条件{notes ? ' · 含其他' : ''}</span>
+            </button>
+            {collapsed ? null : (
             <div className="divide-y divide-gray-100 px-4">
               {groupRows.map((row) => {
                 const rowPending = pendingForRow(row);
@@ -378,6 +441,13 @@ function InlineConditionEditor({
                         <button type="button" title={`编辑${row.label}`} onClick={() => startEditing(row)} className="p-1.5 text-gray-400 hover:bg-gray-100 hover:text-brand-700"><Pencil className="h-3.5 w-3.5" /></button>
                       </div>
                     )}
+                    {!editing && rowHasValue && sourceByField ? (
+                      <RowSource
+                        row={row}
+                        sourceByField={sourceByField}
+                        onShowEvidence={onShowEvidence}
+                      />
+                    ) : null}
                     {rowPending.length ? (
                       <PendingItems
                         items={rowPending}
@@ -389,7 +459,9 @@ function InlineConditionEditor({
                   </div>
                 );
               })}
+              {notes}
             </div>
+            )}
           </div>
         );
       })}
@@ -404,6 +476,131 @@ function InlineConditionEditor({
       {!showEmpty && !rows.some(isVisible) && !orphanPending.length ? <p className="px-4 py-4 text-sm text-gray-500">暂无方案条件，可从右上角新增。</p> : null}
     </section>
   );
+}
+
+/** 一行可能由多个字段组成（如行业的一级+二级），取第一条有出处的。 */
+function RowSource({ row, sourceByField, onShowEvidence }: {
+  row: ConditionRowDefinition;
+  sourceByField: Map<string, FieldValueSource>;
+  onShowEvidence?: (source: FieldValueSource) => void;
+}) {
+  const source = row.indicators.map((indicator) => sourceByField.get(indicator.column)).find(Boolean);
+  if (!source) return null;
+  const text = `来源：${sourceDetailText(source)}`;
+  if (onShowEvidence && hasReadableEvidence(source)) {
+    return (
+      <button type="button" onClick={() => onShowEvidence(source)} className="ml-[7.5rem] block text-left text-[10px] text-gray-400 hover:text-brand-600 hover:underline">
+        {text}
+      </button>
+    );
+  }
+  return <p className="ml-[7.5rem] text-[10px] text-gray-400">{text}</p>;
+}
+
+/**
+ * 模块底部的「其他」：装这个模块里标准化不了、也不适合拿去初筛的说法。
+ *
+ * 上面是只读的描述字段（解析写进来的，如溢价要求、风险容忍），下面是一块自由
+ * 文本，人可以直接改。两者都会随搜索文档进深评 —— 「放进其他就交给深评」这句
+ * 话对模型也成立，不只是界面上的说法。
+ */
+function ModuleNotes({ intentId, sectionCode, label, descriptiveIndicators, fields, section, onSaved }: {
+  intentId: string;
+  sectionCode: string;
+  label: string;
+  descriptiveIndicators: IndicatorMeta[];
+  fields: Record<string, unknown>;
+  section?: ProfileSection;
+  onSaved: () => void | Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const filled = descriptiveIndicators.filter((indicator) => hasValue(fields[indicator.column]));
+  const content = (section?.content_text || '').trim();
+  if (!filled.length && !content && !editing) {
+    return (
+      <div className="py-3">
+        <button type="button" onClick={() => { setDraft(''); setEditing(true); }} className="text-xs text-gray-400 hover:text-brand-700">
+          + 补充「{label}」的其他说明
+        </button>
+      </div>
+    );
+  }
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await profileSections.write('buyer_intent', intentId, {
+        section_code: sectionCode,
+        info_status: 'filled',
+        content_text: draft.trim() || null,
+      });
+      setEditing(false);
+      await onSaved();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : '保存其他说明失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="py-3">
+      <p className="mb-1.5 text-[11px] font-semibold text-gray-400">其他（不参与初筛，交给深度评估）</p>
+      {filled.map((indicator) => (
+        <div key={indicator.column} className="flex items-start gap-3 py-1">
+          <span className="w-16 shrink-0" />
+          <span className="w-36 shrink-0 text-xs text-gray-500">{indicator.label}</span>
+          <span className="min-w-0 flex-1 whitespace-pre-wrap text-sm text-gray-700">{displayDescriptive(fields[indicator.column])}</span>
+        </div>
+      ))}
+      {editing ? (
+        <div className="mt-2 space-y-2">
+          <textarea className="input min-h-24 resize-y" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={`这个模块里标准化不了的说法，写在这里`} />
+          <div className="flex justify-end gap-2">
+            <button type="button" disabled={saving} onClick={() => void save()} className="inline-flex items-center gap-1 bg-brand-600 px-3 py-1.5 text-xs text-white disabled:opacity-50">{saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}保存</button>
+            <button type="button" disabled={saving} onClick={() => setEditing(false)} className="inline-flex items-center gap-1 border border-gray-200 px-3 py-1.5 text-xs text-gray-600"><X className="h-3.5 w-3.5" />取消</button>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-1 flex items-start gap-3 py-1">
+          <span className="w-16 shrink-0" />
+          <span className="w-36 shrink-0 text-xs text-gray-500">其他说明</span>
+          <span className={`min-w-0 flex-1 whitespace-pre-wrap text-sm ${content ? 'text-gray-700' : 'text-gray-300'}`}>{content || '未填写'}</span>
+          <button type="button" title="编辑其他说明" onClick={() => { setDraft(content); setEditing(true); }} className="p-1.5 text-gray-400 hover:bg-gray-100 hover:text-brand-700"><Pencil className="h-3.5 w-3.5" /></button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 字段值的出处。附件解析给的是正文片段，AI 调研给的是网页。 */
+function EvidencePopover({ source, onClose }: { source: FieldValueSource; onClose: () => void }) {
+  const excerpt = source.evidence_span?.text_excerpt || source.research_evidence?.source_excerpt || '';
+  const url = source.research_evidence?.source_url || '';
+  return (
+    <div className="fixed inset-0 z-40 flex items-end justify-end bg-black/20 p-4 sm:items-center" onClick={onClose}>
+      <div className="max-h-[70vh] w-full max-w-xl overflow-y-auto border border-gray-200 bg-white p-4 shadow-lg" onClick={(event) => event.stopPropagation()}>
+        <div className="mb-2 flex items-start justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-gray-900">{fieldLabel('buyer_intent', source.field_path)}</p>
+            <p className="mt-0.5 text-xs text-gray-500">{sourceDetailText(source)}</p>
+          </div>
+          <button type="button" onClick={onClose} className="p-1 text-gray-400 hover:text-gray-700"><X className="h-4 w-4" /></button>
+        </div>
+        {url ? <a href={url} target="_blank" rel="noreferrer" className="mb-2 block break-all text-xs text-brand-700 underline">{source.research_evidence?.source_title || url}</a> : null}
+        <p className="whitespace-pre-wrap bg-gray-50 px-3 py-2 text-sm leading-6 text-gray-700">{excerpt || '这条来源没有留存原文片段。'}</p>
+      </div>
+    </div>
+  );
+}
+
+function displayDescriptive(value: unknown): string {
+  if (Array.isArray(value)) return value.map((item) => String(item)).join('、');
+  if (value === null || value === undefined || value === '') return '-';
+  return typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
 }
 
 function ConditionRowEditor({ row, fields, effects, taxonomy, onFields, onEffects }: {
@@ -470,7 +667,7 @@ function ConditionRowEditor({ row, fields, effects, taxonomy, onFields, onEffect
 function PendingItems({ items, resolvingItem, onResolve, onModify }: {
   items: PendingItem[];
   resolvingItem: string | null;
-  onResolve: (item: PendingItem, action: 'apply' | 'discard' | 'deep_eval', replacement?: unknown) => Promise<void>;
+  onResolve: (item: PendingItem, action: 'apply' | 'discard', replacement?: unknown) => Promise<void>;
   onModify: (item: PendingItem) => void;
 }) {
   return (
@@ -486,7 +683,6 @@ function PendingItems({ items, resolvingItem, onResolve, onModify }: {
             <div className="mt-2 flex flex-wrap gap-2">
               {item.proposed_value !== undefined ? <button type="button" disabled={resolvingItem === key} onClick={() => void onResolve(item, 'apply')} className="border border-amber-300 bg-white px-2.5 py-1 text-xs text-amber-800 disabled:opacity-50">采纳建议值</button> : null}
               {item.proposed_value !== undefined ? <button type="button" disabled={resolvingItem === key} onClick={() => onModify(item)} className="border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-600 disabled:opacity-50">修改并采纳</button> : null}
-              <button type="button" disabled={resolvingItem === key} onClick={() => void onResolve(item, 'deep_eval')} className="border border-violet-200 bg-white px-2.5 py-1 text-xs text-violet-700 disabled:opacity-50">改为仅深评</button>
               <button type="button" disabled={resolvingItem === key} onClick={() => void onResolve(item, 'discard')} className="border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-600 disabled:opacity-50">不设置该条件</button>
             </div>
           </div>
@@ -551,7 +747,7 @@ function ScenarioCard({
   onSaved: (scenario: BuyerIntentScenario) => void;
   onCopy: () => void;
   onDelete: () => void;
-  onResolvePending: (item: PendingItem, action: 'apply' | 'discard' | 'deep_eval', replacement?: unknown) => Promise<void>;
+  onResolvePending: (item: PendingItem, action: 'apply' | 'discard', replacement?: unknown) => Promise<void>;
   onModifyPending: (item: PendingItem) => void;
 }) {
   const [editingMeta, setEditingMeta] = useState(false);
@@ -656,6 +852,7 @@ function conditionRows(indicators: IndicatorMeta[]): ConditionRowDefinition[] {
   const l2 = indicators.find((item) => item.column === 'industry_l2_json');
   for (const indicator of indicators) {
     if (!indicator.group || indicator.column === 'industry_l2_json') continue;
+    if (!isConditionIndicator(indicator)) continue;
     if (indicator.column === 'industries_json') {
       rows.push({
         key: 'accepted_industries',
@@ -735,31 +932,39 @@ function formatConditionRow(
   return hasValue(value) ? formatFieldValue(indicator, value) : '-';
 }
 
-function EffectBadge({ effect }: { effect: ConditionEffect | 'pending' }) {
-  const styles = { required: 'bg-red-50 text-red-700', preferred: 'bg-blue-50 text-blue-700', deep_eval: 'bg-violet-50 text-violet-700', pending: 'bg-amber-100 text-amber-800' };
-  const labels = { required: '必须', preferred: '优先', deep_eval: '仅深评', pending: '需要确认' };
+function EffectBadge({ effect }: { effect: ConditionEffect | 'pending' | null }) {
+  // 描述字段没有规则，留空位而不是画一个「无」——那会读成一种规则。
+  if (!effect) return <span className="w-16 shrink-0" />;
+  const styles = { required: 'bg-red-50 text-red-700', preferred: 'bg-blue-50 text-blue-700', pending: 'bg-amber-100 text-amber-800' };
+  const labels = { required: '必须', preferred: '优先', pending: '需要确认' };
   return <span className={`w-16 shrink-0 px-1.5 py-0.5 text-center text-[11px] font-medium ${styles[effect]}`}>{labels[effect]}</span>;
 }
 
 function EffectSelect({ value, onChange, label }: { value: ConditionEffect; onChange: (value: ConditionEffect) => void; label?: string }) {
-  return <label className="flex items-center gap-1 text-[11px] text-gray-500">{label ? <span>{label}</span> : null}<select value={value} onChange={(event) => onChange(event.target.value as ConditionEffect)} className="border border-gray-200 bg-white px-1.5 py-1 text-[11px]"><option value="required">必须</option><option value="preferred">优先</option><option value="deep_eval">仅深评</option></select></label>;
+  return <label className="flex items-center gap-1 text-[11px] text-gray-500">{label ? <span>{label}</span> : null}<select value={value} onChange={(event) => onChange(event.target.value as ConditionEffect)} className="border border-gray-200 bg-white px-1.5 py-1 text-[11px]"><option value="required">必须</option><option value="preferred">优先</option></select></label>;
 }
 
 function CheckboxOptions({ value, options, onChange }: { value: string[]; options: Array<{ value: string; label: string }>; onChange: (value: string[]) => void }) {
   return <div className="flex min-h-9 flex-wrap gap-2 border border-gray-200 bg-white p-2">{options.map((option) => <label key={option.value} className="inline-flex items-center gap-1 text-xs text-gray-700"><input type="checkbox" checked={value.includes(option.value)} onChange={() => onChange(value.includes(option.value) ? value.filter((item) => item !== option.value) : [...value, option.value])} />{option.label}</label>)}</div>;
 }
 
-function effectiveEffect(indicator: IndicatorMeta, effects: Record<string, ConditionEffect>, value: unknown): ConditionEffect {
+/** 返回 null 表示这个字段不是条件，只是描述，不参与初筛和排序。 */
+function effectiveEffect(indicator: IndicatorMeta, effects: Record<string, ConditionEffect>, value: unknown): ConditionEffect | null {
   if (effects[indicator.column]) return effects[indicator.column];
   if (['requires_relocation', 'requires_return_investment', 'requires_team_retention'].includes(indicator.column)) {
     if (value === 'required' || value === 'preferred') return value;
-    return 'deep_eval';
+    return null;
   }
   if (indicator.column === 'region_constraints_json') {
     const regions = regionArray(value);
     return regions.some((item) => item.effect === 'required' || item.effect === 'excluded') ? 'required' : 'preferred';
   }
-  return indicator.default_effect || 'deep_eval';
+  return (indicator.default_effect as ConditionEffect | null) || null;
+}
+
+/** 是条件才进条件表；描述字段归模块的「其他」区。 */
+function isConditionIndicator(indicator: IndicatorMeta): boolean {
+  return Boolean(indicator.default_effect) || indicator.effect_editable;
 }
 
 function requirementPairs(fields: Record<string, unknown>, taxonomy: IndustryOptionsResponse): IndustryPairValue[] {

@@ -29,6 +29,7 @@ import ResearchEvidenceDrawer from './ResearchEvidenceDrawer';
 import ResearchReportDrawer from './ResearchReportDrawer';
 import IndustryPairsEditor from '../../components/IndustryPairsEditor';
 import AdministrativeAreaPicker from '../../components/AdministrativeAreaPicker';
+import { fieldSourceLabel, formatSourceTime } from '../shared/fieldSource';
 
 const ACTIVE_RESEARCH_STATES = new Set([
   'research_queued',
@@ -555,14 +556,6 @@ function LocationField({ field, editing, saving, source, onStart, onCancel, onSh
   </div>;
 }
 
-function fieldSourceLabel(source: FieldValueSource): string {
-  if (['direct_api', 'manual', 'manual_edit'].includes(source.source_type || '')) return '手动编辑';
-  if (source.source_type === 'research_proposal') return 'AI调研';
-  if (['update_log_rollback', 'rollback'].includes(source.source_type || '')) return '更新回滚';
-  if (source.evidence_span?.attachment_id) return '文字+附件更新';
-  return '文字更新';
-}
-
 function ProfileBlock({
   code,
   section,
@@ -743,11 +736,6 @@ function sourceDomain(url: string): string {
   } catch {
     return url;
   }
-}
-
-function formatSourceTime(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
 function conflictLabel(kind: ResearchProposal['conflict_kind']): string {
