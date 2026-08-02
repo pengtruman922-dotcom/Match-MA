@@ -201,7 +201,7 @@ def _search_buyer_intents(db: Session, params: dict[str, Any], current_user: Any
               bi.id::text as entity_id,
               bi.intent_name as title,
               nullif(concat_ws(' · ', bp.buyer_name, bi.industry_primary, bi.region_scope_summary), '') as subtitle,
-              coalesce(bi.intent_summary, bi.raw_requirement_text, bi.preference_summary) as snippet,
+              coalesce(bi.intent_summary, bi.raw_requirement_text) as snippet,
               case
                 when bi.buyer_party_id is not null
                   then '/buyers/' || bi.buyer_party_id::text || '?intentId=' || bi.id::text
@@ -236,7 +236,6 @@ def _search_buyer_intents(db: Session, params: dict[str, Any], current_user: Any
                 bi.intent_name ilike :q
                 or coalesce(bi.raw_requirement_text, '') ilike :q
                 or coalesce(bi.intent_summary, '') ilike :q
-                or coalesce(bi.preference_summary, '') ilike :q
                 or coalesce(bi.industry_primary, '') ilike :q
                 or coalesce(bi.industry_secondary, '') ilike :q
                 or coalesce(bi.region_scope_summary, '') ilike :q

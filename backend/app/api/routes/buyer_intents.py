@@ -109,10 +109,6 @@ class BuyerIntentCreate(BaseModel):
     budget_min_yuan: Decimal | None = None
     budget_max_yuan: Decimal | None = None
     needs_confirmation_json: list[Any] | None = None
-    negative_summary: str | None = None
-    priority_summary: str | None = None
-    preference_summary: str | None = None
-    unknown_summary: str | None = None
 
     @field_validator("equity_requirement_type", "listing_market_region", mode="before")
     @classmethod
@@ -187,10 +183,6 @@ class BuyerIntentOut(BaseModel):
     needs_confirmation_json: list[Any] = []
     reviewed_at: str | None = None
     reviewed_by: UUID | None = None
-    negative_summary: str | None
-    priority_summary: str | None
-    preference_summary: str | None
-    unknown_summary: str | None
     owner_user_id: UUID | None = None
     owner_name: str | None = None
     scenario_labels: list[str] = []
@@ -267,10 +259,6 @@ class BuyerIntentUpdate(BaseModel):
     budget_min_yuan: Decimal | None = None
     budget_max_yuan: Decimal | None = None
     needs_confirmation_json: list[Any] | None = None
-    negative_summary: str | None = None
-    priority_summary: str | None = None
-    preference_summary: str | None = None
-    unknown_summary: str | None = None
     owner_user_id: UUID | None = None
 
     @field_validator("equity_requirement_type", "listing_market_region", mode="before")
@@ -377,7 +365,6 @@ BUYER_INTENT_OUT_COLUMNS = """
               bi.requires_team_retention, bi.earnout_requirement,
               bi.listing_market_region, bi.budget_min_yuan, bi.budget_max_yuan,
               bi.needs_confirmation_json, bi.reviewed_at::text as reviewed_at, bi.reviewed_by,
-              bi.negative_summary, bi.priority_summary, bi.preference_summary, bi.unknown_summary,
               bi.owner_user_id,
               (select au.name from app_user au where au.id = bi.owner_user_id) as owner_name,
               (select coalesce(jsonb_agg(s.label order by s.sort_order, s.created_at), '[]'::jsonb)
@@ -434,8 +421,6 @@ def create_buyer_intent(
               requires_return_investment, return_investment_multiple,
               requires_team_retention, earnout_requirement, listing_market_region,
               budget_min_yuan, budget_max_yuan, needs_confirmation_json,
-              negative_summary, priority_summary,
-              preference_summary, unknown_summary,
               created_by, updated_by
             )
             values (
@@ -462,8 +447,6 @@ def create_buyer_intent(
               :requires_return_investment, :return_investment_multiple,
               :requires_team_retention, :earnout_requirement, :listing_market_region,
               :budget_min_yuan, :budget_max_yuan, :needs_confirmation_json,
-              :negative_summary, :priority_summary,
-              :preference_summary, :unknown_summary,
               :created_by, :updated_by
             )
             returning id
@@ -1423,10 +1406,6 @@ def _buyer_intent_params(payload: BuyerIntentCreate, current_user: AuthContext, 
         "budget_min_yuan": payload.budget_min_yuan,
         "budget_max_yuan": payload.budget_max_yuan,
         "needs_confirmation_json": payload.needs_confirmation_json or [],
-        "negative_summary": payload.negative_summary,
-        "priority_summary": payload.priority_summary,
-        "preference_summary": payload.preference_summary,
-        "unknown_summary": payload.unknown_summary,
         "created_by": current_user.user_id,
         "updated_by": current_user.user_id,
     }

@@ -9,6 +9,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+from backend.app.services.profile_sections import load_profile_sections, render_profile_text
 
 
 def rebuild_seller_target_search_doc(db: Session, seller_target_id: UUID) -> dict[str, Any]:
@@ -158,8 +159,14 @@ def rebuild_buyer_intent_search_doc(db: Session, buyer_intent_id: UUID) -> dict[
             _kv("收购方产业优势", intent.get("buyer_industry_advantage_summary")),
         ]
     )
-    preference_text = _join_lines([intent.get("preference_summary"), intent.get("priority_summary")])
-    negative_text = intent.get("negative_summary")
+    # 标准化不了的说法现在住在各模块的「其他」里。搜索文档是深评实际读到的
+    # 那份上下文，所以它必须把「其他」带上 —— 否则「放进其他就交给深评」这句话
+    # 只对界面成立，对模型不成立。
+    sections = load_profile_sections(
+        db, entity_type="buyer_intent", entity_ids=[buyer_intent_id]
+    ).get(str(buyer_intent_id))
+    preference_text = render_profile_text(sections, entity_type="buyer_intent") or None
+    negative_text = None
     history_text = None
     # This document is now used as direct LLM context rather than an embedding
     # source, so exclusions must be explicit and buyer-party profile data is omitted.
@@ -423,8 +430,7 @@ def _get_buyer_intent(db: Session, buyer_intent_id: UUID) -> dict[str, Any]:
               financing_stage_requirement_summary, transaction_type, transaction_types_json,
               premium_tolerance_summary, max_premium_rate, max_debt_ratio,
               debt_ratio_requirement_summary, major_risk_tolerance_summary,
-              buyer_industry_advantage_summary, negative_summary,
-              priority_summary, preference_summary, unknown_summary
+              buyer_industry_advantage_summary
             from buyer_intent
             where id = :buyer_intent_id
               and team_id = :team_id

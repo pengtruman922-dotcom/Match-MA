@@ -1411,11 +1411,8 @@ def _candidate_intents_for_target(
               bi.requires_return_investment,
               bi.requires_team_retention,
               bi.major_risk_tolerance_summary,
-              bi.negative_summary,
               bi.raw_requirement_text,
               bi.intent_summary,
-              bi.priority_summary,
-              bi.preference_summary,
               bi.industry_focus_tags_json,
               bi.needs_confirmation_json,
               exists(
@@ -1480,8 +1477,6 @@ def _candidate_intents_for_target(
                     item.get("buyer_intent_name"),
                     item.get("raw_requirement_text"),
                     item.get("intent_summary"),
-                    item.get("priority_summary"),
-                    item.get("preference_summary"),
                     item.get("industry_focus_tags_json"),
                 )
             ),
@@ -2542,8 +2537,7 @@ def _get_buyer_intent_anchor(db: Session, buyer_intent_id: UUID | None) -> dict[
               bi.requires_relocation, bi.relocation_target_regions_json,
               bi.requires_return_investment, bi.return_investment_multiple,
               bi.requires_team_retention, bi.earnout_requirement,
-              bi.major_risk_tolerance_summary,
-              bi.negative_summary, bi.preference_summary
+              bi.major_risk_tolerance_summary
             from buyer_intent bi
             left join buyer_party bp on bp.id = bi.buyer_party_id
             where bi.id = :buyer_intent_id
@@ -3131,11 +3125,13 @@ def _build_rerank_query(*, mode: str, anchor: dict[str, Any]) -> str:
     if mode == "buyer_to_target":
         parts = [
             anchor.get("intent_name"),
+            # 原来这里取的是 preference_summary / negative_summary。那两列下线后，
+            # 定性内容住进各模块的「其他」，会随搜索文档一起进上下文；rerank 的
+            # 查询串改用需求摘要，它同样是整条需求的一句话概括。
+            anchor.get("intent_summary"),
             anchor.get("industry_primary"),
             anchor.get("industry_secondary"),
             anchor.get("region_scope_summary"),
-            anchor.get("preference_summary"),
-            anchor.get("negative_summary"),
         ]
     else:
         parts = [

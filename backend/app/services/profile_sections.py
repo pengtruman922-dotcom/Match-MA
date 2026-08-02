@@ -36,17 +36,44 @@ PROFILE_SECTIONS: tuple[tuple[str, str, int], ...] = (
     ("deal_terms", "交易属性与出售诉求", 400),
 )
 
+# 买家侧同一个道理：每个需求模块配一块「其他」，装该模块里标准化不了、
+# 也不适合拿去初筛的说法。栏目码和模块 key 对齐（registry.BUYER_GROUPS）。
+BUYER_PROFILE_SECTIONS: tuple[tuple[str, str, int], ...] = (
+    ("intent_scope", "行业与地区·其他", 300),
+    ("intent_financial", "经营与财务·其他", 300),
+    ("intent_deal", "交易与能力要求·其他", 400),
+)
+
+_SECTIONS_BY_ENTITY: dict[str, tuple[tuple[str, str, int], ...]] = {
+    "seller_target": PROFILE_SECTIONS,
+    "buyer_intent": BUYER_PROFILE_SECTIONS,
+}
+
 PROFILE_SECTION_CODES = tuple(code for code, _, _ in PROFILE_SECTIONS)
 PROFILE_SECTION_ALIASES = {
     "chain_position": "business_product",
     "sell_intent_risk": "deal_terms",
 }
 
-PROFILE_SECTION_LABELS = {code: label for code, label, _ in PROFILE_SECTIONS}
+# 两侧的栏目码不重叠，所以展示用的标签表可以合成一张，调用方不必先知道实体。
+PROFILE_SECTION_LABELS = {
+    code: label for code, label, _ in (*PROFILE_SECTIONS, *BUYER_PROFILE_SECTIONS)
+}
 
-PROFILE_SECTION_BUDGETS = {code: budget for code, _, budget in PROFILE_SECTIONS}
+PROFILE_SECTION_BUDGETS = {
+    code: budget for code, _, budget in (*PROFILE_SECTIONS, *BUYER_PROFILE_SECTIONS)
+}
 
-PROFILE_TOTAL_BUDGET = sum(PROFILE_SECTION_BUDGETS.values())
+PROFILE_TOTAL_BUDGET = sum(budget for _, _, budget in PROFILE_SECTIONS)
+
+
+def profile_sections_for(entity_type: str) -> tuple[tuple[str, str, int], ...]:
+    """某个实体有哪几块「其他」。未登记的实体没有画像栏目，不是报错。"""
+    return _SECTIONS_BY_ENTITY.get(entity_type, ())
+
+
+def profile_section_codes(entity_type: str) -> tuple[str, ...]:
+    return tuple(code for code, _, _ in profile_sections_for(entity_type))
 
 PROFILE_CLAUSE_SPLIT_PATTERN = re.compile(r"[，,；;。\n]+")
 DEAL_TERMS_NOISE_TERMS = ("融资阶段", "融资规模", "融资金额", "估值", "营业收入", "营收", "净利润")
@@ -57,7 +84,11 @@ INFO_STATUS_LABELS = {
 }
 
 
-def normalize_profile_section_items(values: Any) -> tuple[list[dict[str, Any]], list[str]]:
+def normalize_profile_section_items(
+    values: Any,
+    *,
+    entity_type: str = "seller_target",
+) -> tuple[list[dict[str, Any]], list[str]]:
     """Validate profile sections emitted by a parser or research node.
 
     Profile text is deliberately qualitative. Empty rows, unknown section
@@ -67,6 +98,7 @@ def normalize_profile_section_items(values: Any) -> tuple[list[dict[str, Any]], 
     """
     if not isinstance(values, list):
         return [], [] if values is None else ["profile_sections:not_a_list"]
+    allowed_codes = profile_section_codes(entity_type)
     normalized: list[dict[str, Any]] = []
     notes: list[str] = []
     seen: set[str] = set()
@@ -76,7 +108,7 @@ def normalize_profile_section_items(values: Any) -> tuple[list[dict[str, Any]], 
             continue
         raw_section_code = str(value.get("section_code") or "").strip()
         section_code = PROFILE_SECTION_ALIASES.get(raw_section_code, raw_section_code)
-        if section_code not in PROFILE_SECTION_CODES:
+        if section_code not in allowed_codes:
             notes.append(f"profile_sections[{index}]:unknown_section:{section_code[:50]}")
             continue
         if section_code in seen:
@@ -195,7 +227,11 @@ def load_profile_sections(
     return grouped
 
 
-def render_profile_text(sections: dict[str, dict[str, Any]] | None) -> str:
+def render_profile_text(
+    sections: dict[str, dict[str, Any]] | None,
+    *,
+    entity_type: str = "seller_target",
+) -> str:
     """Compose the deep-eval profile with a budget per section.
 
     Cutting one long document at a fixed offset drops whichever sections happen
@@ -205,7 +241,7 @@ def render_profile_text(sections: dict[str, dict[str, Any]] | None) -> str:
     if not sections:
         return ""
     parts: list[str] = []
-    for code, label, budget in PROFILE_SECTIONS:
+    for code, label, budget in profile_sections_for(entity_type):
         row = sections.get(code)
         if not row:
             continue

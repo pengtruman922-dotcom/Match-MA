@@ -563,8 +563,7 @@ BUSINESS_OBJECT_SELECTS = {
           transaction_type, transaction_types_json, premium_tolerance_summary,
           max_premium_rate, max_debt_ratio, debt_ratio_requirement_summary,
           major_risk_tolerance_summary, buyer_industry_advantage_summary,
-          negative_summary, priority_summary, preference_summary,
-          unknown_summary, created_at::text as created_at, updated_at::text as updated_at,
+          created_at::text as created_at, updated_at::text as updated_at,
           metadata_json
         from buyer_intent
         where id = :entity_id

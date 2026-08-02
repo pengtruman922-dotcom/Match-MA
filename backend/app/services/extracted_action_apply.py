@@ -652,8 +652,7 @@ def _get_buyer_intent_snapshot_or_404(db: Session, buyer_intent_id: UUID) -> dic
               financing_stage_requirement_summary, transaction_type, transaction_types_json,
               premium_tolerance_summary, max_premium_rate, max_debt_ratio,
               debt_ratio_requirement_summary, major_risk_tolerance_summary,
-              buyer_industry_advantage_summary, negative_summary,
-              priority_summary, preference_summary, unknown_summary
+              buyer_industry_advantage_summary
             from buyer_intent
             where id = :buyer_intent_id
               and team_id = :team_id
@@ -888,10 +887,6 @@ def _allowed_buyer_intent_changes(changes: dict[str, Any]) -> dict[str, Any]:
         "debt_ratio_requirement_summary",
         "major_risk_tolerance_summary",
         "buyer_industry_advantage_summary",
-        "negative_summary",
-        "priority_summary",
-        "preference_summary",
-        "unknown_summary",
     }
     return {key: value for key, value in changes.items() if key in allowed_fields}
 

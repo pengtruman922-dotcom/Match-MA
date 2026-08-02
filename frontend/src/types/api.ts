@@ -369,10 +369,6 @@ export interface BuyerIntent {
   needs_confirmation_json?: BuyerIntentConfirmationItem[];
   reviewed_at?: string | null;
   reviewed_by?: string | null;
-  negative_summary: string | null;
-  priority_summary: string | null;
-  preference_summary: string | null;
-  unknown_summary: string | null;
   acceptable_control_paths_json?: string[];
   owner_user_id?: string | null;
   owner_name?: string | null;
@@ -696,10 +692,6 @@ export interface BuyerIntentCreate {
   major_risk_tolerance_summary?: string;
   buyer_industry_advantage_summary?: string;
   needs_confirmation_json?: BuyerIntentConfirmationItem[];
-  negative_summary?: string;
-  priority_summary?: string;
-  preference_summary?: string;
-  unknown_summary?: string;
 }
 
 export interface BuyerIntentParseJob {
@@ -795,10 +787,6 @@ export interface BuyerIntentUpdate {
   major_risk_tolerance_summary?: string | null;
   buyer_industry_advantage_summary?: string | null;
   needs_confirmation_json?: BuyerIntentConfirmationItem[];
-  negative_summary?: string | null;
-  priority_summary?: string | null;
-  preference_summary?: string | null;
-  unknown_summary?: string | null;
   pause_reason?: string;
   owner_user_id?: string | null;
 }

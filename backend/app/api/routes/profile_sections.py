@@ -18,9 +18,9 @@ from backend.app.api.routes.utils import ensure_entity_visible, ensure_entity_wr
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 from backend.app.services.profile_sections import (
-    PROFILE_SECTION_CODES,
     PROFILE_SECTION_LABELS,
     apply_profile_section,
+    profile_section_codes,
 )
 
 router = APIRouter(prefix="/profile-sections", tags=["profile-sections"])
@@ -63,10 +63,13 @@ def _validate_target(entity_type: str, section_code: str | None = None) -> None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"entity_type must be one of {sorted(ENTITY_TYPES)}.",
         )
-    if section_code is not None and section_code not in PROFILE_SECTION_CODES:
+    # 栏目按实体分：买家的三块「其他」和标的的五栏画像互不通用，
+    # 写串了会在 entity_profile_section 的 check 约束上炸，不如在入口就说清楚。
+    allowed = profile_section_codes(entity_type)
+    if section_code is not None and section_code not in allowed:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"section_code must be one of {list(PROFILE_SECTION_CODES)}.",
+            detail=f"section_code for {entity_type} must be one of {list(allowed)}.",
         )
 
 

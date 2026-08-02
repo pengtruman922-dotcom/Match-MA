@@ -946,7 +946,6 @@ def _get_candidate_search_doc_text(db: Session, *, mode: str, candidate: dict[st
                   financing_stage_requirement_summary, transaction_type, transaction_types_json,
                   premium_tolerance_summary, max_premium_rate, max_debt_ratio,
                   debt_ratio_requirement_summary, major_risk_tolerance_summary,
-                  negative_summary, priority_summary, preference_summary, unknown_summary,
                   needs_confirmation_json,
                   coalesce((
                     select jsonb_agg(

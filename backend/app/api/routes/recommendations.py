@@ -186,7 +186,6 @@ def _build_temporary_anchor(mode: str, temporary_input: str) -> dict[str, Any]:
             "intent_name": "临时买家需求",
             "raw_requirement_text": temporary_input,
             "intent_summary": temporary_input,
-            "preference_summary": temporary_input,
             "industries_json": [],
             "excluded_industries_json": [],
         }

@@ -529,8 +529,7 @@ def _get_buyer_intent_for_parse(db: Session, buyer_intent_id: UUID) -> dict[str,
               financing_stage_requirement_summary, transaction_type, transaction_types_json,
               premium_tolerance_summary, max_premium_rate, max_debt_ratio,
               debt_ratio_requirement_summary, major_risk_tolerance_summary,
-              buyer_industry_advantage_summary, negative_summary,
-              priority_summary, preference_summary, unknown_summary,
+              buyer_industry_advantage_summary,
               needs_confirmation_json, reviewed_at, reviewed_by
             from buyer_intent
             where id = :buyer_intent_id
@@ -643,10 +642,6 @@ BUYER_INTENT_PARSE_FIELDS = {
     "debt_ratio_requirement_summary",
     "major_risk_tolerance_summary",
     "buyer_industry_advantage_summary",
-    "negative_summary",
-    "priority_summary",
-    "preference_summary",
-    "unknown_summary",
     "needs_confirmation_json",
 }
 

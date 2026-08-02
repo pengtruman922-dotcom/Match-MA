@@ -128,10 +128,6 @@ const BUYER_INTENT_FIELD_LABELS: Record<string, string> = {
   debt_ratio_requirement_summary: '负债率要求',
   major_risk_tolerance_summary: '风险容忍度',
   buyer_industry_advantage_summary: '买方产业优势',
-  negative_summary: '排除项',
-  priority_summary: '优先级',
-  preference_summary: '偏好说明',
-  unknown_summary: '待确认事项',
   deleted_at: '删除时间',
 };
 
@@ -223,10 +219,6 @@ Object.assign(BUYER_INTENT_FIELD_LABELS, {
   debt_ratio_requirement_summary: '负债率要求',
   major_risk_tolerance_summary: '风险容忍度',
   buyer_industry_advantage_summary: '买方产业优势',
-  negative_summary: '排除项',
-  priority_summary: '优先级',
-  preference_summary: '偏好说明',
-  unknown_summary: '待确认事项',
   deleted_at: '删除时间',
 });
 
@@ -247,6 +239,9 @@ const PROFILE_SECTION_LABELS: Record<string, string> = {
   ops_quality: '经营质量',
   deal_terms: '交易属性与配合度',
   sell_intent_risk: '出售诉求与风险缺口',
+  intent_scope: '行业与地区·其他',
+  intent_financial: '经营与财务·其他',
+  intent_deal: '交易与能力要求·其他',
 };
 
 const PROFILE_INFO_STATUS_LABELS: Record<string, string> = {

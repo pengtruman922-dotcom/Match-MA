@@ -58,7 +58,6 @@ export function intentConditionChips(intent: BuyerIntent): ConditionChip[] {
   }
   if (intent.requires_consolidation === 'yes') chips.push({ label: '需并表', field: 'requires_consolidation' });
   if (intent.requires_control === 'yes') chips.push({ label: '需控股', field: 'requires_control' });
-  if (intent.negative_summary) chips.push({ label: `排除:${intent.negative_summary}` });
   return chips;
 }
 

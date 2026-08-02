@@ -41,7 +41,10 @@ def test_temporary_anchor_is_explicitly_unbound() -> None:
 
     assert buyer_anchor["id"] is None
     assert buyer_anchor["intent_name"] == "临时买家需求"
-    assert buyer_anchor["preference_summary"] == "寻找消费品牌"
+    # 原来还断言 preference_summary。那一列下线后，临时锚点的原话由
+    # intent_summary 与 raw_requirement_text 承接，本来也一直是同一份文本。
+    assert buyer_anchor["intent_summary"] == "寻找消费品牌"
+    assert buyer_anchor["raw_requirement_text"] == "寻找消费品牌"
     assert target_anchor["id"] is None
     assert target_anchor["target_name"] == "临时标的画像"
     assert target_anchor["business_summary"] == "消费品牌拟出售控股权"

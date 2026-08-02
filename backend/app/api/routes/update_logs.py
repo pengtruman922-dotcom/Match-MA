@@ -1182,10 +1182,6 @@ ROLLBACK_FIELDS_BY_ENTITY = {
         "debt_ratio_requirement_summary",
         "major_risk_tolerance_summary",
         "buyer_industry_advantage_summary",
-        "negative_summary",
-        "priority_summary",
-        "preference_summary",
-        "unknown_summary",
     },
     "buyer_party": {
         "buyer_name",
