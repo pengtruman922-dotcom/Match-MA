@@ -195,36 +195,44 @@ def test_attachment_context_flags_budget_truncation(monkeypatch) -> None:
     assert "甲" * 51 not in context["combined_text"]
 
 
-# --- ④ 模型的字段词汇表必须覆盖可写的财务字段 -----------------------------
+# --- ④ 模型的字段词汇表必须覆盖每一个可写字段 -----------------------------
 
-# 提示词说的是 "use canonical seller_target fields from context"：没进 context 的
-# 字段，模型不知道它存在。这几列都是 parse 可写的，缺一个就等于永远写不进去。
-FINANCIAL_CONTEXT_COLUMNS = (
-    "current_revenue_yuan",
-    "current_net_profit_yuan",
-    "current_total_profit_yuan",
-    "current_assets_yuan",
-    "current_debt_ratio",
-    "current_operating_cash_flow_yuan",
-    "financial_period_label",
-    "market_cap_yuan",
-    "profitability_status",
-    "cash_flow_status",
-    "operation_stability_status",
-)
+# 提示词说的是 "use canonical fields from context"：没进 context 的字段，模型不
+# 知道它存在。手写过一次这份清单，seller 漏了 21 个、buyer 漏了 12 个，财务和
+# 股权比例整组缺席。现在从注册表派生，这两条用例锁死"只能故意排除，不能漏"。
 
 
-def test_seller_target_context_exposes_writable_financial_fields() -> None:
+def test_seller_context_covers_every_parse_writable_column() -> None:
+    from backend.app.registry.indicators import writable_columns
+    from backend.app.jobs.handlers.common import (
+        _SELLER_CONTEXT_EXCLUDED_COLUMNS,
+        seller_target_context_columns,
+    )
+
+    invisible = writable_columns("parse") - set(seller_target_context_columns())
+    assert invisible == set(_SELLER_CONTEXT_EXCLUDED_COLUMNS), (
+        f"parse 可写却对模型不可见: {sorted(invisible - _SELLER_CONTEXT_EXCLUDED_COLUMNS)}"
+    )
+
+
+def test_buyer_context_covers_every_parse_writable_column() -> None:
+    from backend.app.registry.indicators import writable_columns
+    from backend.app.jobs.handlers.common import (
+        _BUYER_INTENT_CONTEXT_EXCLUDED_COLUMNS,
+        buyer_intent_context_columns,
+    )
+
+    invisible = writable_columns("parse", "buyer_intent") - set(buyer_intent_context_columns())
+    assert invisible == set(_BUYER_INTENT_CONTEXT_EXCLUDED_COLUMNS), (
+        f"parse 可写却对模型不可见: {sorted(invisible - _BUYER_INTENT_CONTEXT_EXCLUDED_COLUMNS)}"
+    )
+
+
+def test_seller_context_projection_reaches_sql() -> None:
+    from backend.app.jobs.handlers.common import seller_target_context_columns
+
     db = _CaptureDb([])
     _fetch_seller_targets(db, [ATTACHMENT_ID])
 
-    for column in FINANCIAL_CONTEXT_COLUMNS:
-        assert column in db.sql_text, f"{column} 不在模型可见的字段清单里"
-
-
-def test_context_financial_columns_are_parse_writable() -> None:
-    from backend.app.registry.indicators import writable_columns
-
-    parse_writable = writable_columns("parse")
-    for column in FINANCIAL_CONTEXT_COLUMNS:
-        assert column in parse_writable, f"{column} 不是 parse 可写，放进 context 会被写入层拒掉"
+    for column in seller_target_context_columns():
+        assert column in db.sql_text, f"{column} 没进 SQL 投影"

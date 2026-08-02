@@ -626,25 +626,46 @@ def _safe_prompt_messages_for_trace(messages: list[dict[str, Any]]) -> list[dict
         safe_messages.append(safe_message)
     return safe_messages
 
+# 模型看得见但改不了的列：给它当前值做判断，写回要走别的字段。
+_SELLER_CONTEXT_READ_ONLY_COLUMNS = (
+    "id",
+    "target_name",
+    "target_type",
+    # 兼容投影列，真正的写入口是 industry_pairs_json。
+    "industry_l1",
+    "industry_l2",
+)
+# parse 可写但**故意**不给模型看的列，每条都要有理由。
+_SELLER_CONTEXT_EXCLUDED_COLUMNS = frozenset(
+    {
+        # 由 mark_parse_completed 按解析结果自己维护，模型不该提议。
+        "information_status",
+    }
+)
+
+
+def seller_target_context_columns() -> list[str]:
+    """模型的字段词汇表。
+
+    提示词说的是 "use canonical seller_target fields from context" —— 没出现在
+    这份清单里的字段，模型就当它不存在。所以这里必须从注册表派生而不是手写：
+    手写过一次，42 个 parse 可写列漏了 21 个，财务几项全在漏的里面，年报摆在
+    面前也只写得出行业和地区。新增可写指标现在会自动进来。
+    """
+    writable = writable_columns("parse") - _SELLER_CONTEXT_EXCLUDED_COLUMNS
+    extra = sorted(writable - set(_SELLER_CONTEXT_READ_ONLY_COLUMNS))
+    return [*_SELLER_CONTEXT_READ_ONLY_COLUMNS, *extra]
+
+
 def _fetch_seller_targets(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
     if not ids:
         return []
+    # 列名来自指标注册表，不是外部输入，可以安全拼接（同 field_writer._load_current）。
+    projection = ", ".join(seller_target_context_columns())
     rows = db.execute(
         text(
-            """
-            select
-              id, target_name, target_type, target_subject_name, industry_l1, industry_l2, industry_pairs_json,
-              location_province, location_city, location_district, listed_status,
-              -- 这份清单就是模型的字段词汇表：提示词让它"use canonical fields from
-              -- context"，没出现在这里的字段它根本不知道存在。财务几项曾经缺席，
-              -- 结果年报摆在面前也只写得出行业和地区。
-              current_revenue_yuan, current_net_profit_yuan, current_total_profit_yuan,
-              current_assets_yuan, current_debt_ratio, current_operating_cash_flow_yuan,
-              financial_period_label, market_cap_yuan,
-              profitability_status, cash_flow_status, operation_stability_status,
-              valuation_yuan,
-              valuation_date, asking_price_yuan, asking_price_date, pe_ratio, is_for_sale, can_control,
-              can_consolidate, business_summary, transaction_summary, risk_summary
+            f"""
+            select {projection}
             from seller_target
             where team_id = :team_id
               and workspace_id = :workspace_id
@@ -676,29 +697,38 @@ def _fetch_buyer_parties(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
     ).mappings().all()
     return [_json_safe_dict(row) for row in rows]
 
+_BUYER_INTENT_CONTEXT_READ_ONLY_COLUMNS = (
+    "id",
+    "buyer_party_id",
+    "intent_name",
+    "raw_requirement_text",
+)
+# parse 可写但**故意**不给模型看的列，每条都要有理由。
+_BUYER_INTENT_CONTEXT_EXCLUDED_COLUMNS = frozenset(
+    {
+        # 需求的启停由人操作，不是从材料里读出来的。
+        "status",
+        "pause_reason",
+    }
+)
+
+
+def buyer_intent_context_columns() -> list[str]:
+    """买家侧的字段词汇表，和 seller_target_context_columns 同一个道理。"""
+    writable = writable_columns("parse", "buyer_intent") - _BUYER_INTENT_CONTEXT_EXCLUDED_COLUMNS
+    extra = sorted(writable - set(_BUYER_INTENT_CONTEXT_READ_ONLY_COLUMNS))
+    return [*_BUYER_INTENT_CONTEXT_READ_ONLY_COLUMNS, *extra]
+
+
 def _fetch_buyer_intents(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
     if not ids:
         return []
+    # 列名来自指标注册表，不是外部输入，可以安全拼接。
+    projection = ", ".join(buyer_intent_context_columns())
     rows = db.execute(
         text(
-            """
-            select
-              id, buyer_party_id, intent_name, status, contact_name,
-              raw_requirement_text, intent_summary, industry_primary,
-              industry_secondary, industries_json, industry_l2_json, excluded_industries_json,
-              industry_focus_tags_json, region_scope_summary, region_constraints_json, min_revenue_yuan,
-              min_net_profit_yuan, max_pe, max_ps, min_net_margin, min_gross_margin,
-              min_valuation_yuan, max_valuation_yuan,
-              min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
-              requires_control, requires_consolidation,
-              accepts_minority_investment, preferred_listed_status,
-              acceptable_listed_status_json, condition_effects_json,
-              requires_relocation, requires_return_investment, requires_team_retention,
-              listing_board_requirement_summary, financing_stage_requirement_summary,
-              transaction_type, transaction_types_json, premium_tolerance_summary,
-              max_premium_rate, max_debt_ratio, debt_ratio_requirement_summary,
-              major_risk_tolerance_summary, buyer_industry_advantage_summary,
-              negative_summary, preference_summary, unknown_summary
+            f"""
+            select {projection}
             from buyer_intent
             where team_id = :team_id
               and workspace_id = :workspace_id
