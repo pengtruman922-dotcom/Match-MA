@@ -26,6 +26,7 @@ from backend.app.api.routes.utils import (
 )
 from backend.app.db import get_db
 from backend.app.registry.nodes import buyer_parse_node_names
+from backend.app.services.listed_status import legacy_listed_status
 from backend.app.services.recommendation_conditions import normalize_condition_effects, normalize_scenario_fields
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 from backend.app.services.buyer_intent_processing_state import buyer_intent_processing_states
@@ -1449,7 +1450,8 @@ def _normalize_legacy_listed_status(value: Any) -> str:
 
 
 def _legacy_listed_status(values: list[str]) -> str:
-    return values[0] if len(values) == 1 else "any"
+    # 与解析侧同一个投影规则，理由见 legacy_listed_status 的注释。
+    return legacy_listed_status(values)
 
 
 def _latest_active_parse_job(db: Session, buyer_intent_id: UUID) -> dict[str, Any] | None:

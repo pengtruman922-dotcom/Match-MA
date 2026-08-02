@@ -40,6 +40,7 @@ from backend.app.jobs.handlers.traces import (
 from backend.app.jobs.queue import JobClaim
 from backend.app.registry.indicators import indicators_for
 from backend.app.registry.nodes import buyer_intent_legacy_node_name, buyer_intent_two_stage_node_names
+from backend.app.services.listed_status import legacy_listed_status
 from backend.app.services.industry_taxonomy import (
     classify_terms,
     industry_l1_prompt_list,
@@ -812,7 +813,7 @@ def _normalize_buyer_intent_parse_changes(
         if key == "acceptable_listed_status_json":
             normalized_statuses = _normalize_acceptable_listed_statuses(value)
             changes[key] = normalized_statuses
-            changes["preferred_listed_status"] = normalized_statuses[0] if len(normalized_statuses) == 1 else "any"
+            changes["preferred_listed_status"] = legacy_listed_status(normalized_statuses)
             continue
         if key == "condition_effects_json":
             changes[key] = normalize_condition_effects(value)
