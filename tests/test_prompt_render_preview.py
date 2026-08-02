@@ -30,6 +30,25 @@ def test_render_preview_resolves_industry_dictionary_and_samples(monkeypatch) ->
     assert result["resolved_variables"]["industry_l1_list"] == "制造与工业、能源、医药健康"
 
 
+def test_render_preview_resolves_every_dictionary_the_runtime_injects(monkeypatch) -> None:
+    # 预览只认 industry_l1_list 时，写「从二级清单里逐字挑」的编辑者看到的是
+    # 占位符，根本判断不了清单里有没有那个词 —— 这正是 normalizer v0.1.1 要写的话。
+    monkeypatch.setattr(
+        "backend.app.api.routes.model_config.industry_l2_prompt_list",
+        lambda _db: "模具制造、储能温控",
+    )
+    result = render_prompt_preview(
+        PromptRenderPreviewIn(
+            user_prompt_template="二级：{{ industry_l2_list }}\n省份：{{ province_list }}",
+        ),
+        db=None,
+    )
+
+    assert result["resolved_variables"]["industry_l2_list"] == "模具制造、储能温控"
+    assert "广东省" in result["resolved_variables"]["province_list"]
+    assert "示例数据" not in result["rendered_user_prompt"]
+
+
 def test_render_preview_survives_dictionary_failure(monkeypatch) -> None:
     def boom(_db):
         raise RuntimeError("db down")
@@ -40,4 +59,4 @@ def test_render_preview_survives_dictionary_failure(monkeypatch) -> None:
         db=None,
     )
 
-    assert "行业字典读取失败" in result["rendered_user_prompt"]
+    assert "industry_l1_list 字典读取失败" in result["rendered_user_prompt"]

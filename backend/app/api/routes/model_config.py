@@ -1,4 +1,5 @@
 
+from collections.abc import Callable
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
@@ -11,7 +12,6 @@ from sqlalchemy.orm import Session
 from backend.app.ai.embedding_client import EmbeddingCallError, call_openai_compatible_embedding
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
 from backend.app.ai.prompting import extract_template_variables, render_template
-from backend.app.ai.prompting import extract_template_variables
 from backend.app.ai.rerank_client import RerankCallError, call_dashscope_compatible_rerank
 from backend.app.registry.nodes import (
     PROMPT_VARIABLE_LABELS,
@@ -24,12 +24,13 @@ from backend.app.registry.nodes import (
 from backend.app.api.authn import CurrentUser, require_admin
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
-from backend.app.services.industry_taxonomy import industry_l1_prompt_list
+from backend.app.services.industry_taxonomy import industry_l1_prompt_list, industry_l2_prompt_list
 from backend.app.services.model_secrets import (
     ModelSecretError,
     encrypt_model_secret,
     model_secret_encryption_configured,
 )
+from backend.app.services.region_dictionary import PROVINCES
 
 
 def _require_admin_route(current_user: CurrentUser) -> None:
@@ -993,6 +994,16 @@ def deactivate_node(node_id: UUID, db: Session = Depends(get_db)) -> dict[str, A
     return row
 
 
+# 这几个变量在运行时由 handler 注入真字典，预览也必须给真值，否则编辑者写
+# 「从清单里逐字挑」时看到的是占位符，无从判断清单里到底有没有那个词。
+_PREVIEW_DICTIONARY_LOADERS: dict[str, Callable[[Session], str]] = {
+    # 用 lambda 而不是直接引函数：晚绑定，测试替换模块级名字时才拦得住。
+    "industry_l1_list": lambda db: industry_l1_prompt_list(db),
+    "industry_l2_list": lambda db: industry_l2_prompt_list(db),
+    "province_list": lambda _db: "、".join(PROVINCES),
+}
+
+
 class PromptRenderPreviewIn(BaseModel):
     system_prompt: str | None = None
     user_prompt_template: str | None = None
@@ -1009,19 +1020,22 @@ class PromptRenderPreviewOut(BaseModel):
 def render_prompt_preview(payload: PromptRenderPreviewIn, db: Session = Depends(get_db)) -> dict[str, Any]:
     """Render a prompt draft with sample data so editors can see what the model receives.
 
-    `industry_l1_list` resolves to the real dictionary content; other variables
-    get a visible sample placeholder.
+    Dictionary variables resolve to their real content; everything else gets a
+    visible sample placeholder. The dictionaries are the whole reason the
+    preview exists -- an editor writing "pick a value from the list" needs to
+    see the list they are asking the model to pick from.
     """
     variables = extract_template_variables(payload.system_prompt, payload.user_prompt_template)
     resolved: dict[str, str] = {}
     for name in variables:
-        if name == "industry_l1_list":
-            try:
-                resolved[name] = industry_l1_prompt_list(db)
-            except Exception:  # noqa: BLE001 - preview must not fail on dictionary errors
-                resolved[name] = "（行业字典读取失败，渲染时会注入当前启用的一级行业列表）"
-        else:
+        loader = _PREVIEW_DICTIONARY_LOADERS.get(name)
+        if loader is None:
             resolved[name] = f"【示例数据: {name}】"
+            continue
+        try:
+            resolved[name] = loader(db)
+        except Exception:  # noqa: BLE001 - preview must not fail on dictionary errors
+            resolved[name] = f"（{name} 字典读取失败，渲染时会注入当前启用的清单）"
     return {
         "variables": variables,
         "resolved_variables": resolved,
