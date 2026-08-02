@@ -157,6 +157,7 @@ NODES: tuple[NodeSpec, ...] = (
             "buyer_profile_json",
             "field_contract_json",
             "industry_l1_list",
+            "industry_l2_list",
             "province_list",
             "enum_contract_json",
         ),
