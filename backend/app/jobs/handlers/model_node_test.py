@@ -70,7 +70,7 @@ def _handle_model_chat_node_test(
             messages=messages,
             temperature=node_config.get("temperature"),
             top_p=node_config.get("top_p"),
-            max_tokens=node_config.get("max_tokens") or 64,
+            max_tokens=node_config.get("max_tokens") or _test_max_tokens(node_config),
             timeout_seconds=int(job.payload_json.get("timeout_seconds") or node_config["timeout_seconds"]),
             response_format=node_config.get("response_format"),
         )
@@ -342,6 +342,16 @@ def _model_node_test_messages(
         {"role": "system", "content": "You are a concise API connectivity tester."},
         {"role": "user", "content": input_text or "Return exactly: ok"},
     ]
+
+
+def _test_max_tokens(node_config: dict[str, Any]) -> int:
+    """节点没设 max_tokens 时，这次测试该给多少输出预算。
+
+    连通性探针回一句 ``{"status":"ok"}``，64 token 绰绰有余。但节点一旦有提示词，
+    测试跑的就是渲染过真实业务输入的完整提示词 —— 64 token 会把 JSON 从中间切断，
+    于是测试永远"失败"，看起来像模型或提示词有问题，其实是测试自己把答案掐了。
+    """
+    return 4096 if str(node_config.get("user_prompt_template") or "").strip() else 64
 
 
 def _business_test_variables(
