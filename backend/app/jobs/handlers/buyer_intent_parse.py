@@ -40,6 +40,7 @@ from backend.app.jobs.handlers.traces import (
 from backend.app.jobs.queue import JobClaim
 from backend.app.registry.indicators import indicators_for
 from backend.app.registry.nodes import buyer_intent_legacy_node_name, buyer_intent_two_stage_node_names
+from backend.app.services.buyer_intent_industry import normalize_buyer_intent_industry_changes
 from backend.app.services.listed_status import legacy_listed_status
 from backend.app.services.industry_taxonomy import (
     classify_terms,
@@ -49,7 +50,6 @@ from backend.app.services.industry_taxonomy import (
     normalize_excluded_terms,
     normalize_l1_values,
     normalize_l2_values,
-    resolve_l1,
 )
 from backend.app.services.recommendation_conditions import (
     normalize_condition_effects,
@@ -944,74 +944,9 @@ def _normalize_confirmation_items(raw: Any, allowed_fields: set[str]) -> list[di
         normalized.append(entry)
     return normalized
 
-def _normalize_buyer_intent_industry_changes(db: Session, changes: dict[str, Any]) -> list[str]:
-    """Map parser industry output onto the closed L1 dictionary in place."""
-    notes: list[str] = []
-    semantic_focus_terms: list[str] = []
-    for value in changes.get("industry_focus_tags_json") or []:
-        term = str(value or "").strip()
-        if term and term not in semantic_focus_terms:
-            semantic_focus_terms.append(term)
-    if "industries_json" in changes:
-        raw_l1 = [str(value).strip() for value in changes["industries_json"] if str(value or "").strip()]
-        normalized, industry_notes = normalize_l1_values(
-            db,
-            changes["industries_json"],
-            fallback_unmapped=False,
-        )
-        notes.extend(industry_notes)
-        if normalized:
-            changes["industries_json"] = normalized
-        else:
-            changes.pop("industries_json", None)
-        mapped_l1 = set(normalized)
-        for term in raw_l1:
-            if resolve_l1(db, term) is None and term not in mapped_l1 and term not in semantic_focus_terms:
-                semantic_focus_terms.append(term)
-    if "industry_l2_json" in changes:
-        # L2 是筛选字段，只保留字典里真实存在的赛道；写不进字典的细分方向
-        # （醋酸下游、偏光膜这类产品级说法）留给深评，不污染 SQL。
-        raw_l2 = [str(value).strip() for value in changes["industry_l2_json"] if str(value or "").strip()]
-        normalized_l2, l2_notes = normalize_l2_values(db, raw_l2)
-        notes.extend(l2_notes)
-        if normalized_l2:
-            changes["industry_l2_json"] = normalized_l2
-        else:
-            changes.pop("industry_l2_json", None)
-        for term in raw_l2:
-            if term not in normalized_l2 and term not in semantic_focus_terms:
-                semantic_focus_terms.append(term)
-    if "excluded_industries_json" in changes:
-        cleaned = normalize_excluded_terms(changes["excluded_industries_json"])
-        classified = classify_terms(cleaned, load_term_levels(db))
-        effective_exclusions = classified["l1"] + classified["l2"]
-        for term in classified["unresolved"]:
-            notes.append(f"excluded_industry_unmapped:{term[:50]}")
-            if term not in semantic_focus_terms:
-                semantic_focus_terms.append(term)
-        if effective_exclusions:
-            changes["excluded_industries_json"] = effective_exclusions
-        else:
-            changes.pop("excluded_industries_json", None)
-    if "industry_focus_tags_json" in changes:
-        raw_tags = changes["industry_focus_tags_json"]
-        tags: list[str] = []
-        if isinstance(raw_tags, list):
-            for value in raw_tags:
-                tag = str(value or "").strip()[:80]
-                if tag and tag not in tags:
-                    tags.append(tag)
-        if tags:
-            changes["industry_focus_tags_json"] = tags
-        else:
-            changes.pop("industry_focus_tags_json", None)
-    if semantic_focus_terms:
-        changes["industry_focus_tags_json"] = semantic_focus_terms[:50]
-    if "industries_json" not in changes and changes.get("industry_primary"):
-        l1_name = resolve_l1(db, changes["industry_primary"])
-        if l1_name:
-            changes["industries_json"] = [l1_name]
-    return notes
+# 规则本体搬进了服务层，因为带附件的那条路（extracted_action_apply）也必须走同一套。
+# 这个别名保留原名，handlers 包的 re-export 和现有用例都依赖它。
+_normalize_buyer_intent_industry_changes = normalize_buyer_intent_industry_changes
 
 def _apply_buyer_intent_parse_changes(
     db: Session,

@@ -15,6 +15,7 @@ from backend.app.api.routes.utils import (
     write_action_logs_for_diff,
     write_field_value_sources_for_diff,
 )
+from backend.app.services.buyer_intent_industry import normalize_buyer_intent_industry_changes
 from backend.app.services.field_writer import WriteProvenance, write_seller_target_fields
 from backend.app.services.relation_flow import mark_seller_target_sold_for_deal_closed
 from backend.app.services.search_docs import create_search_doc_rebuild_job
@@ -178,6 +179,31 @@ def _record_rejected_fields(
     )
 
 
+def _record_industry_notes(db: Session, extracted_action_id: UUID, notes: list[str]) -> None:
+    """把字典对齐时挪走的行业说法挂到 action 上。
+
+    值没丢（都进了 industry_focus_tags_json 走深评），但「模型说的是汽车电子零部件、
+    字典里只有汽车零部件」这件事只有这里留得住 —— 也是判断字典该不该补词的依据。
+    """
+    db.execute(
+        text(
+            """
+            update extracted_action
+            set metadata_json = metadata_json || :metadata_patch
+            where id = :extracted_action_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+        {
+            "extracted_action_id": extracted_action_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "metadata_patch": {"industry_normalization_notes": notes[:50]},
+        },
+    )
+
+
 def apply_buyer_intent_update_action(
     db: Session,
     action: dict[str, Any],
@@ -203,6 +229,17 @@ def apply_buyer_intent_update_action(
     changes = _allowed_buyer_intent_changes(action["proposed_changes_json"])
     if not changes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No supported changes to apply.")
+
+    # 行业列是封闭词表的筛选列，只能带着字典写。新建解析那条路一直这么做，
+    # 这条路（带附件时的 business_update_extractor）此前直接写原文，于是
+    # 「汽车电子零部件」这类字典外的说法进了 industries_json —— 页面上看着有
+    # 行业筛选，实际一个标的都匹配不上。字典装不下的说法挪进 focus_tags 走深评。
+    industry_notes = normalize_buyer_intent_industry_changes(db, changes)
+    if not changes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No supported changes to apply after industry normalization.",
+        )
 
     buyer_intent_id = action["target_entity_id"]
     original = _get_buyer_intent_snapshot_or_404(db, buyer_intent_id)
@@ -303,6 +340,8 @@ def apply_buyer_intent_update_action(
         entity_id=buyer_intent_id,
         source="buyer_intent_update_apply",
     )
+    if industry_notes:
+        _record_industry_notes(db, action["id"], industry_notes)
     _mark_action_applied(db, action["id"], review_status="auto_accepted" if not require_accepted else None)
     _refresh_business_update_status(db, action["business_update_id"])
 
@@ -313,6 +352,7 @@ def apply_buyer_intent_update_action(
         "entity_type": "buyer_intent",
         "entity_id": buyer_intent_id,
         "applied_fields": list(diff.keys()),
+        "industry_normalization_notes": industry_notes,
     }
 
 
