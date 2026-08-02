@@ -353,22 +353,29 @@ def _apply_buyer_intent_profile_sections(
     """
     sections, notes = normalize_profile_section_items(raw_sections, entity_type="buyer_intent")
     normalization_notes.extend(notes)
+    written = 0
     for section in sections:
-        apply_profile_section(
-            db,
-            entity_type="buyer_intent",
-            entity_id=buyer_intent_id,
-            section_code=section["section_code"],
-            info_status="filled",
-            content_text=section["content_text"],
-            source_type="buyer_intent_parse",
-            source_excerpt=section.get("source_excerpt"),
-            as_of_date=section.get("as_of_date"),
-            review_status="auto_accepted",
-            user_id=SYSTEM_USER_ID,
-            log_source_type="buyer_intent_parse",
-        )
-    return len(sections)
+        try:
+            apply_profile_section(
+                db,
+                entity_type="buyer_intent",
+                entity_id=buyer_intent_id,
+                section_code=section["section_code"],
+                info_status="filled",
+                content_text=section["content_text"],
+                source_type="buyer_intent_parse",
+                source_excerpt=section.get("source_excerpt"),
+                as_of_date=section.get("as_of_date"),
+                review_status="auto_accepted",
+                user_id=SYSTEM_USER_ID,
+                log_source_type="buyer_intent_parse",
+            )
+            written += 1
+        except ValueError as exc:
+            # 「其他」是补充说明，字段才是这次解析的正事。一块栏目写不进去
+            # 不该把已经解析好的几十个字段一起回滚 —— 留痕，继续。
+            normalization_notes.append(f"profile_section_rejected:{section['section_code']}:{exc}")
+    return written
 
 
 def _buyer_intent_field_contract() -> list[dict[str, Any]]:

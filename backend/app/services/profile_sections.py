@@ -324,8 +324,11 @@ def upsert_profile_section(
     consultant clicks 确认 and the panel does not change. Whoever accepted last
     wins; as_of_date stays a display and deep-eval signal only.
     """
-    if section_code not in PROFILE_SECTION_CODES:
-        raise ValueError(f"Unknown profile section: {section_code}")
+    # 栏目按实体分。这里曾经只认卖方五栏，于是买家的三块「其他」在
+    # normalize 那关放行、到写库这关被拒 —— 解析走到写入阶段才炸。
+    allowed_codes = profile_section_codes(entity_type)
+    if section_code not in allowed_codes:
+        raise ValueError(f"Unknown {entity_type} profile section: {section_code}")
     superseded = db.execute(
         text(
             """
