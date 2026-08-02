@@ -52,6 +52,7 @@ from backend.app.services.industry_taxonomy import (
     normalize_l2_values,
 )
 from backend.app.services.recommendation_conditions import (
+    CONDITION_EFFECTS,
     normalize_condition_effects,
     normalize_scenario_fields,
 )
@@ -920,7 +921,7 @@ def _normalize_confirmation_items(raw: Any, allowed_fields: set[str]) -> list[di
         if operator:
             entry["operator"] = operator[:80]
         effect = str(item.get("effect") or "").strip().lower()
-        if effect in {"required", "preferred", "deep_eval"}:
+        if effect in CONDITION_EFFECTS:
             entry["effect"] = effect
         scope = str(item.get("scope") or "").strip()
         if scope:

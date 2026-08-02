@@ -279,7 +279,7 @@ def test_score_target_against_intent_uses_expanded_buyer_filters() -> None:
     assert meta["unknown_dimensions"] == []
 
 
-def test_condition_effects_control_conflict_ranking_and_deep_eval() -> None:
+def test_condition_effects_control_conflict_and_ranking() -> None:
     target = {"current_revenue_yuan": 8_000_000}
     base_intent = {"min_revenue_yuan": 10_000_000}
 
@@ -291,18 +291,27 @@ def test_condition_effects_control_conflict_ranking_and_deep_eval() -> None:
         target,
         {**base_intent, "condition_effects_json": {"min_revenue_yuan": "preferred"}},
     )
-    deep_score, _, deep_gaps, deep_meta = _score_target_against_intent(
-        target,
-        {**base_intent, "condition_effects_json": {"min_revenue_yuan": "deep_eval"}},
-    )
 
     assert required_meta["state"] == "conflict"
     assert preferred_meta["state"] == "compatible"
     assert preferred_score == 0
     assert "营收低于买家门槛" in preferred_gaps
-    assert deep_meta["state"] == "compatible"
-    assert deep_score == 40
-    assert deep_gaps == []
+
+
+def test_a_stale_deep_eval_effect_no_longer_switches_scoring_off() -> None:
+    """规则只剩必须/优先。存量库里残留的 deep_eval 不能继续静默让字段不参与打分。
+
+    它曾经是第三个取值，含义是「跳过规则打分」。现在这件事只能由「把内容放进
+    模块的其他」来表达；写在 condition_effects_json 里的 deep_eval 是脏数据，
+    要退回字段自己的规则，而不是被当成一个仍然生效的开关。
+    """
+    _, _, _, meta = _score_target_against_intent(
+        {"current_revenue_yuan": 8_000_000},
+        {"min_revenue_yuan": 10_000_000, "condition_effects_json": {"min_revenue_yuan": "deep_eval"}},
+    )
+
+    # min_revenue_yuan 注册表默认就是 required，所以按它自己的规则判：冲突。
+    assert meta["state"] == "conflict"
 
 
 def test_required_unknown_target_value_never_conflicts() -> None:

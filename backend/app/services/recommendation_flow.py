@@ -2110,7 +2110,8 @@ def _score_target_against_intent(
         nonlocal earned, possible, known_count
         if field:
             effect = condition_effect(intent, field)
-            if effect == "deep_eval":
+            if effect is None:
+                # 不是条件，只是描述。它的内容随「其他」进深评，不进规则打分。
                 return
             gate = effect == "required" if gate is None else bool(gate and effect == "required")
         else:
@@ -2183,7 +2184,7 @@ def _score_target_against_intent(
         item for item in (intent.get("region_constraints_json") or []) if isinstance(item, dict)
     ]
     region_scope = str(intent.get("region_scope_summary") or "").strip()
-    if region_constraints and condition_effect(intent, "region_constraints_json") != "deep_eval":
+    if region_constraints and condition_effect(intent, "region_constraints_json") is not None:
         province = target.get("location_province")
         city = target.get("location_city")
         district = target.get("location_district")

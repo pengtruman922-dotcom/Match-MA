@@ -294,11 +294,15 @@ def normalize_scenario_fields(raw: Any) -> dict[str, Any]:
     return fields
 
 
-CONDITION_EFFECTS = {"required", "preferred", "deep_eval"}
+# 规则只有两态：必须（初筛硬门槛）和优先（只影响排序）。
+# 曾经还有第三个取值 deep_eval，名字骗人 —— 深评上下文是把整个 anchor 打包成
+# 一个 JSON 交给模型的，从来不按字段分流；那个标签实际只让字段跳过规则打分。
+# 现在「不参与规则打分」由 condition_effect 返回 None 表达，不再是可选的规则。
+CONDITION_EFFECTS = {"required", "preferred"}
 
 
 def normalize_condition_effects(raw: Any) -> dict[str, str]:
-    """Keep only editable contract fields and the three supported effects."""
+    """Keep only editable contract fields and the two supported effects."""
     if not isinstance(raw, dict):
         return {}
     allowed = {
@@ -313,10 +317,23 @@ def normalize_condition_effects(raw: Any) -> dict[str, str]:
     }
 
 
-def condition_effect(anchor: dict[str, Any], field: str) -> str:
+def condition_effect(anchor: dict[str, Any], field: str) -> str | None:
+    """这个字段在这次比对里怎么用：required / preferred，或 None（不参与规则打分）。
+
+    方案里显式设过的字段，取值一个方案一份，方案说了算。
+    """
     effects = anchor.get("condition_effects_json")
     if isinstance(effects, dict) and str(effects.get(field)) in CONDITION_EFFECTS:
         return str(effects[field])
+    # 方案自己写进 fields_json 的字段，是这一档和别档的分界线，必须硬判。
+    # 软条件只扣分不冲突，而打分取各档中最好的一档 —— 于是标的会从要求最松的
+    # 那一档溜进来，买家的分档等于没写。举个实测过的例子：
+    # 「市值≥10亿→盈利≥1000万 / 市值<10亿→盈利≥1亿」，min_market_cap_yuan
+    # 注册表默认是 preferred，一个 5亿市值、1500万盈利的标的在第一档只扣分、
+    # 不冲突，盈利又够 1000万，就这么进来了。
+    # 方案里显式设过规则的字段不走这里 —— 上面那个分支已经返回了。
+    if field in (anchor.get("_scenario_fields") or ()):
+        return "required"
     # These fields carry their effect in the value itself.  Keeping that
     # interpretation here lets the scorer use the same contract as ordinary
     # fields without accidentally downgrading a ``required`` requirement to
@@ -327,13 +344,13 @@ def condition_effect(anchor: dict[str, Any], field: str) -> str:
         "requires_team_retention",
     }:
         strength = str(anchor.get(field) or "").strip().lower()
-        if strength in {"required", "preferred"}:
+        if strength in CONDITION_EFFECTS:
             return strength
-        return "deep_eval"
+        return None
     try:
-        return indicator_by_column("buyer_intent", field).default_effect or "deep_eval"
+        return indicator_by_column("buyer_intent", field).default_effect
     except KeyError:
-        return "deep_eval"
+        return None
 
 
 def merge_scenario_into_anchor(anchor: dict[str, Any], scenario_fields: Any) -> dict[str, Any]:
