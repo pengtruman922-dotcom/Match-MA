@@ -76,12 +76,13 @@ def test_buyer_party_block_carries_business_facts_without_identity() -> None:
 
         def one_or_none(self):
             return {
-                "buyer_type": "地方国企",
-                "group_name": "某产业集团",
+                "industries_json": ["能源"],
+                "industry_l2_json": ["新能源"],
                 "region_province": "湖北省",
-                "main_business": "城市燃气与综合能源服务",
-                "capital_strength_summary": "年投资规模 50 亿",
-                "profile_summary": "已布局储能、充电桩",
+                "region_city": "武汉市",
+                "contact_name": "张经理",
+                "contact_info_json": {"text": "13800000000"},
+                "notes": "关注储能、充电桩",
             }
 
     class _Db:
@@ -94,8 +95,10 @@ def test_buyer_party_block_carries_business_facts_without_identity() -> None:
     db = _Db()
     block = buyer_party_fact_block(db, "8ff4bc53-047c-47be-b9b8-a3c465a519a1")
 
-    assert "现有主业：城市燃气与综合能源服务" in block
-    assert "产业布局：已布局储能、充电桩" in block
+    assert "所属行业：新能源" in block
+    assert "所在地区：湖北省 武汉市" in block
+    assert "联系人：张经理" in block
+    assert "其他：关注储能、充电桩" in block
     # 身份字段不进块：它服务于协同性判断，不用于指名买家
     assert "buyer_name" not in db.statement
     assert "legal_name" not in db.statement

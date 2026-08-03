@@ -528,7 +528,7 @@ def list_buyer_intents(
         else:
             where.append(
                 "("
-                "bi.intent_name ilike :q or bp.buyer_name ilike :q or bp.legal_name ilike :q "
+                "bi.intent_name ilike :q or bp.buyer_name ilike :q or bp.aliases_json::text ilike :q "
                 "or bi.raw_requirement_text ilike :q or bi.intent_summary ilike :q "
                 "or bi.industry_primary ilike :q or bi.industry_secondary ilike :q or bi.region_scope_summary ilike :q"
                 ")"

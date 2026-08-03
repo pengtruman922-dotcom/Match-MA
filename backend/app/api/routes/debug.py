@@ -573,9 +573,9 @@ BUSINESS_OBJECT_SELECTS = {
     """,
     "buyer_party": """
         select
-          id, buyer_name as name, buyer_name as title, legal_name, buyer_type,
-          status, listed_status, region_province, region_city, main_business,
-          profile_summary, contact_info_json, created_at::text as created_at,
+          id, buyer_name as name, buyer_name as title, aliases_json, industries_json,
+          industry_l2_json, status, region_province, region_city, contact_name,
+          contact_info_json, notes, created_at::text as created_at,
           updated_at::text as updated_at, metadata_json
         from buyer_party
         where id = :entity_id

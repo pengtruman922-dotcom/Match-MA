@@ -143,22 +143,23 @@ def _search_buyer_parties(db: Session, params: dict[str, Any], current_user: Any
               'buyer_party' as entity_type,
               id::text as entity_id,
               buyer_name as title,
-              nullif(concat_ws(' · ', buyer_type, region_province, region_city), '') as subtitle,
-              coalesce(profile_summary, main_business, capital_strength_summary) as snippet,
+              nullif(concat_ws(' · ', region_province, region_city), '') as subtitle,
+              coalesce(contact_name, nullif(contact_info_json::text, '{{}}'), notes) as snippet,
               '/buyers/' || id::text as route,
               updated_at::text as updated_at,
               case
                 when lower(buyer_name) = lower(:q_plain) then '名称完全匹配'
                 when buyer_name ilike :q_prefix then '名称前缀匹配'
-                when legal_name ilike :q then '法人全称匹配'
+                when aliases_json::text ilike :q then '别名匹配'
                 else '字段匹配'
               end as match_reason,
               jsonb_build_object(
-                'legal_name', legal_name,
-                'buyer_type', buyer_type,
+                'aliases_json', aliases_json,
+                'industries_json', industries_json,
+                'industry_l2_json', industry_l2_json,
                 'region_province', region_province,
                 'region_city', region_city,
-                'main_business', main_business
+                'contact_name', contact_name
               ) as metadata
             from buyer_party
             where team_id = :team_id
@@ -167,12 +168,14 @@ def _search_buyer_parties(db: Session, params: dict[str, Any], current_user: Any
               {scope_clause}
               and (
                 buyer_name ilike :q
-                or coalesce(legal_name, '') ilike :q
-                or coalesce(main_business, '') ilike :q
-                or coalesce(profile_summary, '') ilike :q
-                or coalesce(capital_strength_summary, '') ilike :q
+                or coalesce(aliases_json::text, '') ilike :q
+                or coalesce(industries_json::text, '') ilike :q
+                or coalesce(industry_l2_json::text, '') ilike :q
                 or coalesce(region_province, '') ilike :q
                 or coalesce(region_city, '') ilike :q
+                or coalesce(contact_name, '') ilike :q
+                or coalesce(contact_info_json::text, '') ilike :q
+                or coalesce(notes, '') ilike :q
               )
             order by
               case

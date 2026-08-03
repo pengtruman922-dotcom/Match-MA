@@ -684,8 +684,8 @@ def _fetch_buyer_parties(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
         text(
             """
             select
-              id, buyer_name, legal_name, buyer_type, listed_status,
-              region_province, region_city, main_business, profile_summary
+              id, buyer_name, aliases_json, industries_json, industry_l2_json,
+              region_province, region_city, contact_name, contact_info_json, notes
             from buyer_party
             where team_id = :team_id
               and workspace_id = :workspace_id

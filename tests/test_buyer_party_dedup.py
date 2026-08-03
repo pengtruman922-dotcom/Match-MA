@@ -40,7 +40,6 @@ def test_dedup_check_searches_all_buyers_with_ilike_and_returns_ids() -> None:
     row = {
         "id": buyer_id,
         "buyer_name": "北控集团有限公司",
-        "legal_name": None,
         "owner_name": "其他顾问",
         "match_type": "buyer_name",
         "status": "active",
@@ -51,7 +50,7 @@ def test_dedup_check_searches_all_buyers_with_ilike_and_returns_ids() -> None:
 
     assert result == {"exists": True, "query": "北控集团", "matches": [row]}
     assert "bp.buyer_name ilike :name_pattern" in db.sql
-    assert "bp.legal_name" in db.sql
+    assert "bp.legal_name" not in db.sql
     assert "alias_name ilike :name_pattern" in db.sql
     assert "owner_user_id = :scope_user_id" not in db.sql
     assert " limit " not in f" {db.sql.lower()} "

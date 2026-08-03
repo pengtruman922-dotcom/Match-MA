@@ -84,7 +84,6 @@ export function PartyStatusBadge({ status }: { status: string }) {
 
 export function dedupMatchLabel(value: string): string {
   if (value === 'buyer_name') return '买家名称';
-  if (value === 'legal_name') return '公司全称';
   if (value === 'alias') return '别名';
   return value;
 }

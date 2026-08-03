@@ -31,9 +31,7 @@ def test_buyer_party_suggestions_returns_compact_snippet_for_match() -> None:
             {
                 "id": "00000000-0000-0000-0000-000000000301",
                 "buyer_name": "测试买家",
-                "legal_name": None,
-                "main_business": "  医药   健康  ",
-                "profile_summary": None,
+                "contact_name": "  李经理  ",
                 "search_field": "buyer_name",
                 "match_type": "buyer",
                 "match_text": "测试买家",
@@ -48,6 +46,6 @@ def test_buyer_party_suggestions_returns_compact_snippet_for_match() -> None:
         db=db,
     )
 
-    assert result[0]["snippet"] == "医药 健康"
+    assert result[0]["snippet"] == "李经理"
     assert result[0]["buyer_name"] == "测试买家"
     assert db.params["q"] == "%测试买家%"

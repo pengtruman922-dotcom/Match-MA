@@ -9,7 +9,6 @@ from backend.app.jobs.handlers import (
     _normalize_actions,
     _normalize_buyer_intent_industry_changes,
     _normalize_buyer_intent_parse_changes,
-    _normalize_buyer_party_parse_changes,
     _normalize_equity_requirement_type,
     _normalize_listed_status,
     _normalize_yes_no_like,
@@ -425,39 +424,20 @@ def test_buyer_intent_update_action_normalizes_numbers_and_valuation_semantics()
     assert "min_market_cap_yuan" not in changes
 
 
-def test_buyer_party_parse_changes_normalize_model_buyer_type_aliases() -> None:
-    changes = _normalize_buyer_party_parse_changes(
-        {
-            "buyer_party": {
-                "buyer_type": "strategic",
-                "listed_status": "不限",
-                "group_name": "华源",
-                "main_business": "冶炼及关键金属供应链",
-            }
-        }
-    )
-
-    assert changes["buyer_type"] == "industrial_buyer"
-    assert changes["listed_status"] == "unknown"
-    assert changes["group_name"] == "华源"
-
-
 def test_buyer_profile_context_loads_linked_buyer_party() -> None:
     buyer_party_id = UUID("00000000-0000-0000-0000-000000000123")
     db = _FakeDb(
         {
             "id": buyer_party_id,
             "buyer_name": "中大咨询",
-            "legal_name": "中大咨询有限公司",
             "aliases_json": [],
-            "buyer_type": "industrial_buyer",
-            "group_name": None,
-            "listed_status": "unlisted",
+            "industries_json": ["专业服务"],
+            "industry_l2_json": ["咨询服务"],
             "region_province": "广东省",
             "region_city": "广州市",
-            "main_business": "咨询服务",
-            "capital_strength_summary": None,
-            "profile_summary": None,
+            "contact_name": "王经理",
+            "contact_info_json": {},
+            "notes": None,
             "status": "active",
         }
     )

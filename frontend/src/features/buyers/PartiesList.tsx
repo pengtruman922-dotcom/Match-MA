@@ -9,7 +9,6 @@ import type {
   BuyerPartyFilterOptions,
   BuyerPartySuggestion,
 } from '../../types/api';
-import { valueLabel } from '../../lib/fieldLabels';
 import BulkActionBar from '../../components/BulkActionBar';
 import PaginationFooter from '../../components/PaginationFooter';
 import ListToolbar from './ListToolbar';
@@ -65,9 +64,8 @@ export default function PartiesList({
     next.set('tab', 'parties');
     if ('q' in patch) setOrDelete(next, 'partyQ', patch.q);
     if ('searchField' in patch) setOrDelete(next, 'partySearchField', patch.searchField);
-    if ('buyerType' in patch) setOrDelete(next, 'buyerType', patch.buyerType);
+    if ('industry' in patch) setOrDelete(next, 'partyIndustry', patch.industry);
     if ('region' in patch) setOrDelete(next, 'partyRegion', patch.region);
-    if ('listedStatus' in patch) setOrDelete(next, 'partyListedStatus', patch.listedStatus);
     if ('status' in patch) setOrDelete(next, 'partyStatus', patch.status);
     if ('owner' in patch) setOrDelete(next, 'partyOwner', patch.owner);
     if (patch.page !== undefined) {
@@ -83,9 +81,8 @@ export default function PartiesList({
       .list({
         q: filters.q || undefined,
         search_field: filters.searchField,
-        buyer_type: filters.buyerType || undefined,
+        industry: filters.industry || undefined,
         region: filters.region || undefined,
-        listed_status: filters.listedStatus || undefined,
         status: filters.status || undefined,
         owner: filters.owner || undefined,
         limit: PAGE_SIZE,
@@ -140,7 +137,7 @@ export default function PartiesList({
   };
 
   const handleSuggestionSelect = (suggestion: BuyerPartySuggestion) => {
-    const nextQuery = ['business', 'profile'].includes(suggestion.match_type) ? searchQuery.trim() : suggestion.match_text;
+    const nextQuery = suggestion.match_text;
     setSearchQuery(nextQuery);
     setShowSuggestions(false);
     updateFilters({ q: nextQuery, searchField: suggestion.search_field, page: 1 });
@@ -213,14 +210,14 @@ export default function PartiesList({
 
   const clearFilters = () => {
     setSearchQuery('');
-    updateFilters({ q: '', searchField: undefined, buyerType: '', region: '', listedStatus: '', status: '', owner: '', page: 1 });
+    updateFilters({ q: '', searchField: undefined, industry: '', region: '', status: '', owner: '', page: 1 });
   };
 
   return (
     <>
       <ListToolbar
         searchValue={searchQuery}
-        placeholder="搜索买家名称、法律主体、业务或画像..."
+        placeholder="搜索买家名称、别名或联系人..."
         suggestions={suggestions}
         suggestionsOpen={showSuggestions && searchQuery.trim().length > 0}
         suggestionsLoading={suggestionsLoading}
@@ -231,9 +228,8 @@ export default function PartiesList({
         onSuggestionSelect={(suggestion) => handleSuggestionSelect(suggestion as BuyerPartySuggestion)}
         searchFieldBadge={filters.q && filters.searchField ? `按${PARTY_SEARCH_FIELD_LABELS[filters.searchField]}检索：${filters.q}` : ''}
         filters={[
-          { label: '买家类型', value: filters.buyerType, options: filterOptions.buyer_types, onChange: (value) => updateFilters({ buyerType: value, page: 1 }) },
+          { label: '所属行业', value: filters.industry, options: filterOptions.industries, onChange: (value) => updateFilters({ industry: value, page: 1 }) },
           { label: '地区', value: filters.region, options: filterOptions.regions, onChange: (value) => updateFilters({ region: value, page: 1 }) },
-          { label: '上市状态', value: filters.listedStatus, options: filterOptions.listed_statuses, onChange: (value) => updateFilters({ listedStatus: value, page: 1 }) },
           { label: '状态', value: filters.status, options: filterOptions.statuses, onChange: (value) => updateFilters({ status: value, page: 1 }) },
           ...(admin ? [{ label: '负责人', value: filters.owner, options: filterOptions.owners || [], onChange: (value: string) => updateFilters({ owner: value, page: 1 }) }] : []),
         ]}
@@ -264,10 +260,8 @@ export default function PartiesList({
             <tr className="border-b border-gray-100 bg-gray-50">
               <th className="text-left px-4 py-3 w-12"><input type="checkbox" disabled={visibleIds.length === 0} checked={allVisibleSelected} onChange={toggleSelectAllVisible} aria-label="选择当前页买家主体" className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600" /></th>
               <th className="text-left px-4 py-3 font-medium text-gray-600">买家名称</th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600">类型</th>
+              <th className="text-left px-4 py-3 font-medium text-gray-600">所属行业</th>
               <th className="text-left px-4 py-3 font-medium text-gray-600">地区</th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600">上市状态</th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600">主营业务</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">状态</th>
               <th className="text-left px-4 py-3 font-medium text-gray-600">负责人</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">操作</th>
@@ -275,9 +269,9 @@ export default function PartiesList({
           </thead>
           <tbody className="divide-y divide-gray-100">
             {loading ? (
-              <tr><td colSpan={9} className="px-4 py-8 text-center"><div className="w-5 h-5 border-2 border-brand-600 border-t-transparent rounded-full animate-spin mx-auto" /></td></tr>
+              <tr><td colSpan={7} className="px-4 py-8 text-center"><div className="w-5 h-5 border-2 border-brand-600 border-t-transparent rounded-full animate-spin mx-auto" /></td></tr>
             ) : items.length === 0 ? (
-              <tr><td colSpan={9} className="px-4 py-8 text-center text-gray-400">暂无匹配的买家主体</td></tr>
+              <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-400">暂无匹配的买家主体</td></tr>
             ) : items.map((item) => (
               <PartyRow
                 key={item.id}
@@ -313,15 +307,14 @@ function PartyRow({
   deleting: boolean;
 }) {
   const region = [item.region_province, item.region_city].filter(Boolean).join(' ') || '-';
+  const industries = [...new Set([...(item.industries_json || []), ...(item.industry_l2_json || [])])].join('、') || '-';
   const canDelete = canManageOwnedEntity(item.owner_user_id);
   return (
     <tr className="hover:bg-brand-50/30 transition-colors">
       <td className="px-4 py-3"><input type="checkbox" checked={selected} onChange={(event) => onSelectedChange(event.target.checked)} aria-label={`选择${item.buyer_name}`} className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600" /></td>
-      <td className="px-4 py-3"><Link to={`/buyers/${item.id}`} className="font-medium text-gray-900 hover:text-brand-600 transition-colors">{item.buyer_name}</Link>{item.legal_name && <span className="text-xs text-gray-400 ml-2">{item.legal_name}</span>}</td>
-      <td className="px-4 py-3 text-gray-600">{valueLabel('buyer_type', item.buyer_type)}</td>
+      <td className="px-4 py-3"><Link to={`/buyers/${item.id}`} className="font-medium text-gray-900 hover:text-brand-600 transition-colors">{item.buyer_name}</Link></td>
+      <td className="px-4 py-3 text-gray-600 max-w-[240px] truncate" title={industries === '-' ? undefined : industries}>{industries}</td>
       <td className="px-4 py-3 text-gray-600 max-w-[160px] truncate" title={region === '-' ? undefined : region}>{region}</td>
-      <td className="px-4 py-3 text-gray-600">{valueLabel('listed_status', item.listed_status)}</td>
-      <td className="px-4 py-3 text-gray-600 truncate max-w-[240px]" title={item.main_business || undefined}>{item.main_business || '-'}</td>
       <td className="px-4 py-3 text-center"><PartyStatusBadge status={item.status} /></td>
       <td className="px-4 py-3 text-gray-600">{item.owner_name || <span className="text-gray-300">未指派</span>}</td>
       <td className="px-4 py-3 text-center">

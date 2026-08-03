@@ -183,16 +183,13 @@ export interface SellerTargetUpdate {
 export interface BuyerParty {
   id: string;
   buyer_name: string;
-  legal_name: string | null;
   aliases_json: string[];
-  buyer_type: string | null;
-  group_name: string | null;
-  listed_status: string | null;
+  industries_json: string[];
+  industry_l2_json: string[];
   region_province: string | null;
   region_city: string | null;
-  main_business: string | null;
-  capital_strength_summary: string | null;
-  profile_summary: string | null;
+  contact_name: string | null;
+  contact_info_json: Record<string, unknown>;
   notes: string | null;
   status: string;
   owner_user_id?: string | null;
@@ -208,7 +205,7 @@ export interface BuyerPartyListResponse {
   offset: number;
 }
 
-export type BuyerPartySearchField = 'buyer_name' | 'legal_name' | 'main_business' | 'profile_summary';
+export type BuyerPartySearchField = 'buyer_name' | 'alias' | 'contact_name';
 
 export interface BuyerFilterOption {
   value: string;
@@ -217,9 +214,8 @@ export interface BuyerFilterOption {
 }
 
 export interface BuyerPartyFilterOptions {
-  buyer_types: BuyerFilterOption[];
+  industries: BuyerFilterOption[];
   regions: BuyerFilterOption[];
-  listed_statuses: BuyerFilterOption[];
   statuses: BuyerFilterOption[];
   owners?: BuyerFilterOption[];
 }
@@ -227,20 +223,18 @@ export interface BuyerPartyFilterOptions {
 export interface BuyerPartySuggestion {
   id: string;
   search_field: BuyerPartySearchField;
-  match_type: 'buyer' | 'legal' | 'business' | 'profile';
+  match_type: 'buyer' | 'alias' | 'contact';
   match_label: string;
   match_text: string;
   buyer_name: string;
-  legal_name: string | null;
   snippet: string | null;
 }
 
 export interface BuyerPartyDedupMatch {
   id: string;
   buyer_name: string;
-  legal_name: string | null;
   owner_name: string | null;
-  match_type: 'buyer_name' | 'legal_name' | 'alias';
+  match_type: 'buyer_name' | 'alias';
   status: string;
 }
 
@@ -259,15 +253,13 @@ export interface BuyerBulkDeleteResponse {
 
 export interface BuyerPartyCreate {
   buyer_name: string;
-  legal_name?: string | null;
-  buyer_type?: string | null;
-  group_name?: string | null;
-  listed_status?: string | null;
+  aliases_json?: string[];
+  industries_json?: string[];
+  industry_l2_json?: string[];
   region_province?: string | null;
   region_city?: string | null;
-  main_business?: string | null;
-  capital_strength_summary?: string | null;
-  profile_summary?: string | null;
+  contact_name?: string | null;
+  contact_info_json?: Record<string, unknown>;
   notes?: string | null;
   owner_user_id?: string | null;
 }

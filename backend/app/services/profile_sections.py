@@ -271,8 +271,8 @@ def buyer_party_fact_block(db: Session, buyer_party_id: Any) -> str:
     row = db.execute(
         text(
             """
-            select buyer_type, group_name, region_province, main_business,
-                   capital_strength_summary, profile_summary
+            select industries_json, industry_l2_json, region_province, region_city,
+                   contact_name, contact_info_json, notes
             from buyer_party
             where id = :buyer_party_id
               and team_id = :team_id
@@ -289,12 +289,11 @@ def buyer_party_fact_block(db: Session, buyer_party_id: Any) -> str:
     if row is None:
         return ""
     lines = [
-        f"买方类型：{row['buyer_type']}" if row["buyer_type"] else None,
-        f"所属集团：{row['group_name']}" if row["group_name"] else None,
-        f"所在地区：{row['region_province']}" if row["region_province"] else None,
-        f"现有主业：{row['main_business']}" if row["main_business"] else None,
-        f"资金实力：{row['capital_strength_summary']}" if row["capital_strength_summary"] else None,
-        f"产业布局：{row['profile_summary']}" if row["profile_summary"] else None,
+        f"所属行业：{'、'.join(row['industry_l2_json'] or row['industries_json'] or [])}" if (row["industry_l2_json"] or row["industries_json"]) else None,
+        f"所在地区：{' '.join(value for value in (row['region_province'], row['region_city']) if value)}" if (row["region_province"] or row["region_city"]) else None,
+        f"联系人：{row['contact_name']}" if row["contact_name"] else None,
+        f"联系方式：{row['contact_info_json'].get('text') or row['contact_info_json']}" if row["contact_info_json"] else None,
+        f"其他：{row['notes']}" if row["notes"] else None,
     ]
     body = "\n".join(line for line in lines if line)
     return f"【买方自身情况（供协同性判断）】\n{body}" if body else ""

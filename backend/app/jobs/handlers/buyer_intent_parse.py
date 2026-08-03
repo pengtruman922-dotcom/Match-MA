@@ -996,9 +996,8 @@ def _get_buyer_party(db: Session, buyer_party_id: UUID) -> dict[str, Any] | None
         text(
             """
             select
-              id, buyer_name, legal_name, aliases_json, buyer_type, group_name,
-              listed_status, region_province, region_city, main_business,
-              capital_strength_summary, profile_summary, status
+              id, buyer_name, aliases_json, industries_json, industry_l2_json,
+              region_province, region_city, contact_name, contact_info_json, notes, status
             from buyer_party
             where id = :buyer_party_id
               and team_id = :team_id
@@ -1130,67 +1129,6 @@ BUYER_INTENT_TEXT_LIMITS = {
     "intent_name": 300,
 }
 
-BUYER_PARTY_PARSE_FIELDS = {
-    "buyer_type",
-    "group_name",
-    "listed_status",
-    "region_province",
-    "region_city",
-    "main_business",
-    "capital_strength_summary",
-    "profile_summary",
-}
-
-BUYER_PARTY_PARSE_TEXT_LIMITS = {
-    "buyer_type": 80,
-    "group_name": 200,
-    "region_province": 80,
-    "region_city": 80,
-    "main_business": 2000,
-    "capital_strength_summary": 2000,
-    "profile_summary": 2000,
-}
-
-BUYER_PARTY_TYPE_VALUES = {
-    "industrial_buyer",
-    "listed_company",
-    "state_owned_platform",
-    "pe_fund",
-    "financial_investor",
-    "government_platform",
-    "other",
-}
-
-BUYER_PARTY_TYPE_ALIASES = {
-    "strategic": "industrial_buyer",
-    "strategic_buyer": "industrial_buyer",
-    "strategic_investor": "industrial_buyer",
-    "industrial": "industrial_buyer",
-    "industry": "industrial_buyer",
-    "corporate": "industrial_buyer",
-    "corporate_buyer": "industrial_buyer",
-    "private": "industrial_buyer",
-    "private_company": "industrial_buyer",
-    "listed": "listed_company",
-    "public_company": "listed_company",
-    "上市公司": "listed_company",
-    "state_owned": "state_owned_platform",
-    "state_owned_enterprise": "state_owned_platform",
-    "soe": "state_owned_platform",
-    "国资": "state_owned_platform",
-    "国资平台": "state_owned_platform",
-    "pe": "pe_fund",
-    "private_equity": "pe_fund",
-    "pe基金": "pe_fund",
-    "fund": "financial_investor",
-    "financial": "financial_investor",
-    "financial_investor": "financial_investor",
-    "government": "government_platform",
-    "government_platform": "government_platform",
-    "政府平台": "government_platform",
-    "other": "other",
-}
-
 def _validate_buyer_intent_parse_output(parsed_output_json: dict[str, Any] | None) -> dict[str, Any]:
     if parsed_output_json is None:
         return {"valid": False, "error": "LLM output is not a JSON object."}
@@ -1202,9 +1140,6 @@ def _validate_buyer_intent_parse_output(parsed_output_json: dict[str, Any] | Non
     if not isinstance(candidate, dict):
         return {"valid": False, "error": "Buyer intent parser output must be an object."}
     allowed_count = len([key for key in candidate if key in BUYER_INTENT_PARSE_FIELDS])
-    party = parsed_output_json.get("buyer_party")
-    if isinstance(party, dict):
-        allowed_count += len([key for key in party if key in BUYER_PARTY_PARSE_FIELDS])
     allowed_count += len(
         _normalize_confirmation_items(parsed_output_json.get("needs_confirmation"), BUYER_INTENT_PARSE_FIELDS)
     )
@@ -1486,147 +1421,6 @@ def _write_buyer_intent_parse_logs(
                 "metadata_json": {
                     "source": "buyer_intent_parser",
                     "normalization_notes": normalization_notes,
-                    "proposed_value": _json_safe_value(changes.get(field_path)),
-                    "field_value_source": _json_safe_value(source_context),
-                },
-            },
-        )
-
-def _normalize_buyer_party_parse_changes(parsed_output_json: dict[str, Any] | None) -> dict[str, Any]:
-    if not parsed_output_json:
-        return {}
-    candidate = parsed_output_json.get("buyer_party")
-    if not isinstance(candidate, dict):
-        return {}
-
-    changes: dict[str, Any] = {}
-    for key, value in candidate.items():
-        if key not in BUYER_PARTY_PARSE_FIELDS:
-            continue
-        if value is None or (isinstance(value, str) and not value.strip()):
-            continue
-        if key == "listed_status":
-            listed_status = _normalize_listed_status(value)
-            changes[key] = "unknown" if listed_status == "any" else listed_status
-            continue
-        if key == "buyer_type":
-            changes[key] = _normalize_buyer_party_type(value)
-            continue
-        text_value = str(value).strip()
-        limit = BUYER_PARTY_PARSE_TEXT_LIMITS.get(key)
-        if limit:
-            text_value = text_value[:limit]
-        changes[key] = text_value
-    return {key: value for key, value in changes.items() if value is not None}
-
-def _normalize_buyer_party_type(value: Any) -> str | None:
-    if value is None:
-        return None
-    raw = str(value).strip()
-    if not raw:
-        return None
-    normalized = raw.lower().replace("-", "_").replace(" ", "_")
-    if normalized in BUYER_PARTY_TYPE_VALUES:
-        return normalized
-    if normalized in BUYER_PARTY_TYPE_ALIASES:
-        return BUYER_PARTY_TYPE_ALIASES[normalized]
-    if raw in BUYER_PARTY_TYPE_ALIASES:
-        return BUYER_PARTY_TYPE_ALIASES[raw]
-    return "other"
-
-def _apply_buyer_party_parse_changes(
-    db: Session,
-    buyer_party: dict[str, Any],
-    changes: dict[str, Any],
-    job_id: UUID,
-    source_context: dict[str, Any],
-) -> list[str]:
-    # Enrich-only: fill empty buyer_party fields, never overwrite existing data.
-    diff: dict[str, tuple[Any, Any]] = {}
-    for field, new_value in changes.items():
-        current = buyer_party.get(field)
-        if current is not None and not (isinstance(current, str) and not current.strip()):
-            continue
-        if _json_safe_value(current) == _json_safe_value(new_value):
-            continue
-        diff[field] = (current, new_value)
-    if not diff:
-        return []
-
-    set_clauses = [f"{field} = :{field}" for field in diff]
-    set_clauses.extend(["updated_at = now()", "updated_by = :updated_by"])
-    db.execute(
-        text(
-            f"""
-            update buyer_party
-            set {', '.join(set_clauses)}
-            where id = :buyer_party_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
-              and deleted_at is null
-            """
-        ),
-        {
-            **{field: changes[field] for field in diff},
-            "updated_by": SYSTEM_USER_ID,
-            "buyer_party_id": buyer_party["id"],
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
-    )
-    _write_buyer_party_parse_logs(db, buyer_party, changes, diff, job_id, source_context)
-    _write_field_value_sources(
-        db,
-        entity_type="buyer_party",
-        entity_id=UUID(str(buyer_party["id"])),
-        changes=changes,
-        diff=diff,
-        source_context=source_context,
-        review_status="auto_accepted",
-    )
-    return list(diff.keys())
-
-def _write_buyer_party_parse_logs(
-    db: Session,
-    buyer_party: dict[str, Any],
-    changes: dict[str, Any],
-    diff: dict[str, tuple[Any, Any]],
-    job_id: UUID,
-    source_context: dict[str, Any],
-) -> None:
-    for field_path, (old_value, new_value) in diff.items():
-        db.execute(
-            text(
-                """
-                insert into action_application_log (
-                  team_id, workspace_id, entity_type, entity_id, field_path,
-                  old_value_json, new_value_json, source_type, source_id,
-                  evidence_id, applied_by, edited_before_apply, metadata_json
-                )
-                values (
-                  :team_id, :workspace_id, 'buyer_party', :buyer_party_id, :field_path,
-                  :old_value_json, :new_value_json, 'buyer_intent_parse', :job_id,
-                  :evidence_id, :applied_by, false, :metadata_json
-                )
-                """
-            ).bindparams(
-                bindparam("old_value_json", type_=JSONB),
-                bindparam("new_value_json", type_=JSONB),
-                bindparam("metadata_json", type_=JSONB),
-            ),
-            {
-                "team_id": DEFAULT_TEAM_ID,
-                "workspace_id": DEFAULT_WORKSPACE_ID,
-                "buyer_party_id": buyer_party["id"],
-                "field_path": field_path,
-                "old_value_json": _json_safe_value(old_value),
-                "new_value_json": _json_safe_value(new_value),
-                "job_id": job_id,
-                "evidence_id": source_context.get("evidence_id"),
-                "applied_by": SYSTEM_USER_ID,
-                "metadata_json": {
-                    "source": "buyer_intent_parser",
-                    "enrichment": "buyer_party",
                     "proposed_value": _json_safe_value(changes.get(field_path)),
                     "field_value_source": _json_safe_value(source_context),
                 },

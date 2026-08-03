@@ -176,9 +176,8 @@ export const buyerParties = {
   list: (params?: {
     q?: string;
     search_field?: BuyerPartySearchField;
-    buyer_type?: string;
+    industry?: string;
     region?: string;
-    listed_status?: string;
     status?: string;
     owner?: string;
     limit?: number;

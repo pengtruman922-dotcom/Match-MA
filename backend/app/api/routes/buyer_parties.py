@@ -25,6 +25,7 @@ from backend.app.api.routes.utils import (
 )
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
+from backend.app.services.industry_taxonomy import normalize_l2_values, resolve_l1
 
 router = APIRouter(prefix="/buyer-parties", tags=["buyer-parties"])
 
@@ -32,31 +33,25 @@ router = APIRouter(prefix="/buyer-parties", tags=["buyer-parties"])
 class BuyerPartyCreate(BaseModel):
     buyer_name: str = Field(min_length=1, max_length=300)
     owner_user_id: UUID | None = None
-    legal_name: str | None = None
     aliases_json: list[str] = Field(default_factory=list)
-    buyer_type: str | None = None
-    group_name: str | None = None
-    listed_status: str = "unknown"
+    industries_json: list[str] = Field(default_factory=list)
+    industry_l2_json: list[str] = Field(default_factory=list)
     region_province: str | None = None
     region_city: str | None = None
-    main_business: str | None = None
-    capital_strength_summary: str | None = None
-    profile_summary: str | None = None
+    contact_name: str | None = None
+    contact_info_json: dict[str, Any] = Field(default_factory=dict)
     notes: str | None = None
 
 
 class BuyerPartyUpdate(BaseModel):
     buyer_name: str | None = Field(default=None, min_length=1, max_length=300)
-    legal_name: str | None = None
     aliases_json: list[str] | None = None
-    buyer_type: str | None = None
-    group_name: str | None = None
-    listed_status: str | None = None
+    industries_json: list[str] | None = None
+    industry_l2_json: list[str] | None = None
     region_province: str | None = None
     region_city: str | None = None
-    main_business: str | None = None
-    capital_strength_summary: str | None = None
-    profile_summary: str | None = None
+    contact_name: str | None = None
+    contact_info_json: dict[str, Any] | None = None
     notes: str | None = None
     owner_user_id: UUID | None = None
 
@@ -64,16 +59,13 @@ class BuyerPartyUpdate(BaseModel):
 class BuyerPartyOut(BaseModel):
     id: UUID
     buyer_name: str
-    legal_name: str | None
     aliases_json: list[Any]
-    buyer_type: str | None
-    group_name: str | None
-    listed_status: str
+    industries_json: list[str]
+    industry_l2_json: list[str]
     region_province: str | None
     region_city: str | None
-    main_business: str | None
-    capital_strength_summary: str | None
-    profile_summary: str | None
+    contact_name: str | None
+    contact_info_json: dict[str, Any]
     notes: str | None = None
     status: str
     owner_user_id: UUID | None = None
@@ -96,30 +88,27 @@ class BuyerPartyFilterOptionOut(BaseModel):
 
 
 class BuyerPartyFilterOptionsOut(BaseModel):
-    buyer_types: list[BuyerPartyFilterOptionOut]
+    industries: list[BuyerPartyFilterOptionOut]
     regions: list[BuyerPartyFilterOptionOut]
-    listed_statuses: list[BuyerPartyFilterOptionOut]
     statuses: list[BuyerPartyFilterOptionOut]
     owners: list[BuyerPartyFilterOptionOut] = []
 
 
 class BuyerPartySuggestionOut(BaseModel):
     id: UUID
-    search_field: Literal["buyer_name", "legal_name", "main_business", "profile_summary"]
-    match_type: Literal["buyer", "legal", "business", "profile"]
+    search_field: Literal["buyer_name", "alias", "contact_name"]
+    match_type: Literal["buyer", "alias", "contact"]
     match_label: str
     match_text: str
     buyer_name: str
-    legal_name: str | None
     snippet: str | None
 
 
 class BuyerPartyDedupMatchOut(BaseModel):
     id: UUID
     buyer_name: str
-    legal_name: str | None = None
     owner_name: str | None = None
-    match_type: Literal["buyer_name", "legal_name", "alias"]
+    match_type: Literal["buyer_name", "alias"]
     status: str
 
 
@@ -141,9 +130,8 @@ class BuyerPartyBulkDeleteOut(BaseModel):
 
 
 BUYER_PARTY_OUT_COLUMNS = """
-          id, buyer_name, legal_name, aliases_json, buyer_type, group_name,
-          listed_status, region_province, region_city, main_business,
-          capital_strength_summary, profile_summary, notes, status,
+          id, buyer_name, aliases_json, industries_json, industry_l2_json,
+          region_province, region_city, contact_name, contact_info_json, notes, status,
           owner_user_id,
           (select au.name from app_user au where au.id = buyer_party.owner_user_id) as owner_name,
           created_at::text as created_at, updated_at::text as updated_at
@@ -152,9 +140,8 @@ BUYER_PARTY_OUT_COLUMNS = """
 
 BUYER_PARTY_SEARCH_COLUMNS = {
     "buyer_name": "buyer_name",
-    "legal_name": "legal_name",
-    "main_business": "main_business",
-    "profile_summary": "profile_summary",
+    "alias": "aliases_json::text",
+    "contact_name": "contact_name",
 }
 
 
@@ -167,22 +154,27 @@ def create_buyer_party(
     statement = text(
         f"""
         insert into buyer_party (
-          team_id, workspace_id, buyer_name, legal_name, aliases_json,
-          buyer_type, group_name, listed_status, region_province, region_city,
-          main_business, capital_strength_summary, profile_summary, notes,
+          team_id, workspace_id, buyer_name, aliases_json, industries_json,
+          industry_l2_json, region_province, region_city, contact_name,
+          contact_info_json, notes,
           owner_user_id, created_by, updated_by
         )
         values (
-          :team_id, :workspace_id, :buyer_name, :legal_name, :aliases_json,
-          :buyer_type, :group_name, :listed_status, :region_province, :region_city,
-          :main_business, :capital_strength_summary, :profile_summary, :notes,
+          :team_id, :workspace_id, :buyer_name, :aliases_json, :industries_json,
+          :industry_l2_json, :region_province, :region_city, :contact_name,
+          :contact_info_json, :notes,
           :owner_user_id, :created_by, :updated_by
         )
         returning
 {BUYER_PARTY_OUT_COLUMNS}
         """
-    ).bindparams(bindparam("aliases_json", type_=JSONB))
-    row = db.execute(statement, _buyer_party_params(payload, current_user)).mappings().one()
+    ).bindparams(
+        bindparam("aliases_json", type_=JSONB),
+        bindparam("industries_json", type_=JSONB),
+        bindparam("industry_l2_json", type_=JSONB),
+        bindparam("contact_info_json", type_=JSONB),
+    )
+    row = db.execute(statement, _buyer_party_params(payload, current_user, db)).mappings().one()
     db.commit()
     return dict(row)
 
@@ -194,10 +186,9 @@ def list_buyer_parties(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     q: str | None = Query(default=None, max_length=200),
-    search_field: Literal["buyer_name", "legal_name", "main_business", "profile_summary"] | None = Query(default=None),
-    buyer_type: str | None = Query(default=None, max_length=80),
+    search_field: Literal["buyer_name", "alias", "contact_name"] | None = Query(default=None),
+    industry: str | None = Query(default=None, max_length=200),
     region: str | None = Query(default=None, max_length=200),
-    listed_status: str | None = Query(default=None, max_length=80),
     status: Literal["active", "archived", "merged"] | None = Query(default=None),
     owner: str | None = Query(default=None, max_length=50),
 ) -> dict[str, Any]:
@@ -224,20 +215,17 @@ def list_buyer_parties(
         else:
             where.append(
                 "("
-                "buyer_name ilike :q or legal_name ilike :q or aliases_json::text ilike :q "
-                "or main_business ilike :q or profile_summary ilike :q"
+                "buyer_name ilike :q or aliases_json::text ilike :q "
+                "or contact_name ilike :q or contact_info_json::text ilike :q or notes ilike :q"
                 ")"
             )
         params["q"] = f"%{q}%"
-    if buyer_type:
-        where.append("buyer_type = :buyer_type")
-        params["buyer_type"] = buyer_type
+    if industry:
+        where.append("industries_json ? :industry")
+        params["industry"] = industry
     if region:
         where.append("concat_ws(' ', nullif(region_province, ''), nullif(region_city, '')) = :region")
         params["region"] = region
-    if listed_status:
-        where.append("listed_status = :listed_status")
-        params["listed_status"] = listed_status
     if status:
         where.append("status = :status")
         params["status"] = status
@@ -277,29 +265,23 @@ def buyer_party_filter_options(current_user: CurrentUser, db: Session = Depends(
     if owner_scope_required(current_user):
         params["scope_user_id"] = current_user.user_id
         scope_clause = f"and {owner_scope_sql('buyer_party', 'buyer_party')}"
-    buyer_types = _filter_options(
+    industries = _filter_options(
         db,
         f"""
-        select buyer_type as value, count(*) as count
+        select industry.value as value, count(*) as count
         from buyer_party
+        cross join lateral jsonb_array_elements_text(
+          case when jsonb_typeof(industries_json) = 'array' then industries_json else '[]'::jsonb end
+        ) as industry(value)
         where team_id = :team_id
           and workspace_id = :workspace_id
           and deleted_at is null
           {scope_clause}
-          and nullif(buyer_type, '') is not null
-        group by buyer_type
-        order by count desc, buyer_type asc
+          and nullif(industry.value, '') is not null
+        group by industry.value
+        order by count desc, industry.value asc
         """,
         params,
-        labels={
-            "industrial_buyer": "产业买家",
-            "listed_company": "上市公司",
-            "state_owned_platform": "国资平台",
-            "pe_fund": "PE基金",
-            "financial_investor": "财务投资人",
-            "government_platform": "政府平台",
-            "other": "其他",
-        },
     )
     regions = _filter_options(
         db,
@@ -319,21 +301,6 @@ def buyer_party_filter_options(current_user: CurrentUser, db: Session = Depends(
         """,
         params,
     )
-    listed_statuses = _filter_options(
-        db,
-        f"""
-        select listed_status as value, count(*) as count
-        from buyer_party
-        where team_id = :team_id
-          and workspace_id = :workspace_id
-          and deleted_at is null
-          {scope_clause}
-        group by listed_status
-        order by count desc, listed_status asc
-        """,
-        params,
-        labels={"listed": "已上市", "unlisted": "未上市", "pre_ipo": "拟上市", "unknown": "未知"},
-    )
     statuses = _filter_options(
         db,
         f"""
@@ -351,9 +318,8 @@ def buyer_party_filter_options(current_user: CurrentUser, db: Session = Depends(
     )
     owners = [] if owner_scope_required(current_user) else owner_filter_options(db, "buyer_party", params)
     return {
-        "buyer_types": buyer_types,
+        "industries": industries,
         "regions": regions,
-        "listed_statuses": listed_statuses,
         "statuses": statuses,
         "owners": owners,
     }
@@ -388,32 +354,27 @@ def buyer_party_dedup_check(
               select
                 bp.id,
                 bp.buyer_name,
-                bp.legal_name,
                 coalesce(au.name, '未指派') as owner_name,
                 bp.status,
                 case
                   when lower(bp.buyer_name) = lower(:q) then 'buyer_name'
-                  when lower(coalesce(bp.legal_name, '')) = lower(:q) then 'legal_name'
                   when exists (
                     select 1
                     from jsonb_array_elements_text(coalesce(bp.aliases_json, '[]'::jsonb)) alias_name
                     where lower(alias_name) = lower(:q)
                   ) then 'alias'
                   when bp.buyer_name ilike :name_pattern escape '\' then 'buyer_name'
-                  when coalesce(bp.legal_name, '') ilike :name_pattern escape '\' then 'legal_name'
                   else 'alias'
                 end as match_type,
                 case
                   when lower(bp.buyer_name) = lower(:q) then 1
-                  when lower(coalesce(bp.legal_name, '')) = lower(:q) then 2
                   when exists (
                     select 1
                     from jsonb_array_elements_text(coalesce(bp.aliases_json, '[]'::jsonb)) alias_name
                     where lower(alias_name) = lower(:q)
-                  ) then 3
-                  when bp.buyer_name ilike :name_pattern escape '\' then 4
-                  when coalesce(bp.legal_name, '') ilike :name_pattern escape '\' then 5
-                  else 6
+                  ) then 2
+                  when bp.buyer_name ilike :name_pattern escape '\' then 3
+                  else 4
                 end as priority,
                 bp.updated_at
               from buyer_party bp
@@ -423,7 +384,6 @@ def buyer_party_dedup_check(
                 and bp.deleted_at is null
                 and (
                   bp.buyer_name ilike :name_pattern escape '\'
-                  or coalesce(bp.legal_name, '') ilike :name_pattern escape '\'
                   or exists (
                     select 1
                     from jsonb_array_elements_text(coalesce(bp.aliases_json, '[]'::jsonb)) alias_name
@@ -431,7 +391,7 @@ def buyer_party_dedup_check(
                   )
                 )
             )
-            select id, buyer_name, legal_name, owner_name, match_type, status
+            select id, buyer_name, owner_name, match_type, status
             from candidate
             order by priority asc, updated_at desc, buyer_name asc
             {limit_sql}
@@ -469,7 +429,7 @@ def buyer_party_suggestions(
             f"""
             with matches as (
               select
-                id, buyer_name, legal_name, main_business, profile_summary, updated_at,
+                id, buyer_name, contact_name, updated_at,
                 'buyer_name'::text as search_field,
                 'buyer'::text as match_type,
                 buyer_name as match_text,
@@ -482,46 +442,36 @@ def buyer_party_suggestions(
                 and buyer_name ilike :q
               union all
               select
-                id, buyer_name, legal_name, main_business, profile_summary, updated_at,
-                'legal_name'::text as search_field,
-                'legal'::text as match_type,
-                legal_name as match_text,
+                id, buyer_name, contact_name, updated_at,
+                'alias'::text as search_field,
+                'alias'::text as match_type,
+                alias_name as match_text,
                 2 as priority
               from buyer_party
+              cross join lateral jsonb_array_elements_text(
+                case when jsonb_typeof(aliases_json) = 'array' then aliases_json else '[]'::jsonb end
+              ) as alias(alias_name)
               where team_id = :team_id
                 and workspace_id = :workspace_id
                 and deleted_at is null
                 {scope_clause}
-                and legal_name ilike :q
+                and alias_name ilike :q
               union all
               select
-                id, buyer_name, legal_name, main_business, profile_summary, updated_at,
-                'main_business'::text as search_field,
-                'business'::text as match_type,
-                main_business as match_text,
+                id, buyer_name, contact_name, updated_at,
+                'contact_name'::text as search_field,
+                'contact'::text as match_type,
+                contact_name as match_text,
                 3 as priority
               from buyer_party
               where team_id = :team_id
                 and workspace_id = :workspace_id
                 and deleted_at is null
                 {scope_clause}
-                and main_business ilike :q
-              union all
-              select
-                id, buyer_name, legal_name, main_business, profile_summary, updated_at,
-                'profile_summary'::text as search_field,
-                'profile'::text as match_type,
-                profile_summary as match_text,
-                4 as priority
-              from buyer_party
-              where team_id = :team_id
-                and workspace_id = :workspace_id
-                and deleted_at is null
-                {scope_clause}
-                and profile_summary ilike :q
+                and contact_name ilike :q
             )
             select distinct on (id)
-              id, buyer_name, legal_name, main_business, profile_summary,
+              id, buyer_name, contact_name,
               search_field, match_type, match_text
             from matches
             order by id, priority, updated_at desc
@@ -531,9 +481,9 @@ def buyer_party_suggestions(
     ).mappings().all()
     sorted_rows = sorted(
         rows,
-        key=lambda row: ({"buyer": 1, "legal": 2, "business": 3, "profile": 4}[row["match_type"]], row["buyer_name"]),
+        key=lambda row: ({"buyer": 1, "alias": 2, "contact": 3}[row["match_type"]], row["buyer_name"]),
     )
-    labels = {"buyer": "买家", "legal": "法律主体", "business": "主营业务", "profile": "画像"}
+    labels = {"buyer": "买家名称", "alias": "别名", "contact": "联系人"}
     return [
         {
             "id": row["id"],
@@ -542,8 +492,7 @@ def buyer_party_suggestions(
             "match_label": labels[row["match_type"]],
             "match_text": row["match_text"],
             "buyer_name": row["buyer_name"],
-            "legal_name": row["legal_name"],
-            "snippet": _truncate_text(row["profile_summary"] or row["main_business"], 80),
+            "snippet": _truncate_text(row["contact_name"], 80),
         }
         for row in sorted_rows[:limit]
         if row["match_text"]
@@ -687,6 +636,12 @@ def update_buyer_party(
 
     if "buyer_name" in changes and changes["buyer_name"] is not None:
         changes["buyer_name"] = changes["buyer_name"].strip()
+    if "aliases_json" in changes:
+        changes["aliases_json"] = _normalize_aliases(changes["aliases_json"] or [])
+    if "industries_json" in changes:
+        changes["industries_json"] = _normalize_industry_l1_values(db, changes["industries_json"] or [])
+    if "industry_l2_json" in changes:
+        changes["industry_l2_json"] = _normalize_industry_l2_values(db, changes["industry_l2_json"] or [])
 
     if not changes:
         return original
@@ -709,8 +664,8 @@ def update_buyer_party(
 {BUYER_PARTY_OUT_COLUMNS}
         """
     )
-    if "aliases_json" in changes:
-        statement = statement.bindparams(bindparam("aliases_json", type_=JSONB))
+    for json_field in {"aliases_json", "industries_json", "industry_l2_json", "contact_info_json"} & changes.keys():
+        statement = statement.bindparams(bindparam(json_field, type_=JSONB))
 
     row = db.execute(
         statement,
@@ -825,28 +780,47 @@ def _soft_delete_buyer_parties(
     return deleted_ids
 
 
-def _buyer_party_params(payload: BuyerPartyCreate, current_user: AuthContext) -> dict[str, Any]:
+def _buyer_party_params(payload: BuyerPartyCreate, current_user: AuthContext, db: Session) -> dict[str, Any]:
     # 创建人默认成为负责人；只有管理员可以在创建时指定他人。
     owner_user_id = payload.owner_user_id if current_user.is_admin and payload.owner_user_id else current_user.user_id
     return {
         "team_id": DEFAULT_TEAM_ID,
         "workspace_id": DEFAULT_WORKSPACE_ID,
         "buyer_name": payload.buyer_name.strip(),
-        "legal_name": payload.legal_name,
-        "aliases_json": payload.aliases_json,
-        "buyer_type": payload.buyer_type,
-        "group_name": payload.group_name,
-        "listed_status": payload.listed_status,
+        "aliases_json": _normalize_aliases(payload.aliases_json),
+        "industries_json": _normalize_industry_l1_values(db, payload.industries_json),
+        "industry_l2_json": _normalize_industry_l2_values(db, payload.industry_l2_json),
         "region_province": payload.region_province,
         "region_city": payload.region_city,
-        "main_business": payload.main_business,
-        "capital_strength_summary": payload.capital_strength_summary,
-        "profile_summary": payload.profile_summary,
+        "contact_name": payload.contact_name,
+        "contact_info_json": payload.contact_info_json,
         "notes": payload.notes,
         "owner_user_id": owner_user_id,
         "created_by": current_user.user_id,
         "updated_by": current_user.user_id,
     }
+
+
+def _normalize_aliases(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(value.strip() for value in values if isinstance(value, str) and value.strip()))
+
+
+def _normalize_industry_l1_values(db: Session, values: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for value in values:
+        resolved = resolve_l1(db, str(value).strip())
+        if resolved is None:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Unknown industry: {value}")
+        if resolved not in normalized:
+            normalized.append(resolved)
+    return normalized
+
+
+def _normalize_industry_l2_values(db: Session, values: list[str]) -> list[str]:
+    normalized, rejected = normalize_l2_values(db, [str(value).strip() for value in values if str(value).strip()])
+    if rejected:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Unknown industry: {rejected[0]}")
+    return normalized
 
 
 def _get_buyer_party_or_404(db: Session, buyer_party_id: UUID) -> dict[str, Any]:

@@ -1211,9 +1211,8 @@ def _buyer_parties_by_ids(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
         text(
             """
             select
-              id, buyer_name, buyer_type, group_name, listed_status,
-              region_province, region_city, main_business,
-              capital_strength_summary, profile_summary, status,
+              id, buyer_name, aliases_json, industries_json, industry_l2_json,
+              region_province, region_city, contact_name, contact_info_json, notes, status,
               updated_at::text as updated_at
             from buyer_party
             where team_id = :team_id

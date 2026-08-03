@@ -270,7 +270,6 @@ export default function CreateIntentModal({ onClose, onCreated }: { onClose: () 
                   <div className="min-w-0 text-sm text-gray-800">
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                       <span className="font-medium">{match.buyer_name}</span>
-                      {match.legal_name && <span className="text-xs text-gray-500">法律主体：{match.legal_name}</span>}
                     </div>
                     <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-gray-500">
                       <span>负责人：{match.owner_name || '未指派'}</span>

@@ -85,7 +85,7 @@ export default function BuyerIntentWorkspace({
         {activeTab === 'intent' ? <BuyerIntentRequirements intent={intent} parseStatus={parseStatus} onRefresh={onIntentRefresh} /> : null}
         {activeTab === 'buyer' ? (
           party ? (
-            <BuyerInfo party={party} intent={intent} onPartySaved={onPartySaved} onIntentSaved={onIntentSaved} />
+            <BuyerInfo party={party} onPartySaved={onPartySaved} />
           ) : (
             <EmptyState title="当前需求未关联买家" description="可在买家管理中补充关联关系。" />
           )
@@ -123,25 +123,20 @@ export function IntentStatusBadge({ status }: { status: string }) {
   return <span className={`px-2 py-0.5 text-xs font-medium ${className}`}>{labels[status] || status}</span>;
 }
 
-type BuyerInfoField = 'buyer_name' | 'location' | 'industry' | 'region' | 'contact_name' | 'contact_info' | 'notes';
+type BuyerInfoField = 'buyer_name' | 'location' | 'industry' | 'contact_name' | 'contact_info' | 'notes';
 
 export function BuyerInfo({
   party,
-  intent,
   onPartySaved,
-  onIntentSaved,
 }: {
   party: BuyerParty;
-  intent?: BuyerIntent | null;
   onPartySaved?: (party: BuyerParty) => void;
-  onIntentSaved?: (intent: BuyerIntent) => void;
 }) {
   const [editingField, setEditingField] = useState<BuyerInfoField | null>(null);
   const [saving, setSaving] = useState(false);
   const [textDraft, setTextDraft] = useState('');
   const [locationDraft, setLocationDraft] = useState<AdministrativeAreaValue>({ province: '' });
   const [industryDraft, setIndustryDraft] = useState<IndustryPairValue[]>([]);
-  const [regionDraft, setRegionDraft] = useState<AdministrativeAreaValue & { effect: 'required' | 'preferred' | 'excluded' }>({ province: '', effect: 'preferred' });
   const [taxonomy, setTaxonomy] = useState<IndustryOptionsResponse>({ l1: [], l2: [] });
 
   useEffect(() => {
@@ -149,16 +144,14 @@ export function BuyerInfo({
     meta.industryOptions().then((value) => { if (!cancelled) setTaxonomy(value); }).catch(() => {});
     return () => { cancelled = true; };
   }, []);
-  useEffect(() => setEditingField(null), [party.id, intent?.id]);
+  useEffect(() => setEditingField(null), [party.id]);
 
   const startEditing = (field: BuyerInfoField) => {
-    if (!intent && isIntentField(field)) return;
     if (field === 'buyer_name') setTextDraft(party.buyer_name);
     if (field === 'location') setLocationDraft({ province: party.region_province || '', city: party.region_city || undefined });
-    if (field === 'industry') setIndustryDraft(intentIndustryPairs(intent, taxonomy));
-    if (field === 'region') setRegionDraft(intentRegion(intent));
-    if (field === 'contact_name') setTextDraft(intent?.contact_name || '');
-    if (field === 'contact_info') setTextDraft(contactInfoText(intent?.contact_info_json));
+    if (field === 'industry') setIndustryDraft(buyerPartyIndustryPairs(party, taxonomy));
+    if (field === 'contact_name') setTextDraft(party.contact_name || '');
+    if (field === 'contact_info') setTextDraft(contactInfoText(party.contact_info_json));
     if (field === 'notes') setTextDraft(party.notes || '');
     setEditingField(field);
   };
@@ -178,20 +171,16 @@ export function BuyerInfo({
         }));
       } else if (editingField === 'notes') {
         onPartySaved?.(await buyerParties.update(party.id, { notes: nullIfEmpty(textDraft) }));
-      } else if (intent) {
+      } else {
         if (editingField === 'industry') {
-          onIntentSaved?.(await buyerIntents.update(intent.id, {
+          onPartySaved?.(await buyerParties.update(party.id, {
             industries_json: [...new Set(industryDraft.map((pair) => pair.l1).filter(Boolean))],
             industry_l2_json: [...new Set(industryDraft.flatMap((pair) => pair.l2 ? [pair.l2] : []))],
           }));
-        } else if (editingField === 'region') {
-          onIntentSaved?.(await buyerIntents.update(intent.id, {
-            region_constraints_json: regionDraft.province ? [regionDraft] : [],
-          }));
         } else if (editingField === 'contact_name') {
-          onIntentSaved?.(await buyerIntents.update(intent.id, { contact_name: nullIfEmpty(textDraft) }));
+          onPartySaved?.(await buyerParties.update(party.id, { contact_name: nullIfEmpty(textDraft) }));
         } else if (editingField === 'contact_info') {
-          onIntentSaved?.(await buyerIntents.update(intent.id, {
+          onPartySaved?.(await buyerParties.update(party.id, {
             contact_info_json: textDraft.trim() ? { text: textDraft.trim() } : {},
           }));
         }
@@ -206,7 +195,7 @@ export function BuyerInfo({
 
   return (
     <div>
-      <p className="mb-3 text-xs text-gray-500">买家主体信息与当前需求的行业、地区和联系人集中展示；每个字段独立编辑、独立保存。</p>
+      <p className="mb-3 text-xs text-gray-500">以下均为买家主体资料。编辑后会同步到同一买家的所有需求；本次收购需求的行业和目标地区在“需求信息”中维护。</p>
       <div className="divide-y divide-gray-100 border border-gray-100 px-4">
         <BuyerInfoRow label="买家名称" value={party.buyer_name} field="buyer_name" editingField={editingField} saving={saving} onEdit={startEditing} onSave={saveField} onCancel={() => setEditingField(null)}>
           <input className="input" value={textDraft} onChange={(event) => setTextDraft(event.target.value)} autoFocus />
@@ -214,26 +203,19 @@ export function BuyerInfo({
         <BuyerInfoRow label="所在地区" value={buyerLocationText(party)} field="location" editingField={editingField} saving={saving} onEdit={startEditing} onSave={saveField} onCancel={() => setEditingField(null)}>
           <AdministrativeAreaPicker value={locationDraft} onChange={setLocationDraft} showDistrict={false} />
         </BuyerInfoRow>
-        <BuyerInfoRow label="行业" value={industryText(intent, taxonomy)} field="industry" editingField={editingField} saving={saving} disabled={!intent || !taxonomy.l1.length} onEdit={startEditing} onSave={saveField} onCancel={() => setEditingField(null)}>
+        <BuyerInfoRow label="所属行业" value={buyerPartyIndustryText(party, taxonomy)} field="industry" editingField={editingField} saving={saving} disabled={!taxonomy.l1.length} onEdit={startEditing} onSave={saveField} onCancel={() => setEditingField(null)}>
           <IndustryPairsEditor value={industryDraft} options={taxonomy} onChange={setIndustryDraft} />
         </BuyerInfoRow>
-        <BuyerInfoRow label="地区" value={regionText(intent)} field="region" editingField={editingField} saving={saving} disabled={!intent} onEdit={startEditing} onSave={saveField} onCancel={() => setEditingField(null)}>
-          <div className="space-y-2 border border-gray-200 bg-gray-50 p-2">
-            <AdministrativeAreaPicker value={regionDraft} onChange={(area) => setRegionDraft({ ...area, effect: regionDraft.effect })} />
-            <p className="text-[10px] text-gray-400">变更上级会自动清空下级；筛选仍按省、市、区三个字段命中。</p>
-          </div>
-        </BuyerInfoRow>
-        <BuyerInfoRow label="联系人" value={intent?.contact_name || ''} field="contact_name" editingField={editingField} saving={saving} disabled={!intent} onEdit={startEditing} onSave={saveField} onCancel={() => setEditingField(null)}>
+        <BuyerInfoRow label="联系人" value={party.contact_name || ''} field="contact_name" editingField={editingField} saving={saving} onEdit={startEditing} onSave={saveField} onCancel={() => setEditingField(null)}>
           <input className="input" value={textDraft} onChange={(event) => setTextDraft(event.target.value)} autoFocus />
         </BuyerInfoRow>
-        <BuyerInfoRow label="联系方式" value={contactInfoText(intent?.contact_info_json)} field="contact_info" editingField={editingField} saving={saving} disabled={!intent} onEdit={startEditing} onSave={saveField} onCancel={() => setEditingField(null)}>
+        <BuyerInfoRow label="联系方式" value={contactInfoText(party.contact_info_json)} field="contact_info" editingField={editingField} saving={saving} onEdit={startEditing} onSave={saveField} onCancel={() => setEditingField(null)}>
           <textarea className="input min-h-20 resize-y" value={textDraft} onChange={(event) => setTextDraft(event.target.value)} placeholder="电话、邮箱、微信等" autoFocus />
         </BuyerInfoRow>
         <BuyerInfoRow label="其他" value={party.notes || ''} field="notes" editingField={editingField} saving={saving} onEdit={startEditing} onSave={saveField} onCancel={() => setEditingField(null)}>
           <textarea className="input min-h-28 resize-y" value={textDraft} onChange={(event) => setTextDraft(event.target.value)} autoFocus />
         </BuyerInfoRow>
       </div>
-      {!intent ? <p className="mt-2 text-xs text-gray-400">录入并购需求后即可维护行业、目标地区、联系人和联系方式。</p> : null}
     </div>
   );
 }
@@ -385,21 +367,10 @@ function AttachmentStatus({ item }: { item: AttachmentItem }) {
 }
 
 function nullIfEmpty(value: string | null | undefined): string | null { return value?.trim() || null; }
-function isIntentField(field: BuyerInfoField): boolean { return ['industry', 'region', 'contact_name', 'contact_info'].includes(field); }
 function buyerLocationText(party: BuyerParty): string { return [party.region_province, party.region_city].filter(Boolean).join(' '); }
-function intentRegion(intent?: BuyerIntent | null): AdministrativeAreaValue & { effect: 'required' | 'preferred' | 'excluded' } {
-  const regions = Array.isArray(intent?.region_constraints_json) ? intent.region_constraints_json : [];
-  const region = regions.find((item) => item.effect !== 'excluded' && item.province) || regions.find((item) => item.province);
-  return region ? { ...region } : { province: '', effect: 'preferred' };
-}
-function regionText(intent?: BuyerIntent | null): string {
-  const region = intentRegion(intent);
-  return [region.province, region.city, region.district].filter(Boolean).join(' / ');
-}
-function intentIndustryPairs(intent: BuyerIntent | null | undefined, taxonomy: IndustryOptionsResponse): IndustryPairValue[] {
-  if (!intent) return [];
-  const pairs: IndustryPairValue[] = (intent.industries_json || []).map((l1) => ({ l1 }));
-  for (const l2 of intent.industry_l2_json || []) {
+function buyerPartyIndustryPairs(party: BuyerParty, taxonomy: IndustryOptionsResponse): IndustryPairValue[] {
+  const pairs: IndustryPairValue[] = (party.industries_json || []).map((l1) => ({ l1 }));
+  for (const l2 of party.industry_l2_json || []) {
     const match = taxonomy.l2.find((item) => item.term === l2);
     if (match) pairs.push({ l1: match.l1, l2 });
   }
@@ -411,8 +382,8 @@ function intentIndustryPairs(intent: BuyerIntent | null | undefined, taxonomy: I
     return true;
   });
 }
-function industryText(intent: BuyerIntent | null | undefined, taxonomy: IndustryOptionsResponse): string {
-  const pairs = intentIndustryPairs(intent, taxonomy);
+function buyerPartyIndustryText(party: BuyerParty, taxonomy: IndustryOptionsResponse): string {
+  const pairs = buyerPartyIndustryPairs(party, taxonomy);
   const grouped = new Map<string, string[]>();
   for (const pair of pairs) {
     const l2 = grouped.get(pair.l1) || [];
@@ -420,7 +391,7 @@ function industryText(intent: BuyerIntent | null | undefined, taxonomy: Industry
     grouped.set(pair.l1, l2);
   }
   const mappedL2 = new Set(pairs.flatMap((pair) => pair.l2 ? [pair.l2] : []));
-  const unmatchedL2 = (intent?.industry_l2_json || []).filter((l2) => !mappedL2.has(l2));
+  const unmatchedL2 = (party.industry_l2_json || []).filter((l2) => !mappedL2.has(l2));
   return [
     ...[...grouped.entries()].map(([l1, l2]) => l2.length ? `${l1} / ${l2.join('、')}` : l1),
     ...unmatchedL2,

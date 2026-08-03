@@ -50,16 +50,15 @@ export type BuyerIntentFilters = {
 export type BuyerPartyFilters = {
   q: string;
   searchField?: BuyerPartySearchField;
-  buyerType: string;
+  industry: string;
   region: string;
-  listedStatus: string;
   status: string;
   owner: string;
   page: number;
 };
 
 export const INTENT_FILTERS: Array<keyof BuyerIntentFilters> = ['q', 'industry', 'region', 'status', 'listedStatus', 'requiresConsolidation', 'owner'];
-export const PARTY_FILTERS: Array<keyof BuyerPartyFilters> = ['q', 'buyerType', 'region', 'listedStatus', 'status', 'owner'];
+export const PARTY_FILTERS: Array<keyof BuyerPartyFilters> = ['q', 'industry', 'region', 'status', 'owner'];
 
 export const EMPTY_INTENT_FILTER_OPTIONS: BuyerIntentFilterOptions = {
   industries: [],
@@ -70,9 +69,8 @@ export const EMPTY_INTENT_FILTER_OPTIONS: BuyerIntentFilterOptions = {
 };
 
 export const EMPTY_PARTY_FILTER_OPTIONS: BuyerPartyFilterOptions = {
-  buyer_types: [],
+  industries: [],
   regions: [],
-  listed_statuses: [],
   statuses: [],
 };
 
@@ -87,9 +85,8 @@ export const INTENT_SEARCH_FIELD_LABELS: Record<BuyerIntentSearchField | 'all', 
 export const PARTY_SEARCH_FIELD_LABELS: Record<BuyerPartySearchField | 'all', string> = {
   all: '全部字段',
   buyer_name: '买家',
-  legal_name: '法律主体',
-  main_business: '主营业务',
-  profile_summary: '材料摘要',
+  alias: '别名',
+  contact_name: '联系人',
 };
 
 export function readIntentFilters(searchParams: URLSearchParams): BuyerIntentFilters {
@@ -102,11 +99,11 @@ export function readIntentFilters(searchParams: URLSearchParams): BuyerIntentFil
 
 export function readPartyFilters(searchParams: URLSearchParams): BuyerPartyFilters {
   const searchFieldParam = searchParams.get('partySearchField');
-  return { q: searchParams.get('partyQ') || '', searchField: isBuyerPartySearchField(searchFieldParam) ? searchFieldParam : undefined, buyerType: searchParams.get('buyerType') || '', region: searchParams.get('partyRegion') || '', listedStatus: searchParams.get('partyListedStatus') || '', status: searchParams.get('partyStatus') || '', owner: searchParams.get('partyOwner') || '', page: Math.max(1, Number(searchParams.get('partyPage') || '1') || 1) };
+  return { q: searchParams.get('partyQ') || '', searchField: isBuyerPartySearchField(searchFieldParam) ? searchFieldParam : undefined, industry: searchParams.get('partyIndustry') || '', region: searchParams.get('partyRegion') || '', status: searchParams.get('partyStatus') || '', owner: searchParams.get('partyOwner') || '', page: Math.max(1, Number(searchParams.get('partyPage') || '1') || 1) };
 }
 
 export function isBuyerIntentSearchField(value: string | null): value is BuyerIntentSearchField { return value === 'intent_name' || value === 'buyer_name' || value === 'raw_requirement_text' || value === 'intent_summary'; }
-export function isBuyerPartySearchField(value: string | null): value is BuyerPartySearchField { return value === 'buyer_name' || value === 'legal_name' || value === 'main_business' || value === 'profile_summary'; }
+export function isBuyerPartySearchField(value: string | null): value is BuyerPartySearchField { return value === 'buyer_name' || value === 'alias' || value === 'contact_name'; }
 
 export { setOrDelete };
 
@@ -116,7 +113,7 @@ export function suggestionSubtitle(suggestion: BuyerSuggestion): string {
     if (suggestion.match_type === 'buyer') return suggestion.intent_name;
     return suggestion.intent_name || suggestion.snippet || '点击按该字段检索';
   }
-  if (suggestion.match_type === 'buyer') return suggestion.legal_name || suggestion.snippet || '点击按买家检索';
-  if (suggestion.match_type === 'legal') return suggestion.buyer_name;
+  if (suggestion.match_type === 'buyer') return suggestion.snippet || '点击按买家检索';
+  if (suggestion.match_type === 'alias' || suggestion.match_type === 'contact') return suggestion.buyer_name;
   return suggestion.buyer_name || suggestion.snippet || '点击按该字段检索';
 }
