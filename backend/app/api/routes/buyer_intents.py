@@ -858,9 +858,13 @@ def bulk_delete_buyer_intents(
     current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    require_admin(current_user)
     intent_ids = list(dict.fromkeys(payload.ids))
-    deleted_ids = _soft_delete_buyer_intents(db, intent_ids, actor_user_id=current_user.user_id)
+    deleted_ids = _soft_delete_buyer_intents(
+        db,
+        intent_ids,
+        actor_user_id=current_user.user_id,
+        owner_user_id=None if current_user.is_admin else current_user.user_id,
+    )
     deleted_id_set = set(deleted_ids)
     skipped_ids = [intent_id for intent_id in intent_ids if intent_id not in deleted_id_set]
     db.commit()
@@ -1217,8 +1221,8 @@ def delete_buyer_intent(
     current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> None:
-    require_admin(current_user)
     _get_buyer_intent_or_404(db, buyer_intent_id)
+    ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
     _soft_delete_buyer_intents(db, [buyer_intent_id], actor_user_id=current_user.user_id)
     db.commit()
     return None
@@ -1244,14 +1248,26 @@ def _soft_delete_buyer_intents(
     buyer_intent_ids: list[UUID],
     *,
     actor_user_id: UUID | None = None,
+    owner_user_id: UUID | None = None,
 ) -> list[UUID]:
     if not buyer_intent_ids:
         return []
     actor = actor_user_id or DEFAULT_ADMIN_USER_ID
 
+    owner_scope_clause = "and owner_user_id = :owner_user_id" if owner_user_id is not None else ""
+    params = {
+        "deleted_by": actor,
+        "updated_by": actor,
+        "buyer_intent_ids": buyer_intent_ids,
+        "team_id": DEFAULT_TEAM_ID,
+        "workspace_id": DEFAULT_WORKSPACE_ID,
+    }
+    if owner_user_id is not None:
+        params["owner_user_id"] = owner_user_id
+
     rows = db.execute(
         text(
-            """
+            f"""
             update buyer_intent
             set deleted_at = now(),
                 deleted_by = :deleted_by,
@@ -1261,16 +1277,11 @@ def _soft_delete_buyer_intents(
               and team_id = :team_id
               and workspace_id = :workspace_id
               and deleted_at is null
+              {owner_scope_clause}
             returning id
             """
         ).bindparams(bindparam("buyer_intent_ids", expanding=True)),
-        {
-            "deleted_by": actor,
-            "updated_by": actor,
-            "buyer_intent_ids": buyer_intent_ids,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
+        params,
     ).mappings().all()
     deleted_ids = [row["id"] for row in rows]
     for deleted_id in deleted_ids:

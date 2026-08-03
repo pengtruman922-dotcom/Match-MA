@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { Loader2, Sparkles, Trash2 } from 'lucide-react';
 import { buyerIntents, users } from '../../lib/api';
-import { isAdmin } from '../../lib/auth';
+import { canManageOwnedEntity, isAdmin } from '../../lib/auth';
 import type {
   AppUserOption,
   BuyerIntent,
@@ -387,6 +387,7 @@ function IntentRow({
   deleting: boolean;
 }) {
   const frozen = 'bg-white group-hover:bg-brand-50';
+  const canDelete = canManageOwnedEntity(item.owner_user_id);
   return (
     <tr className="group h-[88px] transition-colors hover:bg-brand-50/30">
       <td className={`sticky left-0 z-20 px-4 py-3 align-middle ${frozen}`}><input type="checkbox" checked={selected} onChange={(event) => onSelectedChange(event.target.checked)} aria-label={`选择${item.intent_name}`} className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600" /></td>
@@ -404,7 +405,7 @@ function IntentRow({
         <div className="flex items-center justify-center gap-1 whitespace-nowrap">
           <UpdateEntryMenu compact onSelect={onRecord} />
           <Link to={`/recommendations?mode=buyer-to-target&intentId=${item.id}`} className="inline-flex items-center gap-1 px-2 py-1 text-xs text-brand-600 transition-colors hover:bg-brand-50"><Sparkles className="h-3 w-3" />推荐标的</Link>
-          {isAdmin() && (
+          {canDelete && (
             <button
               type="button"
               onClick={onDelete}

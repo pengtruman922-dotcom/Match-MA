@@ -904,9 +904,13 @@ def bulk_delete_seller_targets(
     current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    require_admin(current_user)
     target_ids = list(dict.fromkeys(payload.ids))
-    deleted_ids = _soft_delete_seller_targets(db, target_ids, actor_user_id=current_user.user_id)
+    deleted_ids = _soft_delete_seller_targets(
+        db,
+        target_ids,
+        actor_user_id=current_user.user_id,
+        owner_user_id=None if current_user.is_admin else current_user.user_id,
+    )
     deleted_id_set = set(deleted_ids)
     skipped_ids = [target_id for target_id in target_ids if target_id not in deleted_id_set]
     db.commit()
@@ -1326,14 +1330,26 @@ def _soft_delete_seller_targets(
     seller_target_ids: list[UUID],
     *,
     actor_user_id: UUID | None = None,
+    owner_user_id: UUID | None = None,
 ) -> list[UUID]:
     if not seller_target_ids:
         return []
     actor = actor_user_id or DEFAULT_ADMIN_USER_ID
 
+    owner_scope_clause = "and owner_user_id = :owner_user_id" if owner_user_id is not None else ""
+    params = {
+        "deleted_by": actor,
+        "updated_by": actor,
+        "seller_target_ids": seller_target_ids,
+        "team_id": DEFAULT_TEAM_ID,
+        "workspace_id": DEFAULT_WORKSPACE_ID,
+    }
+    if owner_user_id is not None:
+        params["owner_user_id"] = owner_user_id
+
     rows = db.execute(
         text(
-            """
+            f"""
             update seller_target
             set deleted_at = now(),
                 deleted_by = :deleted_by,
@@ -1343,16 +1359,11 @@ def _soft_delete_seller_targets(
               and team_id = :team_id
               and workspace_id = :workspace_id
               and deleted_at is null
+              {owner_scope_clause}
             returning id
             """
         ).bindparams(bindparam("seller_target_ids", expanding=True)),
-        {
-            "deleted_by": actor,
-            "updated_by": actor,
-            "seller_target_ids": seller_target_ids,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
+        params,
     ).mappings().all()
     deleted_ids = [row["id"] for row in rows]
     for deleted_id in deleted_ids:
