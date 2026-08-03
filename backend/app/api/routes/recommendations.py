@@ -902,6 +902,7 @@ def list_recent_recommendation_session_summaries(
     current_user: CurrentUser,
     db: Session = Depends(get_db),
     mode: str | None = None,
+    q: str | None = Query(default=None, max_length=100),
     status_filter: str | None = Query(
         default=None,
         alias="status",
@@ -918,6 +919,7 @@ def list_recent_recommendation_session_summaries(
         mode=mode,
         limit=scan_limit,
         offset=0,
+        q=q,
     )
     summaries = [
         _build_recommendation_session_summary(db, session=row, preview_limit=preview_limit) for row in rows

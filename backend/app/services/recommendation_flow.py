@@ -108,6 +108,7 @@ def _list_recommendation_session_overview_rows(
     mode: str | None,
     limit: int,
     offset: int,
+    q: str | None = None,
 ) -> list[dict[str, Any]]:
     where = ["rs.team_id = :team_id", "rs.workspace_id = :workspace_id", "rs.status <> 'archived'"]
     params: dict[str, Any] = {
@@ -122,6 +123,19 @@ def _list_recommendation_session_overview_rows(
     if owner_scope_required(current_user):
         where.append(recommendation_session_visible_sql("rs"))
         params["scope_user_id"] = current_user.user_id
+    normalized_query = (q or "").strip()
+    if normalized_query:
+        where.append(
+            """(
+              (rs.mode = 'buyer_to_target' and coalesce(bi.intent_name, '') ilike :q)
+              or (rs.mode = 'target_to_buyer' and coalesce(st.target_name, '') ilike :q)
+              or (
+                coalesce(rs.metadata_json ->> 'temporary_filter', 'false') = 'true'
+                and coalesce(rs.anonymous_input_snapshot, '') ilike :q
+              )
+            )"""
+        )
+        params["q"] = f"%{normalized_query}%"
 
     rows = db.execute(
         text(
@@ -131,6 +145,7 @@ def _list_recommendation_session_overview_rows(
             left join buyer_intent bi on bi.id = rs.buyer_intent_id
             left join buyer_party bp on bp.id = coalesce(rs.buyer_party_id, bi.buyer_party_id)
             left join seller_target st on st.id = rs.seller_target_id
+            left join app_user creator on creator.id = rs.created_by
             where {' and '.join(where)}
             order by rs.updated_at desc, rs.created_at desc
             limit :limit offset :offset
@@ -150,6 +165,7 @@ def _get_recommendation_session_overview_or_404(db: Session, session_id: UUID) -
             left join buyer_intent bi on bi.id = rs.buyer_intent_id
             left join buyer_party bp on bp.id = coalesce(rs.buyer_party_id, bi.buyer_party_id)
             left join seller_target st on st.id = rs.seller_target_id
+            left join app_user creator on creator.id = rs.created_by
             where rs.id = :session_id
               and rs.team_id = :team_id
               and rs.workspace_id = :workspace_id
@@ -3226,6 +3242,9 @@ def _session_overview_select_columns() -> str:
       rs.initial_condition_snapshot_json, rs.latest_condition_snapshot_json,
       rs.condition_overrides_json,
       rs.created_at::text as created_at, rs.updated_at::text as updated_at, rs.metadata_json,
+      rs.created_by,
+      creator.name as created_by_name,
+      creator.username as created_by_username,
       bi.intent_name as buyer_intent_name,
       bp.buyer_name,
       st.target_name as seller_target_name

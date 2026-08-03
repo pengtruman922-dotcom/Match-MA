@@ -73,6 +73,7 @@ import type {
   RecommendationSessionDebugBundle,
   RecommendationSession,
   RecommendationSessionBundle,
+  RecommendationSessionSummary,
   AppUser,
   AppUserCreate,
   AppUserOption,
@@ -769,6 +770,13 @@ export const recommendations = {
     limit?: number;
     offset?: number;
   }) => apiRequest<RecommendationSession[]>(`/recommendations/sessions${buildQuery(params || {})}`),
+  recentSessions: (params?: {
+    mode?: 'buyer_to_target' | 'target_to_buyer';
+    q?: string;
+    limit?: number;
+    offset?: number;
+    preview_limit?: number;
+  }) => apiRequest<RecommendationSessionSummary[]>(`/recommendations/sessions/recent${buildQuery(params || {})}`),
   getSession: (sessionId: string) => apiRequest<RecommendationSession>(`/recommendations/sessions/${sessionId}`),
   bundle: (sessionId: string, params?: { include_canceled?: boolean }) =>
     apiRequest<RecommendationSessionBundle>(

@@ -12,6 +12,7 @@ from backend.app.api.routes.recommendations import (
     _ensure_selected_item_allowed_from_session_candidates,
     _ensure_selected_item_matches_session,
     _filter_recommendation_session_summaries,
+    _list_recommendation_session_overview_rows,
     _recommendation_page_overview,
     _recommendation_session_display,
     _recommendation_session_is_processing,
@@ -172,6 +173,9 @@ class _MessageResult:
     def all(self) -> list[dict]:
         return self._rows
 
+    def first(self):
+        return self._rows[0] if self._rows else None
+
 
 class _MessageDb:
     def __init__(self, rows: list[dict]) -> None:
@@ -179,6 +183,42 @@ class _MessageDb:
 
     def execute(self, *_args, **_kwargs) -> _MessageResult:
         return _MessageResult(self._rows)
+
+
+class _OverviewDb:
+    def __init__(self) -> None:
+        self.statement = ""
+        self.params: dict = {}
+
+    def execute(self, statement, params) -> _MessageResult:
+        self.statement = str(statement)
+        self.params = params
+        return _MessageResult([])
+
+
+def test_recommendation_history_search_is_scoped_and_mode_specific() -> None:
+    current_user = AuthContext(user_id=uuid4(), role="consultant", name="consultant")
+    db = _OverviewDb()
+
+    rows = _list_recommendation_session_overview_rows(
+        db,
+        current_user=current_user,
+        mode=None,
+        limit=20,
+        offset=0,
+        q="  医疗  ",
+    )
+
+    assert rows == []
+    assert "rs.created_by = :scope_user_id" in db.statement
+    assert "rs.mode = 'buyer_to_target'" in db.statement
+    assert "coalesce(bi.intent_name, '') ilike :q" in db.statement
+    assert "rs.mode = 'target_to_buyer'" in db.statement
+    assert "coalesce(st.target_name, '') ilike :q" in db.statement
+    assert "left join app_user creator on creator.id = rs.created_by" in db.statement
+    assert "creator.username" in db.statement
+    assert db.params["scope_user_id"] == current_user.user_id
+    assert db.params["q"] == "%医疗%"
 
 
 def test_owner_scoped_selected_item_must_come_from_session_candidates() -> None:
