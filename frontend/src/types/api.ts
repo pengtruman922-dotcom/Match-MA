@@ -104,6 +104,11 @@ export interface SellerTargetFilterOptions {
   owners?: SellerTargetFilterOption[];
 }
 
+export interface SellerTargetDedupCheck {
+  query: string;
+  matches: string[];
+}
+
 export interface SellerTargetSuggestion {
   id: string;
   search_field: SellerTargetSearchField;

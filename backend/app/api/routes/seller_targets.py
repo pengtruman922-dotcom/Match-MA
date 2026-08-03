@@ -263,6 +263,11 @@ class SellerTargetFilterOptionsOut(BaseModel):
     owners: list[SellerTargetFilterOptionOut] = []
 
 
+class SellerTargetDedupCheckOut(BaseModel):
+    query: str
+    matches: list[str]
+
+
 class SellerTargetSuggestionOut(BaseModel):
     id: UUID
     search_field: Literal["target_name", "target_subject_name", "business_summary"]
@@ -686,6 +691,52 @@ def seller_target_filter_options(current_user: CurrentUser, db: Session = Depend
         "statuses": statuses,
         "owners": owners,
     }
+
+
+@router.get("/dedup-check", response_model=SellerTargetDedupCheckOut)
+def seller_target_dedup_check(
+    current_user: CurrentUser,
+    q: str = Query(min_length=1, max_length=300),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = q.strip()
+    if not query:
+        return {"query": "", "matches": []}
+
+    # This intentionally ignores the caller's broader visibility scope. A
+    # consultant and an admin both check only the targets they personally own,
+    # because the warning is about duplicates in the current user's own book.
+    # Escape LIKE metacharacters so '%' and '_' in a name stay literal.
+    escaped_query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    names = (
+        db.execute(
+            text(
+                r"""
+                select target_name
+                from seller_target
+                where team_id = :team_id
+                  and workspace_id = :workspace_id
+                  and deleted_at is null
+                  and owner_user_id = :owner_user_id
+                  and target_name ilike :name_pattern escape '\'
+                group by target_name
+                order by (target_name ilike :exact_name escape '\') desc,
+                         max(updated_at) desc,
+                         target_name asc
+                """
+            ),
+            {
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+                "owner_user_id": current_user.user_id,
+                "name_pattern": f"%{escaped_query}%",
+                "exact_name": escaped_query,
+            },
+        )
+        .scalars()
+        .all()
+    )
+    return {"query": query, "matches": list(names)}
 
 
 def _industry_option_tree(rows: list[Any]) -> list[dict[str, Any]]:

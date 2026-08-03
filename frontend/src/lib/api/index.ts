@@ -14,6 +14,7 @@ import type {
   SellerTarget,
   SellerTargetBulkDeleteResponse,
   SellerTargetCreate,
+  SellerTargetDedupCheck,
   SellerTargetFilterOptions,
   SellerTargetListResponse,
   SellerTargetSearchField,
@@ -133,6 +134,8 @@ export const sellerTargets = {
     offset?: number;
   }) => apiRequest<SellerTargetListResponse>(`/seller-targets${buildQuery(params || {})}`),
   filterOptions: () => apiRequest<SellerTargetFilterOptions>('/seller-targets/filter-options'),
+  dedupCheck: (params: { q: string }) =>
+    apiRequest<SellerTargetDedupCheck>(`/seller-targets/dedup-check${buildQuery(params)}`),
   suggestions: (params: { q: string; limit?: number }) =>
     apiRequest<SellerTargetSuggestion[]>(`/seller-targets/suggestions${buildQuery(params)}`),
   get: (id: string) => apiRequest<SellerTarget>(`/seller-targets/${id}`),

@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ChangeEvent, DragEvent, FormEvent } from 'react';
-import { Link } from 'react-router-dom';
 import { Building2, Loader2, Upload } from 'lucide-react';
 import { attachments, businessUpdates, sellerTargets } from '../../lib/api';
-import type { AttachmentUploadPolicy, SellerTarget, SellerTargetCreate } from '../../types/api';
+import type { AttachmentUploadPolicy, SellerTargetCreate } from '../../types/api';
 import Modal, { Field } from '../../components/Modal';
 import { InlineWarning, SelectedFiles, UploadPolicyCard } from '../../components/UploadArea';
 import { formatBytes } from '../../lib/format';
@@ -35,7 +34,6 @@ export default function CreateTargetModal({ onClose, onCreated }: { onClose: () 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [form, setForm] = useState<CreateTargetForm>(DEFAULT_CREATE_FORM);
   const [saving, setSaving] = useState(false);
-  const [duplicates, setDuplicates] = useState<SellerTarget[]>([]);
   const [nameWarning, setNameWarning] = useState('');
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [uploadPolicy, setUploadPolicy] = useState<AttachmentUploadPolicy | null>(null);
@@ -63,27 +61,12 @@ export default function CreateTargetModal({ onClose, onCreated }: { onClose: () 
     };
   }, []);
 
-  useEffect(() => {
-    const name = form.targetName.trim();
-    if (name.length < 2) {
-      setDuplicates([]);
-      setNameWarning(name.length === 1 ? '名称过短，建议补充公司全称或地区' : '');
-      return;
-    }
-
-    const timer = window.setTimeout(() => {
-      setNameWarning('');
-      sellerTargets
-        .list({ q: name, limit: 5 })
-        .then((response) => setDuplicates(response.items.filter((item) => item.target_name !== name)))
-        .catch(() => {});
-    }, 300);
-
-    return () => window.clearTimeout(timer);
-  }, [form.targetName]);
-
   function updateForm<K extends keyof CreateTargetForm>(key: K, value: CreateTargetForm[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
+    if (key === 'targetName') {
+      const name = String(value).trim();
+      setNameWarning(name.length === 1 ? '名称过短，建议补充公司全称或地区' : '');
+    }
   }
 
   function addFiles(incoming: File[]) {
@@ -142,6 +125,13 @@ export default function CreateTargetModal({ onClose, onCreated }: { onClose: () 
     setSaving(true);
     setSubmitError(null);
     try {
+      const dedupCheck = await sellerTargets.dedupCheck({ q: targetName });
+      if (dedupCheck.matches.length > 0) {
+        const existingNames = dedupCheck.matches.map((name) => `“${name}”`).join('、');
+        const confirmed = window.confirm(`当前已存在${existingNames}，疑似重复，仍确认新建吗？`);
+        if (!confirmed) return;
+      }
+
       const region = parseRegion(form.region);
       const shouldParse = selectedFiles.length > 0 || form.supplement.trim().length > 0;
       const payload: SellerTargetCreate = {
@@ -315,22 +305,6 @@ export default function CreateTargetModal({ onClose, onCreated }: { onClose: () 
           </div>
         </div>
 
-        {duplicates.length > 0 && (
-          <div className="border border-amber-200 bg-amber-50 p-3 space-y-2">
-            <p className="text-xs font-medium text-amber-800">疑似重复</p>
-            {duplicates.map((item) => (
-              <div key={item.id} className="flex items-center justify-between gap-3 text-xs">
-                <span className="text-gray-700 line-clamp-2">
-                  {item.target_name} · {item.location_province || '未知'} · {item.industry_l1 || '未知'}
-                </span>
-                <Link to={`/targets/${item.id}`} className="text-brand-600 hover:text-brand-700 font-medium shrink-0" onClick={onClose}>
-                  更新它
-                </Link>
-              </div>
-            ))}
-          </div>
-        )}
-
         {submitError && <div className="border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{submitError}</div>}
 
         <div className="flex items-center justify-between gap-3 pt-2">
@@ -345,7 +319,7 @@ export default function CreateTargetModal({ onClose, onCreated }: { onClose: () 
             </button>
             <button type="submit" disabled={saving || !form.targetName.trim()} className="px-4 py-2 text-sm bg-brand-600 text-white hover:bg-brand-700 transition-colors disabled:opacity-50 inline-flex items-center gap-2">
               {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-              {saving ? '创建中...' : duplicates.length > 0 ? '仍然新建' : selectedFiles.length > 0 || form.supplement.trim() ? '创建并解析' : '创建'}
+              {saving ? '检查并创建中...' : selectedFiles.length > 0 || form.supplement.trim() ? '创建并解析' : '创建'}
             </button>
           </div>
         </div>
