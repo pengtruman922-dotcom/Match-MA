@@ -1,9 +1,9 @@
 """Manual writes to a buyer_intent × seller_target relation.
 
 A relation is the unit of matchmaking progress: one buyer intent paired with
-one seller target, with a status pipeline and an event timeline. LLM follow-up
-parsing already advances relations through extracted_action_apply; this module
-is the consultant driving the same relation by hand from the progress tab.
+one seller target, with a status pipeline and an event timeline. This module
+owns both consultant-written events and the editable placeholder that an AI
+follow-up job fills asynchronously.
 
 Both operations here assume the caller has already checked visibility.
 """
@@ -19,7 +19,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from backend.app.api.routes.utils import write_action_log
-from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 
 # Mirrors the buyer_seller_relation.status check constraint.
 RELATION_STATUSES: tuple[str, ...] = (
@@ -66,6 +66,24 @@ RELATION_EVENT_LABELS: dict[str, str] = {
     "exclusivity": "排他安排", "deal_closed": "交易完成", "paused": "暂停推进",
     "internal_note": "内部备注", "other": "其他",
 }
+
+FOLLOWUP_AI_PENDING = "pending"
+FOLLOWUP_AI_SUCCEEDED = "succeeded"
+FOLLOWUP_AI_FAILED = "failed"
+FOLLOWUP_AI_MANUAL = "manual"
+FOLLOWUP_AI_PENDING_SUMMARY = "AI解析中"
+FOLLOWUP_AI_FAILED_SUMMARY = "AI解析失败，请删除该记录重新录入或手动编辑。"
+
+_SYSTEM_EVENT_TYPES = {
+    "recommended",
+    "buyer_interested",
+    "buyer_not_interested",
+    "due_diligence_started",
+    "agreement_discussion",
+    "deal_closed",
+    "paused",
+}
+MANUAL_RELATION_EVENT_TYPES = frozenset(set(RELATION_EVENT_TYPES) - _SYSTEM_EVENT_TYPES)
 
 # 状态的中文名，只用于自动生成的动态摘要文案（last_event_summary 是展示字段，
 # LLM 路径也存中文摘要，这里保持一致）。
@@ -128,6 +146,7 @@ def _insert_event(
     next_step: str | None,
     source_type: str,
     source_id: UUID | None = None,
+    metadata_json: dict[str, Any] | None = None,
 ) -> UUID:
     return db.execute(
         text(
@@ -158,7 +177,7 @@ def _insert_event(
             "next_step": next_step,
             "source_type": source_type,
             "source_id": source_id,
-            "metadata_json": {},
+            "metadata_json": metadata_json or {},
             "created_by": actor_user_id,
             "updated_by": actor_user_id,
         },
@@ -347,6 +366,293 @@ def record_relation_event(
     return event_id
 
 
+def record_direct_business_update_followup(
+    db: Session,
+    *,
+    business_update_id: UUID,
+    relation_id: UUID,
+    actor_user_id: UUID,
+    event_type: str,
+    content: str,
+) -> UUID:
+    """Write a consultant's raw follow-up directly to the relation timeline.
+
+    The caller owns the surrounding transaction.  Keeping the business update
+    and relation event in that one transaction prevents an audit source from
+    existing without its timeline record (or vice versa).
+    """
+    _validate_manual_event_type(event_type)
+    clean_content = content.strip()
+    if not clean_content:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="直接写入跟进内容时，原始材料不能为空。",
+        )
+    if len(clean_content) > 4000:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="直接写入的跟进内容不能超过 4000 字；较长材料请使用 AI 整理。",
+        )
+    relation = _load_relation(db, relation_id)
+    event_id = _insert_event(
+        db,
+        relation,
+        actor_user_id=actor_user_id,
+        event_type=event_type,
+        title=None,
+        content=clean_content,
+        next_step=None,
+        source_type="manual",
+        source_id=business_update_id,
+        metadata_json={
+            "followup_ai_status": FOLLOWUP_AI_MANUAL,
+            "business_update_id": str(business_update_id),
+            "entry_mode": "direct",
+        },
+    )
+    _touch_relation_summary(db, relation_id, clean_content, actor_user_id=actor_user_id)
+    _store_followup_event_id_on_business_update(db, business_update_id, event_id)
+    return event_id
+
+
+def ensure_ai_followup_event(
+    db: Session,
+    *,
+    business_update_id: UUID,
+    relation_id: UUID,
+    actor_user_id: UUID,
+    event_type: str,
+    original_content: str,
+    job_id: UUID | None,
+) -> UUID:
+    """Create (or reset) the editable timeline placeholder for an AI follow-up."""
+    _validate_manual_event_type(event_type)
+    existing = db.execute(
+        text(
+            """
+            select id
+            from relation_event
+            where relation_id = :relation_id
+              and source_type = 'manual'
+              and source_id = :business_update_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            order by created_at desc
+            limit 1
+            """
+        ),
+        {
+            "relation_id": relation_id,
+            "business_update_id": business_update_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).scalar_one_or_none()
+    metadata_patch = {
+        "followup_ai_status": FOLLOWUP_AI_PENDING,
+        "followup_ai_error": None,
+        "business_update_id": str(business_update_id),
+        "followup_job_id": str(job_id) if job_id else None,
+        "entry_mode": "ai",
+    }
+    created = existing is None
+    if existing is not None:
+        db.execute(
+            text(
+                """
+                update relation_event
+                set event_type = :event_type,
+                    metadata_json = metadata_json || :metadata_patch,
+                    updated_at = now(),
+                    updated_by = :updated_by
+                where id = :event_id
+                  and team_id = :team_id
+                  and workspace_id = :workspace_id
+                  and deleted_at is null
+                """
+            ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+            {
+                "event_type": event_type,
+                "metadata_patch": metadata_patch,
+                "updated_by": actor_user_id,
+                "event_id": existing,
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+            },
+        )
+        event_id = existing
+    else:
+        relation = _load_relation(db, relation_id)
+        event_id = _insert_event(
+            db,
+            relation,
+            actor_user_id=actor_user_id,
+            event_type=event_type,
+            title=None,
+            content=original_content.strip()[:4000] or "AI 整理附件中的跟进内容",
+            next_step=None,
+            source_type="manual",
+            source_id=business_update_id,
+            metadata_json=metadata_patch,
+        )
+    if created:
+        _touch_relation_summary(
+            db,
+            relation_id,
+            FOLLOWUP_AI_PENDING_SUMMARY,
+            actor_user_id=actor_user_id,
+        )
+    else:
+        _recompute_relation_summary(db, relation_id, actor_user_id=actor_user_id)
+    _store_followup_event_id_on_business_update(db, business_update_id, event_id)
+    return event_id
+
+
+def complete_ai_followup_event(
+    db: Session,
+    *,
+    business_update_id: UUID,
+    job_id: UUID,
+    content: str,
+    next_step: str | None,
+) -> bool:
+    """Replace a pending placeholder with the parsed communication result."""
+    event = _followup_event_for_update(db, business_update_id)
+    if event is None:
+        return False
+    result = db.execute(
+        text(
+            """
+            update relation_event
+            set content = :content,
+                next_step = :next_step,
+                metadata_json = metadata_json || :metadata_patch,
+                updated_at = now()
+            where id = :event_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+              and metadata_json ->> 'followup_ai_status' = 'pending'
+            """
+        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+        {
+            "content": content.strip()[:4000],
+            "next_step": next_step.strip()[:1000] if isinstance(next_step, str) and next_step.strip() else None,
+            "metadata_patch": {
+                "followup_ai_status": FOLLOWUP_AI_SUCCEEDED,
+                "followup_ai_error": None,
+                "followup_job_id": str(job_id),
+            },
+            "event_id": event["id"],
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )
+    if not result.rowcount:
+        return False
+    _recompute_relation_summary(db, event["relation_id"], actor_user_id=event["created_by"])
+    return True
+
+
+def fail_ai_followup_event(
+    db: Session,
+    *,
+    business_update_id: UUID,
+    job_id: UUID,
+    error_message: str,
+) -> bool:
+    """Turn a pending placeholder into an editable/deletable failure record."""
+    event = _followup_event_for_update(db, business_update_id)
+    if event is None:
+        return False
+    result = db.execute(
+        text(
+            """
+            update relation_event
+            set metadata_json = metadata_json || :metadata_patch,
+                updated_at = now()
+            where id = :event_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+              and metadata_json ->> 'followup_ai_status' = 'pending'
+            """
+        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+        {
+            "metadata_patch": {
+                "followup_ai_status": FOLLOWUP_AI_FAILED,
+                "followup_ai_error": error_message[:1000],
+                "followup_job_id": str(job_id),
+            },
+            "event_id": event["id"],
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )
+    if not result.rowcount:
+        return False
+    _recompute_relation_summary(db, event["relation_id"], actor_user_id=event["created_by"])
+    return True
+
+
+def _validate_manual_event_type(event_type: str) -> None:
+    if event_type not in MANUAL_RELATION_EVENT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Invalid manual event_type: {event_type}",
+        )
+
+
+def _store_followup_event_id_on_business_update(
+    db: Session,
+    business_update_id: UUID,
+    event_id: UUID,
+) -> None:
+    db.execute(
+        text(
+            """
+            update business_update
+            set metadata_json = metadata_json || :metadata_patch
+            where id = :business_update_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
+        {
+            "metadata_patch": {"followup_event_id": str(event_id)},
+            "business_update_id": business_update_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )
+
+
+def _followup_event_for_update(db: Session, business_update_id: UUID) -> dict[str, Any] | None:
+    row = db.execute(
+        text(
+            """
+            select id, relation_id, coalesce(created_by, updated_by, :system_user_id) as created_by
+            from relation_event
+            where source_type = 'manual'
+              and source_id = :business_update_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            order by created_at desc
+            limit 1
+            """
+        ),
+        {
+            "business_update_id": business_update_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "system_user_id": DEFAULT_ADMIN_USER_ID,
+        },
+    ).mappings().one_or_none()
+    return dict(row) if row else None
+
+
 def change_relation_status(
     db: Session,
     relation_id: UUID,
@@ -525,7 +831,12 @@ def _recompute_relation_summary(db: Session, relation_id: UUID, *, actor_user_id
     latest = db.execute(
         text(
             """
-            select event_time, coalesce(nullif(content, ''), nullif(title, '')) as summary
+            select event_time,
+                   case metadata_json ->> 'followup_ai_status'
+                     when 'pending' then :pending_summary
+                     when 'failed' then :failed_summary
+                     else coalesce(nullif(content, ''), nullif(title, ''))
+                   end as summary
             from relation_event
             where relation_id = :relation_id and team_id = :team_id
               and workspace_id = :workspace_id and deleted_at is null
@@ -533,7 +844,13 @@ def _recompute_relation_summary(db: Session, relation_id: UUID, *, actor_user_id
             limit 1
             """
         ),
-        {"relation_id": relation_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+        {
+            "relation_id": relation_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "pending_summary": FOLLOWUP_AI_PENDING_SUMMARY,
+            "failed_summary": FOLLOWUP_AI_FAILED_SUMMARY,
+        },
     ).mappings().one_or_none()
     db.execute(
         text(
@@ -581,16 +898,26 @@ def update_relation_event(
             """
             update relation_event
             set event_type = :event_type, title = :title, content = :content,
-                next_step = :next_step, updated_at = now(), updated_by = :updated_by
+                next_step = :next_step,
+                metadata_json = case
+                  when metadata_json ? 'followup_ai_status'
+                  then metadata_json || :metadata_patch
+                  else metadata_json
+                end,
+                updated_at = now(), updated_by = :updated_by
             where id = :event_id and relation_id = :relation_id and team_id = :team_id
               and workspace_id = :workspace_id and deleted_at is null
             """
-        ),
+        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
         {
             "event_type": event_type,
             "title": title.strip() if isinstance(title, str) and title.strip() else None,
             "content": content.strip() if isinstance(content, str) and content.strip() else None,
             "next_step": changes.get("next_step", event["next_step"]),
+            "metadata_patch": {
+                "followup_ai_status": FOLLOWUP_AI_MANUAL,
+                "followup_ai_error": None,
+            },
             "updated_by": actor_user_id,
             "event_id": event_id,
             "relation_id": relation_id,

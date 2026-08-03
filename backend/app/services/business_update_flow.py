@@ -21,6 +21,7 @@ from backend.app.services.attachment_storage import (
     save_upload_file,
 )
 from backend.app.services.image_inputs import is_supported_multimodal_image, multimodal_image_constraints
+from backend.app.services.relation_flow import ensure_ai_followup_event
 
 ATTACHMENT_VISIBILITY_VALUES = {"workspace", "team", "private"}
 
@@ -411,6 +412,12 @@ def _enqueue_business_update_process_job_type(
 ) -> dict[str, Any]:
     existing_job = _latest_active_business_update_process_job_type(db, business_update_id, job_type)
     if existing_job:
+        if job_type == BUSINESS_UPDATE_FOLLOWUP_JOB_TYPE:
+            _ensure_followup_timeline_event(
+                db,
+                business_update_id=business_update_id,
+                job_id=existing_job["id"],
+            )
         return {**existing_job, "reused_existing": True}
 
     row = db.execute(
@@ -469,7 +476,57 @@ def _enqueue_business_update_process_job_type(
                 },
             },
         )
+        _ensure_followup_timeline_event(
+            db,
+            business_update_id=business_update_id,
+            job_id=row["id"],
+        )
     return {**dict(row), "reused_existing": False}
+
+
+def _ensure_followup_timeline_event(
+    db: Session,
+    *,
+    business_update_id: UUID,
+    job_id: UUID | None,
+) -> UUID | None:
+    """Materialize the timeline placeholder independently of any open UI."""
+    row = db.execute(
+        text(
+            """
+            select raw_text, created_by, metadata_json
+            from business_update
+            where id = :business_update_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {
+            "business_update_id": business_update_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Business update not found.")
+    metadata = row.get("metadata_json") if isinstance(row.get("metadata_json"), dict) else {}
+    if str(metadata.get("processing_scope") or "basic_info") not in {"follow_up", "both"}:
+        return None
+    if str(metadata.get("followup_entry_mode") or "ai") != "ai":
+        return None
+    relation_id = _optional_uuid(metadata.get("bound_relation_id"))
+    if relation_id is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Follow-up relation is missing.")
+    event_type = str(metadata.get("followup_event_type") or "other")
+    return ensure_ai_followup_event(
+        db,
+        business_update_id=business_update_id,
+        relation_id=relation_id,
+        actor_user_id=_optional_uuid(row.get("created_by")) or DEFAULT_ADMIN_USER_ID,
+        event_type=event_type,
+        original_content=str(row.get("raw_text") or ""),
+        job_id=job_id,
+    )
 
 
 def _business_update_processing_scope(db: Session, business_update_id: UUID) -> str:

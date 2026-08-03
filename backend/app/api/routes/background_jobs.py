@@ -39,6 +39,7 @@ from backend.app.services.background_job_governance import (
     _untest_data_metadata,
     _utc_now_text,
 )
+from backend.app.services.business_update_flow import _ensure_followup_timeline_event
 
 
 def _require_admin_route(current_user: CurrentUser) -> None:
@@ -1063,6 +1064,11 @@ def _mark_related_business_update_retrying(db: Session, job: dict[str, Any]) -> 
             "followup_draft_error": None,
             "followup_draft_job_id": str(job["id"]),
         })
+        _ensure_followup_timeline_event(
+            db,
+            business_update_id=business_update_id,
+            job_id=job["id"],
+        )
     db.execute(
         text(
             """

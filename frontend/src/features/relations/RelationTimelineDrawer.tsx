@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Loader2, X, ArrowRight, UserRound, Building2, Pencil, Trash2, Check, MessageSquarePlus } from 'lucide-react';
 import { relations } from '../../lib/api';
@@ -34,8 +34,8 @@ export default function RelationTimelineDrawer({ relation, side, statuses, event
   const counterpartyLink = side === 'seller_target'
     ? `/buyer-intents/${current.buyer_intent_id}` : `/targets/${current.seller_target_id}`;
 
-  const loadEvents = () => relations.events(current.id, { limit: 100 })
-    .then(setEvents).catch(() => {}).finally(() => setLoading(false));
+  const loadEvents = useCallback(() => relations.events(current.id, { limit: 100 })
+    .then(setEvents).catch(() => {}).finally(() => setLoading(false)), [current.id]);
   const refreshRelation = async () => {
     const updated = await relations.get(current.id);
     setCurrent(updated);
@@ -45,8 +45,14 @@ export default function RelationTimelineDrawer({ relation, side, statuses, event
   useEffect(() => {
     setLoading(true);
     void loadEvents();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current.id]);
+  }, [loadEvents]);
+
+  const hasPendingAiEvent = events.some((event) => event.metadata_json.followup_ai_status === 'pending');
+  useEffect(() => {
+    if (!hasPendingAiEvent) return;
+    const timer = window.setInterval(() => { void loadEvents(); }, 1800);
+    return () => window.clearInterval(timer);
+  }, [hasPendingAiEvent, loadEvents]);
 
   const changeStatus = async (status: string) => {
     if (status === current.status) return;
@@ -97,7 +103,7 @@ export default function RelationTimelineDrawer({ relation, side, statuses, event
 
           <section className="border border-gray-100 bg-gray-50/60 p-3">
             <div className="flex items-center justify-between gap-3">
-              <div><h4 className="text-xs font-semibold uppercase tracking-wider text-gray-500">记录跟进</h4><p className="mt-1 text-xs text-gray-400">上传或粘贴原始记录，AI 整理草稿后再确认。</p></div>
+              <div><h4 className="text-xs font-semibold uppercase tracking-wider text-gray-500">记录跟进</h4><p className="mt-1 text-xs text-gray-400">可直接写入；AI 整理会在后台完成并自动回填。</p></div>
               <button type="button" onClick={() => setComposerOpen(true)} className="inline-flex items-center gap-1.5 bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"><MessageSquarePlus className="h-3.5 w-3.5" />录入</button>
             </div>
           </section>
@@ -132,7 +138,10 @@ export default function RelationTimelineDrawer({ relation, side, statuses, event
 function TimelineEvent({ event, relationId, eventTypes, labels, onChanged }: {
   event: RelationEvent; relationId: string; eventTypes: RelationEventType[]; labels: Record<string, string>; onChanged: () => Promise<void>;
 }) {
-  const editable = event.source_type === 'manual';
+  const aiStatus = typeof event.metadata_json.followup_ai_status === 'string'
+    ? event.metadata_json.followup_ai_status : null;
+  const editable = event.source_type === 'manual' && aiStatus !== 'pending';
+  const deletable = event.source_type === 'manual';
   const [editing, setEditing] = useState(false);
   const [eventType, setEventType] = useState(event.event_type);
   const [content, setContent] = useState(event.content || '');
@@ -160,7 +169,7 @@ function TimelineEvent({ event, relationId, eventTypes, labels, onChanged }: {
       <div className="flex items-baseline gap-2">
         <span className="text-xs font-medium text-gray-700">{label}</span>
         <span className="font-mono text-[11px] text-gray-400">{formatDateTime(event.event_time)}</span>
-        {editable && !editing && <span className="ml-auto flex gap-1"><button type="button" onClick={() => setEditing(true)} className="text-gray-400 hover:text-brand-600" title="编辑"><Pencil className="h-3.5 w-3.5" /></button><button type="button" disabled={saving} onClick={() => void remove()} className="text-gray-400 hover:text-red-600" title="删除"><Trash2 className="h-3.5 w-3.5" /></button></span>}
+        {(editable || deletable) && !editing && <span className="ml-auto flex gap-1">{editable ? <button type="button" onClick={() => setEditing(true)} className="text-gray-400 hover:text-brand-600" title="编辑"><Pencil className="h-3.5 w-3.5" /></button> : null}{deletable ? <button type="button" disabled={saving} onClick={() => void remove()} className="text-gray-400 hover:text-red-600" title="删除"><Trash2 className="h-3.5 w-3.5" /></button> : null}</span>}
       </div>
       {editing ? (
         <div className="mt-2 space-y-2 border border-gray-100 bg-gray-50 p-2">
@@ -171,11 +180,15 @@ function TimelineEvent({ event, relationId, eventTypes, labels, onChanged }: {
           <input value={nextStep} onChange={(item) => setNextStep(item.target.value)} placeholder="下一步（选填）" className="w-full border border-gray-200 px-2 py-1 text-xs" />
           <div className="flex justify-end gap-2"><button type="button" onClick={() => setEditing(false)} className="text-xs text-gray-500">取消</button><button type="button" disabled={saving} onClick={() => void save()} className="inline-flex items-center gap-1 bg-brand-600 px-2 py-1 text-xs text-white"><Check className="h-3 w-3" />保存</button></div>
         </div>
+      ) : aiStatus === 'pending' ? (
+        <p className="mt-1 flex items-center gap-1.5 text-sm text-blue-700"><Loader2 className="h-3.5 w-3.5 animate-spin" />AI解析中</p>
+      ) : aiStatus === 'failed' ? (
+        <p className="mt-1 text-sm text-red-700">AI解析失败，请删除该记录重新录入或手动编辑。</p>
       ) : <>
-        {event.title ? <p className="mt-0.5 text-sm text-gray-800">{event.title}</p> : null}
-        {event.content ? <p className="mt-0.5 whitespace-pre-wrap text-sm text-gray-600">{event.content}</p> : null}
-        {event.next_step ? <p className="mt-1 flex items-center gap-1 text-xs text-brand-700"><ArrowRight className="h-3 w-3" />下一步：{event.next_step}</p> : null}
-      </>}
+          {event.title ? <p className="mt-0.5 text-sm text-gray-800">{event.title}</p> : null}
+          {event.content ? <p className="mt-0.5 whitespace-pre-wrap text-sm text-gray-600">{event.content}</p> : null}
+          {event.next_step ? <p className="mt-1 flex items-center gap-1 text-xs text-brand-700"><ArrowRight className="h-3 w-3" />下一步：{event.next_step}</p> : null}
+        </>}
     </li>
   );
 }

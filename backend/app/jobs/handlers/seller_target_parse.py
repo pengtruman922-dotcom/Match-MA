@@ -384,20 +384,13 @@ def _seller_target_changes_with_parse_completion(
     seller_target: dict[str, Any],
     changes: dict[str, Any],
 ) -> dict[str, Any]:
-    """Release the target from its in-flight parse state, nothing more.
+    """Keep the field-write diff free of transient parse state.
 
-    This used to also flip a recommendation gate, which meant recommendability
-    depended on *when* a fact happened to be written rather than on the target
-    itself. That gate is gone (施工单 0727); parsing now only reports its own
-    progress.
+    The handler calls ``mark_parse_completed`` after writing facts. If
+    ``information_status`` were included here, withdrawing the fact batch
+    would also roll the target back into ``parsing`` with no job behind it.
     """
-    next_changes = dict(changes)
-    if (
-        "information_status" not in next_changes
-        and seller_target.get("information_status") in SELLER_TARGET_POST_PARSE_STATUSES
-    ):
-        next_changes["information_status"] = "normal"
-    return next_changes
+    return dict(changes)
 
 def _normalize_seller_target_industry_changes(
     db: Session,

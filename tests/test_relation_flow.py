@@ -16,6 +16,7 @@ from backend.app.services.relation_flow import (
     RELATION_STATUSES,
     _seller_target_deal_closed_changes,
     change_relation_status,
+    record_direct_business_update_followup,
     record_relation_event,
 )
 
@@ -71,6 +72,19 @@ def test_empty_event_reaches_storage_and_gets_a_default_summary() -> None:
     # generates “已记录：电话沟通” after loading the relation.
     with pytest.raises(AssertionError, match="validation should have rejected"):
         record_relation_event(_RejectingDb(), _uuid(), actor_user_id=_uuid(), event_type="call")
+
+
+def test_direct_follow_up_rejects_content_that_cannot_be_stored_losslessly() -> None:
+    with pytest.raises(Exception) as exc:
+        record_direct_business_update_followup(
+            _RejectingDb(),
+            business_update_id=_uuid(),
+            relation_id=_uuid(),
+            actor_user_id=_uuid(),
+            event_type="call",
+            content="沟" * 4001,
+        )
+    assert "4000" in str(exc.value.detail)
 
 
 def test_deal_closed_marks_the_target_sold() -> None:

@@ -6,7 +6,6 @@ import type {
   BusinessUpdateProcessingScope,
   BuyerSellerRelation,
   RelationEventType,
-  RelationFollowUpDraft,
 } from '../types/api';
 import { relationStatusLabel } from '../features/relations/relationLabels';
 import { updateScopeLabel } from './updateEntryLabels';
@@ -30,9 +29,6 @@ const STATUS_SYSTEM_EVENT_TYPES = new Set([
   'agreement_discussion', 'deal_closed', 'paused',
 ]);
 
-const DRAFT_POLL_INTERVAL_MS = 1800;
-const DRAFT_POLL_LIMIT = 70;
-
 export default function BusinessUpdateDrawer({
   open,
   onClose,
@@ -47,7 +43,6 @@ export default function BusinessUpdateDrawer({
   defaultIntentName,
 }: Props) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const pollGenerationRef = useRef(0);
   const [scope, setScope] = useState<BusinessUpdateProcessingScope>(initialScope);
   const [rawText, setRawText] = useState('');
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
@@ -60,12 +55,8 @@ export default function BusinessUpdateDrawer({
   const [selectedRelationId, setSelectedRelationId] = useState('');
   const [eventTypes, setEventTypes] = useState<RelationEventType[]>([]);
   const [eventType, setEventType] = useState('meeting');
-  const [businessUpdateId, setBusinessUpdateId] = useState<string | null>(null);
-  const [draftStatus, setDraftStatus] = useState<'input' | 'waiting' | 'timeout' | 'failed' | 'ready'>('input');
-  const [draftContent, setDraftContent] = useState('');
-  const [draftNextStep, setDraftNextStep] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const [recording, setRecording] = useState(false);
+  const [directWriting, setDirectWriting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const needsFollowUp = scope === 'follow_up' || scope === 'both';
@@ -73,7 +64,6 @@ export default function BusinessUpdateDrawer({
   const manualEventTypes = eventTypes.filter((item) => !STATUS_SYSTEM_EVENT_TYPES.has(item.value));
 
   const reset = useCallback(() => {
-    pollGenerationRef.current += 1;
     setScope(initialScope);
     setRawText('');
     setSelectedFiles([]);
@@ -81,12 +71,8 @@ export default function BusinessUpdateDrawer({
     setRelationItems([]);
     setRelationError(null);
     setSelectedRelationId(defaultRelationId || '');
-    setBusinessUpdateId(null);
-    setDraftStatus('input');
-    setDraftContent('');
-    setDraftNextStep('');
     setSubmitting(false);
-    setRecording(false);
+    setDirectWriting(false);
     setError(null);
   }, [defaultRelationId, initialScope]);
 
@@ -143,9 +129,7 @@ export default function BusinessUpdateDrawer({
   if (!open) return null;
 
   const requestClose = () => {
-    if (submitting || recording || draftStatus === 'waiting') return;
-    if (draftStatus === 'ready' && !window.confirm('AI 草稿尚未记录为推进动态，确认关闭？')) return;
-    pollGenerationRef.current += 1;
+    if (submitting || directWriting) return;
     onClose();
   };
 
@@ -167,46 +151,6 @@ export default function BusinessUpdateDrawer({
       }
     }
     setSelectedFiles(next);
-  };
-
-  const pollDraft = async (id: string) => {
-    const generation = pollGenerationRef.current + 1;
-    pollGenerationRef.current = generation;
-    setDraftStatus('waiting');
-    setError(null);
-    for (let attempt = 0; attempt < DRAFT_POLL_LIMIT; attempt += 1) {
-      if (attempt > 0) await delay(DRAFT_POLL_INTERVAL_MS);
-      if (pollGenerationRef.current !== generation) return;
-      try {
-        const update = await businessUpdates.get(id);
-        const metadata = update.metadata_json || {};
-        const status = typeof metadata.followup_draft_status === 'string' ? metadata.followup_draft_status : 'pending';
-        if (status === 'succeeded') {
-          const draft = relationDraft(metadata.followup_draft);
-          if (!draft) throw new Error('AI 已返回结果，但草稿格式无效。');
-          setDraftContent(draft.content);
-          setDraftNextStep(draft.next_step || '');
-          setDraftStatus('ready');
-          return;
-        }
-        if (status === 'failed') {
-          setDraftStatus('failed');
-          setError(typeof metadata.followup_draft_error === 'string' ? metadata.followup_draft_error : 'AI 整理失败，请重试。');
-          return;
-        }
-      } catch (err) {
-        setDraftStatus('timeout');
-        setError(err instanceof Error ? `暂时无法读取 AI 草稿：${err.message}` : '暂时无法读取 AI 草稿。');
-        return;
-      }
-    }
-    setDraftStatus('timeout');
-    setError('AI 整理等待超时，后台任务可能仍在运行。请继续等待，不要重复启动任务。');
-  };
-
-  const continueWaiting = async () => {
-    if (!businessUpdateId) return;
-    await pollDraft(businessUpdateId);
   };
 
   const submit = async () => {
@@ -234,6 +178,8 @@ export default function BusinessUpdateDrawer({
         formData.set('process_after_ocr', 'true');
         formData.set('include_attachment_text', 'true');
         formData.set('processing_scope', scope);
+        formData.set('followup_entry_mode', 'ai');
+        if (eventType) formData.set('followup_event_type', eventType);
         if (selectedRelationId) formData.set('bound_relation_id', selectedRelationId);
         if (defaultTargetId) formData.set('bound_seller_target_ids', JSON.stringify([defaultTargetId]));
         if (defaultBuyerPartyId) formData.set('bound_buyer_party_ids', JSON.stringify([defaultBuyerPartyId]));
@@ -251,18 +197,15 @@ export default function BusinessUpdateDrawer({
           bound_buyer_intent_ids: defaultIntentId ? [defaultIntentId] : undefined,
           processing_scope: scope,
           bound_relation_id: selectedRelationId || undefined,
+          followup_entry_mode: 'ai',
+          followup_event_type: eventType || undefined,
+          auto_process: true,
           metadata_json: { source: 'frontend_unified_update_drawer' },
         });
-        await businessUpdates.process(result.id);
         id = result.id;
       }
-      setBusinessUpdateId(id);
       onSuccess?.(id);
-      if (needsFollowUp) {
-        await pollDraft(id);
-      } else {
-        onClose();
-      }
+      onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : '提交失败');
     } finally {
@@ -270,38 +213,34 @@ export default function BusinessUpdateDrawer({
     }
   };
 
-  const retryDraft = async () => {
-    if (!businessUpdateId) return;
-    setSubmitting(true);
-    setError(null);
-    try {
-      await businessUpdates.process(businessUpdateId, { branch: 'follow_up' });
-      await pollDraft(businessUpdateId);
-    } catch (err) {
-      setDraftStatus('failed');
-      setError(err instanceof Error ? err.message : '重试失败');
-    } finally {
-      setSubmitting(false);
+  const writeDirectly = async () => {
+    if (!rawText.trim() || !selectedRelationId || !eventType || selectedFiles.length > 0) return;
+    if (rawText.trim().length > 4000) {
+      setError('直接写入的跟进内容不能超过 4000 字；较长材料请使用 AI 整理。');
+      return;
     }
-  };
-
-  const recordDraft = async () => {
-    if (!businessUpdateId || !selectedRelationId || !eventType || !draftContent.trim()) return;
-    setRecording(true);
+    setDirectWriting(true);
     setError(null);
     try {
-      await relations.createEvent(selectedRelationId, {
-        event_type: eventType,
-        content: draftContent.trim(),
-        next_step: draftNextStep.trim() || null,
+      const result = await businessUpdates.create({
+        raw_text: rawText.trim(),
+        input_type: 'text',
+        bound_seller_target_ids: defaultTargetId ? [defaultTargetId] : undefined,
+        bound_buyer_party_ids: defaultBuyerPartyId ? [defaultBuyerPartyId] : undefined,
+        bound_buyer_intent_ids: defaultIntentId ? [defaultIntentId] : undefined,
+        processing_scope: scope,
+        bound_relation_id: selectedRelationId,
+        followup_entry_mode: 'direct',
+        followup_event_type: eventType,
+        auto_process: scope === 'both',
+        metadata_json: { source: 'frontend_unified_update_drawer' },
       });
-      onSuccess?.(businessUpdateId);
-      pollGenerationRef.current += 1;
+      onSuccess?.(result.id);
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : '记录推进动态失败');
+      setError(err instanceof Error ? err.message : '直接写入跟进失败');
     } finally {
-      setRecording(false);
+      setDirectWriting(false);
     }
   };
 
@@ -315,9 +254,9 @@ export default function BusinessUpdateDrawer({
               <h2 className="text-base font-semibold text-gray-900">{updateScopeLabel(scope)}</h2>
               <span className="bg-brand-50 px-2 py-0.5 text-[11px] text-brand-700">{scope === 'both' ? '双节点独立处理' : '固定处理路径'}</span>
             </div>
-            <p className="mt-1 text-xs text-gray-500">AI 只整理草稿；关系、状态和动态类型由你决定。</p>
+            <p className="mt-1 text-xs text-gray-500">{needsFollowUp ? '可直接写入原文，或交给 AI 整理后自动回填时间线。' : '提交后由 AI 在后台解析并更新基本信息。'}</p>
           </div>
-          <button type="button" onClick={requestClose} disabled={submitting || recording || draftStatus === 'waiting'} className="p-1 text-gray-400 hover:text-gray-700 disabled:opacity-40"><X className="h-5 w-5" /></button>
+          <button type="button" onClick={requestClose} disabled={submitting || directWriting} className="p-1 text-gray-400 hover:text-gray-700 disabled:opacity-40"><X className="h-5 w-5" /></button>
         </header>
 
         <div className="flex-1 space-y-5 overflow-y-auto px-6 py-5">
@@ -337,7 +276,7 @@ export default function BusinessUpdateDrawer({
                 {relationLoading ? <LoadingText text="正在读取推进关系" /> : relationError ? <ErrorText text={relationError} /> : relationItems.length === 0 ? (
                   <ErrorText text="当前对象还没有推进关系。请先在「推进」页关联对手方，再记录跟进。" />
                 ) : (
-                  <select value={selectedRelationId} onChange={(event) => setSelectedRelationId(event.target.value)} disabled={draftStatus !== 'input'} className="w-full border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 outline-none focus:border-brand-500 disabled:bg-gray-100">
+                  <select value={selectedRelationId} onChange={(event) => setSelectedRelationId(event.target.value)} disabled={submitting || directWriting} className="w-full border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 outline-none focus:border-brand-500 disabled:bg-gray-100">
                     <option value="">请选择推进关系</option>
                     {relationItems.map((item) => <option key={item.id} value={item.id}>{relationLabel(item, Boolean(defaultTargetId))}</option>)}
                   </select>
@@ -346,62 +285,42 @@ export default function BusinessUpdateDrawer({
               </div>
               <div>
                 <label className="mb-1.5 block text-sm font-medium text-gray-700">动态类型 *</label>
-                <select value={eventType} onChange={(event) => setEventType(event.target.value)} disabled={draftStatus !== 'input'} className="w-full border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 outline-none focus:border-brand-500 disabled:bg-gray-100">
+                <select value={eventType} onChange={(event) => setEventType(event.target.value)} disabled={submitting || directWriting} className="w-full border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 outline-none focus:border-brand-500 disabled:bg-gray-100">
                   {manualEventTypes.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
                 </select>
               </div>
             </section>
           ) : null}
 
-          {draftStatus === 'input' ? (
-            <>
-              <section>
-                <label className="mb-2 block text-sm font-medium text-gray-700">原始材料</label>
-                <textarea value={rawText} onChange={(event) => setRawText(event.target.value)} rows={8} placeholder={needsFollowUp ? '粘贴聊天记录、会议速记或沟通纪要。AI 将只整理“沟通内容”和“下一步”。' : '粘贴企业资料、需求变化或补充事实。基础信息节点不会再解析沟通过程。'} className="w-full resize-y border border-gray-200 px-3 py-2.5 text-sm text-gray-800 outline-none placeholder:text-gray-400 focus:border-brand-500" />
-              </section>
-              <section>
-                <label className="mb-2 block text-sm font-medium text-gray-700">附件 / 截图</label>
-                <div onDragOver={(event) => event.preventDefault()} onDrop={(event: DragEvent<HTMLDivElement>) => { event.preventDefault(); addFiles(Array.from(event.dataTransfer.files || [])); }} className="border border-dashed border-gray-300 bg-gray-50 p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <p className="flex items-center gap-2 text-sm text-gray-600"><Upload className="h-4 w-4 text-brand-600" />拖拽文件，或选择聊天截图、PDF、Office、文本附件</p>
-                    <button type="button" onClick={() => fileInputRef.current?.click()} className="shrink-0 border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-700 hover:border-brand-400">选择文件</button>
-                  </div>
-                  <input ref={fileInputRef} type="file" multiple className="hidden" onChange={(event: ChangeEvent<HTMLInputElement>) => { addFiles(Array.from(event.target.files || [])); event.target.value = ''; }} />
-                  <p className="mt-2 text-xs text-gray-400">{uploadPolicy ? `单文件 ${uploadPolicy.max_upload_mb} MB，单次最多 ${uploadPolicy.max_files_per_business_update} 个` : policyError || '正在读取上传规则...'}</p>
-                  <SelectedFiles files={selectedFiles} onRemove={(index) => setSelectedFiles((items) => items.filter((_, itemIndex) => itemIndex !== index))} />
-                  {fileError ? <ErrorText text={fileError} /> : null}
-                </div>
-              </section>
-            </>
-          ) : null}
-
-          {draftStatus === 'waiting' ? (
-            <div className="border border-blue-200 bg-blue-50 px-4 py-5 text-sm text-blue-800"><p className="flex items-center gap-2 font-medium"><Loader2 className="h-4 w-4 animate-spin" />AI 正在整理跟进草稿</p><p className="mt-1 text-xs leading-5">{scope === 'both' ? '基础信息分支已独立启动；跟进分支失败不会回滚基础信息。' : '草稿不会自动写入时间线。'}</p></div>
-          ) : null}
-
-          {draftStatus === 'timeout' ? (
-            <div className="border border-amber-200 bg-amber-50 px-4 py-4 text-sm text-amber-800"><p className="font-medium">暂未取得 AI 草稿</p><p className="mt-1 text-xs leading-5">这不等于任务失败；继续等待只读取现有任务，不会重复解析基础信息或跟进内容。</p></div>
-          ) : null}
-
-          {draftStatus === 'ready' ? (
-            <section className="space-y-4">
-              <div className="flex items-center gap-2 text-sm font-medium text-emerald-700"><CheckCircle2 className="h-4 w-4" />AI 草稿已生成，请确认后记录</div>
-              <label className="block"><span className="mb-1.5 block text-sm font-medium text-gray-700">沟通内容 *</span><textarea value={draftContent} onChange={(event) => setDraftContent(event.target.value)} maxLength={4000} rows={8} className="w-full resize-y border border-gray-200 px-3 py-2.5 text-sm outline-none focus:border-brand-500" /><span className="mt-1 block text-right text-[11px] text-gray-400">{draftContent.length}/4000</span></label>
-              <label className="block"><span className="mb-1.5 block text-sm font-medium text-gray-700">下一步</span><textarea value={draftNextStep} onChange={(event) => setDraftNextStep(event.target.value)} maxLength={1000} rows={3} className="w-full resize-y border border-gray-200 px-3 py-2.5 text-sm outline-none focus:border-brand-500" /><span className="mt-1 block text-right text-[11px] text-gray-400">{draftNextStep.length}/1000</span></label>
-            </section>
-          ) : null}
+          <section>
+            <label className="mb-2 block text-sm font-medium text-gray-700">原始材料</label>
+            <textarea value={rawText} onChange={(event) => setRawText(event.target.value)} rows={8} placeholder={needsFollowUp ? '粘贴聊天记录、会议速记或沟通纪要。可直接写入，或由 AI 整理沟通对象、具体内容和下一步。' : '粘贴企业资料、需求变化或补充事实。基础信息节点不会再解析沟通过程。'} className="w-full resize-y border border-gray-200 px-3 py-2.5 text-sm text-gray-800 outline-none placeholder:text-gray-400 focus:border-brand-500" />
+          </section>
+          <section>
+            <label className="mb-2 block text-sm font-medium text-gray-700">附件 / 截图</label>
+            <div onDragOver={(event) => event.preventDefault()} onDrop={(event: DragEvent<HTMLDivElement>) => { event.preventDefault(); addFiles(Array.from(event.dataTransfer.files || [])); }} className="border border-dashed border-gray-300 bg-gray-50 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <p className="flex items-center gap-2 text-sm text-gray-600"><Upload className="h-4 w-4 text-brand-600" />拖拽文件，或选择聊天截图、PDF、Office、文本附件</p>
+                <button type="button" onClick={() => fileInputRef.current?.click()} className="shrink-0 border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-700 hover:border-brand-400">选择文件</button>
+              </div>
+              <input ref={fileInputRef} type="file" multiple className="hidden" onChange={(event: ChangeEvent<HTMLInputElement>) => { addFiles(Array.from(event.target.files || [])); event.target.value = ''; }} />
+              <p className="mt-2 text-xs text-gray-400">{uploadPolicy ? `单文件 ${uploadPolicy.max_upload_mb} MB，单次最多 ${uploadPolicy.max_files_per_business_update} 个` : policyError || '正在读取上传规则...'}</p>
+              <SelectedFiles files={selectedFiles} onRemove={(index) => setSelectedFiles((items) => items.filter((_, itemIndex) => itemIndex !== index))} />
+              {fileError ? <ErrorText text={fileError} /> : null}
+            </div>
+            {needsFollowUp && selectedFiles.length > 0 ? <p className="mt-1.5 text-xs text-gray-400">包含附件时需选择“提交并 AI 整理”。</p> : null}
+            {needsFollowUp && rawText.trim().length > 4000 ? <p className="mt-1.5 text-xs text-amber-600">内容超过 4000 字，需选择“提交并 AI 整理”。</p> : null}
+          </section>
 
           {error ? <div className="border border-red-200 bg-red-50 px-3 py-2 text-xs leading-5 text-red-700">{error}</div> : null}
         </div>
 
         <footer className="flex items-center justify-between gap-3 border-t border-gray-200 px-6 py-4">
-          <p className="text-xs text-gray-400">{scope === 'both' ? '一份材料，两条独立任务' : needsFollowUp ? 'AI 回填草稿后由你确认' : '只更新基本信息'}</p>
+          <p className="text-xs text-gray-400">{scope === 'both' ? '跟进可直接写入；基本信息仍由 AI 独立解析' : needsFollowUp ? 'AI 提交后可离开，结果会自动回填' : '只更新基本信息'}</p>
           <div className="flex items-center gap-3">
-            <button type="button" onClick={requestClose} disabled={submitting || recording || draftStatus === 'waiting'} className="px-3 py-2 text-sm text-gray-600 disabled:opacity-40">取消</button>
-            {draftStatus === 'timeout' ? <button type="button" onClick={() => void continueWaiting()} className="inline-flex items-center gap-1.5 border border-brand-500 px-4 py-2 text-sm font-medium text-brand-700"><Loader2 className="h-4 w-4" />继续等待</button> : null}
-            {draftStatus === 'failed' ? <button type="button" onClick={() => void retryDraft()} disabled={submitting} className="inline-flex items-center gap-1.5 border border-brand-500 px-4 py-2 text-sm font-medium text-brand-700 disabled:opacity-50">{submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}仅重试跟进整理</button> : null}
-            {draftStatus === 'input' ? <button type="button" onClick={() => void submit()} disabled={submitting || (!rawText.trim() && selectedFiles.length === 0) || (needsFollowUp && (!selectedRelationId || !eventType))} className="inline-flex items-center gap-1.5 bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50">{submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}{submitting ? '提交中...' : needsFollowUp ? '提交并 AI 整理' : '提交并解析'}</button> : null}
-            {draftStatus === 'ready' ? <button type="button" onClick={() => void recordDraft()} disabled={recording || !draftContent.trim()} className="inline-flex items-center gap-1.5 bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50">{recording ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}{recording ? '记录中...' : '确认记录动态'}</button> : null}
+            <button type="button" onClick={requestClose} disabled={submitting || directWriting} className="px-3 py-2 text-sm text-gray-600 disabled:opacity-40">取消</button>
+            {needsFollowUp ? <button type="button" onClick={() => void writeDirectly()} disabled={submitting || directWriting || !rawText.trim() || rawText.trim().length > 4000 || selectedFiles.length > 0 || !selectedRelationId || !eventType} className="inline-flex items-center gap-1.5 border border-brand-500 px-4 py-2 text-sm font-medium text-brand-700 hover:bg-brand-50 disabled:opacity-50">{directWriting ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}{directWriting ? '写入中...' : '直接写入'}</button> : null}
+            <button type="button" onClick={() => void submit()} disabled={submitting || directWriting || (!rawText.trim() && selectedFiles.length === 0) || (needsFollowUp && (!selectedRelationId || !eventType))} className="inline-flex items-center gap-1.5 bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50">{submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}{submitting ? '提交中...' : needsFollowUp ? '提交并 AI 整理' : '提交并解析'}</button>
           </div>
         </footer>
       </div>
@@ -416,14 +335,6 @@ function relationLabel(item: BuyerSellerRelation, targetSide: boolean): string {
   return `${counterpart}（${relationStatusLabel(item.status)}）`;
 }
 
-function relationDraft(value: unknown): RelationFollowUpDraft | null {
-  if (!value || typeof value !== 'object') return null;
-  const draft = value as Record<string, unknown>;
-  if (typeof draft.content !== 'string' || !draft.content.trim()) return null;
-  if (draft.next_step !== null && draft.next_step !== undefined && typeof draft.next_step !== 'string') return null;
-  return { content: draft.content, next_step: typeof draft.next_step === 'string' ? draft.next_step : null };
-}
-
 function ContextRow({ label, value }: { label: string; value: string }) {
   return <div className="flex gap-2"><span className="w-20 shrink-0 text-gray-500">{label}：</span><span className="min-w-0 text-gray-900">{value}</span></div>;
 }
@@ -435,5 +346,4 @@ function SelectedFiles({ files, onRemove }: { files: File[]; onRemove: (index: n
 
 function ErrorText({ text }: { text: string }) { return <p className="mt-2 flex items-start gap-1.5 text-xs leading-5 text-amber-700"><AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{text}</p>; }
 function LoadingText({ text }: { text: string }) { return <p className="flex items-center gap-2 py-2 text-xs text-gray-500"><Loader2 className="h-3.5 w-3.5 animate-spin" />{text}</p>; }
-function delay(ms: number) { return new Promise((resolve) => window.setTimeout(resolve, ms)); }
 function formatBytes(value: number) { if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`; if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`; return `${value} B`; }

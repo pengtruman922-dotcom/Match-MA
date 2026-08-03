@@ -26,6 +26,10 @@ from backend.app.jobs.handlers.common import (
     _safe_prompt_messages_for_trace,
 )
 from backend.app.jobs.handlers.traces import _insert_llm_trace
+from backend.app.services.relation_flow import (
+    complete_ai_followup_event,
+    fail_ai_followup_event,
+)
 
 
 FOLLOWUP_NODE_NAME = "relation_followup_draft_parser"
@@ -81,7 +85,8 @@ def _handle_relation_followup_draft_parse(db: Session, job: JobClaim) -> dict[st
                 image_context["images"],
                 instruction=(
                     "The following images are source material for the selected relation follow-up. "
-                    "Read them directly and organize only the communication content and explicit next step. "
+                    "Read them directly and clearly preserve who said what, the concrete communication content, "
+                    "and any explicit next action with its actor and deadline. "
                     "Do not output attachment ids, raw_evidence_text, relation ids, status, or event type."
                 ),
             )
@@ -244,6 +249,13 @@ def _store_relation_followup_draft(
     job_id: UUID,
     draft: dict[str, str | None],
 ) -> None:
+    complete_ai_followup_event(
+        db,
+        business_update_id=business_update_id,
+        job_id=job_id,
+        content=str(draft["content"]),
+        next_step=draft.get("next_step"),
+    )
     db.execute(
         text(
             """
@@ -278,6 +290,12 @@ def _store_relation_followup_failure(
     job_id: UUID,
     error_message: str,
 ) -> None:
+    fail_ai_followup_event(
+        db,
+        business_update_id=business_update_id,
+        job_id=job_id,
+        error_message=error_message,
+    )
     db.execute(
         text(
             """

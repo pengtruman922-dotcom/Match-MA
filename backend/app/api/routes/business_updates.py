@@ -59,6 +59,7 @@ from backend.app.services.business_update_flow import (  # noqa: F401 - re-expor
     _ensure_attachment_exists,
     _ensure_bound_entities_writable,
     _ensure_business_update_exists,
+    _ensure_followup_timeline_event,
     _entity_ref,
     _history_route,
     _insert_business_update_row,
@@ -107,6 +108,10 @@ from backend.app.services.business_update_flow import (  # noqa: F401 - re-expor
     _validate_business_update_input_type,
     _validate_parse_entity_types,
 )
+from backend.app.services.relation_flow import (
+    MANUAL_RELATION_EVENT_TYPES,
+    record_direct_business_update_followup,
+)
 
 router = APIRouter(prefix="/business-updates", tags=["business-updates"])
 
@@ -132,6 +137,8 @@ class BusinessUpdateCreate(BaseModel):
     bound_buyer_intent_ids: list[UUID] = Field(default_factory=list)
     processing_scope: Literal["basic_info", "follow_up", "both"] = "basic_info"
     bound_relation_id: UUID | None = None
+    followup_entry_mode: Literal["ai", "direct"] = "ai"
+    followup_event_type: str | None = None
     attachment_ids: list[UUID] = Field(default_factory=list)
     attachments: list[BusinessUpdateAttachmentCreate] = Field(default_factory=list)
     auto_start_ocr: bool = False
@@ -232,6 +239,8 @@ def _validated_processing_scope_metadata(
     bound_relation_id: UUID | None,
     seller_target_ids: list[UUID],
     buyer_intent_ids: list[UUID],
+    followup_entry_mode: str = "ai",
+    followup_event_type: str | None = None,
 ) -> dict[str, Any]:
     if processing_scope not in BUSINESS_UPDATE_PROCESSING_SCOPES:
         raise HTTPException(status_code=422, detail="processing_scope must be basic_info, follow_up, or both.")
@@ -240,11 +249,20 @@ def _validated_processing_scope_metadata(
         raise HTTPException(status_code=422, detail="记录跟进时必须选择推进关系。")
     if not needs_relation and bound_relation_id is not None:
         raise HTTPException(status_code=422, detail="仅更新基本信息时不能绑定推进关系。")
+    if needs_relation and followup_entry_mode not in {"ai", "direct"}:
+        raise HTTPException(status_code=422, detail="followup_entry_mode must be ai or direct.")
+    normalized_event_type = followup_event_type or "other"
+    if needs_relation and normalized_event_type not in MANUAL_RELATION_EVENT_TYPES:
+        raise HTTPException(status_code=422, detail="请选择可手工记录的动态类型。")
 
     metadata: dict[str, Any] = {
         "processing_scope": processing_scope,
         "bound_relation_id": str(bound_relation_id) if bound_relation_id else None,
-        "followup_draft_status": "pending" if needs_relation else "not_requested",
+        "followup_entry_mode": followup_entry_mode if needs_relation else None,
+        "followup_event_type": normalized_event_type if needs_relation else None,
+        "followup_draft_status": (
+            "pending" if needs_relation and followup_entry_mode == "ai" else "not_requested"
+        ),
     }
     if bound_relation_id is None:
         return metadata
@@ -294,6 +312,8 @@ def create_business_update(
         buyer_party_ids=payload.bound_buyer_party_ids,
         buyer_intent_ids=payload.bound_buyer_intent_ids,
     )
+    if payload.followup_entry_mode == "direct" and (payload.attachment_ids or payload.attachments):
+        raise HTTPException(status_code=422, detail="直接写入仅支持文本；如需处理附件，请选择提交并 AI 整理。")
     scope_metadata = _validated_processing_scope_metadata(
         db,
         current_user,
@@ -301,6 +321,8 @@ def create_business_update(
         bound_relation_id=payload.bound_relation_id,
         seller_target_ids=payload.bound_seller_target_ids,
         buyer_intent_ids=payload.bound_buyer_intent_ids,
+        followup_entry_mode=payload.followup_entry_mode,
+        followup_event_type=payload.followup_event_type,
     )
     statement = text(
         """
@@ -341,6 +363,35 @@ def create_business_update(
             "metadata_json": {**payload.metadata_json, **scope_metadata},
         },
     ).mappings().one()
+    row = dict(row)
+    if payload.processing_scope in {"follow_up", "both"} and payload.followup_entry_mode == "direct":
+        event_id = record_direct_business_update_followup(
+            db,
+            business_update_id=row["id"],
+            relation_id=payload.bound_relation_id,
+            actor_user_id=current_user.user_id,
+            event_type=payload.followup_event_type or "other",
+            content=payload.raw_text,
+        )
+        db.execute(
+            text(
+                """
+                update business_update
+                set processing_status = 'applied'
+                where id = :business_update_id
+                  and team_id = :team_id
+                  and workspace_id = :workspace_id
+                """
+            ),
+            {
+                "business_update_id": row["id"],
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+            },
+        )
+        row["processing_status"] = "applied"
+        row["metadata_json"] = {**row["metadata_json"], "followup_event_id": str(event_id)}
+
     follow_up = _ingest_business_update_attachments(
         db,
         business_update_id=row["id"],
@@ -356,14 +407,20 @@ def create_business_update(
         parse_entity_types=payload.parse_entity_types,
     )
     defer_process_for_ocr = bool(follow_up["ocr_jobs"]) and payload.process_after_ocr
-    if payload.auto_process and not defer_process_for_ocr and not follow_up["process_job"]:
+    should_process = payload.auto_process and (
+        payload.followup_entry_mode != "direct" or payload.processing_scope == "both"
+    )
+    if should_process and not defer_process_for_ocr and not follow_up["process_job"]:
         follow_up["process_job"] = _enqueue_business_update_process_job(
             db,
             business_update_id=row["id"],
             include_attachment_text=payload.include_attachment_text,
             source="business_update_create_auto_process",
+            branch="basic_info" if payload.followup_entry_mode == "direct" else "all",
         )
-    if follow_up["process_job"] or defer_process_for_ocr:
+    if should_process and defer_process_for_ocr:
+        _ensure_followup_timeline_event(db, business_update_id=row["id"], job_id=None)
+    if follow_up["process_job"] or (should_process and defer_process_for_ocr):
         _mark_business_update_processing(db, row["id"])
         row = {**dict(row), "processing_status": "processing"}
     db.commit()
@@ -381,6 +438,8 @@ def upload_business_update(
     bound_buyer_intent_ids: str | None = Form(default=None),
     processing_scope: str = Form(default="basic_info"),
     bound_relation_id: UUID | None = Form(default=None),
+    followup_entry_mode: str = Form(default="ai"),
+    followup_event_type: str | None = Form(default=None),
     auto_process: bool = Form(default=True),
     process_after_ocr: bool = Form(default=True),
     include_attachment_text: bool = Form(default=True),
@@ -402,6 +461,8 @@ def upload_business_update(
         buyer_party_ids=buyer_party_ids,
         buyer_intent_ids=buyer_intent_ids,
     )
+    if followup_entry_mode == "direct":
+        raise HTTPException(status_code=422, detail="直接写入仅支持文本；如需处理附件，请选择提交并 AI 整理。")
     scope_metadata = _validated_processing_scope_metadata(
         db,
         current_user,
@@ -409,6 +470,8 @@ def upload_business_update(
         bound_relation_id=bound_relation_id,
         seller_target_ids=seller_target_ids,
         buyer_intent_ids=buyer_intent_ids,
+        followup_entry_mode=followup_entry_mode,
+        followup_event_type=followup_event_type,
     )
     form_metadata = _parse_metadata_json_form(metadata_json)
     settings = get_settings()
@@ -465,6 +528,9 @@ def upload_business_update(
             include_attachment_text=include_attachment_text,
             source="business_update_multipart_upload",
         )
+
+    if auto_process and ocr_jobs and process_after_ocr:
+        _ensure_followup_timeline_event(db, business_update_id=row["id"], job_id=None)
 
     if process_job or ocr_jobs:
         _mark_business_update_processing(db, row["id"])

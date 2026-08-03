@@ -104,22 +104,22 @@ def test_extracted_action_keeps_normalized_industry_fields() -> None:
     assert notes == []
 
 
-def test_seller_target_parse_releases_the_in_flight_parse_state() -> None:
+def test_seller_target_parse_keeps_derived_state_out_of_fact_diff() -> None:
     changes = _seller_target_changes_with_parse_completion(
         {"information_status": "parsing"},
         {"business_summary": "parsed summary"},
     )
 
-    assert changes == {"business_summary": "parsed summary", "information_status": "normal"}
+    assert changes == {"business_summary": "parsed summary"}
 
 
-def test_extracted_action_apply_releases_the_in_flight_parse_state() -> None:
+def test_extracted_action_apply_keeps_derived_state_out_of_fact_diff() -> None:
     changes = _action_seller_target_changes_with_parse_completion(
         {"information_status": "parsing"},
         {"business_summary": "parsed summary"},
     )
 
-    assert changes == {"business_summary": "parsed summary", "information_status": "normal"}
+    assert changes == {"business_summary": "parsed summary"}
 
 
 def test_parse_completion_touches_no_other_status() -> None:

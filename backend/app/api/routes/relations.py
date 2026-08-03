@@ -575,13 +575,22 @@ def _relation_select_columns() -> str:
         order by e.event_time desc, e.created_at desc limit 1
       ) as last_event_type,
       (
-        select e.content from relation_event e
+        select case e.metadata_json ->> 'followup_ai_status'
+                 when 'pending' then 'AI解析中'
+                 when 'failed' then 'AI解析失败，请删除该记录重新录入或手动编辑。'
+                 else e.content
+               end
+        from relation_event e
         where e.relation_id = r.id and e.team_id = r.team_id
           and e.workspace_id = r.workspace_id and e.deleted_at is null
         order by e.event_time desc, e.created_at desc limit 1
       ) as last_event_content,
       (
-        select e.next_step from relation_event e
+        select case
+                 when e.metadata_json ->> 'followup_ai_status' in ('pending', 'failed') then null
+                 else e.next_step
+               end
+        from relation_event e
         where e.relation_id = r.id and e.team_id = r.team_id
           and e.workspace_id = r.workspace_id and e.deleted_at is null
         order by e.event_time desc, e.created_at desc limit 1

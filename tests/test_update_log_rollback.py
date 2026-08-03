@@ -7,6 +7,7 @@ from backend.app.api.routes.update_logs import (
     _batch_category,
     _batch_record,
     _batch_rollback_block_reason,
+    _active_batch_logs,
     _latest_effective_batch,
     _research_job_batch,
     _build_update_batches,
@@ -31,6 +32,24 @@ def test_rollbackability_accepts_supported_fields() -> None:
     )
 
     assert result["ok"] is True
+
+
+def test_transient_target_parse_state_is_not_part_of_a_withdrawable_batch() -> None:
+    fact_log = _batch_log(
+        log_id="00000000-0000-0000-0000-000000000010",
+        applied_at="2026-08-03T07:52:41+00:00",
+        source_type="extracted_action",
+    )
+    status_log = {
+        **fact_log,
+        "id": UUID("00000000-0000-0000-0000-000000000011"),
+        "field_path": "information_status",
+        "old_value_json": "parsing",
+        "new_value_json": "normal",
+    }
+
+    assert _active_batch_logs([fact_log, status_log]) == [fact_log]
+    assert _rollbackability(status_log)["ok"] is False
 
 
 def test_research_listing_market_and_internal_period_are_rollbackable() -> None:

@@ -826,6 +826,11 @@ export interface BusinessUpdateCreate {
   bound_buyer_intent_ids?: string[];
   processing_scope?: BusinessUpdateProcessingScope;
   bound_relation_id?: string;
+  followup_entry_mode?: 'ai' | 'direct';
+  followup_event_type?: string;
+  auto_process?: boolean;
+  process_after_ocr?: boolean;
+  include_attachment_text?: boolean;
   metadata_json?: Record<string, unknown>;
 }
 

@@ -807,19 +807,13 @@ def _seller_target_changes_with_parse_completion(
     original: dict[str, Any],
     changes: dict[str, Any],
 ) -> dict[str, Any]:
-    """Release the target from its in-flight parse state, nothing more.
+    """Return fact changes only; parse completion is maintained separately.
 
-    Applying a fact used to double as a recommendation gate release, so whether
-    a target could be recommended depended on the order the consultant clicked
-    through the review list. That gate is gone (施工单 0727).
+    ``mark_parse_completed`` runs after the fact writer. Keeping the derived
+    ``information_status`` out of the fact diff means withdrawing a price or
+    profile update can never restore the transient value ``parsing``.
     """
-    next_changes = dict(changes)
-    if (
-        "information_status" not in next_changes
-        and original.get("information_status") in _POST_PARSE_INFORMATION_STATUSES
-    ):
-        next_changes["information_status"] = "normal"
-    return next_changes
+    return dict(changes)
 
 
 _POST_PARSE_INFORMATION_STATUSES = {"parsing", "pending_review", "insufficient", "parse_failed"}

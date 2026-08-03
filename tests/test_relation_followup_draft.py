@@ -159,6 +159,41 @@ def test_follow_up_scope_requires_relation() -> None:
     assert "必须选择推进关系" in str(exc_info.value.detail)
 
 
+def test_direct_follow_up_is_recorded_without_requesting_a_draft(monkeypatch) -> None:
+    monkeypatch.setattr(business_update_routes, "ensure_relation_visible", lambda *args: None)
+    metadata = business_update_routes._validated_processing_scope_metadata(
+        _RelationDb({"seller_target_id": SELLER_TARGET_ID, "buyer_intent_id": BUYER_INTENT_ID}),
+        SimpleNamespace(user_id=UUID(int=1)),
+        processing_scope="follow_up",
+        bound_relation_id=RELATION_ID,
+        seller_target_ids=[SELLER_TARGET_ID],
+        buyer_intent_ids=[],
+        followup_entry_mode="direct",
+        followup_event_type="call",
+    )
+
+    assert metadata["followup_entry_mode"] == "direct"
+    assert metadata["followup_event_type"] == "call"
+    assert metadata["followup_draft_status"] == "not_requested"
+
+
+def test_follow_up_rejects_system_event_types(monkeypatch) -> None:
+    monkeypatch.setattr(business_update_routes, "ensure_relation_visible", lambda *args: None)
+    with pytest.raises(HTTPException) as exc_info:
+        business_update_routes._validated_processing_scope_metadata(
+            _RelationDb({"seller_target_id": SELLER_TARGET_ID, "buyer_intent_id": BUYER_INTENT_ID}),
+            SimpleNamespace(user_id=UUID(int=1)),
+            processing_scope="follow_up",
+            bound_relation_id=RELATION_ID,
+            seller_target_ids=[SELLER_TARGET_ID],
+            buyer_intent_ids=[],
+            followup_event_type="deal_closed",
+        )
+
+    assert exc_info.value.status_code == 422
+    assert "动态类型" in str(exc_info.value.detail)
+
+
 def test_follow_up_only_update_does_not_mark_bound_target_parsing() -> None:
     class _CaptureDb:
         def __init__(self) -> None:
@@ -253,10 +288,11 @@ def test_follow_up_draft_normalizer_respects_relation_event_limits() -> None:
     assert len(draft["next_step"]) == 1000
 
 
-def test_follow_up_handler_stores_draft_without_creating_relation_event(monkeypatch) -> None:
+def test_follow_up_handler_auto_fills_the_timeline_event(monkeypatch) -> None:
     db = _CaptureDb()
     traces: list[dict] = []
     llm_calls: list[dict] = []
+    completed_events: list[dict] = []
     monkeypatch.setattr(
         relation_followup,
         "_get_business_update",
@@ -336,24 +372,36 @@ def test_follow_up_handler_stores_draft_without_creating_relation_event(monkeypa
         "_insert_llm_trace",
         lambda db, **kwargs: traces.append(kwargs),
     )
+    monkeypatch.setattr(
+        relation_followup,
+        "complete_ai_followup_event",
+        lambda db, **kwargs: completed_events.append(kwargs) or True,
+    )
 
     result = relation_followup._handle_relation_followup_draft_parse(db, _job())
 
     assert result["draft"] == {"content": "买方表示感兴趣。", "next_step": "下周发送材料。"}
     assert traces[0]["status"] == "succeeded"
     image_instruction = llm_calls[0]["messages"][1]["content"][1]["text"]
-    assert "only the communication content and explicit next step" in image_instruction
+    assert "clearly preserve who said what" in image_instruction
+    assert "explicit next action with its actor and deadline" in image_instruction
     assert "Do not output attachment ids, raw_evidence_text" in image_instruction
     assert db.commits == 1
     all_sql = "\n".join(sql.lower() for sql, _ in db.executions)
     assert "update business_update" in all_sql
-    assert "relation_event" not in all_sql
+    assert completed_events == [{
+        "business_update_id": BUSINESS_UPDATE_ID,
+        "job_id": JOB_ID,
+        "content": "买方表示感兴趣。",
+        "next_step": "下周发送材料。",
+    }]
     metadata_patch = db.executions[-1][1]["metadata_patch"]
     assert metadata_patch["followup_draft_status"] == "succeeded"
 
 
 def test_final_context_failure_marks_follow_up_draft_failed(monkeypatch) -> None:
     db = _CaptureDb()
+    failed_events: list[dict] = []
     monkeypatch.setattr(
         relation_followup,
         "_get_business_update",
@@ -371,6 +419,11 @@ def test_final_context_failure_marks_follow_up_draft_failed(monkeypatch) -> None
         "_relation_followup_context",
         lambda db, relation_id: (_ for _ in ()).throw(ValueError("Bound relation no longer exists.")),
     )
+    monkeypatch.setattr(
+        relation_followup,
+        "fail_ai_followup_event",
+        lambda db, **kwargs: failed_events.append(kwargs) or True,
+    )
 
     with pytest.raises(ValueError, match="no longer exists"):
         relation_followup._handle_relation_followup_draft_parse(db, _job())
@@ -380,6 +433,9 @@ def test_final_context_failure_marks_follow_up_draft_failed(monkeypatch) -> None
     metadata_patch = db.executions[-1][1]["metadata_patch"]
     assert metadata_patch["followup_draft_status"] == "failed"
     assert "no longer exists" in metadata_patch["followup_draft_error"]
+    assert failed_events[0]["business_update_id"] == BUSINESS_UPDATE_ID
+    assert failed_events[0]["job_id"] == JOB_ID
+    assert "no longer exists" in failed_events[0]["error_message"]
 
 
 def test_ocr_completion_uses_scope_aware_business_update_dispatcher(monkeypatch) -> None:

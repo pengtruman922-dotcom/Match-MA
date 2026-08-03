@@ -969,7 +969,15 @@ def _active_batch_logs(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         row
         for row in logs
-        if row.get("source_type") != "rollback" and row.get("rollback_at") is None
+        if row.get("source_type") != "rollback"
+        and row.get("rollback_at") is None
+        # Derived pipeline state is not a withdrawable business fact. Older
+        # parse batches logged it; ignoring those rows prevents a withdrawal
+        # from restoring ``parsing`` after the worker has already finished.
+        and not (
+            row.get("entity_type") == "seller_target"
+            and row.get("field_path") == "information_status"
+        )
     ]
 
 
@@ -1351,6 +1359,8 @@ def _rollbackability(log: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "reason": "This update log has already been rolled back."}
     if log.get("source_type") == "rollback":
         return {"ok": False, "reason": "Rollback logs cannot be rolled back again."}
+    if entity_type == "seller_target" and field_path == "information_status":
+        return {"ok": False, "reason": "AI processing state is derived and cannot be rolled back."}
     if entity_type not in ROLLBACK_TABLE_BY_ENTITY:
         return {"ok": False, "reason": f"Rollback is not supported for entity_type={entity_type}."}
     if _profile_section_code(field_path):
