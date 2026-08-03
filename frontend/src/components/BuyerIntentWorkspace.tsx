@@ -10,7 +10,7 @@ import {
   Search,
   X,
 } from 'lucide-react';
-import { attachments, buyerIntents, buyerParties, meta } from '../lib/api';
+import { attachments, buyerParties, meta } from '../lib/api';
 import type {
   AttachmentItem,
   BuyerIntent,
@@ -59,7 +59,6 @@ export default function BuyerIntentWorkspace({
   onProgressDrawerClose,
   historyRefreshKey = 0,
   onPartySaved,
-  onIntentSaved,
   onIntentRefresh,
 }: Props) {
   return (

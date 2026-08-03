@@ -34,6 +34,13 @@ RELATION_STATUSES: tuple[str, ...] = (
     "lost",
 )
 
+# “正在深入推进”只表示仍在进行中的深度阶段。推荐结果与关系详情必须
+# 共同引用这一份口径，避免早期接触或已经成交的关系被误标为正在深入推进。
+DEEP_PROGRESS_STATUSES: tuple[str, ...] = (
+    "due_diligence",
+    "agreement",
+)
+
 # Mirrors the relation_event.event_type check constraint.
 RELATION_EVENT_TYPES: tuple[str, ...] = (
     "recommended",

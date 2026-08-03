@@ -269,3 +269,110 @@ def test_owner_scoped_selected_item_must_come_from_session_candidates() -> None:
         )
 
     assert exc_info.value.status_code == 403
+
+
+def test_owner_scoped_selected_item_rejects_other_users_candidate() -> None:
+    current_user = AuthContext(user_id=uuid4(), role="consultant", name="consultant")
+    messages = [
+        {
+            "id": uuid4(),
+            "content_type": "json",
+            "content": json.dumps(
+                {
+                    "message_type": "initial_candidates",
+                    "candidates": [
+                        {
+                            "seller_target_id": str(SELLER_TARGET_ID),
+                            "buyer_intent_id": str(BUYER_INTENT_ID),
+                        }
+                    ],
+                }
+            ),
+            "metadata_json": {"message_type": "initial_candidates"},
+            "created_at": "2026-08-03T00:00:00",
+        }
+    ]
+
+    class _OwnerDb:
+        def execute(self, statement, *_args, **_kwargs):
+            if "from recommendation_message" in str(statement):
+                return _MessageResult(messages)
+            return _MessageResult([])
+
+    with pytest.raises(HTTPException) as exc_info:
+        _ensure_selected_item_allowed_from_session_candidates(
+            _OwnerDb(),
+            current_user,
+            SESSION_ID,
+            RecommendationSelectedItemCreate(
+                mode="buyer_to_target",
+                buyer_intent_id=BUYER_INTENT_ID,
+                seller_target_id=SELLER_TARGET_ID,
+            ),
+        )
+
+    assert exc_info.value.status_code == 403
+
+
+def test_create_selected_item_only_writes_collection(monkeypatch) -> None:
+    from backend.app.api.routes import recommendations as route
+
+    selected_item_id = uuid4()
+    current_user = AuthContext(user_id=uuid4(), role="consultant", name="consultant")
+    row = {
+        "id": selected_item_id,
+        "session_id": SESSION_ID,
+        "mode": "buyer_to_target",
+        "seller_target_id": SELLER_TARGET_ID,
+        "buyer_intent_id": BUYER_INTENT_ID,
+        "buyer_party_id": None,
+        "selected_by": current_user.user_id,
+        "metadata_json": {},
+    }
+
+    class _InsertResult:
+        def mappings(self):
+            return self
+
+        def one(self):
+            return row
+
+    class _Db:
+        statements: list[str] = []
+        committed = False
+
+        def execute(self, statement, *_args, **_kwargs):
+            self.statements.append(str(statement))
+            return _InsertResult()
+
+        def commit(self):
+            self.committed = True
+
+    db = _Db()
+    monkeypatch.setattr(route, "ensure_recommendation_session_visible", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        route,
+        "_get_recommendation_session_or_404",
+        lambda *_args, **_kwargs: {"id": SESSION_ID, "mode": "buyer_to_target", "buyer_intent_id": BUYER_INTENT_ID, "metadata_json": {}},
+    )
+    monkeypatch.setattr(route, "_ensure_selected_item_allowed_from_session_candidates", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(route, "_get_active_selected_item_for_pair", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(route, "_refresh_session_selected_count", lambda *_args, **_kwargs: None)
+
+    created = route.create_selected_item(
+        SESSION_ID,
+        RecommendationSelectedItemCreate(
+            mode="buyer_to_target",
+            buyer_intent_id=BUYER_INTENT_ID,
+            seller_target_id=SELLER_TARGET_ID,
+        ),
+        current_user,
+        db,
+    )
+
+    assert created["id"] == selected_item_id
+    assert db.committed is True
+    assert len(db.statements) == 1
+    assert "insert into recommendation_selected_item" in db.statements[0]
+    assert "buyer_seller_relation" not in db.statements[0]
+    assert "relation_event" not in db.statements[0]

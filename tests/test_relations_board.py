@@ -55,9 +55,54 @@ _FAT_ONLY_COLUMNS = (
     "last_event_next_step",
     "last_event_summary",
     "deep_progress_elsewhere",
+    "seller_target_has_other_deep_progress",
+    "buyer_intent_has_other_deep_progress",
     "metadata_json",
     "status_reason",
 )
+
+
+def test_relation_detail_has_directional_deep_progress_fields() -> None:
+    sql = _relation_select_columns()
+
+    assert "as seller_target_has_other_deep_progress" in sql
+    assert "as buyer_intent_has_other_deep_progress" in sql
+    assert "other.seller_target_id = r.seller_target_id" in sql
+    assert "other.buyer_intent_id = r.buyer_intent_id" in sql
+    assert "'due_diligence', 'agreement'" in sql
+    assert "'recommended'" not in sql
+    assert "'interested'" not in sql
+    assert "'in_discussion'" not in sql
+
+
+def test_relation_creation_checks_both_entity_owners(monkeypatch) -> None:
+    checked: list[tuple[str, UUID]] = []
+    relation_id = UUID("dddddddd-dddd-dddd-dddd-dddddddddddd")
+    buyer_intent_id = UUID("cccccccc-cccc-cccc-cccc-cccccccccccc")
+    seller_target_id = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+
+    monkeypatch.setattr(
+        relations,
+        "ensure_entity_writable",
+        lambda _db, _user, *, entity_type, entity_id: checked.append((entity_type, entity_id)),
+    )
+    monkeypatch.setattr(relations, "create_relation", lambda *_args, **_kwargs: (relation_id, True))
+    monkeypatch.setattr(relations, "get_relation", lambda *_args, **_kwargs: {"id": relation_id})
+
+    result = relations.create_relation_endpoint(
+        relations.RelationCreate(
+            buyer_intent_id=buyer_intent_id,
+            seller_target_id=seller_target_id,
+        ),
+        _USER,
+        object(),
+    )
+
+    assert checked == [
+        ("buyer_intent", buyer_intent_id),
+        ("seller_target", seller_target_id),
+    ]
+    assert result["created"] is True
 
 
 class _FakeResult:

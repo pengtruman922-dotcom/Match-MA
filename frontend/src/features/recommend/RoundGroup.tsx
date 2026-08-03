@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertTriangle, ArrowRight, CheckCircle2, ChevronDown, ChevronRight, ExternalLink, Loader2, Lock, Plus, RefreshCw } from 'lucide-react';
+import { AlertTriangle, ArrowRight, CheckCircle2, ChevronDown, ChevronRight, ExternalLink, Loader2, Lock, Plus, RefreshCw, UserRound } from 'lucide-react';
 import type { CandidateView, Round } from './timeline';
 import { relationStatusLabel } from '../relations/relationLabels';
 
@@ -12,8 +12,11 @@ export default function RoundGroup({
   isLatest,
   onToggleSelect,
   onStartProgress,
+  onBlockedOperation,
   startingProgressKey,
   onRetryDeepEval,
+  totalCandidateCount = round.candidates.length,
+  emptyMessage = '当前筛选下没有可展示的候选',
   readOnly = false,
 }: {
   round: Round;
@@ -21,13 +24,20 @@ export default function RoundGroup({
   isLatest: boolean;
   onToggleSelect: (candidate: CandidateView) => void;
   onStartProgress: (candidate: CandidateView) => void;
+  onBlockedOperation: (candidate: CandidateView) => void;
   startingProgressKey: string | null;
   onRetryDeepEval: () => void;
+  totalCandidateCount?: number;
+  emptyMessage?: string;
   /** Temporary-filter sessions have no real counterpart to associate. */
   readOnly?: boolean;
 }) {
   const [expandedOld, setExpandedOld] = useState(false);
   const [showAll, setShowAll] = useState(false);
+
+  const countLabel = round.candidates.length === totalCandidateCount
+    ? `${totalCandidateCount} 个候选`
+    : `显示 ${round.candidates.length}/${totalCandidateCount} 个候选`;
 
   if (!isLatest && !expandedOld) {
     return (
@@ -37,7 +47,7 @@ export default function RoundGroup({
         className="flex w-full items-center gap-2 border border-gray-200 bg-gray-50 px-4 py-2 text-left text-xs text-gray-500 hover:border-gray-300"
       >
         <ChevronRight className="h-3.5 w-3.5" />
-        第{roundNumber}轮筛选 · {round.candidates.length} 个候选 · 已被新一轮取代，点击展开回看
+        第{roundNumber}轮筛选 · {countLabel} · 已被新一轮取代，点击展开回看
       </button>
     );
   }
@@ -53,7 +63,7 @@ export default function RoundGroup({
               <ChevronDown className="h-3.5 w-3.5" />
             </button>
           )}
-          <span className="font-medium text-gray-800">第{roundNumber}轮筛选 · {round.candidates.length} 个候选</span>
+          <span className="font-medium text-gray-800">第{roundNumber}轮筛选 · {countLabel}</span>
           {!isLatest && <span className="text-gray-400">（已被取代，仅供回看）</span>}
         </div>
         <DeepEvalBadge state={round.deepEval} onRetry={isLatest ? onRetryDeepEval : undefined} />
@@ -68,10 +78,14 @@ export default function RoundGroup({
             interactive={isLatest}
             onToggleSelect={() => onToggleSelect(candidate)}
             onStartProgress={() => onStartProgress(candidate)}
+            onBlockedOperation={() => onBlockedOperation(candidate)}
             startingProgress={startingProgressKey === candidate.pairKey}
             readOnly={readOnly}
           />
         ))}
+        {round.candidates.length === 0 && (
+          <p className="px-4 py-8 text-center text-sm text-gray-500">{emptyMessage}</p>
+        )}
       </div>
       {round.candidates.length > PREVIEW_COUNT && (
         <button
@@ -152,6 +166,7 @@ function CandidateRow({
   interactive,
   onToggleSelect,
   onStartProgress,
+  onBlockedOperation,
   startingProgress,
   readOnly,
 }: {
@@ -160,6 +175,7 @@ function CandidateRow({
   interactive: boolean;
   onToggleSelect: () => void;
   onStartProgress: () => void;
+  onBlockedOperation: () => void;
   startingProgress: boolean;
   readOnly: boolean;
 }) {
@@ -168,7 +184,11 @@ function CandidateRow({
   const matches = Array.isArray(candidate.evidence.matches) ? candidate.evidence.matches.map(String) : [];
   const gaps = Array.isArray(candidate.evidence.gaps) ? candidate.evidence.gaps.map(String) : [];
   return (
-    <div className={`px-4 py-3 ${candidate.selected ? 'bg-emerald-50/50' : ''}`}>
+    <div
+      data-candidate-key={candidate.pairKey}
+      data-owner-state={candidate.ownedByCurrentUser ? 'mine' : candidate.ownerUserId ? 'other' : 'unassigned'}
+      className={`px-4 py-3 ${candidate.selected ? 'bg-emerald-50/50' : ''}`}
+    >
       <div className="flex items-start justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <span className="w-4 shrink-0 font-mono text-xs text-gray-400">{index}</span>
@@ -178,40 +198,40 @@ function CandidateRow({
               已在推进 · {relationStatusLabel(candidate.relationStatus)}
             </span>
           )}
-          {!candidate.relationStatus && candidate.deepProgressElsewhere && (
+          {!candidate.relationStatus && candidate.hasOtherDeepProgress && (
             <span className="inline-flex shrink-0 items-center gap-0.5 bg-amber-50 px-1.5 py-0.5 text-[11px] font-medium text-amber-700">
               <Lock className="h-2.5 w-2.5" />
-              正与其他买家深入推进
+              {candidate.mode === 'buyer_to_target' ? '正与其他买家深入推进' : '正与其他标的深入推进'}
             </span>
           )}
-          {candidate.detailPath && (
+          <OwnerBadge candidate={candidate} />
+          {candidate.detailPath && candidate.operationAllowed && (
             <Link
               to={candidate.detailPath}
               target="_blank"
+              data-action="detail"
               className="inline-flex shrink-0 items-center gap-0.5 text-xs text-brand-600 hover:underline"
             >
               详情
               <ExternalLink className="h-3 w-3" />
             </Link>
           )}
+          {candidate.detailPath && !candidate.operationAllowed && (
+            <button
+              type="button"
+              onClick={onBlockedOperation}
+              data-action="detail"
+              className="inline-flex shrink-0 items-center gap-0.5 text-xs text-brand-600 hover:underline"
+            >
+              详情
+              <ExternalLink className="h-3 w-3" />
+            </button>
+          )}
         </div>
         <span className="flex shrink-0 items-center gap-1">
           {candidate.bestScenarioLabel && (
             <span className="border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-xs text-indigo-700">
               {candidate.bestScenarioLabel}
-            </span>
-          )}
-          {candidate.deepEvalGrade && (
-            <span
-              className={`border px-2 py-0.5 text-xs font-semibold ${
-                candidate.deepEvalGrade === 'A'
-                  ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
-                  : candidate.deepEvalGrade === 'B'
-                    ? 'border-blue-200 bg-blue-50 text-blue-700'
-                    : 'border-gray-200 bg-gray-50 text-gray-500'
-              }`}
-            >
-              {candidate.deepEvalGrade} 档
             </span>
           )}
           <span className="border border-brand-200 bg-brand-50 px-2 py-0.5 text-xs font-medium text-brand-700">
@@ -264,26 +284,39 @@ function CandidateRow({
           ) : (
             <button
               type="button"
-              onClick={onToggleSelect}
+              onClick={candidate.operationAllowed ? onToggleSelect : onBlockedOperation}
+              data-action="select"
               className="inline-flex items-center gap-1 border border-gray-200 px-2.5 py-1 text-xs font-medium text-gray-700 transition-colors hover:border-brand-500 hover:bg-brand-50 hover:text-brand-600"
             >
               <Plus className="h-3 w-3" />
               加入推荐列表
             </button>
           )}
-          {candidate.relationStatus && progressPath ? (
+          {candidate.relationStatus && progressPath && candidate.operationAllowed ? (
             <Link
               to={progressPath}
               target="_blank"
+              data-action="view-progress"
               className="inline-flex items-center gap-1 border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100"
             >
               查看推进
               <ArrowRight className="h-3 w-3" />
             </Link>
+          ) : candidate.relationStatus && progressPath ? (
+            <button
+              type="button"
+              onClick={onBlockedOperation}
+              data-action="view-progress"
+              className="inline-flex items-center gap-1 border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100"
+            >
+              查看推进
+              <ArrowRight className="h-3 w-3" />
+            </button>
           ) : (
             <button
               type="button"
-              onClick={onStartProgress}
+              onClick={candidate.operationAllowed ? onStartProgress : onBlockedOperation}
+              data-action="start-progress"
               disabled={startingProgress}
               className="inline-flex items-center gap-1 border border-gray-200 px-2.5 py-1 text-xs font-medium text-gray-700 transition-colors hover:border-brand-500 hover:bg-brand-50 hover:text-brand-600 disabled:opacity-50"
             >
@@ -297,6 +330,31 @@ function CandidateRow({
         <p className="ml-6 mt-1.5 text-xs text-amber-700">临时筛选结果仅供查看；选择已有对象后可发起关联或推进。</p>
       )}
     </div>
+  );
+}
+
+function OwnerBadge({ candidate }: { candidate: CandidateView }) {
+  if (candidate.ownedByCurrentUser) {
+    return (
+      <span className="inline-flex shrink-0 items-center gap-0.5 bg-emerald-50 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700">
+        <UserRound className="h-2.5 w-2.5" />
+        我负责
+      </span>
+    );
+  }
+  if (!candidate.ownerUserId) {
+    return (
+      <span className="inline-flex shrink-0 items-center gap-0.5 bg-amber-50 px-1.5 py-0.5 text-[11px] font-medium text-amber-700">
+        <Lock className="h-2.5 w-2.5" />
+        未指派
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex shrink-0 items-center gap-0.5 bg-amber-50 px-1.5 py-0.5 text-[11px] font-medium text-amber-700">
+      <Lock className="h-2.5 w-2.5" />
+      {candidate.operationAllowed ? '负责人' : '其他用户负责'} · {candidate.ownerName || '未知用户'}
+    </span>
   );
 }
 

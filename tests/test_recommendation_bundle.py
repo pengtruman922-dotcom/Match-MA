@@ -1,5 +1,6 @@
 ﻿from uuid import UUID
 
+from backend.app.api.authn import AuthContext
 from backend.app.api.routes.recommendations import (
     DEEP_EVAL_CANDIDATE_LIMIT,
     RecommendationCandidateOut,
@@ -13,12 +14,13 @@ from backend.app.api.routes.recommendations import (
     _with_frontend_candidate_fields,
 )
 from backend.app.services.recommendation_flow import (
-    OTHER_BUYER_PROGRESS_STATUSES,
+    _annotate_candidate_ownership,
     _apply_semantic_keyword_match,
     _candidate_intents_for_target,
     _score_against_scenarios,
     _semantic_query_terms,
 )
+from backend.app.services.relation_flow import DEEP_PROGRESS_STATUSES
 
 
 SELLER_TARGET_ID = "5e415f59-79ba-44b3-9d48-519092ffa07b"
@@ -149,10 +151,8 @@ def test_semantic_keyword_recall_reads_business_supplement_text() -> None:
     assert candidate["evidence_json"]["score"]["semantic_keyword_boost"] == 12.0
 
 
-def test_other_buyer_progress_prompt_covers_every_active_stage() -> None:
-    assert set(OTHER_BUYER_PROGRESS_STATUSES) == {
-        "recommended", "interested", "in_discussion", "due_diligence", "agreement",
-    }
+def test_deep_progress_prompt_only_covers_active_deep_stages() -> None:
+    assert set(DEEP_PROGRESS_STATUSES) == {"due_diligence", "agreement"}
 
 
 def test_candidate_pool_prioritizes_a_keyword_only_in_profile_supplement() -> None:
@@ -572,6 +572,7 @@ def test_annotate_marks_existing_relation_and_deep_progress_elsewhere() -> None:
     busy_target = "22222222-2222-2222-2222-222222222222"
     other_intent = "33333333-3333-3333-3333-333333333333"
     relation_id = "44444444-4444-4444-4444-444444444444"
+    other_target = "55555555-5555-5555-5555-555555555555"
 
     result = {
         "candidates": [
@@ -596,9 +597,12 @@ def test_annotate_marks_existing_relation_and_deep_progress_elsewhere() -> None:
         def execute(self, *args, **kwargs):
             statement = str(args[0])
             self.statements.append(statement)
-            if "status in (__[POSTCOMPILE_deep_statuses])" in statement:
+            if "status in (__[POSTCOMPILE_deep_statuses])" in statement and "seller_target_id in" in statement:
                 # 别的买家正对 busy_target 尽调；深度查询不得受 intent_ids 限制。
                 return _Rel([{"buyer_intent_id": other_intent, "seller_target_id": busy_target}])
+            if "status in (__[POSTCOMPILE_deep_statuses])" in statement and "buyer_intent_id in" in statement:
+                # 当前买家需求同时与候选集之外的另一个标的深入推进。
+                return _Rel([{"buyer_intent_id": intent, "seller_target_id": other_target}])
             # 精确关系查询只能返回当前候选意向的 relation。
             return _Rel([{"id": relation_id, "buyer_intent_id": intent, "seller_target_id": paired_target, "status": "interested"}])
 
@@ -607,18 +611,76 @@ def test_annotate_marks_existing_relation_and_deep_progress_elsewhere() -> None:
     by_target = {c["seller_target_id"]: c for c in annotated["candidates"]}
 
     # 精确查询和深度推进查询的语义分离：后者只按标的筛，不得按候选意向筛。
-    assert len(db.statements) == 2
+    assert len(db.statements) == 3
     assert "buyer_intent_id in (__[POSTCOMPILE_intent_ids])" in db.statements[0]
     assert "seller_target_id in (__[POSTCOMPILE_target_ids])" in db.statements[0]
     assert "buyer_intent_id in (__[POSTCOMPILE_intent_ids])" not in db.statements[1]
     assert "seller_target_id in (__[POSTCOMPILE_target_ids])" in db.statements[1]
+    assert "seller_target_id in (__[POSTCOMPILE_target_ids])" not in db.statements[2]
+    assert "buyer_intent_id in (__[POSTCOMPILE_intent_ids])" in db.statements[2]
 
     assert by_target[paired_target]["relation_status"] == "interested"
     assert by_target[paired_target]["relation_id"] == relation_id
     assert by_target[paired_target]["deep_progress_elsewhere"] is False
+    assert by_target[paired_target]["seller_target_has_other_deep_progress"] is False
+    assert by_target[paired_target]["buyer_intent_has_other_deep_progress"] is True
     # busy_target 没和本意向建关系，但别人在尽调 → 标注、不给关系状态
     assert by_target[busy_target]["relation_status"] is None
     assert by_target[busy_target]["deep_progress_elsewhere"] is True
+    assert by_target[busy_target]["seller_target_has_other_deep_progress"] is True
+    assert by_target[busy_target]["buyer_intent_has_other_deep_progress"] is True
+
+    reverse_result = {
+        "candidates": [
+            {"buyer_intent_id": intent, "seller_target_id": paired_target},
+            {"buyer_intent_id": intent, "seller_target_id": busy_target},
+        ]
+    }
+    reverse = _annotate_candidate_relations(_Db(), reverse_result, mode="target_to_buyer")
+    reverse_by_target = {c["seller_target_id"]: c for c in reverse["candidates"]}
+    assert reverse_by_target[paired_target]["deep_progress_elsewhere"] is True
+
+
+def test_candidate_ownership_uses_primary_entity_and_current_user() -> None:
+    current_user_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    other_user_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+    class _Rows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [{"entity_id": BUYER_INTENT_ID, "owner_user_id": other_user_id, "owner_name": "其他顾问"}]
+
+    class _Db:
+        statement = ""
+
+        def execute(self, statement, _params):
+            self.statement = str(statement)
+            return _Rows()
+
+    db = _Db()
+    annotated = _annotate_candidate_ownership(
+        db,
+        {"candidates": [{"buyer_intent_id": BUYER_INTENT_ID, "buyer_party_id": "party-owner-must-not-win"}]},
+        mode="target_to_buyer",
+        current_user=AuthContext(user_id=current_user_id, role="consultant", name="当前顾问"),
+    )["candidates"][0]
+
+    assert "from buyer_intent entity" in db.statement
+    assert annotated["buyer_intent_owner_user_id"] == other_user_id
+    assert annotated["buyer_intent_owner_name"] == "其他顾问"
+    assert annotated["buyer_intent_owned_by_current_user"] is False
+    assert annotated["buyer_intent_operation_allowed"] is False
+
+    admin_result = _annotate_candidate_ownership(
+        _Db(),
+        {"candidates": [{"buyer_intent_id": BUYER_INTENT_ID}]},
+        mode="target_to_buyer",
+        current_user=AuthContext(user_id=current_user_id, role="admin", name="管理员"),
+    )["candidates"][0]
+    assert admin_result["buyer_intent_operation_allowed"] is True
+    assert admin_result["buyer_intent_owned_by_current_user"] is False
 
 
 def _pool_db(rows: list[dict], scenarios: list[dict] | None = None) -> object:

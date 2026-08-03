@@ -1130,6 +1130,8 @@ export interface BuyerSellerRelation {
   last_event_content: string | null;
   last_event_next_step: string | null;
   deep_progress_elsewhere: boolean;
+  seller_target_has_other_deep_progress: boolean;
+  buyer_intent_has_other_deep_progress: boolean;
   buyer_intent_name: string | null;
   buyer_name: string | null;
   seller_target_name: string | null;
@@ -1763,6 +1765,18 @@ export interface RecommendationCandidate {
   relation_status?: string | null;
   /** 对手方正与其他买家深入推进（尽调及以后），标注但不透露对方。 */
   deep_progress_elsewhere?: boolean;
+  /** 同一标的与其他买家需求处于尽调或协议阶段。 */
+  seller_target_has_other_deep_progress?: boolean;
+  /** 同一买家需求与其他标的处于尽调或协议阶段。 */
+  buyer_intent_has_other_deep_progress?: boolean;
+  seller_target_owner_user_id?: string | null;
+  seller_target_owner_name?: string | null;
+  seller_target_owned_by_current_user?: boolean;
+  seller_target_operation_allowed?: boolean;
+  buyer_intent_owner_user_id?: string | null;
+  buyer_intent_owner_name?: string | null;
+  buyer_intent_owned_by_current_user?: boolean;
+  buyer_intent_operation_allowed?: boolean;
 }
 
 export interface RecommendationConditionAction {

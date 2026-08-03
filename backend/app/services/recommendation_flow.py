@@ -25,6 +25,7 @@ from backend.app.services.recommendation_conditions import (
     normalize_scenario_fields,
     suppress_pending_confirmation_fields,
 )
+from backend.app.services.relation_flow import DEEP_PROGRESS_STATUSES
 
 # 分片并发后单请求不再承担全部候选，预算可以放宽到三片（见 handlers/recommendation.py）。
 DEEP_EVAL_CANDIDATE_LIMIT = 45
@@ -35,6 +36,7 @@ def _build_recommendation_session_bundle(
     *,
     session_id: UUID,
     include_canceled: bool,
+    current_user: CurrentUser,
 ) -> dict[str, Any]:
     session = _get_recommendation_session_or_404(db, session_id)
     messages = _list_recommendation_messages(db, session_id=session_id, limit=500, offset=0)
@@ -66,6 +68,18 @@ def _build_recommendation_session_bundle(
     )["candidates"]
     reranked_candidates = _annotate_candidate_relations(
         db, {"candidates": reranked_candidates}, mode=mode
+    )["candidates"]
+    initial_candidates = _annotate_candidate_ownership(
+        db,
+        {"candidates": initial_candidates},
+        mode=mode,
+        current_user=current_user,
+    )["candidates"]
+    reranked_candidates = _annotate_candidate_ownership(
+        db,
+        {"candidates": reranked_candidates},
+        mode=mode,
+        current_user=current_user,
     )["candidates"]
     latest_candidates = reranked_candidates or initial_candidates
     candidate_source = "reranked_candidates" if reranked_candidates else (
@@ -1696,6 +1710,8 @@ def _build_candidate_row(
         "relation_id": None,
         "relation_status": None,
         "deep_progress_elsewhere": False,
+        "seller_target_has_other_deep_progress": False,
+        "buyer_intent_has_other_deep_progress": False,
         "evidence_json": {
             "matches": evidence,
             "gaps": gaps,
@@ -1713,25 +1729,13 @@ def _build_candidate_row(
     }
 
 
-# 任何已开始的其他买家撮合都对当前候选显示匿名提醒。产品仍沿用
-# “正与其他买家深入推进”这一固定文案，但绝不透出对方或具体状态。
-OTHER_BUYER_PROGRESS_STATUSES = (
-    "recommended",
-    "interested",
-    "in_discussion",
-    "due_diligence",
-    "agreement",
-)
-# 终态关系不算「已在推进」，仍作为新候选参与排名。
-ENDED_RELATION_STATUSES = ("deal_closed", "not_interested", "paused", "lost")
-
-
 def _annotate_candidate_relations(db: Session, result: dict[str, Any], *, mode: str) -> dict[str, Any]:
-    """Mark each candidate with any existing relation and deep-progress-elsewhere.
+    """Mark existing relations and both directions of anonymous deep progress.
 
     Recommendation and progress meet here: a candidate the buyer is already
     working is shown apart from fresh ones instead of silently re-ranked, and a
-    target deep in progress with a different buyer is flagged without naming them.
+    target or intent deep in progress elsewhere is flagged without naming the
+    other relation or exposing its stage.
     """
     candidates = result.get("candidates") or []
     if not candidates:
@@ -1774,10 +1778,9 @@ def _annotate_candidate_relations(db: Session, result: dict[str, Any], *, mode: 
     for row in rows:
         exact[(row["buyer_intent_id"], row["seller_target_id"])] = {"id": row["id"], "status": row["status"]}
 
-    # Never constrain this query by candidate intent IDs. The former combined
-    # predicate only saw relations belonging to the recommended buyer and
-    # therefore hid exactly the “other buyer is in due diligence” situation.
-    deep_rows = db.execute(
+    # Seller-side warning: do not constrain by candidate intent IDs, otherwise
+    # the query hides exactly the “other buyer is in due diligence” relation.
+    target_deep_rows = db.execute(
         text(
             """
             select buyer_intent_id::text as buyer_intent_id,
@@ -1796,12 +1799,40 @@ def _annotate_candidate_relations(db: Session, result: dict[str, Any], *, mode: 
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
             "target_ids": target_ids,
-            "deep_statuses": list(OTHER_BUYER_PROGRESS_STATUSES),
+            "deep_statuses": list(DEEP_PROGRESS_STATUSES),
         },
     ).mappings().all()
     deep_intents_by_target: dict[str, set[str]] = {}
-    for row in deep_rows:
+    for row in target_deep_rows:
         deep_intents_by_target.setdefault(row["seller_target_id"], set()).add(row["buyer_intent_id"])
+
+    # Buyer-side warning is the inverse dimension: this intent may already be
+    # in due diligence or agreement with another target.
+    intent_deep_rows = db.execute(
+        text(
+            """
+            select buyer_intent_id::text as buyer_intent_id,
+                   seller_target_id::text as seller_target_id
+            from buyer_seller_relation
+            where team_id = :team_id and workspace_id = :workspace_id
+              and deleted_at is null
+              and buyer_intent_id in :intent_ids
+              and status in :deep_statuses
+            """
+        ).bindparams(
+            bindparam("intent_ids", expanding=True),
+            bindparam("deep_statuses", expanding=True),
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "intent_ids": intent_ids,
+            "deep_statuses": list(DEEP_PROGRESS_STATUSES),
+        },
+    ).mappings().all()
+    deep_targets_by_intent: dict[str, set[str]] = {}
+    for row in intent_deep_rows:
+        deep_targets_by_intent.setdefault(row["buyer_intent_id"], set()).add(row["seller_target_id"])
 
     for candidate in candidates:
         intent_id = str(candidate.get("buyer_intent_id") or "")
@@ -1809,11 +1840,82 @@ def _annotate_candidate_relations(db: Session, result: dict[str, Any], *, mode: 
         relation = exact.get((intent_id, target_id))
         candidate["relation_id"] = str(relation["id"]) if relation else None
         candidate["relation_status"] = relation["status"] if relation else None
-        # Both recommendation directions mean the same thing: *this target*
-        # is deeply progressing with another buyer. Only expose a boolean.
-        candidate["deep_progress_elsewhere"] = bool(
+        seller_has_other = bool(
             deep_intents_by_target.get(target_id, set()) - {intent_id}
         )
+        buyer_has_other = bool(
+            deep_targets_by_intent.get(intent_id, set()) - {target_id}
+        )
+        candidate["seller_target_has_other_deep_progress"] = seller_has_other
+        candidate["buyer_intent_has_other_deep_progress"] = buyer_has_other
+        # Compatibility for clients deployed before the directional fields:
+        # choose the correct meaning for the current recommendation direction.
+        candidate["deep_progress_elsewhere"] = (
+            seller_has_other if mode == "buyer_to_target" else buyer_has_other
+        )
+    return result
+
+
+def _annotate_candidate_ownership(
+    db: Session,
+    result: dict[str, Any],
+    *,
+    mode: str,
+    current_user: CurrentUser,
+) -> dict[str, Any]:
+    """Overlay the primary candidate's live owner and operation boundary."""
+    candidates = result.get("candidates") or []
+    if not candidates:
+        return result
+
+    if mode == "buyer_to_target":
+        entity_ids = sorted(
+            {str(candidate["seller_target_id"]) for candidate in candidates if candidate.get("seller_target_id")}
+        )
+        table = "seller_target"
+        id_key = "seller_target_id"
+        prefix = "seller_target"
+    else:
+        entity_ids = sorted(
+            {str(candidate["buyer_intent_id"]) for candidate in candidates if candidate.get("buyer_intent_id")}
+        )
+        table = "buyer_intent"
+        id_key = "buyer_intent_id"
+        prefix = "buyer_intent"
+    if not entity_ids:
+        return result
+
+    rows = db.execute(
+        text(
+            f"""
+            select entity.id::text as entity_id,
+                   entity.owner_user_id::text as owner_user_id,
+                   owner.name as owner_name
+            from {table} entity
+            left join app_user owner on owner.id = entity.owner_user_id
+            where entity.team_id = :team_id
+              and entity.workspace_id = :workspace_id
+              and entity.deleted_at is null
+              and entity.id in :entity_ids
+            """
+        ).bindparams(bindparam("entity_ids", expanding=True)),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "entity_ids": entity_ids,
+        },
+    ).mappings().all()
+    ownership = {row["entity_id"]: row for row in rows}
+    current_user_id = str(current_user.user_id)
+
+    for candidate in candidates:
+        row = ownership.get(str(candidate.get(id_key) or ""))
+        owner_user_id = str(row["owner_user_id"]) if row and row.get("owner_user_id") else None
+        owned_by_current_user = owner_user_id == current_user_id
+        candidate[f"{prefix}_owner_user_id"] = owner_user_id
+        candidate[f"{prefix}_owner_name"] = row.get("owner_name") if row else None
+        candidate[f"{prefix}_owned_by_current_user"] = owned_by_current_user
+        candidate[f"{prefix}_operation_allowed"] = current_user.is_admin or owned_by_current_user
     return result
 
 
@@ -2750,231 +2852,6 @@ def _get_selected_item_or_404(db: Session, selected_item_id: UUID) -> dict[str, 
     return dict(row)
 
 
-def _sync_selected_item_to_relation(db: Session, selected_item: dict[str, Any]) -> UUID | None:
-    buyer_intent_id = selected_item.get("buyer_intent_id")
-    seller_target_id = selected_item.get("seller_target_id")
-    if not buyer_intent_id or not seller_target_id:
-        return None
-
-    buyer_party_id = selected_item.get("buyer_party_id") or _get_buyer_party_id_for_intent(db, buyer_intent_id)
-    relation = _get_or_create_recommendation_relation(
-        db,
-        buyer_intent_id=buyer_intent_id,
-        seller_target_id=seller_target_id,
-        buyer_party_id=buyer_party_id,
-        session_id=selected_item["session_id"],
-    )
-    content = _summary_text(
-        [
-            selected_item.get("match_summary") or "",
-            selected_item.get("gap_summary") or "",
-            selected_item.get("risk_summary") or "",
-        ]
-    )
-    _insert_recommendation_relation_event(
-        db,
-        relation_id=relation["id"],
-        buyer_intent_id=buyer_intent_id,
-        buyer_party_id=buyer_party_id,
-        seller_target_id=seller_target_id,
-        event_type="recommended",
-        title="加入推荐列表",
-        content=content or "用户将该候选加入推荐列表。",
-        source_id=selected_item["id"],
-        metadata_json={
-            "recommendation_session_id": str(selected_item["session_id"]),
-            "rank_at_selection": selected_item.get("rank_at_selection"),
-            "recommendation_level": selected_item.get("recommendation_level"),
-            "evidence_snapshot_json": selected_item.get("evidence_snapshot_json") or {},
-        },
-    )
-    db.execute(
-        text(
-            """
-            update buyer_seller_relation
-            set first_recommended_at = coalesce(first_recommended_at, now()),
-                last_event_at = now(),
-                last_event_summary = :last_event_summary,
-                updated_at = now(),
-                updated_by = :updated_by,
-                metadata_json = metadata_json || :metadata_patch
-            where id = :relation_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
-            """
-        ).bindparams(bindparam("metadata_patch", type_=JSONB)),
-        {
-            "relation_id": relation["id"],
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "last_event_summary": content or "加入推荐列表",
-            "updated_by": DEFAULT_ADMIN_USER_ID,
-            "metadata_patch": {"last_recommendation_selected_item_id": str(selected_item["id"])},
-        },
-    )
-    return relation["id"]
-
-
-def _insert_selected_item_cancel_event(db: Session, selected_item: dict[str, Any]) -> None:
-    relation_id = _optional_uuid_from_mapping(selected_item.get("metadata_json"), "relation_id")
-    buyer_intent_id = selected_item.get("buyer_intent_id")
-    seller_target_id = selected_item.get("seller_target_id")
-    if relation_id is None and buyer_intent_id and seller_target_id:
-        relation = _get_existing_recommendation_relation(db, buyer_intent_id, seller_target_id)
-        relation_id = relation["id"] if relation else None
-    if relation_id is None or not buyer_intent_id or not seller_target_id:
-        return
-
-    buyer_party_id = selected_item.get("buyer_party_id") or _get_buyer_party_id_for_intent(db, buyer_intent_id)
-    _insert_recommendation_relation_event(
-        db,
-        relation_id=relation_id,
-        buyer_intent_id=buyer_intent_id,
-        buyer_party_id=buyer_party_id,
-        seller_target_id=seller_target_id,
-        event_type="internal_note",
-        title="取消推荐列表项",
-        content="用户从推荐列表中取消了该候选。",
-        source_id=selected_item["id"],
-        metadata_json={"recommendation_session_id": str(selected_item["session_id"])},
-    )
-    db.execute(
-        text(
-            """
-            update buyer_seller_relation
-            set last_event_at = now(),
-                last_event_summary = '取消推荐列表项',
-                updated_at = now(),
-                updated_by = :updated_by
-            where id = :relation_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
-            """
-        ),
-        {
-            "relation_id": relation_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "updated_by": DEFAULT_ADMIN_USER_ID,
-        },
-    )
-
-
-def _get_or_create_recommendation_relation(
-    db: Session,
-    *,
-    buyer_intent_id: UUID,
-    seller_target_id: UUID,
-    buyer_party_id: UUID | None,
-    session_id: UUID,
-) -> dict[str, Any]:
-    existing = _get_existing_recommendation_relation(db, buyer_intent_id, seller_target_id)
-    if existing:
-        return existing
-
-    row = db.execute(
-        text(
-            """
-            insert into buyer_seller_relation (
-              team_id, workspace_id, buyer_intent_id, buyer_party_id,
-              seller_target_id, status, first_recommended_at,
-              created_from_session_id, created_by, updated_by, metadata_json
-            )
-            values (
-              :team_id, :workspace_id, :buyer_intent_id, :buyer_party_id,
-              :seller_target_id, 'recommended', now(),
-              :session_id, :created_by, :updated_by, :metadata_json
-            )
-            returning id, status
-            """
-        ).bindparams(bindparam("metadata_json", type_=JSONB)),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "buyer_intent_id": buyer_intent_id,
-            "buyer_party_id": buyer_party_id,
-            "seller_target_id": seller_target_id,
-            "session_id": session_id,
-            "created_by": DEFAULT_ADMIN_USER_ID,
-            "updated_by": DEFAULT_ADMIN_USER_ID,
-            "metadata_json": {"source": "recommendation_selected_item"},
-        },
-    ).mappings().one()
-    return dict(row)
-
-
-def _get_existing_recommendation_relation(
-    db: Session,
-    buyer_intent_id: UUID,
-    seller_target_id: UUID,
-) -> dict[str, Any] | None:
-    row = db.execute(
-        text(
-            """
-            select id, status
-            from buyer_seller_relation
-            where team_id = :team_id
-              and workspace_id = :workspace_id
-              and buyer_intent_id = :buyer_intent_id
-              and seller_target_id = :seller_target_id
-              and deleted_at is null
-            """
-        ),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "buyer_intent_id": buyer_intent_id,
-            "seller_target_id": seller_target_id,
-        },
-    ).mappings().one_or_none()
-    return dict(row) if row else None
-
-
-def _insert_recommendation_relation_event(
-    db: Session,
-    *,
-    relation_id: UUID,
-    buyer_intent_id: UUID,
-    buyer_party_id: UUID | None,
-    seller_target_id: UUID,
-    event_type: str,
-    title: str,
-    content: str,
-    source_id: UUID,
-    metadata_json: dict[str, Any],
-) -> None:
-    db.execute(
-        text(
-            """
-            insert into relation_event (
-              team_id, workspace_id, relation_id, buyer_intent_id, buyer_party_id,
-              seller_target_id, event_type, event_time, title, content,
-              source_type, source_id, metadata_json, created_by
-            )
-            values (
-              :team_id, :workspace_id, :relation_id, :buyer_intent_id, :buyer_party_id,
-              :seller_target_id, :event_type, now(), :title, :content,
-              'recommendation_selected_item', :source_id, :metadata_json, :created_by
-            )
-            """
-        ).bindparams(bindparam("metadata_json", type_=JSONB)),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "relation_id": relation_id,
-            "buyer_intent_id": buyer_intent_id,
-            "buyer_party_id": buyer_party_id,
-            "seller_target_id": seller_target_id,
-            "event_type": event_type,
-            "title": title,
-            "content": content,
-            "source_id": source_id,
-            "metadata_json": metadata_json,
-            "created_by": DEFAULT_ADMIN_USER_ID,
-        },
-    )
-
-
 def _get_buyer_party_id_for_intent(db: Session, buyer_intent_id: UUID) -> UUID | None:
     row = db.execute(
         text(
@@ -3275,7 +3152,7 @@ def _selected_item_select_columns() -> str:
       ri.rank_at_selection, ri.recommendation_level, ri.match_summary,
       ri.risk_summary, ri.gap_summary, ri.reason_snapshot,
       ri.evidence_snapshot_json, ri.selected_at::text as selected_at,
-      ri.canceled_at::text as canceled_at, ri.metadata_json
+      ri.canceled_at::text as canceled_at, ri.selected_by, ri.metadata_json
     """
 
 
@@ -3295,7 +3172,8 @@ def _selected_item_returning_statement(prefix_sql: str):
           changed.match_summary, changed.risk_summary, changed.gap_summary,
           changed.reason_snapshot, changed.evidence_snapshot_json,
           changed.selected_at::text as selected_at,
-          changed.canceled_at::text as canceled_at, changed.metadata_json
+          changed.canceled_at::text as canceled_at,
+          changed.selected_by, changed.metadata_json
         from changed
         left join seller_target st on st.id = changed.seller_target_id
         left join buyer_intent bi on bi.id = changed.buyer_intent_id

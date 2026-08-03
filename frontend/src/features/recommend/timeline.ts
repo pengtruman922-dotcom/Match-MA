@@ -16,7 +16,6 @@ export interface CandidateView {
   name: string;
   detailPath: string | null;
   strength: string;
-  score: number;
   matchSummary: string;
   gapSummary: string;
   riskSummary: string | null;
@@ -30,7 +29,11 @@ export interface CandidateView {
   deepEvalRisks: string | null;
   relationId: string | null;
   relationStatus: string | null;
-  deepProgressElsewhere: boolean;
+  hasOtherDeepProgress: boolean;
+  ownerUserId: string | null;
+  ownerName: string | null;
+  ownedByCurrentUser: boolean;
+  operationAllowed: boolean;
   selected: boolean;
   selectedItemId: string | null;
 }
@@ -56,16 +59,20 @@ export function candidatePairKey(sellerTargetId: string | null, buyerIntentId: s
 }
 
 const LEVEL_LABELS: Record<RecommendationCandidate['recommendation_level'], string> = {
-  strong: '强推荐',
+  strong: '优先推荐',
   recommended: '推荐',
   possible: '可关注',
-  weak: '弱匹配',
+  weak: '谨慎考虑',
 };
 
+export function recommendationLevelLabel(level: RecommendationCandidate['recommendation_level']): string {
+  return LEVEL_LABELS[level];
+}
+
 export function levelToApi(label: string): RecommendationCandidate['recommendation_level'] {
-  if (label.includes('强推荐')) return 'strong';
+  if (label.includes('优先推荐')) return 'strong';
   if (label.includes('可关注')) return 'possible';
-  if (label.includes('弱匹配')) return 'weak';
+  if (label.includes('谨慎考虑')) return 'weak';
   return 'recommended';
 }
 
@@ -83,8 +90,7 @@ export function mapCandidate(candidate: RecommendationCandidate): CandidateView 
     detailPath: isBuyerMode
       ? candidate.seller_target_id ? `/targets/${candidate.seller_target_id}` : null
       : candidate.buyer_intent_id ? `/buyer-intents/${candidate.buyer_intent_id}` : null,
-    strength: `${LEVEL_LABELS[candidate.recommendation_level]} ${Math.round(candidate.score)}`,
-    score: candidate.score,
+    strength: LEVEL_LABELS[candidate.recommendation_level],
     matchSummary: candidate.match_summary,
     gapSummary: candidate.gap_summary || '',
     riskSummary: candidate.risk_summary,
@@ -98,7 +104,21 @@ export function mapCandidate(candidate: RecommendationCandidate): CandidateView 
     deepEvalRisks: candidate.deep_eval?.risks || null,
     relationId: candidate.relation_id || null,
     relationStatus: candidate.relation_status || null,
-    deepProgressElsewhere: candidate.deep_progress_elsewhere || false,
+    hasOtherDeepProgress: isBuyerMode
+      ? candidate.seller_target_has_other_deep_progress || false
+      : candidate.buyer_intent_has_other_deep_progress || false,
+    ownerUserId: isBuyerMode
+      ? candidate.seller_target_owner_user_id || null
+      : candidate.buyer_intent_owner_user_id || null,
+    ownerName: isBuyerMode
+      ? candidate.seller_target_owner_name || null
+      : candidate.buyer_intent_owner_name || null,
+    ownedByCurrentUser: isBuyerMode
+      ? candidate.seller_target_owned_by_current_user || false
+      : candidate.buyer_intent_owned_by_current_user || false,
+    operationAllowed: isBuyerMode
+      ? candidate.seller_target_operation_allowed || false
+      : candidate.buyer_intent_operation_allowed || false,
     selected: false,
     selectedItemId: null,
   };

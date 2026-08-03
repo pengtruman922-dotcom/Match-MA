@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.api.authn import CurrentUser
 from backend.app.api.routes.utils import (
-    ensure_entity_visible,
+    ensure_entity_writable,
     ensure_relation_visible,
     exclusion_visible_sql,
     owner_scope_required,
@@ -20,6 +20,7 @@ from backend.app.api.routes.utils import (
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 from backend.app.services.relation_flow import (
+    DEEP_PROGRESS_STATUSES,
     RELATION_EVENT_TYPES,
     RELATION_EVENT_LABELS,
     RELATION_STATUSES,
@@ -48,6 +49,8 @@ class BuyerSellerRelationOut(BaseModel):
     last_event_content: str | None
     last_event_next_step: str | None
     deep_progress_elsewhere: bool = False
+    seller_target_has_other_deep_progress: bool = False
+    buyer_intent_has_other_deep_progress: bool = False
     buyer_intent_name: str | None
     buyer_name: str | None
     seller_target_name: str | None
@@ -314,8 +317,10 @@ def create_relation_endpoint(
     current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    # 能看见任一侧即可发起（推荐/关联对手方都从自己负责的一侧出发）。
-    ensure_entity_visible(db, current_user, entity_type="buyer_intent", entity_id=payload.buyer_intent_id)
+    # 新关系会同时影响两端业务对象；普通顾问必须同时负责两端，管理员例外。
+    # 已有跨负责人关系的可见性与后续推进规则不在这里收紧。
+    ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=payload.buyer_intent_id)
+    ensure_entity_writable(db, current_user, entity_type="seller_target", entity_id=payload.seller_target_id)
     relation_id, created = create_relation(
         db,
         buyer_intent_id=payload.buyer_intent_id,
@@ -561,7 +566,8 @@ def _relation_board_columns() -> str:
 
 
 def _relation_select_columns() -> str:
-    return """
+    deep_statuses = ", ".join(f"'{value}'" for value in DEEP_PROGRESS_STATUSES)
+    return f"""
       r.id, r.buyer_intent_id, r.buyer_party_id, r.seller_target_id,
       r.status, r.status_reason,
       r.first_recommended_at::text as first_recommended_at,
@@ -601,7 +607,23 @@ def _relation_select_columns() -> str:
           and other.seller_target_id = r.seller_target_id
           and other.buyer_intent_id <> r.buyer_intent_id
           and other.deleted_at is null
-          and other.status in ('recommended', 'interested', 'in_discussion', 'due_diligence', 'agreement')
+          and other.status in ({deep_statuses})
+      ) as seller_target_has_other_deep_progress,
+      exists (
+        select 1 from buyer_seller_relation other
+        where other.team_id = r.team_id and other.workspace_id = r.workspace_id
+          and other.buyer_intent_id = r.buyer_intent_id
+          and other.seller_target_id <> r.seller_target_id
+          and other.deleted_at is null
+          and other.status in ({deep_statuses})
+      ) as buyer_intent_has_other_deep_progress,
+      exists (
+        select 1 from buyer_seller_relation other
+        where other.team_id = r.team_id and other.workspace_id = r.workspace_id
+          and other.seller_target_id = r.seller_target_id
+          and other.buyer_intent_id <> r.buyer_intent_id
+          and other.deleted_at is null
+          and other.status in ({deep_statuses})
       ) as deep_progress_elsewhere,
       bi.intent_name as buyer_intent_name,
       bp.buyer_name,

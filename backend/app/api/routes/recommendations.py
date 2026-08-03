@@ -42,6 +42,7 @@ from backend.app.services.recommendation_flow import (  # noqa: F401 - re-export
     _build_recommendation_session_bundle,
     _build_recommendation_session_summary,
     _build_rerank_query,
+    _annotate_candidate_ownership,
     _candidate_display_badges,
     _candidate_display_meta,
     _candidate_intents_for_target,
@@ -67,9 +68,7 @@ from backend.app.services.recommendation_flow import (  # noqa: F401 - re-export
     _get_active_selected_item_for_pair,
     _get_buyer_intent_anchor,
     _get_buyer_party_id_for_intent,
-    _get_existing_recommendation_relation,
     _get_latest_recommendation_rerank_job,
-    _get_or_create_recommendation_relation,
     _get_recommendation_report_jobs,
     _get_recommendation_session_or_404,
     _get_recommendation_session_overview_or_404,
@@ -78,8 +77,6 @@ from backend.app.services.recommendation_flow import (  # noqa: F401 - re-export
     _get_seller_target_anchor,
     _infer_recommendation_candidate_message_type,
     _insert_recommendation_message,
-    _insert_recommendation_relation_event,
-    _insert_selected_item_cancel_event,
     _intent_industry_list,
     _join_display_parts,
     _json_dumps,
@@ -118,7 +115,6 @@ from backend.app.services.recommendation_flow import (  # noqa: F401 - re-export
     _string_or_none,
     _strip_region_suffix,
     _summary_text,
-    _sync_selected_item_to_relation,
     _touch_recommendation_session,
     _with_frontend_candidate_fields,
     _yes_like,
@@ -252,6 +248,16 @@ class RecommendationCandidateOut(BaseModel):
     relation_id: UUID | None = None
     relation_status: str | None = None
     deep_progress_elsewhere: bool = False
+    seller_target_has_other_deep_progress: bool = False
+    buyer_intent_has_other_deep_progress: bool = False
+    seller_target_owner_user_id: UUID | None = None
+    seller_target_owner_name: str | None = None
+    seller_target_owned_by_current_user: bool = False
+    seller_target_operation_allowed: bool = False
+    buyer_intent_owner_user_id: UUID | None = None
+    buyer_intent_owner_name: str | None = None
+    buyer_intent_owned_by_current_user: bool = False
+    buyer_intent_operation_allowed: bool = False
 
 
 class RecommendationCandidateResponse(BaseModel):
@@ -589,6 +595,12 @@ def generate_recommendation_candidates(
         sets = _extract_recommendation_candidate_sets(messages)
         candidates = sets["reranked_candidates"] or sets["initial_candidates"]
     candidates = _enrich_candidates_for_frontend(candidates)
+    candidates = _annotate_candidate_ownership(
+        db,
+        {"candidates": candidates},
+        mode=payload.mode,
+        current_user=current_user,
+    )["candidates"]
 
     rerank_planned = new_round and payload.enable_rerank and len(candidates) > 1
     conversation = _build_conversation_payload(
@@ -1009,6 +1021,7 @@ def get_recommendation_session_bundle(
         db,
         session_id=session_id,
         include_canceled=include_canceled,
+        current_user=current_user,
     )
 
 
@@ -1027,6 +1040,7 @@ def get_recommendation_session_page_state(
         db,
         session_id=session_id,
         include_canceled=include_canceled,
+        current_user=current_user,
     )
     return {
         "summary": summary,
@@ -1205,27 +1219,6 @@ def create_selected_item(
         },
     ).mappings().one()
     selected_item = dict(row)
-    relation_id = _sync_selected_item_to_relation(db, selected_item)
-    if relation_id:
-        metadata_patch = {"relation_id": str(relation_id)}
-        db.execute(
-            text(
-                """
-                update recommendation_selected_item
-                set metadata_json = metadata_json || :metadata_patch
-                where id = :selected_item_id
-                  and team_id = :team_id
-                  and workspace_id = :workspace_id
-                """
-            ).bindparams(bindparam("metadata_patch", type_=JSONB)),
-            {
-                "selected_item_id": selected_item["id"],
-                "team_id": DEFAULT_TEAM_ID,
-                "workspace_id": DEFAULT_WORKSPACE_ID,
-                "metadata_patch": metadata_patch,
-            },
-        )
-        selected_item["metadata_json"] = {**selected_item["metadata_json"], **metadata_patch}
     _refresh_session_selected_count(db, session_id)
     db.commit()
     return selected_item
@@ -1534,6 +1527,11 @@ def cancel_selected_item(
 ) -> dict[str, Any]:
     current = _get_selected_item_or_404(db, selected_item_id)
     ensure_recommendation_session_visible(db, current_user, current["session_id"])
+    if owner_scope_required(current_user) and current.get("selected_by") != current_user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only remove recommendation items that you selected.",
+        )
     if current["canceled_at"] is not None:
         return current
     row = db.execute(
@@ -1554,7 +1552,6 @@ def cancel_selected_item(
             "canceled_by": current_user.user_id,
         },
     ).mappings().one()
-    _insert_selected_item_cancel_event(db, dict(row))
     _refresh_session_selected_count(db, row["session_id"])
     db.commit()
     return dict(row)
@@ -1638,6 +1635,20 @@ def _ensure_selected_item_allowed_from_session_candidates(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Selected item must come from this recommendation session's generated candidates.",
+        )
+    if payload.mode == "buyer_to_target" and payload.seller_target_id:
+        ensure_entity_writable(
+            db,
+            current_user,
+            entity_type="seller_target",
+            entity_id=payload.seller_target_id,
+        )
+    if payload.mode == "target_to_buyer" and payload.buyer_intent_id:
+        ensure_entity_writable(
+            db,
+            current_user,
+            entity_type="buyer_intent",
+            entity_id=payload.buyer_intent_id,
         )
 
 

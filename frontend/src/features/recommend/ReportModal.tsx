@@ -4,6 +4,7 @@ import { recommendations } from '../../lib/api';
 import type { RecommendationReport, RecommendationSelectedItem } from '../../types/api';
 import Modal from '../../components/Modal';
 import TinyMarkdown from './TinyMarkdown';
+import { recommendationLevelLabel } from './timeline';
 
 const REPORT_POLL_INTERVAL_MS = 4000;
 const REPORT_POLL_MAX_ATTEMPTS = 45;
@@ -104,7 +105,7 @@ export default function ReportModal({
             {selectedItems.map((item, index) => (
               <li key={item.id}>
                 {index + 1}. {item.seller_target_name || item.buyer_intent_name || '未命名'}
-                {item.recommendation_level && <span className="ml-2 text-xs text-gray-400">{item.recommendation_level}</span>}
+                {item.recommendation_level && <span className="ml-2 text-xs text-gray-400">{recommendationLevelLabel(item.recommendation_level)}</span>}
               </li>
             ))}
           </ol>

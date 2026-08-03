@@ -18,11 +18,6 @@ export const RELATION_STATUS_LABELS: Record<string, string> = {
   lost: '终止',
 };
 
-/** 其他买家已有活跃撮合时显示匿名提示，不透露对方或具体阶段。 */
-export const OTHER_BUYER_PROGRESS_STATUSES = new Set([
-  'recommended', 'interested', 'in_discussion', 'due_diligence', 'agreement',
-]);
-
 const ENDED_STATUSES = new Set(['deal_closed', 'not_interested', 'paused', 'lost']);
 
 /** 超过这个天数没有任何动态的活跃关系，卡片上给「无动态」预警。 */

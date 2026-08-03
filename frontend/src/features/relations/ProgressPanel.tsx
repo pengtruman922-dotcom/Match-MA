@@ -311,6 +311,12 @@ function RelationCard({
   const staleDays = daysSince(relation.last_event_at);
   const eventLabel = eventTypes.find((item) => item.value === relation.last_event_type)?.label || '最近动态';
   const eventContent = relation.last_event_content || relation.last_event_summary;
+  const hasOtherDeepProgress = side === 'seller_target'
+    ? relation.seller_target_has_other_deep_progress
+    : relation.buyer_intent_has_other_deep_progress;
+  const otherDeepProgressLabel = side === 'seller_target'
+    ? '正与其他买家深入推进'
+    : '正与其他标的深入推进';
 
   return (
     <div className={`border px-3 py-2.5 ${muted ? 'border-gray-100 bg-gray-50/40' : 'border-gray-200'}`}>
@@ -325,7 +331,7 @@ function RelationCard({
           </Link>
           {eventContent ? <p className="mt-1 line-clamp-2 text-xs text-gray-600"><span className="mr-1 text-gray-400">{eventLabel}</span>{eventContent}</p> : <p className="mt-1 text-xs text-gray-400">暂无推进动态</p>}
           {relation.last_event_next_step ? <p className="mt-1 line-clamp-1 text-xs text-brand-700"><span className="mr-1 text-gray-400">下一步</span>{relation.last_event_next_step}</p> : null}
-          {relation.deep_progress_elsewhere ? <p className="mt-1 inline-flex items-center gap-1 text-[11px] text-amber-700"><Lock className="h-3 w-3" />正与其他买家深入推进</p> : null}
+          {hasOtherDeepProgress ? <p className="mt-1 inline-flex items-center gap-1 text-[11px] text-amber-700"><Lock className="h-3 w-3" />{otherDeepProgressLabel}</p> : null}
           <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-gray-400">
             {relation.last_event_at ? <span>最新 {formatDate(relation.last_event_at)}</span> : <span>暂无动态</span>}
             {stale ? (

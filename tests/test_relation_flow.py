@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from backend.app.services.relation_flow import (
+    DEEP_PROGRESS_STATUSES,
     RELATION_EVENT_TYPES,
     RELATION_STATUSES,
     _seller_target_deal_closed_changes,
@@ -37,6 +38,11 @@ def _enum_containing(column: str, sentinel: str) -> set[str]:
 
 def test_relation_statuses_match_the_check_constraint() -> None:
     assert set(RELATION_STATUSES) == _enum_containing("status", "in_discussion")
+
+
+def test_deep_progress_statuses_are_active_deep_stages_only() -> None:
+    assert DEEP_PROGRESS_STATUSES == ("due_diligence", "agreement")
+    assert set(DEEP_PROGRESS_STATUSES) < set(RELATION_STATUSES)
 
 
 def test_relation_event_types_match_the_check_constraint() -> None:

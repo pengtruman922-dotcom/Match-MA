@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { ArrowRightLeft, Loader2, Send, Sparkles } from 'lucide-react';
+import { ArrowRightLeft, Loader2, Send, Sparkles, UserRound } from 'lucide-react';
 import { buyerIntents, recommendations, relations, sellerTargets } from '../lib/api';
 import type {
   BuyerIntent,
@@ -45,6 +45,7 @@ export default function Recommend() {
   const [reportOpen, setReportOpen] = useState(false);
   const [overrides, setOverrides] = useState<unknown>({});
   const [displayFilter, setDisplayFilter] = useState<{ type: string; value: string | number } | null>(null);
+  const [onlyMine, setOnlyMine] = useState(false);
   const [startingProgressKey, setStartingProgressKey] = useState<string | null>(null);
 
   const pollRef = useRef<number | null>(null);
@@ -201,6 +202,7 @@ export default function Recommend() {
     setSelectedItems([]);
     setOverrides({});
     setDisplayFilter(null);
+    setOnlyMine(false);
     setError(null);
     const next = new URLSearchParams(searchParams);
     next.delete('session');
@@ -328,6 +330,7 @@ export default function Recommend() {
 
   const startProgress = async (candidate: CandidateView) => {
     if (temporaryMode) return;
+    if (!guardCandidateOperation(candidate)) return;
     if (!candidate.sellerTargetId || !candidate.buyerIntentId || candidate.relationStatus) return;
     setStartingProgressKey(candidate.pairKey);
     try {
@@ -373,6 +376,7 @@ export default function Recommend() {
       }
       return;
     }
+    if (!guardCandidateOperation(candidate)) return;
     const latest = latestRoundEntry(timeline);
     const rank = latest ? latest.round.candidates.findIndex((item) => item.pairKey === candidate.pairKey) + 1 : 1;
     try {
@@ -426,6 +430,7 @@ export default function Recommend() {
     setSessionId(null);
     setTimeline([]);
     setSelectedItems([]);
+    setOnlyMine(false);
     const next = new URLSearchParams();
     next.set('session', pickId);
     setSearchParams(next);
@@ -445,6 +450,7 @@ export default function Recommend() {
     setInputValue('');
     setOverrides({});
     setDisplayFilter(null);
+    setOnlyMine(false);
     setStartingProgressKey(null);
     setReportOpen(false);
     setError(null);
@@ -457,6 +463,18 @@ export default function Recommend() {
 
   let roundCounter = 0;
   const latest = latestRoundEntry(timeline);
+  const latestCandidateCount = latest?.round.candidates.length || 0;
+  const latestOwnedCandidateCount = latest?.round.candidates.filter((candidate) => candidate.ownedByCurrentUser).length || 0;
+
+  function guardCandidateOperation(candidate: CandidateView): boolean {
+    if (candidate.operationAllowed) return true;
+    window.alert(
+      candidate.mode === 'buyer_to_target'
+        ? '该标的由其他用户负责，如需操作请联系管理员'
+        : '该买家需求由其他用户负责，如需操作请联系管理员',
+    );
+    return false;
+  }
 
   return (
     <div className="flex h-[calc(100vh-7rem)] flex-col">
@@ -549,6 +567,27 @@ export default function Recommend() {
           onAction={(actions) => void runRound(undefined, actions)}
         />
       </div>
+      {latest && !temporaryMode && (
+        <div className="mb-2 flex flex-wrap items-center gap-2 border border-gray-200 bg-white px-3 py-2">
+          <button
+            type="button"
+            data-testid="only-my-candidates"
+            aria-pressed={onlyMine}
+            onClick={() => setOnlyMine((current) => !current)}
+            className={`inline-flex items-center gap-1.5 border px-3 py-1.5 text-xs font-medium transition-colors ${
+              onlyMine
+                ? 'border-brand-600 bg-brand-50 text-brand-700'
+                : 'border-gray-200 text-gray-700 hover:border-brand-500 hover:text-brand-600'
+            }`}
+          >
+            <UserRound className="h-3.5 w-3.5" />
+            只看我负责的 {latestOwnedCandidateCount}/{latestCandidateCount}
+          </button>
+          <span className="text-xs text-gray-400">
+            {mode === 'buyer_to_target' ? '仅显示我负责的标的' : '仅显示我负责的买家需求'}，不会重新运行推荐
+          </span>
+        </div>
+      )}
       {temporaryMode && (
         <div className="mb-2 border border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">
           临时筛选不会创建买家、标的或撮合关系；结果仅供查看。选择已有对象后，才可加入推荐列表或开始推进。
@@ -557,7 +596,7 @@ export default function Recommend() {
       {displayFilter && (
         <div className="mb-2 flex items-center gap-2 border border-blue-200 bg-blue-50 px-4 py-1.5 text-xs text-blue-700">
           <span>
-            当前展示筛选：{displayFilter.type === 'only_grade' ? `仅 ${displayFilter.value} 档` : `前 ${displayFilter.value} 项`}
+            当前展示筛选：{displayFilter.type === 'only_grade' ? '仅显示符合指定推荐条件的候选' : `前 ${displayFilter.value} 项`}
           </span>
           <button type="button" onClick={() => setDisplayFilter(null)} className="text-blue-500 hover:underline">清除</button>
         </div>
@@ -607,11 +646,15 @@ export default function Recommend() {
             }
             roundCounter += 1;
             const isLatestRound = latest?.id === entry.id;
-            let roundForDisplay = entry.round;
+            const totalCandidateCount = entry.round.candidates.length;
+            const ownerFilteredCandidates = onlyMine
+              ? entry.round.candidates.filter((candidate) => candidate.ownedByCurrentUser)
+              : entry.round.candidates;
+            let roundForDisplay = { ...entry.round, candidates: ownerFilteredCandidates };
             if (isLatestRound && displayFilter) {
               const filtered = displayFilter.type === 'only_grade'
-                ? entry.round.candidates.filter((candidate) => candidate.deepEvalGrade === displayFilter.value)
-                : entry.round.candidates.slice(0, Number(displayFilter.value));
+                ? ownerFilteredCandidates.filter((candidate) => candidate.deepEvalGrade === displayFilter.value)
+                : ownerFilteredCandidates.slice(0, Number(displayFilter.value));
               roundForDisplay = { ...entry.round, candidates: filtered };
             }
             return (
@@ -622,9 +665,16 @@ export default function Recommend() {
                 isLatest={isLatestRound}
                 onToggleSelect={(candidate) => void toggleSelect(candidate)}
                 onStartProgress={(candidate) => void startProgress(candidate)}
+                onBlockedOperation={guardCandidateOperation}
                 startingProgressKey={startingProgressKey}
                 onRetryDeepEval={() => void retryDeepEval()}
                 readOnly={temporaryMode}
+                totalCandidateCount={totalCandidateCount}
+                emptyMessage={onlyMine
+                  ? mode === 'buyer_to_target'
+                    ? '当前推荐结果中没有你负责的标的'
+                    : '当前推荐结果中没有你负责的买家需求'
+                  : '当前展示筛选下没有候选'}
               />
             );
           })}
