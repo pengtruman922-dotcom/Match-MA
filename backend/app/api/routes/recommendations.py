@@ -1,8 +1,10 @@
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import Response
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -34,15 +36,14 @@ from backend.app.services.recommendation_flow import (  # noqa: F401 - re-export
     CANDIDATE_STATE_POSSIBLE,
     DEEP_EVAL_CANDIDATE_LIMIT,
     REGION_GROUPS,
+    _annotate_candidate_ownership,
     _build_recommendation_activity,
-    _build_recommendation_report_markdown,
     _build_recommendation_report_status,
     _build_recommendation_rerank_status,
     _build_recommendation_selected_status,
     _build_recommendation_session_bundle,
     _build_recommendation_session_summary,
     _build_rerank_query,
-    _annotate_candidate_ownership,
     _candidate_display_badges,
     _candidate_display_meta,
     _candidate_intents_for_target,
@@ -55,8 +56,6 @@ from backend.app.services.recommendation_flow import (  # noqa: F401 - re-export
     _compact_selected_item,
     _count_by_key,
     _create_recommendation_session,
-    _default_report_title,
-    _default_report_type,
     _enqueue_recommendation_report_job,
     _enqueue_recommendation_rerank_job,
     _enrich_candidates_for_frontend,
@@ -118,6 +117,19 @@ from backend.app.services.recommendation_flow import (  # noqa: F401 - re-export
     _touch_recommendation_session,
     _with_frontend_candidate_fields,
     _yes_like,
+)
+from backend.app.services.recommendation_report import (
+    build_fallback_report_markdown,
+    build_recommendation_report_context,
+    default_report_title,
+    default_report_type,
+    ensure_report_item_count,
+    report_type_matches_mode,
+)
+from backend.app.services.report_docx import (
+    DOCX_MEDIA_TYPE,
+    render_report_docx,
+    safe_docx_filename,
 )
 
 router = APIRouter(prefix="/recommendations", tags=["recommendations"])
@@ -351,7 +363,10 @@ class RecommendationMessageOut(BaseModel):
 
 
 class RecommendationReportCreate(BaseModel):
-    report_type: str | None = Field(default=None, pattern="^(buyer_facing_target_report|internal_buyer_list)$")
+    report_type: Literal[
+        "buyer_facing_target_report",
+        "seller_facing_buyer_report",
+    ] | None = None
     selected_item_ids: list[UUID] | None = None
     title: str | None = None
     metadata_json: dict[str, Any] = Field(default_factory=dict)
@@ -1325,20 +1340,32 @@ def create_recommendation_report(
         session_id=session_id,
         selected_item_ids=payload.selected_item_ids,
     )
-    if not selected_items:
+    try:
+        ensure_report_item_count(selected_items)
+    except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="At least one active selected item is required to generate a recommendation report.",
-        )
+            detail=str(exc),
+        ) from exc
 
-    report_type = payload.report_type or _default_report_type(session["mode"])
-    title = payload.title or _default_report_title(session, selected_items, report_type)
-    markdown_content = _build_recommendation_report_markdown(
-        session=session,
+    report_type = payload.report_type or default_report_type(session["mode"])
+    if not report_type_matches_mode(report_type, session["mode"]):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Report type does not match the recommendation session mode.",
+        )
+    title = (payload.title or "").strip() or default_report_title(
+        session,
         selected_items=selected_items,
         report_type=report_type,
-        title=title,
     )
+    report_context = build_recommendation_report_context(
+        db,
+        report={"id": "", "report_type": report_type, "title": title},
+        session=session,
+        selected_items=selected_items,
+    )
+    markdown_content = build_fallback_report_markdown(report_context, title=title)
     selected_item_ids_json = [str(item["id"]) for item in selected_items]
     row = db.execute(
         _report_returning_statement(
@@ -1373,6 +1400,8 @@ def create_recommendation_report(
                 **payload.metadata_json,
                 "source": "recommendation_report_api",
                 "selected_item_count": len(selected_items),
+                "generation_mode": "fallback",
+                "report_context_version": report_context["schema_version"],
             },
         },
     ).mappings().one()
@@ -1410,20 +1439,32 @@ def create_recommendation_report_job(
         session_id=session_id,
         selected_item_ids=payload.selected_item_ids,
     )
-    if not selected_items:
+    try:
+        ensure_report_item_count(selected_items)
+    except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="At least one active selected item is required to generate a recommendation report.",
-        )
+            detail=str(exc),
+        ) from exc
 
-    report_type = payload.report_type or _default_report_type(session["mode"])
-    title = payload.title or _default_report_title(session, selected_items, report_type)
-    fallback_markdown = _build_recommendation_report_markdown(
-        session=session,
+    report_type = payload.report_type or default_report_type(session["mode"])
+    if not report_type_matches_mode(report_type, session["mode"]):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Report type does not match the recommendation session mode.",
+        )
+    title = (payload.title or "").strip() or default_report_title(
+        session,
         selected_items=selected_items,
         report_type=report_type,
-        title=title,
     )
+    report_context = build_recommendation_report_context(
+        db,
+        report={"id": "", "report_type": report_type, "title": title},
+        session=session,
+        selected_items=selected_items,
+    )
+    fallback_markdown = build_fallback_report_markdown(report_context, title=title)
     selected_item_ids_json = [str(item["id"]) for item in selected_items]
     report_row = db.execute(
         _report_returning_statement(
@@ -1458,6 +1499,7 @@ def create_recommendation_report_job(
                 "selected_item_count": len(selected_items),
                 "generation_mode": "queued",
                 "fallback_ready": True,
+                "report_context_version": report_context["schema_version"],
             },
         },
     ).mappings().one()
@@ -1517,6 +1559,57 @@ def get_recommendation_report(
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recommendation report not found.")
     return dict(row)
+
+
+@router.get("/reports/{report_id}/docx")
+def download_recommendation_report_docx(
+    report_id: UUID,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> Response:
+    _ensure_recommendation_report_visible(db, current_user, report_id)
+    row = db.execute(
+        text(
+            """
+            select title, markdown_content
+            from recommendation_report
+            where id = :report_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+            """
+        ),
+        {
+            "report_id": report_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Recommendation report not found.",
+        )
+    markdown_content = str(row.get("markdown_content") or "").strip()
+    if not markdown_content:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Recommendation report content is not ready.",
+        )
+
+    title = str(row.get("title") or "推荐报告")
+    content = render_report_docx(markdown_content, title=title)
+    filename = safe_docx_filename(title)
+    return Response(
+        content=content,
+        media_type=DOCX_MEDIA_TYPE,
+        headers={
+            "Content-Disposition": (
+                'attachment; filename="recommendation-report.docx"; '
+                f"filename*=UTF-8''{quote(filename, safe='')}"
+            ),
+            "Content-Length": str(len(content)),
+        },
+    )
 
 
 @router.post("/selected-items/{selected_item_id}/cancel", response_model=RecommendationSelectedItemOut)

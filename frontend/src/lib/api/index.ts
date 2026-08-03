@@ -826,6 +826,8 @@ export const recommendations = {
   reports: (sessionId: string, params?: { limit?: number; offset?: number }) =>
     apiRequest<RecommendationReport[]>(`/recommendations/sessions/${sessionId}/reports${buildQuery(params || {})}`),
   getReport: (reportId: string) => apiRequest<RecommendationReport>(`/recommendations/reports/${reportId}`),
+  downloadReportDocx: (reportId: string) =>
+    apiBlobResponse(`/recommendations/reports/${reportId}/docx`),
   page: () => apiRequest<RecommendationPage>('/recommendations/page'),
   createRerankJob: (sessionId: string) =>
     apiRequest<RecommendationRerankJob>(`/recommendations/sessions/${sessionId}/rerank-jobs`, {

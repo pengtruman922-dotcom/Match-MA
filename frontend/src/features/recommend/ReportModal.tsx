@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Copy, Loader2, RefreshCw } from 'lucide-react';
+import { Copy, Download, Loader2, RefreshCw } from 'lucide-react';
 import { recommendations } from '../../lib/api';
 import type { RecommendationReport, RecommendationSelectedItem } from '../../types/api';
 import Modal from '../../components/Modal';
@@ -30,7 +30,10 @@ export default function ReportModal({
   const [history, setHistory] = useState<RecommendationReport[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const pollRef = useRef<number | null>(null);
+  const exceedsLimit = selectedItems.length > 10;
+  const reportKind = selectedItems[0]?.mode === 'target_to_buyer' ? '推荐买家报告' : '推荐标的报告';
 
   useEffect(() => {
     recommendations.reports(sessionId).then(setHistory).catch(() => {});
@@ -69,6 +72,10 @@ export default function ReportModal({
   };
 
   const generate = async () => {
+    if (exceedsLimit) {
+      setError('每份报告最多支持 10 个候选，请先移出部分推荐项');
+      return;
+    }
     setPhase('generating');
     setError(null);
     try {
@@ -96,11 +103,37 @@ export default function ReportModal({
     setPhase('preview');
   };
 
+  const downloadWord = async () => {
+    if (!report) return;
+    setDownloading(true);
+    setError(null);
+    try {
+      const response = await recommendations.downloadReportDocx(report.id);
+      const url = window.URL.createObjectURL(await response.blob());
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${safeFileName(report.title || '推荐报告')}.docx`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (downloadError) {
+      setError(downloadError instanceof Error ? downloadError.message : 'Word 文档生成失败');
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   return (
-    <Modal title="生成推荐报告" onClose={onClose} wide>
+    <Modal title={`生成${reportKind}`} onClose={onClose} wide>
       {phase === 'confirm' && (
         <div className="space-y-4">
-          <p className="text-sm text-gray-700">将基于已加入的 {selectedItems.length} 个推荐项生成报告:</p>
+          <div>
+            <p className="text-sm text-gray-700">将基于已加入的 {selectedItems.length} 个推荐项生成报告：</p>
+            <p className={`mt-1 text-xs ${exceedsLimit ? 'text-red-600' : 'text-gray-500'}`}>
+              建议每份选择 3–5 个候选，最多 10 个。{exceedsLimit ? '当前数量已超过上限。' : ''}
+            </p>
+          </div>
           <ol className="space-y-1 text-sm text-gray-600">
             {selectedItems.map((item, index) => (
               <li key={item.id}>
@@ -128,7 +161,7 @@ export default function ReportModal({
             <button
               type="button"
               onClick={() => void generate()}
-              disabled={selectedItems.length === 0}
+              disabled={selectedItems.length === 0 || exceedsLimit}
               className="bg-brand-600 px-4 py-2 text-sm text-white hover:bg-brand-700 disabled:opacity-50"
             >
               开始生成
@@ -149,6 +182,15 @@ export default function ReportModal({
           <div className="flex items-center justify-between gap-2">
             <p className="text-sm font-medium text-gray-800">{report.title || '推荐报告'}</p>
             <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void downloadWord()}
+                disabled={downloading || !report.markdown_content}
+                className="inline-flex items-center gap-1 border border-gray-200 px-3 py-1.5 text-xs text-gray-700 hover:border-brand-500 hover:text-brand-600 disabled:opacity-50"
+              >
+                {downloading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                {downloading ? '生成中' : '下载 Word'}
+              </button>
               <button
                 type="button"
                 onClick={() => void copyMarkdown()}
@@ -188,4 +230,8 @@ export default function ReportModal({
       {error && phase !== 'failed' && <p className="mt-2 text-xs text-red-600">{error}</p>}
     </Modal>
   );
+}
+
+function safeFileName(value: string): string {
+  return value.replace(/[\\/:*?"<>|\r\n]+/g, '_').replace(/[ ._]+$/g, '').slice(0, 80) || '推荐报告';
 }

@@ -11,6 +11,7 @@ from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_
 from backend.app.jobs.queue import JobClaim
 from backend.app.services.json_values import json_safe_value
 
+
 def _insert_llm_trace(
     db: Session,
     *,
@@ -269,6 +270,7 @@ def _insert_recommendation_report_llm_trace(
     *,
     job: JobClaim,
     report_id: UUID,
+    node_name: str,
     node_config: dict[str, Any],
     status: str,
     input_json: dict[str, Any],
@@ -298,7 +300,7 @@ def _insert_recommendation_report_llm_trace(
               metadata_json
             )
             values (
-              :team_id, :workspace_id, 'llm', 'recommendation_report_writer',
+              :team_id, :workspace_id, 'llm', :node_name,
               :job_id, :correlation_id, 'recommendation_report', :report_id,
               :provider_config_id, :node_config_id, :prompt_template_id,
               :provider_name, :model_name, :prompt_version, :status,
@@ -323,6 +325,7 @@ def _insert_recommendation_report_llm_trace(
             "job_id": job.id,
             "correlation_id": job.correlation_id,
             "report_id": report_id,
+            "node_name": node_name,
             "provider_config_id": node_config["provider_config_id"],
             "node_config_id": node_config["node_config_id"],
             "prompt_template_id": node_config["prompt_template_id"],

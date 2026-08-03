@@ -1981,7 +1981,7 @@ export interface RecommendationSelectedItem {
 }
 
 export interface RecommendationReportCreate {
-  report_type?: 'buyer_facing_target_report' | 'internal_buyer_list';
+  report_type?: 'buyer_facing_target_report' | 'seller_facing_buyer_report';
   selected_item_ids?: string[];
   title?: string | null;
   metadata_json?: Record<string, unknown>;
@@ -1990,7 +1990,7 @@ export interface RecommendationReportCreate {
 export interface RecommendationReport {
   id: string;
   session_id: string;
-  report_type: 'buyer_facing_target_report' | 'internal_buyer_list';
+  report_type: 'buyer_facing_target_report' | 'seller_facing_buyer_report';
   selected_item_ids_json: string[];
   title: string | null;
   markdown_content: string | null;

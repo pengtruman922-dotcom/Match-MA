@@ -714,7 +714,7 @@ export default function Recommend() {
         <ReportModal
           sessionId={sessionId}
           selectedItems={selectedItems}
-          defaultTitle={`${anchorLabel || '推荐'}-推荐报告-${new Date().toISOString().slice(5, 10).replace('-', '')}`}
+          defaultTitle={`${anchorLabel || '推荐'}-${mode === 'buyer_to_target' ? '推荐标的报告' : '推荐买家报告'}-${new Date().toISOString().slice(5, 10).replace('-', '')}`}
           onClose={() => setReportOpen(false)}
           onGenerated={() => {
             if (sessionId) void refreshFromServer(sessionId);

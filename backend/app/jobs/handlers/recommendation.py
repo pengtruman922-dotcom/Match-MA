@@ -11,17 +11,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
-from backend.app.registry.nodes import deep_eval_node_by_mode, deep_eval_understudy_node_name
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
-from backend.app.jobs.queue import JobClaim
-
-from backend.app.services.profile_sections import (
-    PROFILE_TOTAL_BUDGET,
-    buyer_party_fact_block,
-    load_profile_sections,
-    render_profile_text,
-)
-
 from backend.app.jobs.handlers.common import (
     _get_default_node_config,
     _json_dumps,
@@ -34,6 +24,28 @@ from backend.app.jobs.handlers.traces import (
     _insert_recommendation_report_llm_trace,
     _insert_rerank_trace,
 )
+from backend.app.jobs.queue import JobClaim
+from backend.app.registry.nodes import (
+    deep_eval_node_by_mode,
+    deep_eval_understudy_node_name,
+    report_writer_node_by_type,
+)
+from backend.app.services.profile_sections import (
+    PROFILE_TOTAL_BUDGET,
+    buyer_party_fact_block,
+    load_profile_sections,
+    render_profile_text,
+)
+from backend.app.services.recommendation_report import (
+    build_fallback_report_markdown as _build_fallback_recommendation_report_markdown,
+)
+from backend.app.services.recommendation_report import (
+    build_recommendation_report_context as _build_recommendation_report_context,
+)
+from backend.app.services.recommendation_report import (
+    normalize_report_markdown,
+)
+
 
 def _handle_recommendation_report_generate(db: Session, job: JobClaim) -> dict[str, object]:
     report_id = _resolve_entity_id(job, expected_entity_type="recommendation_report")
@@ -48,19 +60,19 @@ def _handle_recommendation_report_generate(db: Session, job: JobClaim) -> dict[s
         selected_item_ids=report["selected_item_ids_json"],
     )
     context_json = _build_recommendation_report_context(
+        db,
         report=report,
         session=session,
         selected_items=selected_items,
     )
-    fallback_markdown = report.get("markdown_content") or _build_fallback_recommendation_report_markdown(
-        session=session,
-        selected_items=selected_items,
+    fallback_markdown = _build_fallback_recommendation_report_markdown(
+        context_json,
         title=report.get("title") or "推荐报告",
-        report_type=report["report_type"],
     )
+    node_name = report_writer_node_by_type()[report["report_type"]]
 
     try:
-        node_config = _get_default_node_config(db, "recommendation_report_writer")
+        node_config = _get_default_node_config(db, node_name)
     except Exception as exc:
         _update_recommendation_report_generated(
             db,
@@ -73,6 +85,8 @@ def _handle_recommendation_report_generate(db: Session, job: JobClaim) -> dict[s
                 "fallback_reason": "model_node_config_error",
                 "fallback_error": str(exc),
                 "job_id": str(job.id),
+                "node_name": node_name,
+                "report_context_version": context_json.get("schema_version"),
             },
         )
         _insert_recommendation_report_message(
@@ -91,13 +105,16 @@ def _handle_recommendation_report_generate(db: Session, job: JobClaim) -> dict[s
             "fallback_reason": "model_node_config_error",
         }
 
-    prompt_messages = _render_prompt_messages(node_config, {"context_json": context_json})
+    prompt_messages = _render_prompt_messages(
+        node_config,
+        {"report_context_json": context_json},
+    )
     input_json = {
         "report_id": str(report_id),
         "session_id": str(report["session_id"]),
         "report_type": report["report_type"],
         "selected_item_count": len(selected_items),
-        "context_json": context_json,
+        "report_context_json": context_json,
     }
     started = time.perf_counter()
     try:
@@ -119,6 +136,7 @@ def _handle_recommendation_report_generate(db: Session, job: JobClaim) -> dict[s
             db,
             job=job,
             report_id=report_id,
+            node_name=node_name,
             node_config=node_config,
             status="failed",
             input_json=input_json,
@@ -141,6 +159,8 @@ def _handle_recommendation_report_generate(db: Session, job: JobClaim) -> dict[s
                 "fallback_reason": "llm_call_failed",
                 "fallback_error": str(exc),
                 "job_id": str(job.id),
+                "node_name": node_name,
+                "report_context_version": context_json.get("schema_version"),
             },
         )
         _insert_recommendation_report_message(
@@ -160,7 +180,10 @@ def _handle_recommendation_report_generate(db: Session, job: JobClaim) -> dict[s
             "trace_created": True,
         }
 
-    markdown_content = (llm_result.raw_output_text or "").strip()
+    markdown_content = normalize_report_markdown(
+        llm_result.raw_output_text or "",
+        title=report.get("title") or "推荐报告",
+    )
     if not markdown_content:
         markdown_content = fallback_markdown
         generation_mode = "fallback"
@@ -173,6 +196,7 @@ def _handle_recommendation_report_generate(db: Session, job: JobClaim) -> dict[s
         db,
         job=job,
         report_id=report_id,
+        node_name=node_name,
         node_config=node_config,
         status="succeeded" if generation_mode == "llm" else "failed",
         input_json=input_json,
@@ -196,6 +220,8 @@ def _handle_recommendation_report_generate(db: Session, job: JobClaim) -> dict[s
             "job_id": str(job.id),
             "trace_created": True,
             "llm_model_name": node_config["model_name"],
+            "node_name": node_name,
+            "report_context_version": context_json.get("schema_version"),
         },
     )
     _insert_recommendation_report_message(
@@ -756,7 +782,8 @@ def _get_recommendation_session_for_report(db: Session, session_id: UUID) -> dic
             select
               id, mode, buyer_intent_id, buyer_party_id, seller_target_id,
               anonymous_input_snapshot, initial_condition_snapshot_json,
-              latest_condition_snapshot_json, selected_count, report_count,
+              latest_condition_snapshot_json, condition_overrides_json,
+              selected_count, report_count,
               metadata_json, created_at::text as created_at, updated_at::text as updated_at
             from recommendation_session
             where id = :session_id
@@ -819,68 +846,6 @@ def _get_selected_items_for_recommendation_report(
 
     rows = db.execute(statement, params).mappings().all()
     return [_json_safe_dict(row) for row in rows]
-
-def _build_recommendation_report_context(
-    *,
-    report: dict[str, Any],
-    session: dict[str, Any],
-    selected_items: list[dict[str, Any]],
-) -> dict[str, Any]:
-    return {
-        "report": {
-            "id": str(report["id"]),
-            "report_type": report["report_type"],
-            "title": report.get("title"),
-        },
-        "session": session,
-        "selected_items": selected_items,
-        "instructions": {
-            "source_policy": "Use only provided context. State missing information as review needed.",
-            "output_format": "Chinese Markdown",
-            "generation_boundary": "This is a draft report for human review, not an external final document.",
-        },
-    }
-
-def _build_fallback_recommendation_report_markdown(
-    *,
-    session: dict[str, Any],
-    selected_items: list[dict[str, Any]],
-    title: str,
-    report_type: str,
-) -> str:
-    lines = [
-        f"# {title}",
-        "",
-        f"- 推荐会话：`{session['id']}`",
-        f"- 推荐方向：{session['mode']}",
-        f"- 报告类型：{report_type}",
-        f"- 已采用候选数：{len(selected_items)}",
-        "",
-        "## 推荐清单",
-        "",
-    ]
-    for index, item in enumerate(selected_items, start=1):
-        lines.extend(
-            [
-                f"### {index}. {item.get('seller_target_name') or '未绑定标的'} / {item.get('buyer_intent_name') or '未绑定意向'}",
-                "",
-                f"- 买家：{item.get('buyer_name') or '未绑定买家'}",
-                f"- 推荐等级：{item.get('recommendation_level') or '未评级'}",
-                f"- 匹配理由：{item.get('match_summary') or '暂无'}",
-                f"- 信息缺口：{item.get('gap_summary') or '暂无'}",
-                f"- 风险提示：{item.get('risk_summary') or '暂无'}",
-                "",
-            ]
-        )
-    lines.extend(
-        [
-            "## 后续建议",
-            "",
-            "- 由业务人员复核推荐理由、信息缺口和风险提示。",
-            "- 复核通过后，在买家-标的关系中继续记录推荐、反馈、尽调和终止等进展。",
-        ]
-    )
-    return "\n".join(lines)
 
 def _build_rerank_documents(
     db: Session,

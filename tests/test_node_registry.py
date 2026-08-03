@@ -23,14 +23,15 @@ from backend.app.jobs.handlers.recommendation import (
 from backend.app.registry.nodes import (
     DOMAINS,
     LIFECYCLES,
+    NODES,
     PROMPT_VARIABLE_LABELS,
     UNDERSTUDY_KINDS,
-    NODES,
     active_node_names,
     all_node_names,
     must_configure_node_names,
     node_by_name,
     prompt_required_node_names,
+    report_writer_node_by_type,
     retired_node_names,
 )
 
@@ -51,6 +52,8 @@ EXPECTED_NODE_NAMES = frozenset({
     "recommendation_deep_eval_to_target",
     "recommendation_deep_eval_to_buyer",
     "recommendation_query_parser",
+    "recommendation_target_report_writer",
+    "recommendation_buyer_report_writer",
     "recommendation_report_writer",
     "ocr_attachment_parser",
     "relation_followup_draft_parser",
@@ -61,6 +64,7 @@ EXPECTED_NODE_NAMES = frozenset({
 })
 
 EXPECTED_RETIRED = frozenset({
+    "recommendation_report_writer",
     "embedding_seller_doc",
     "embedding_buyer_intent",
     "recommendation_reranker",
@@ -134,6 +138,13 @@ def test_deep_eval_mode_keys_match_the_runtime_contract() -> None:
             assert spec.understudy_kind == "solo", "方向节点必须是独立代跑，不是 and 组"
 
 
+def test_report_types_route_to_two_dedicated_nodes() -> None:
+    assert report_writer_node_by_type() == {
+        "buyer_facing_target_report": "recommendation_target_report_writer",
+        "seller_facing_buyer_report": "recommendation_buyer_report_writer",
+    }
+
+
 def test_prompt_variables_have_labels() -> None:
     missing = {
         (spec.node_name, name)
@@ -169,8 +180,8 @@ def test_must_configure_excludes_nodes_that_have_an_understudy() -> None:
     for spec in NODES:
         if spec.understudy is not None:
             assert spec.node_name not in required
-    # 2026-08-01 生产：这 11 个全部已配置模型与 Prompt，指标应为 11/11。
-    assert len(required) == 11
+    # 旧共用报告节点退役、两个专属报告节点接替，必配总数净增 1。
+    assert len(required) == 12
     assert "buyer_intent_semantic_parser" not in required
     assert "recommendation_deep_eval_to_target" not in required
     assert "recommendation_deep_eval" in required
@@ -199,9 +210,6 @@ KNOWN_LITERAL_SITES: dict[str, frozenset[str]] = {
     "backend/app/api/routes/meta.py": frozenset({
         "business_update_extractor", "ocr_attachment_parser", "recommendation_deep_eval",
     }),
-    # [自称] 报告生成 handler 引用自己的节点。
-    # 方向深评映射与代跑目标原本也在这里，已收编进注册表。
-    "backend/app/jobs/handlers/recommendation.py": frozenset({"recommendation_report_writer"}),
     # [路由] 业务更新按绑定对象三选一。这三个名字全仓库只出现在这里，
     # 不构成重复的目录知识；换成常量只是多一层间接，不产生保障。
     "backend/app/jobs/handlers/business_update.py": frozenset({
@@ -226,8 +234,8 @@ KNOWN_LITERAL_SITES: dict[str, frozenset[str]] = {
     # recommendation_reranker 是特例：每次深评都会写一条挂着这个名字的 trace，
     # 实际干活的是深评 LLM —— 见《退役 AI 节点与代码清除》单。
     "backend/app/jobs/handlers/traces.py": frozenset({
-        "business_update_extractor", "buyer_intent_parser", "recommendation_report_writer",
-        "recommendation_reranker", "seller_target_parser",
+        "business_update_extractor", "buyer_intent_parser", "recommendation_reranker",
+        "seller_target_parser",
     }),
     # [退役] 随退役清除单处理
     "backend/app/jobs/handlers/search_embedding.py": frozenset({
