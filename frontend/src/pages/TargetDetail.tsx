@@ -200,74 +200,46 @@ export default function TargetDetail() {
         </div>
       </div>
 
-      {/* Tabs + Content + Sidebar */}
-      <div className="grid grid-cols-12 gap-5">
-        {/* Main content */}
-        <div className={activeTab === 'history' ? 'col-span-12' : 'col-span-8'}>
-          <div className="bg-white border border-gray-200">
-            <div className="flex items-center border-b border-gray-100 px-5">
-              {tabs.map((tab) => (
-                <button
-                  key={tab.key}
-                  onClick={() => setActiveTab(tab.key)}
-                  className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
-                    activeTab === tab.key
-                      ? 'border-brand-600 text-brand-600'
-                      : 'border-transparent text-gray-500 hover:text-gray-700'
-                  }`}
-                >
-                  {tab.label}
-                </button>
-              ))}
-            </div>
-            <div className="p-5">
-              {activeTab === 'info' && <TargetInfoPanel target={target} onTargetChanged={setTarget} />}
-              {activeTab === 'progress' && (
-                <ProgressPanel
-                  side="seller_target"
-                  entityId={target.id}
-                  initialOpenId={searchParams.get('relation')}
-                  onDrawerClose={clearProgressRelation}
-                />
-              )}
-              {activeTab === 'attachments' && <AttachmentsTab targetId={target.id} />}
-              {activeTab === 'history' && id && (
-                <UpdateHistory
-                  entityType="seller_target"
-                  entityId={id}
-                  refreshKey={historyRefreshKey}
-                  onRolledBack={async () => {
-                    const fresh = await sellerTargets.get(id);
-                    setTarget(fresh);
-                  }}
-                />
-              )}
-            </div>
-          </div>
+      {/* Tabs + Content */}
+      <div className="bg-white border border-gray-200">
+        <div className="flex items-center border-b border-gray-100 px-5">
+          {tabs.map((tab) => (
+            <button
+              key={tab.key}
+              onClick={() => setActiveTab(tab.key)}
+              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
+                activeTab === tab.key
+                  ? 'border-brand-600 text-brand-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
         </div>
-
-        {/* Right sidebar */}
-        {activeTab !== 'history' && <div className="col-span-4 space-y-4">
-          <div className="bg-white border border-gray-200 p-4">
-            <h3 className="text-sm font-semibold text-gray-900 mb-3">信息缺口</h3>
-            <div className="space-y-1.5 text-xs text-gray-600">
-              {!target.can_consolidate || target.can_consolidate === 'unknown' ? (
-                <p>- 是否可并表</p>
-              ) : null}
-              {!target.can_control || target.can_control === 'unknown' ? (
-                <p>- 是否可控股</p>
-              ) : null}
-              {!target.current_revenue_yuan ? <p>- 营收</p> : null}
-              {!target.current_net_profit_yuan ? <p>- 利润</p> : null}
-              {!target.valuation_yuan ? <p>- 估值</p> : null}
-              {target.can_consolidate && target.can_consolidate !== 'unknown' &&
-               target.can_control && target.can_control !== 'unknown' &&
-               target.current_revenue_yuan && target.current_net_profit_yuan && target.valuation_yuan && (
-                <p className="text-emerald-600">信息完善</p>
-              )}
-            </div>
-          </div>
-        </div>}
+        <div className="p-5">
+          {activeTab === 'info' && <TargetInfoPanel target={target} onTargetChanged={setTarget} />}
+          {activeTab === 'progress' && (
+            <ProgressPanel
+              side="seller_target"
+              entityId={target.id}
+              initialOpenId={searchParams.get('relation')}
+              onDrawerClose={clearProgressRelation}
+            />
+          )}
+          {activeTab === 'attachments' && <AttachmentsTab targetId={target.id} />}
+          {activeTab === 'history' && id && (
+            <UpdateHistory
+              entityType="seller_target"
+              entityId={id}
+              refreshKey={historyRefreshKey}
+              onRolledBack={async () => {
+                const fresh = await sellerTargets.get(id);
+                setTarget(fresh);
+              }}
+            />
+          )}
+        </div>
       </div>
 
       <BusinessUpdateDrawer
