@@ -9,6 +9,11 @@ import backend.app.jobs.handlers.attachment_ocr as attachment_ocr
 import backend.app.jobs.handlers.relation_followup as relation_followup
 import backend.app.services.business_update_flow as business_update_flow
 from backend.app.jobs.queue import JobClaim
+from backend.app.services.attachment_status import (
+    attachment_content_extraction_status,
+    attachment_extraction_strategy,
+    attachment_waits_for_text_extraction,
+)
 
 
 BUSINESS_UPDATE_ID = UUID("00000000-0000-0000-0000-000000000101")
@@ -439,3 +444,82 @@ def test_ocr_completion_uses_scope_aware_business_update_dispatcher(monkeypatch)
         business_update_flow.BUSINESS_UPDATE_FOLLOWUP_JOB_TYPE,
     ]
     assert "update business_update" in db.executions[-1][0].lower()
+
+
+def test_ocr_fan_in_does_not_wait_for_direct_multimodal_images() -> None:
+    summary = attachment_ocr._summarize_business_update_attachment_statuses(
+        [
+            {
+                "parse_status": "parsed",
+                "file_type": "pdf",
+                "mime_type": "application/pdf",
+                "metadata_json": {"ocr_policy": "auto_ocr"},
+            },
+            {
+                "parse_status": "parsed",
+                "file_type": None,
+                "mime_type": "text/plain",
+                "metadata_json": {"ocr_policy": "auto_ocr"},
+            },
+            {
+                "parse_status": "pending",
+                "file_type": "jpg",
+                "mime_type": "image/jpeg",
+                "metadata_json": {"ocr_policy": "multimodal_image_only"},
+            },
+            {
+                "parse_status": "pending",
+                "file_type": "webp",
+                "mime_type": None,
+                "metadata_json": {},
+            },
+        ]
+    )
+
+    assert summary == {"total": 4, "active": 0, "succeeded": 2, "failed": 0, "skipped": 0}
+
+
+def test_ocr_fan_in_still_waits_for_pending_text_extraction() -> None:
+    summary = attachment_ocr._summarize_business_update_attachment_statuses(
+        [
+            {
+                "parse_status": "parsing",
+                "file_type": "pdf",
+                "mime_type": "application/pdf",
+                "metadata_json": {"ocr_policy": "auto_ocr"},
+            },
+            {
+                "parse_status": "pending",
+                "file_type": "bin",
+                "mime_type": "application/octet-stream",
+                "metadata_json": {"ocr_policy": "skip_ocr"},
+            },
+        ]
+    )
+
+    assert summary == {"total": 2, "active": 1, "succeeded": 0, "failed": 0, "skipped": 0}
+
+
+def test_pending_image_is_exposed_as_direct_multimodal_input() -> None:
+    attachment = {
+        "parse_status": "pending",
+        "file_type": "jpg",
+        "mime_type": "image/jpeg",
+        "metadata_json": {"ocr_policy": "multimodal_image_only"},
+    }
+
+    assert attachment_content_extraction_status(attachment) == "multimodal"
+    assert attachment_extraction_strategy(attachment) == "multimodal_llm_direct"
+    assert attachment_waits_for_text_extraction(attachment) is False
+
+
+def test_explicit_skip_ocr_attachment_is_not_exposed_as_waiting() -> None:
+    attachment = {
+        "parse_status": "pending",
+        "file_type": "bin",
+        "mime_type": "application/octet-stream",
+        "metadata_json": {"ocr_policy": "skip_ocr"},
+    }
+
+    assert attachment_content_extraction_status(attachment) == "skipped"
+    assert attachment_waits_for_text_extraction(attachment) is False

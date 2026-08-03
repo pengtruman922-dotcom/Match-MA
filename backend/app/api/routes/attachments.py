@@ -32,6 +32,10 @@ from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 from backend.app.services.ocr_provider import ocr_provider_status
+from backend.app.services.attachment_status import (
+    attachment_content_extraction_status,
+    attachment_extraction_strategy,
+)
 from backend.app.services.attachment_storage import (
     TEXT_FILE_EXTENSIONS,
     TEXT_MIME_PREFIXES,
@@ -1216,26 +1220,16 @@ def _attachment_with_links(db: Session, attachment_id: UUID) -> dict[str, Any]:
 
 def _attach_links_to_row(db: Session, attachment: dict[str, Any]) -> dict[str, Any]:
     latest_job = _latest_ocr_job(db, attachment["id"])
-    stored_status = str(attachment.get("parse_status") or "pending")
     job_status = str(latest_job.get("status") or "") if latest_job else None
-    effective_status = stored_status
-    if stored_status in {"pending", "parsing"} and job_status in {"failed", "canceled", "cancelled"}:
-        effective_status = "failed"
-    product_status = {
-        "pending": "pending",
-        "parsing": "processing",
-        "parsed": "succeeded",
-        "failed": "failed",
-        "skipped": "skipped",
-    }.get(effective_status, "pending")
+    product_status = attachment_content_extraction_status(
+        attachment,
+        latest_job_status=job_status,
+    )
     metadata = attachment.get("metadata_json") or {}
-    strategy = metadata.get("last_ocr_provider") if isinstance(metadata, dict) else None
-    if not strategy and isinstance(metadata, dict) and metadata.get("last_office_kind"):
-        strategy = "office_text_layer"
     attachment.update(
         {
             "content_extraction_status": product_status,
-            "extraction_strategy": strategy,
+            "extraction_strategy": attachment_extraction_strategy(attachment),
             "latest_job_status": job_status,
             "error_message": (
                 latest_job.get("error_message") if latest_job else metadata.get("last_ocr_error")

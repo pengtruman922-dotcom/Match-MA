@@ -19,6 +19,10 @@ from backend.app.api.routes.utils import (
 )
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
+from backend.app.services.attachment_status import (
+    attachment_content_extraction_status,
+    attachment_extraction_strategy,
+)
 from backend.app.services.profile_sections import (
     PROFILE_SECTION_CODES,
     PROFILE_SECTION_FIELD_PREFIX,
@@ -570,7 +574,7 @@ def _business_update_attachments(
             """
             select
               al.entity_id as business_update_id,
-              a.id, a.file_name, a.mime_type, a.file_size,
+              a.id, a.file_name, a.file_type, a.mime_type, a.file_size,
               a.uploaded_at::text as uploaded_at, a.parse_status, a.metadata_json,
               latest_job.status as latest_job_status,
               latest_job.error_message as latest_job_error_message
@@ -604,18 +608,15 @@ def _business_update_attachments(
         item = dict(row)
         update_id = str(item.pop("business_update_id"))
         item["download_route"] = f"/attachments/{item['id']}/download"
-        stored = str(item.pop("parse_status") or "pending")
         job_status = str(item.pop("latest_job_status") or "")
-        if stored in {"pending", "parsing"} and job_status in {"failed", "canceled", "cancelled"}:
-            stored = "failed"
-        item["content_extraction_status"] = {
-            "pending": "pending", "parsing": "processing", "parsed": "succeeded",
-            "failed": "failed", "skipped": "skipped",
-        }.get(stored, "pending")
-        metadata = item.pop("metadata_json") or {}
-        item["extraction_strategy"] = metadata.get("last_ocr_provider") or (
-            "office_text_layer" if metadata.get("last_office_kind") else None
+        item["content_extraction_status"] = attachment_content_extraction_status(
+            item,
+            latest_job_status=job_status,
         )
+        item["extraction_strategy"] = attachment_extraction_strategy(item)
+        metadata = item.pop("metadata_json") or {}
+        item.pop("parse_status", None)
+        item.pop("file_type", None)
         item["error_message"] = item.pop("latest_job_error_message") or metadata.get("last_ocr_error")
         item["recoverable"] = item["content_extraction_status"] == "failed"
         grouped.setdefault(update_id, []).append(item)

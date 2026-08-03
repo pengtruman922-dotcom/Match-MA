@@ -592,7 +592,11 @@ def _review_terminal_enough(review: dict[str, Any]) -> bool:
     attachments = review.get("attachments") or []
     if any(job.get("status") in {"queued", "running", "retry_waiting"} for job in jobs):
         return False
-    if any(item.get("parse_status") in {"pending", "parsing"} for item in attachments):
+    if any(
+        item.get("parse_status") in {"pending", "parsing"}
+        and (item.get("parse_readiness") or {}).get("readiness_status") != "ready_for_multimodal"
+        for item in attachments
+    ):
         return False
     return business_update.get("processing_status") in {"parsed", "failed", "needs_review", "applied"}
 

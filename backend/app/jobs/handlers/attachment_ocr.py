@@ -17,6 +17,7 @@ from backend.app.jobs.queue import JobClaim
 from backend.app.services.attachment_storage import (
     save_generated_text,
 )
+from backend.app.services.attachment_status import attachment_waits_for_text_extraction
 from backend.app.services.office_inspection import inspect_office_text, office_document_kind
 from backend.app.services.pdf_inspection import extract_pdf_text, inspect_pdf_text_layer
 from backend.app.services.business_update_flow import _enqueue_business_update_process_job
@@ -1597,16 +1598,12 @@ def _enqueue_business_update_process_after_ocr(
 
 
 def _business_update_content_readiness(db: Session, business_update_id: UUID) -> dict[str, Any]:
-    """Return one batch-level decision after every linked attachment reaches a terminal state."""
-    status_row = db.execute(
+    """Return one batch-level decision after every text-extraction attachment is terminal."""
+    attachment_rows = db.execute(
         text(
             """
             select
-              count(*)::int as total,
-              count(*) filter (where a.parse_status in ('pending', 'parsing'))::int as active,
-              count(*) filter (where a.parse_status = 'parsed')::int as succeeded,
-              count(*) filter (where a.parse_status = 'failed')::int as failed,
-              count(*) filter (where a.parse_status = 'skipped')::int as skipped
+              a.parse_status, a.file_type, a.mime_type, a.metadata_json
             from attachment_link al
             join attachment a on a.id = al.attachment_id
             where al.team_id = :team_id
@@ -1621,7 +1618,10 @@ def _business_update_content_readiness(db: Session, business_update_id: UUID) ->
             "workspace_id": DEFAULT_WORKSPACE_ID,
             "business_update_id": business_update_id,
         },
-    ).mappings().one()
+    ).mappings().all()
+    status_row = _summarize_business_update_attachment_statuses(
+        [_json_safe_dict(row) for row in attachment_rows]
+    )
     business_update = _get_business_update(db, business_update_id)
     raw_text = _meaningful_business_update_raw_text(business_update)
     attachment_context = _build_business_update_attachment_context(db, business_update_id)
@@ -1633,6 +1633,23 @@ def _business_update_content_readiness(db: Session, business_update_id: UUID) ->
         "combined_text": combined_text,
         "has_usable_text": bool(combined_text),
     }
+
+
+def _summarize_business_update_attachment_statuses(
+    attachments: list[dict[str, Any]],
+) -> dict[str, int]:
+    summary = {"total": len(attachments), "active": 0, "succeeded": 0, "failed": 0, "skipped": 0}
+    for attachment in attachments:
+        parse_status = str(attachment.get("parse_status") or "")
+        if parse_status == "parsed":
+            summary["succeeded"] += 1
+        elif parse_status == "failed":
+            summary["failed"] += 1
+        elif parse_status == "skipped":
+            summary["skipped"] += 1
+        elif attachment_waits_for_text_extraction(attachment):
+            summary["active"] += 1
+    return summary
 
 
 def _meaningful_business_update_raw_text(business_update: dict[str, Any]) -> str:

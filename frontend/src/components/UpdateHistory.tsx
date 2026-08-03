@@ -449,8 +449,8 @@ function BatchStatusBadge({ status, sourceType }: { status: string; sourceType: 
 }
 
 function AttachmentReadStatus({ status }: { status: string }) {
-  const labels: Record<string, string> = { pending: '等待读取', processing: '读取中', succeeded: '读取成功', failed: '读取失败', skipped: '无需读取' };
-  const color = status === 'failed' ? 'text-red-600' : status === 'processing' || status === 'pending' ? 'text-blue-600' : 'text-gray-400';
+  const labels: Record<string, string> = { pending: '等待读取', processing: '读取中', succeeded: '读取成功', failed: '读取失败', skipped: '无需读取', multimodal: '模型直读' };
+  const color = status === 'failed' ? 'text-red-600' : status === 'processing' || status === 'pending' ? 'text-blue-600' : status === 'multimodal' ? 'text-purple-600' : 'text-gray-400';
   return <span className={`shrink-0 text-[10px] ${color}`}>[{labels[status] || status}]</span>;
 }
 

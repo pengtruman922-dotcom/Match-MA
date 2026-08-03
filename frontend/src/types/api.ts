@@ -1025,7 +1025,7 @@ export interface AttachmentItem {
   uploaded_by: string | null;
   uploaded_at: string;
   parse_status: string;
-  content_extraction_status: 'pending' | 'processing' | 'succeeded' | 'failed' | 'skipped';
+  content_extraction_status: 'pending' | 'processing' | 'succeeded' | 'failed' | 'skipped' | 'multimodal';
   extraction_strategy: string | null;
   latest_job_status: string | null;
   error_message: string | null;
@@ -1050,7 +1050,7 @@ export interface UpdateBatchAttachment {
   file_size: number | null;
   uploaded_at: string;
   download_route: string;
-  content_extraction_status: 'pending' | 'processing' | 'succeeded' | 'failed' | 'skipped';
+  content_extraction_status: 'pending' | 'processing' | 'succeeded' | 'failed' | 'skipped' | 'multimodal';
   extraction_strategy: string | null;
   error_message: string | null;
   recoverable: boolean;

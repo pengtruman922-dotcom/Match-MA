@@ -300,9 +300,9 @@ function ErrorState({ message, onRetry }: { message: string; onRetry: () => void
 function EmptyState({ title, description }: { title: string; description: string }) { return <div className="py-12 text-center"><Search className="mx-auto h-8 w-8 text-gray-300" /><p className="mt-2 text-sm text-gray-500">{title}</p><p className="mt-1 text-xs text-gray-400">{description}</p></div>; }
 
 function AttachmentStatus({ item }: { item: AttachmentItem }) {
-  const labels = { pending: '等待读取', processing: '读取中', succeeded: '读取成功', failed: '读取失败', skipped: '无需读取' };
+  const labels = { pending: '等待读取', processing: '读取中', succeeded: '读取成功', failed: '读取失败', skipped: '无需读取', multimodal: '模型直读' };
   const status = item.content_extraction_status;
-  const color = status === 'failed' ? 'bg-red-50 text-red-700' : status === 'processing' || status === 'pending' ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-600';
+  const color = status === 'failed' ? 'bg-red-50 text-red-700' : status === 'processing' || status === 'pending' ? 'bg-blue-50 text-blue-700' : status === 'multimodal' ? 'bg-purple-50 text-purple-700' : 'bg-gray-100 text-gray-600';
   return <span className={`shrink-0 px-1.5 py-0.5 text-[11px] ${color}`}>{labels[status]}</span>;
 }
 
@@ -310,6 +310,7 @@ function partyDraft(party: BuyerParty): Partial<BuyerPartyCreate> { return { buy
 function nullIfEmpty(value: string | null | undefined): string | null { return value?.trim() || null; }
 function attachmentKindLabel(item: AttachmentItem): string {
   const extension = (item.file_type || item.file_name.split('.').pop() || '').toLowerCase();
+  if (item.extraction_strategy === 'multimodal_llm_direct') return '图片 · 模型直接读取';
   if (extension === 'doc' || extension === 'docx') return `Word 文档 · ${item.extraction_strategy === 'office_text_layer' ? '本地内容读取' : '内容读取'}`;
   if (extension === 'xls' || extension === 'xlsx') return `Excel 文档 · ${item.extraction_strategy === 'office_text_layer' ? '本地内容读取' : '内容读取'}`;
   if (extension === 'ppt' || extension === 'pptx') return `PowerPoint 文档 · ${item.extraction_strategy === 'office_text_layer' ? '本地内容读取' : '内容读取'}`;
