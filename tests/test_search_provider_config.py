@@ -15,6 +15,7 @@ from backend.app.api.routes.model_config import (
     PROVIDER_TYPES,
     ProviderCreate,
     _clear_default_provider,
+    _validate_external_provider_payload,
     create_provider,
     get_model_config_capabilities,
 )
@@ -94,6 +95,34 @@ def test_unknown_provider_type_is_still_rejected(monkeypatch) -> None:
         create_provider(_search_payload(provider_type="telepathy"), db=_Db())
 
     assert excinfo.value.status_code == 422
+
+
+def test_unknown_search_adapter_is_rejected() -> None:
+    with pytest.raises(HTTPException) as excinfo:
+        _validate_external_provider_payload(
+            {
+                "provider_type": "search",
+                "model_name": "unknown-search",
+                "extra_config_json": {"adapter": "unknown-search"},
+            }
+        )
+
+    assert excinfo.value.status_code == 422
+    assert "Invalid search adapter" in excinfo.value.detail
+
+
+def test_search_adapter_cannot_drift_between_columns() -> None:
+    with pytest.raises(HTTPException) as excinfo:
+        _validate_external_provider_payload(
+            {
+                "provider_type": "search",
+                "model_name": "tavily",
+                "extra_config_json": {"adapter": "other"},
+            }
+        )
+
+    assert excinfo.value.status_code == 422
+    assert "must match" in excinfo.value.detail
 
 
 def test_making_a_search_provider_default_leaves_the_chat_model_alone(monkeypatch) -> None:

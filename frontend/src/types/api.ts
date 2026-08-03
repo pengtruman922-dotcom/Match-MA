@@ -2189,6 +2189,39 @@ export interface SearchProviderTestResult {
   sample_titles: string[];
 }
 
+export interface OcrProviderConfig {
+  id: string;
+  provider_name: string;
+  adapter: string;
+  base_url: string | null;
+  model: string;
+  secret_mode: 'env' | 'direct';
+  api_key_secret_ref: string | null;
+  secret_configured: boolean;
+  key_display: string;
+  extra_config_json: Record<string, unknown>;
+  is_active: boolean;
+  is_default: boolean;
+  updated_at: string;
+}
+
+export interface OcrConfigOverview {
+  adapter: string;
+  base_url: string;
+  model: string;
+  key_configured: boolean;
+  configured: boolean;
+  source: 'database' | 'environment';
+  provider_config_id: string | null;
+  provider_name: string | null;
+  adapters: string[];
+  providers: OcrProviderConfig[];
+  upload_timeout_seconds: number;
+  poll_interval_seconds: number;
+  max_wait_seconds: number;
+  direct_key_encryption_configured: boolean;
+}
+
 export interface TargetProvinceCount {
   province: string;
   count: number;

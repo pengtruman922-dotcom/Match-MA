@@ -30,7 +30,9 @@ from backend.app.services.model_secrets import (
     encrypt_model_secret,
     model_secret_encryption_configured,
 )
+from backend.app.services.ocr_provider import OCR_ADAPTERS
 from backend.app.services.region_dictionary import PROVINCES
+from backend.app.services.search_providers import available_adapters
 
 
 def _require_admin_route(current_user: CurrentUser) -> None:
@@ -54,6 +56,7 @@ PROVIDER_TYPES = {
     "search",
     "custom",
 }
+EXTERNAL_PROVIDER_TYPES = {"ocr", "search"}
 AUTH_TYPES = {"none", "bearer", "api_key_header", "custom"}
 NODE_TYPES = {"llm", "embedding", "ocr", "rerank", "research", "parser"}
 OUTPUT_MODES = {"text", "json", "embedding", "file", "mixed"}
@@ -479,6 +482,7 @@ def list_providers(
 def create_provider(payload: ProviderCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
     _validate_choice("provider_type", payload.provider_type, PROVIDER_TYPES)
     _validate_choice("auth_type", payload.auth_type, AUTH_TYPES)
+    _validate_external_provider_payload(payload.model_dump())
     provider_name = payload.provider_name.strip()
     _ensure_unique_model_config_name(db, provider_name)
     secret_data = _model_secret_create_data(payload)
@@ -583,10 +587,15 @@ def update_provider(provider_id: UUID, payload: ProviderUpdate, db: Session = De
         _validate_choice("provider_type", data["provider_type"], PROVIDER_TYPES)
     if "auth_type" in data:
         _validate_choice("auth_type", data["auth_type"], AUTH_TYPES)
+    _validate_external_provider_payload({**current, **data})
     if data.get("is_default") is True:
         _clear_default_provider(db, str(data.get("provider_type") or current["provider_type"]))
     if data.get("is_active") is False and current.get("is_active"):
-        _ensure_model_can_deactivate(db, provider_id)
+        _ensure_provider_can_deactivate(
+            db,
+            provider_id,
+            provider_type=str(current["provider_type"]),
+        )
     row = _update_row(
         db,
         table_name="model_provider_config",
@@ -622,7 +631,11 @@ def deactivate_provider(provider_id: UUID, db: Session = Depends(get_db)) -> dic
     current = _get_provider_or_404(db, provider_id)
     if not current["is_active"]:
         return current
-    _ensure_model_can_deactivate(db, provider_id)
+    _ensure_provider_can_deactivate(
+        db,
+        provider_id,
+        provider_type=str(current["provider_type"]),
+    )
     row = _update_row(
         db,
         table_name="model_provider_config",
@@ -703,6 +716,7 @@ def create_node(payload: NodeCreate, db: Session = Depends(get_db)) -> dict[str,
     model = _get_provider_or_404(db, payload.provider_config_id)
     if not model["is_active"]:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Selected model is inactive.")
+    _ensure_provider_can_bind_node(model)
     node_data["model_name"] = model["model_name"]
     _validate_node_payload(node_data)
     if payload.is_default:
@@ -753,6 +767,7 @@ def upsert_catalog_node(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Selected model is inactive.",
         )
+    _ensure_provider_can_bind_node(model)
 
     existing = db.execute(
         text(
@@ -929,6 +944,7 @@ def update_node(node_id: UUID, payload: NodeUpdate, db: Session = Depends(get_db
         model = _get_provider_or_404(db, data["provider_config_id"])
         if not model["is_active"]:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Selected model is inactive.")
+        _ensure_provider_can_bind_node(model)
         data["model_name"] = model["model_name"]
         merged["model_name"] = model["model_name"]
     _validate_node_payload(merged)
@@ -1525,6 +1541,48 @@ def _validate_choice(field_name: str, value: str | None, allowed: set[str]) -> N
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Invalid {field_name}: {value}")
 
 
+def _validate_external_provider_payload(data: dict[str, Any]) -> None:
+    provider_type = str(data.get("provider_type") or "")
+    if provider_type not in EXTERNAL_PROVIDER_TYPES:
+        return
+    extra_config = data.get("extra_config_json") or {}
+    if not isinstance(extra_config, dict):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="extra_config_json must be an object.",
+        )
+    if provider_type == "search":
+        model_adapter = str(data.get("model_name") or "").strip().lower()
+        configured_adapter = str(extra_config.get("adapter") or "").strip().lower()
+        if configured_adapter and model_adapter and configured_adapter != model_adapter:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Search adapter must match model_name and extra_config_json.adapter.",
+            )
+        adapter = configured_adapter or model_adapter
+        if adapter not in available_adapters():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Invalid search adapter: {adapter or '(empty)'}",
+            )
+        return
+    adapter = str(extra_config.get("adapter") or "doc2x").strip().lower()
+    if adapter not in OCR_ADAPTERS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid OCR adapter: {adapter or '(empty)'}",
+        )
+
+
+def _ensure_provider_can_bind_node(provider: dict[str, Any]) -> None:
+    provider_type = str(provider.get("provider_type") or "")
+    if provider_type in EXTERNAL_PROVIDER_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Provider type {provider_type} is an external service and cannot be bound to an AI node.",
+        )
+
+
 def _model_secret_create_data(payload: ProviderCreate) -> dict[str, Any]:
     if payload.secret_mode == "env":
         if not payload.api_key_secret_ref:
@@ -1643,6 +1701,7 @@ def _ensure_model_can_deactivate(db: Session, provider_id: UUID) -> None:
                 select count(*) from model_provider_config
                 where team_id = :team_id and workspace_id = :workspace_id
                   and is_active = true and id <> :provider_config_id
+                  and provider_type not in ('ocr', 'search')
                 """
             ),
             {
@@ -1655,6 +1714,34 @@ def _ensure_model_can_deactivate(db: Session, provider_id: UUID) -> None:
     )
     if remaining < 1:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="At least one active model must remain.")
+
+
+def _ensure_provider_can_deactivate(
+    db: Session,
+    provider_id: UUID,
+    *,
+    provider_type: str,
+) -> None:
+    if provider_type in EXTERNAL_PROVIDER_TYPES:
+        bound_nodes = int(
+            db.execute(
+                text(
+                    """
+                    select count(*) from model_node_config
+                    where provider_config_id = :provider_config_id and is_active = true
+                    """
+                ),
+                {"provider_config_id": provider_id},
+            ).scalar_one()
+            or 0
+        )
+        if bound_nodes:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"External provider is still used by {bound_nodes} active node(s).",
+            )
+        return
+    _ensure_model_can_deactivate(db, provider_id)
 
 
 def _validate_node_payload(data: dict[str, Any]) -> None:

@@ -52,8 +52,10 @@ function AiSettings({ tab }: { tab: 'nodes' | 'models' }) {
   if (loading) return <Loading />;
   if (error || !data) return <ErrorState message={error || '读取 AI 设置失败'} onRetry={load} />;
 
-  // 节点只能绑定启用中的对话类模型；搜索服务商走独立区块。
-  const selectableModels = data.providers.filter((model) => model.is_active && model.provider_type !== 'search');
+  // 搜索与 OCR 是外部 HTTP 服务，不是可绑定到 AI 节点的模型。
+  const selectableModels = data.providers.filter(
+    (model) => model.is_active && !['search', 'ocr'].includes(model.provider_type),
+  );
 
   if (tab === 'models') {
     return (

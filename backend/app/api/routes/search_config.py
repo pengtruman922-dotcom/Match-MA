@@ -54,6 +54,22 @@ class SearchProviderTestOut(BaseModel):
     sample_titles: list[str]
 
 
+class OcrProviderOut(BaseModel):
+    id: UUID
+    provider_name: str
+    adapter: str
+    base_url: str | None
+    model: str
+    secret_mode: str
+    api_key_secret_ref: str | None
+    secret_configured: bool
+    key_display: str
+    extra_config_json: dict[str, Any]
+    is_active: bool
+    is_default: bool
+    updated_at: str
+
+
 @router.get("/overview")
 def search_config_overview(
     current_user: CurrentUser,
@@ -163,7 +179,45 @@ def ocr_config_overview(
 ) -> dict[str, Any]:
     require_admin(current_user)
     status_payload = ocr_provider_status(db)
+    rows = db.execute(
+        text(
+            """
+            select
+              id, provider_name, model_name, base_url, secret_mode, api_key_secret_ref,
+              (secret_mode = 'direct' and api_key_encrypted is not null)
+                or (secret_mode = 'env' and api_key_secret_ref is not null) as secret_configured,
+              case
+                when secret_mode = 'direct' and api_key_encrypted is not null then '已加密保存'
+                when secret_mode = 'env' then coalesce(api_key_secret_ref, '未配置')
+                else '未配置'
+              end as key_display,
+              extra_config_json, is_active, is_default,
+              updated_at::text as updated_at
+            from model_provider_config
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and provider_type = 'ocr'
+            order by is_default desc, is_active desc, updated_at desc
+            """
+        ),
+        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+    ).mappings().all()
+    providers = [
+        OcrProviderOut(
+            **{
+                **{
+                    key: value
+                    for key, value in dict(row).items()
+                    if key != "model_name"
+                },
+                "adapter": str((row["extra_config_json"] or {}).get("adapter") or "doc2x"),
+                "model": str(row["model_name"] or ""),
+            }
+        ).model_dump(mode="json")
+        for row in rows
+    ]
     return {
         **status_payload,
+        "providers": providers,
         "direct_key_encryption_configured": model_secret_encryption_configured(),
     }

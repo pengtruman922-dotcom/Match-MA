@@ -1,6 +1,7 @@
 import type {
   SearchConfigOverview,
   SearchProviderTestResult,
+  OcrConfigOverview,
   PlatformOverview,
   ProfileSection,
   ProfileSectionsResponse,
@@ -532,21 +533,83 @@ export const searchConfig = {
       provider_type: 'search',
       auth_type: 'bearer',
       is_default: true,
-      extra_config_json: { adapter: data.adapter, ...(data.extra_config_json || {}) },
+      extra_config_json: { ...(data.extra_config_json || {}), adapter: data.adapter },
     }),
   }),
   update: (id: string, data: {
     provider_name?: string;
+    adapter?: string;
     base_url?: string;
     secret_mode?: 'env' | 'direct';
     api_key_secret_ref?: string | null;
     api_key?: string | null;
+    extra_config_json?: Record<string, unknown>;
     is_active?: boolean;
-  }) => apiRequest<ModelProviderConfig>(`/model-config/providers/${id}`, {
-    method: 'PATCH',
-    body: JSON.stringify(data),
-  }),
+    is_default?: boolean;
+  }) => {
+    const { adapter, extra_config_json: extraConfig, ...rest } = data;
+    return apiRequest<ModelProviderConfig>(`/model-config/providers/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        ...rest,
+        ...(adapter ? {
+          model_name: adapter,
+          extra_config_json: { ...(extraConfig || {}), adapter },
+        } : extraConfig ? { extra_config_json: extraConfig } : {}),
+      }),
+    });
+  },
   remove: (id: string) =>
+    apiRequest<ModelProviderConfig>(`/model-config/providers/${id}`, { method: 'DELETE' }),
+};
+
+export const ocrConfig = {
+  overview: () => apiRequest<OcrConfigOverview>('/search-config/ocr-config/overview'),
+  create: (data: {
+    provider_name: string;
+    adapter: string;
+    base_url: string;
+    model: string;
+    api_key: string;
+  }) => apiRequest<ModelProviderConfig>('/model-config/providers', {
+    method: 'POST',
+    body: JSON.stringify({
+      provider_name: data.provider_name,
+      model_name: data.model,
+      base_url: data.base_url,
+      secret_mode: 'direct',
+      api_key: data.api_key,
+      provider_type: 'ocr',
+      auth_type: 'bearer',
+      is_active: true,
+      is_default: true,
+      extra_config_json: { adapter: data.adapter },
+    }),
+  }),
+  update: (id: string, data: {
+    provider_name?: string;
+    adapter?: string;
+    base_url?: string;
+    model?: string;
+    api_key?: string;
+    is_active?: boolean;
+    is_default?: boolean;
+    extra_config_json?: Record<string, unknown>;
+  }) => {
+    const { adapter, model, extra_config_json: extraConfig, ...rest } = data;
+    return apiRequest<ModelProviderConfig>(`/model-config/providers/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        ...rest,
+        ...(model ? { model_name: model } : {}),
+        ...(adapter ? {
+          extra_config_json: { ...(extraConfig || {}), adapter },
+        } : extraConfig ? { extra_config_json: extraConfig } : {}),
+        ...(data.api_key ? { secret_mode: 'direct' } : {}),
+      }),
+    });
+  },
+  deactivate: (id: string) =>
     apiRequest<ModelProviderConfig>(`/model-config/providers/${id}`, { method: 'DELETE' }),
 };
 

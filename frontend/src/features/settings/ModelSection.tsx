@@ -31,7 +31,7 @@ export default function ModelSection({
     return counts;
   }, [nodes]);
 
-  const chatModels = providers.filter((model) => model.provider_type !== 'search');
+  const chatModels = providers.filter((model) => !['search', 'ocr'].includes(model.provider_type));
   const active = chatModels.filter((model) => model.is_active);
   const inactive = chatModels.filter((model) => !model.is_active);
 

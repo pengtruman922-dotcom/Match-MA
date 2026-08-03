@@ -10,6 +10,8 @@ from backend.app.api.routes.model_config import (
     ProviderOut,
     ProviderUpdate,
     _ensure_model_can_deactivate,
+    _ensure_provider_can_bind_node,
+    _ensure_provider_can_deactivate,
     _ensure_unique_model_config_name,
     _model_secret_update_data,
     test_model_draft as run_model_draft_test,
@@ -127,6 +129,22 @@ def test_unbound_model_can_be_deleted_when_another_model_remains() -> None:
         _ModelConstraintDb([0, 1]),
         MODEL_ID,
     )
+
+
+def test_external_provider_can_be_deactivated_without_another_model() -> None:
+    _ensure_provider_can_deactivate(
+        _ModelConstraintDb([0]),
+        MODEL_ID,
+        provider_type="ocr",
+    )
+
+
+def test_external_provider_cannot_be_bound_to_ai_node() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        _ensure_provider_can_bind_node({"provider_type": "search"})
+
+    assert exc_info.value.status_code == 422
+    assert "cannot be bound" in exc_info.value.detail
 
 
 def test_duplicate_model_config_name_returns_conflict() -> None:
