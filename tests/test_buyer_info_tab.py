@@ -36,6 +36,7 @@ def test_buyer_info_tab_is_trimmed_and_uses_inline_editors() -> None:
 
     assert "editingField === field" in content
     assert "<IndustryPairsEditor" in content
-    assert "<RegionConstraintsEditor" in content
-    assert "<AdministrativeAreaPicker" in content
+    assert content.count("<AdministrativeAreaPicker") == 2
+    assert "<RegionConstraintsEditor" not in content
+    assert "变更上级会自动清空下级；筛选仍按省、市、区三个字段命中。" in content
     assert "编辑资料" not in content
