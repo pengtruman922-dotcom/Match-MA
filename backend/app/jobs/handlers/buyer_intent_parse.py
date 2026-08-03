@@ -654,10 +654,12 @@ def _reconcile_buyer_intent_scope(
         valid, normalized = _normalize_confirmation_proposed_value(
             db, field=field, proposed_value=entry.get("proposed_value")
         )
-        if not valid and field in pending_fallback_values:
-            valid, normalized = _normalize_confirmation_proposed_value(
+        if field in pending_fallback_values:
+            fallback_valid, fallback_normalized = _normalize_confirmation_proposed_value(
                 db, field=field, proposed_value=pending_fallback_values[field]
             )
+            if fallback_valid:
+                valid, normalized = fallback_valid, fallback_normalized
         if not valid:
             entry["proposed_value_status"] = "invalid"
             reconciled_pending.append(entry)

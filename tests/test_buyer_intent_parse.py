@@ -179,6 +179,28 @@ def test_confirmation_reconciliation_marks_invalid_value_non_actionable() -> Non
     assert reconciled["needs_confirmation_json"][0]["scope"] == "上市公司方案"
 
 
+def test_confirmation_reconciliation_prefers_typed_field_over_text_placeholder() -> None:
+    reconciled = _reconcile_buyer_intent_scope(
+        None,
+        current_fields={"premium_tolerance_summary": "适当溢价具体比例"},
+        candidate_changes={
+            "premium_tolerance_summary": "可接受适当溢价，具体视标的情况确定",
+            "needs_confirmation_json": [
+                {
+                    "field": "premium_tolerance_summary",
+                    "proposed_value": "适当溢价具体比例",
+                    "reason": "溢价适当的具体范围未明确",
+                }
+            ],
+        },
+        normalization_notes=[],
+        scope_label="公共条件",
+    )
+
+    assert "premium_tolerance_summary" not in reconciled
+    assert reconciled["needs_confirmation_json"][0]["proposed_value"] == "可接受适当溢价，具体视标的情况确定"
+
+
 def test_scoped_confirmation_is_routed_out_of_common_layer() -> None:
     routed = _route_scoped_confirmation_items(
         {
