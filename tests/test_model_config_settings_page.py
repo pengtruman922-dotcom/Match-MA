@@ -3,6 +3,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import HTTPException
 
+from backend.app.api.routes import model_config
 from backend.app.api.routes.model_config import (
     CatalogNodeConfigIn,
     _catalog_placeholder_row,
@@ -230,6 +231,61 @@ def test_catalog_upsert_payload_cannot_carry_structural_fields() -> None:
     fields = set(CatalogNodeConfigIn.model_fields)
 
     assert fields == {"provider_config_id", "temperature", "top_p", "max_tokens", "timeout_seconds"}
+
+
+def test_catalog_upsert_normalizes_structural_fields_on_existing_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """历史配置的类型漂移不能在每次保存后继续残留。"""
+    provider_id = uuid4()
+    captured: dict[str, object] = {}
+
+    class _ExistingResult:
+        def mappings(self) -> "_ExistingResult":
+            return self
+
+        def one_or_none(self) -> dict[str, UUID]:
+            return {"id": NODE_ID}
+
+    class _Db:
+        def execute(self, *_args: object, **_kwargs: object) -> _ExistingResult:
+            return _ExistingResult()
+
+        def commit(self) -> None:
+            captured["committed"] = True
+
+    monkeypatch.setattr(
+        model_config,
+        "_get_provider_or_404",
+        lambda _db, _provider_id: {
+            "id": provider_id,
+            "is_active": True,
+            "model_name": "qwen-test",
+        },
+    )
+
+    def capture_update(_db: object, *, node_id: UUID, data: dict[str, object]) -> dict[str, object]:
+        captured["node_id"] = node_id
+        captured["data"] = data
+        return {"id": node_id, **data}
+
+    monkeypatch.setattr(model_config, "_update_node_row", capture_update)
+
+    row = upsert_catalog_node(
+        "buyer_intent_semantic_parser",
+        CatalogNodeConfigIn(provider_config_id=provider_id),
+        db=_Db(),
+    )
+
+    spec = node_by_name("buyer_intent_semantic_parser")
+    assert spec is not None
+    data = captured["data"]
+    assert isinstance(data, dict)
+    assert data["node_type"] == spec.node_type == "llm"
+    assert data["response_format"] == spec.response_format
+    assert data["output_mode"] == spec.output_mode
+    assert row["node_type"] == "llm"
+    assert captured["committed"] is True
 
 
 def _understudy_prompt(system: str | None, user: str | None, version: str = "v0.7.0") -> dict:

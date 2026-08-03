@@ -793,12 +793,18 @@ def upsert_catalog_node(
             db,
             node_id=existing["id"],
             data={
+                # 节点的结构字段属于代码目录，不属于环境配置。历史行可能仍保存
+                # 旧类型；管理员重新保存模型时一并归一，不能让 type_mismatch
+                # 永久卡住且只能靠手工 SQL 修复。
+                "node_type": spec.node_type,
                 "provider_config_id": payload.provider_config_id,
                 "model_name": model["model_name"],
                 "temperature": payload.temperature,
                 "top_p": payload.top_p,
                 "max_tokens": payload.max_tokens,
                 "timeout_seconds": payload.timeout_seconds or spec.default_timeout_seconds,
+                "response_format": spec.response_format,
+                "output_mode": spec.output_mode,
                 "is_active": True,
                 "is_default": True,
             },
