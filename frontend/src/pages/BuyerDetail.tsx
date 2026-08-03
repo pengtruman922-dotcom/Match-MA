@@ -47,7 +47,7 @@ export default function BuyerDetail() {
         </div>
         <button type="button" onClick={() => setDialogOpen(true)} className="inline-flex items-center gap-1.5 bg-brand-600 px-3 py-2 text-sm font-medium text-white hover:bg-brand-700"><Plus className="h-4 w-4" />录入并购需求</button>
       </header>
-      <div className="border border-gray-200 bg-white p-5"><BuyerInfo party={party} onSaved={setParty} /></div>
+      <div className="border border-gray-200 bg-white p-5"><BuyerInfo party={party} onPartySaved={setParty} /></div>
       {dialogOpen ? <NewRequirementDialog party={party} onClose={() => setDialogOpen(false)} onCreated={(intent) => navigate(`/buyer-intents/${intent.id}`, { replace: true })} /> : null}
     </div>
   );

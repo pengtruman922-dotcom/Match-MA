@@ -53,6 +53,7 @@ class BuyerIntentCreate(BaseModel):
     buyer_party_id: UUID | None = None
     owner_user_id: UUID | None = None
     contact_name: str | None = None
+    contact_info_json: dict[str, Any] | None = None
     raw_requirement_text: str | None = None
     intent_summary: str | None = None
     industry_primary: str | None = None
@@ -125,6 +126,7 @@ class BuyerIntentOut(BaseModel):
     intent_name: str
     status: str
     contact_name: str | None
+    contact_info_json: dict[str, Any] = Field(default_factory=dict)
     raw_requirement_text: str | None
     intent_summary: str | None
     industry_primary: str | None
@@ -203,6 +205,7 @@ class BuyerIntentUpdate(BaseModel):
     status: Literal["active", "paused", "closed"] | None = None
     pause_reason: str | None = None
     contact_name: str | None = None
+    contact_info_json: dict[str, Any] | None = None
     raw_requirement_text: str | None = None
     intent_summary: str | None = None
     industry_primary: str | None = None
@@ -339,7 +342,8 @@ _JSONB_ARRAY = "case when jsonb_typeof({column}) = 'array' then {column} else '[
 
 
 BUYER_INTENT_OUT_COLUMNS = """
-              bi.id, bi.buyer_party_id, bp.buyer_name as buyer_name, bi.intent_name, bi.status, bi.contact_name,
+              bi.id, bi.buyer_party_id, bp.buyer_name as buyer_name, bi.intent_name, bi.status,
+              bi.contact_name, bi.contact_info_json,
               bi.raw_requirement_text, bi.intent_summary, bi.parsed_requirement_json,
               bi.industry_primary, bi.industry_secondary,
               bi.industries_json, bi.industry_l2_json,
@@ -399,7 +403,7 @@ def create_buyer_intent(
             """
             insert into buyer_intent (
               team_id, workspace_id, buyer_party_id, owner_user_id,
-              intent_name, contact_name, raw_requirement_text, intent_summary,
+              intent_name, contact_name, contact_info_json, raw_requirement_text, intent_summary,
               parsed_requirement_json, industry_primary, industry_secondary,
               industries_json, industry_l2_json, excluded_industries_json, industry_focus_tags_json,
               region_scope_summary, region_constraints_json,
@@ -425,7 +429,7 @@ def create_buyer_intent(
             )
             values (
               :team_id, :workspace_id, :buyer_party_id, :owner_user_id,
-              :intent_name, :contact_name, :raw_requirement_text, :intent_summary,
+              :intent_name, :contact_name, :contact_info_json, :raw_requirement_text, :intent_summary,
               :parsed_requirement_json, :industry_primary, :industry_secondary,
               :industries_json, :industry_l2_json, :excluded_industries_json, :industry_focus_tags_json,
               :region_scope_summary, :region_constraints_json,
@@ -452,6 +456,7 @@ def create_buyer_intent(
             returning id
             """
         ).bindparams(
+            bindparam("contact_info_json", type_=JSONB),
             bindparam("parsed_requirement_json", type_=JSONB),
             bindparam("industries_json", type_=JSONB),
             bindparam("industry_l2_json", type_=JSONB),
@@ -1073,6 +1078,7 @@ def update_buyer_intent(
         """
     )
     json_fields = {
+        "contact_info_json",
         "parsed_requirement_json",
         "region_constraints_json",
         "acceptable_control_paths_json",
@@ -1361,6 +1367,7 @@ def _buyer_intent_params(payload: BuyerIntentCreate, current_user: AuthContext, 
         "owner_user_id": _resolve_intent_owner(payload, current_user, db),
         "intent_name": payload.intent_name.strip(),
         "contact_name": payload.contact_name,
+        "contact_info_json": payload.contact_info_json or {},
         "raw_requirement_text": payload.raw_requirement_text,
         "intent_summary": payload.intent_summary,
         "parsed_requirement_json": payload.parsed_requirement_json or {},

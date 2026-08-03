@@ -154,6 +154,7 @@ export default function BuyerIntentDetail() {
         onProgressDrawerClose={clearProgressRelation}
         historyRefreshKey={historyRefreshKey}
         onPartySaved={setParty}
+        onIntentSaved={setIntent}
         onIntentRefresh={load}
       />
 

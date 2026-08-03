@@ -1,24 +1,29 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
+  Check,
   Download,
   FileText,
   Loader2,
+  Pencil,
   RefreshCw,
   Search,
+  X,
 } from 'lucide-react';
-import { attachments, buyerParties } from '../lib/api';
+import { attachments, buyerIntents, buyerParties, meta } from '../lib/api';
 import type {
   AttachmentItem,
   BuyerIntent,
   BuyerIntentParseStatus,
   BuyerParty,
-  BuyerPartyCreate,
+  BuyerRegionConstraint,
+  IndustryOptionsResponse,
 } from '../types/api';
-import { valueLabel } from '../lib/fieldLabels';
 import UpdateHistory from './UpdateHistory';
 import ProgressPanel from '../features/relations/ProgressPanel';
-import BuyerIntentRequirements from './BuyerIntentRequirements';
+import BuyerIntentRequirements, { RegionConstraintsEditor } from './BuyerIntentRequirements';
+import AdministrativeAreaPicker, { type AdministrativeAreaValue } from './AdministrativeAreaPicker';
+import IndustryPairsEditor, { type IndustryPairValue } from './IndustryPairsEditor';
 
 export type BuyerWorkspaceTab = 'intent' | 'buyer' | 'progress' | 'attachments' | 'history';
 
@@ -33,12 +38,13 @@ interface Props {
   onProgressDrawerClose?: () => void;
   historyRefreshKey?: number;
   onPartySaved?: (party: BuyerParty) => void;
+  onIntentSaved?: (intent: BuyerIntent) => void;
   onIntentRefresh?: () => void | Promise<void>;
 }
 
 const TABS: Array<{ key: BuyerWorkspaceTab; label: string }> = [
   { key: 'intent', label: '需求信息' },
-  { key: 'buyer', label: '买家资料' },
+  { key: 'buyer', label: '买家信息' },
   { key: 'progress', label: '推进' },
   { key: 'attachments', label: '附件与证据' },
   { key: 'history', label: '更新记录' },
@@ -54,6 +60,7 @@ export default function BuyerIntentWorkspace({
   onProgressDrawerClose,
   historyRefreshKey = 0,
   onPartySaved,
+  onIntentSaved,
   onIntentRefresh,
 }: Props) {
   return (
@@ -79,7 +86,7 @@ export default function BuyerIntentWorkspace({
         {activeTab === 'intent' ? <BuyerIntentRequirements intent={intent} parseStatus={parseStatus} onRefresh={onIntentRefresh} /> : null}
         {activeTab === 'buyer' ? (
           party ? (
-            <BuyerInfo party={party} onSaved={onPartySaved} />
+            <BuyerInfo party={party} intent={intent} onPartySaved={onPartySaved} onIntentSaved={onIntentSaved} />
           ) : (
             <EmptyState title="当前需求未关联买家" description="可在买家管理中补充关联关系。" />
           )
@@ -117,89 +124,160 @@ export function IntentStatusBadge({ status }: { status: string }) {
   return <span className={`px-2 py-0.5 text-xs font-medium ${className}`}>{labels[status] || status}</span>;
 }
 
-export function BuyerInfo({ party, onSaved }: { party: BuyerParty; onSaved?: (party: BuyerParty) => void }) {
-  const [editing, setEditing] = useState(false);
+type BuyerInfoField = 'buyer_name' | 'location' | 'industry' | 'region' | 'contact_name' | 'contact_info' | 'notes';
+
+export function BuyerInfo({
+  party,
+  intent,
+  onPartySaved,
+  onIntentSaved,
+}: {
+  party: BuyerParty;
+  intent?: BuyerIntent | null;
+  onPartySaved?: (party: BuyerParty) => void;
+  onIntentSaved?: (intent: BuyerIntent) => void;
+}) {
+  const [editingField, setEditingField] = useState<BuyerInfoField | null>(null);
   const [saving, setSaving] = useState(false);
-  const [draft, setDraft] = useState<Partial<BuyerPartyCreate>>(() => partyDraft(party));
+  const [textDraft, setTextDraft] = useState('');
+  const [locationDraft, setLocationDraft] = useState<AdministrativeAreaValue>({ province: '' });
+  const [industryDraft, setIndustryDraft] = useState<IndustryPairValue[]>([]);
+  const [regionDraft, setRegionDraft] = useState<BuyerRegionConstraint[]>([]);
+  const [taxonomy, setTaxonomy] = useState<IndustryOptionsResponse>({ l1: [], l2: [] });
 
-  useEffect(() => setDraft(partyDraft(party)), [party]);
+  useEffect(() => {
+    let cancelled = false;
+    meta.industryOptions().then((value) => { if (!cancelled) setTaxonomy(value); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => setEditingField(null), [party.id, intent?.id]);
 
-  const save = async () => {
+  const startEditing = (field: BuyerInfoField) => {
+    if (!intent && isIntentField(field)) return;
+    if (field === 'buyer_name') setTextDraft(party.buyer_name);
+    if (field === 'location') setLocationDraft({ province: party.region_province || '', city: party.region_city || undefined });
+    if (field === 'industry') setIndustryDraft(intentIndustryPairs(intent, taxonomy));
+    if (field === 'region') setRegionDraft(intentRegions(intent));
+    if (field === 'contact_name') setTextDraft(intent?.contact_name || '');
+    if (field === 'contact_info') setTextDraft(contactInfoText(intent?.contact_info_json));
+    if (field === 'notes') setTextDraft(party.notes || '');
+    setEditingField(field);
+  };
+
+  const saveField = async () => {
+    if (!editingField) return;
     setSaving(true);
     try {
-      const updated = await buyerParties.update(party.id, {
-        buyer_name: draft.buyer_name?.trim() || party.buyer_name,
-        legal_name: nullIfEmpty(draft.legal_name),
-        buyer_type: nullIfEmpty(draft.buyer_type),
-        group_name: nullIfEmpty(draft.group_name),
-        listed_status: draft.listed_status || 'unknown',
-        region_province: nullIfEmpty(draft.region_province),
-        region_city: nullIfEmpty(draft.region_city),
-        main_business: nullIfEmpty(draft.main_business),
-        capital_strength_summary: nullIfEmpty(draft.capital_strength_summary),
-        profile_summary: nullIfEmpty(draft.profile_summary),
-        notes: nullIfEmpty(draft.notes),
-      });
-      onSaved?.(updated);
-      setEditing(false);
+      if (editingField === 'buyer_name') {
+        const buyerName = textDraft.trim();
+        if (!buyerName) throw new Error('买家名称不能为空');
+        onPartySaved?.(await buyerParties.update(party.id, { buyer_name: buyerName }));
+      } else if (editingField === 'location') {
+        onPartySaved?.(await buyerParties.update(party.id, {
+          region_province: nullIfEmpty(locationDraft.province),
+          region_city: nullIfEmpty(locationDraft.city),
+        }));
+      } else if (editingField === 'notes') {
+        onPartySaved?.(await buyerParties.update(party.id, { notes: nullIfEmpty(textDraft) }));
+      } else if (intent) {
+        if (editingField === 'industry') {
+          onIntentSaved?.(await buyerIntents.update(intent.id, {
+            industries_json: [...new Set(industryDraft.map((pair) => pair.l1).filter(Boolean))],
+            industry_l2_json: [...new Set(industryDraft.flatMap((pair) => pair.l2 ? [pair.l2] : []))],
+          }));
+        } else if (editingField === 'region') {
+          onIntentSaved?.(await buyerIntents.update(intent.id, {
+            region_constraints_json: regionDraft.filter((item) => item.province),
+          }));
+        } else if (editingField === 'contact_name') {
+          onIntentSaved?.(await buyerIntents.update(intent.id, { contact_name: nullIfEmpty(textDraft) }));
+        } else if (editingField === 'contact_info') {
+          onIntentSaved?.(await buyerIntents.update(intent.id, {
+            contact_info_json: textDraft.trim() ? { text: textDraft.trim() } : {},
+          }));
+        }
+      }
+      setEditingField(null);
     } catch (error) {
-      alert(error instanceof Error ? error.message : '保存买家资料失败');
+      alert(error instanceof Error ? error.message : '保存买家信息失败');
     } finally {
       setSaving(false);
     }
   };
 
-  if (!editing) {
-    return (
-      <div className="space-y-6">
-        <div className="flex items-center justify-between">
-          <p className="text-xs text-gray-500">买家资料由用户手工维护，不参与需求解析。</p>
-          <button type="button" onClick={() => setEditing(true)} className="border border-gray-200 px-3 py-1.5 text-xs text-gray-700 hover:border-brand-500 hover:text-brand-700">
-            编辑资料
-          </button>
-        </div>
-        <div className="grid grid-cols-1 gap-x-10 gap-y-3 md:grid-cols-2">
-          <Info label="买家名称" value={party.buyer_name} />
-          <Info label="法人全称" value={party.legal_name} />
-          <Info label="买家类型" value={party.buyer_type ? valueLabel('buyer_type', party.buyer_type) : null} />
-          <Info label="所属集团" value={party.group_name} />
-          <Info label="所在地区" value={`${party.region_province || ''}${party.region_city || ''}`} />
-          <Info label="上市状态" value={valueLabel('listed_status', party.listed_status)} />
-        </div>
-        <div className="space-y-3">
-          <Info label="主营业务" value={party.main_business} wide />
-          <Info label="资金实力/规模" value={party.capital_strength_summary} wide />
-          <Info label="资料摘要" value={party.profile_summary} wide />
-          <Info label="备注" value={party.notes} wide />
-        </div>
-      </div>
-    );
-  }
-
-  const setField = (key: keyof BuyerPartyCreate, value: string) => setDraft((current) => ({ ...current, [key]: value }));
   return (
-    <div className="space-y-5">
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        <EditField label="买家名称"><input className="input" value={draft.buyer_name || ''} onChange={(event) => setField('buyer_name', event.target.value)} /></EditField>
-        <EditField label="法人全称"><input className="input" value={draft.legal_name || ''} onChange={(event) => setField('legal_name', event.target.value)} /></EditField>
-        <EditField label="买家类型"><input className="input" value={draft.buyer_type || ''} onChange={(event) => setField('buyer_type', event.target.value)} /></EditField>
-        <EditField label="所属集团"><input className="input" value={draft.group_name || ''} onChange={(event) => setField('group_name', event.target.value)} /></EditField>
-        <EditField label="省份"><input className="input" value={draft.region_province || ''} onChange={(event) => setField('region_province', event.target.value)} /></EditField>
-        <EditField label="城市"><input className="input" value={draft.region_city || ''} onChange={(event) => setField('region_city', event.target.value)} /></EditField>
-        <EditField label="上市状态">
-          <select className="input" value={draft.listed_status || 'unknown'} onChange={(event) => setField('listed_status', event.target.value)}>
-            <option value="unknown">未知</option><option value="listed">已上市</option><option value="unlisted">未上市</option><option value="pre_ipo">拟上市</option>
-          </select>
-        </EditField>
+    <div>
+      <p className="mb-3 text-xs text-gray-500">买家主体信息与当前需求的行业、地区和联系人集中展示；每个字段独立编辑、独立保存。</p>
+      <div className="divide-y divide-gray-100 border border-gray-100 px-4">
+        <BuyerInfoRow label="买家名称" value={party.buyer_name} field="buyer_name" editingField={editingField} saving={saving} onEdit={startEditing} onSave={saveField} onCancel={() => setEditingField(null)}>
+          <input className="input" value={textDraft} onChange={(event) => setTextDraft(event.target.value)} autoFocus />
+        </BuyerInfoRow>
+        <BuyerInfoRow label="所在地区" value={buyerLocationText(party)} field="location" editingField={editingField} saving={saving} onEdit={startEditing} onSave={saveField} onCancel={() => setEditingField(null)}>
+          <AdministrativeAreaPicker value={locationDraft} onChange={setLocationDraft} showDistrict={false} />
+        </BuyerInfoRow>
+        <BuyerInfoRow label="行业" value={industryText(intent, taxonomy)} field="industry" editingField={editingField} saving={saving} disabled={!intent || !taxonomy.l1.length} onEdit={startEditing} onSave={saveField} onCancel={() => setEditingField(null)}>
+          <IndustryPairsEditor value={industryDraft} options={taxonomy} onChange={setIndustryDraft} />
+        </BuyerInfoRow>
+        <BuyerInfoRow label="地区" value={regionText(intent)} field="region" editingField={editingField} saving={saving} disabled={!intent} onEdit={startEditing} onSave={saveField} onCancel={() => setEditingField(null)}>
+          <RegionConstraintsEditor value={regionDraft} onChange={setRegionDraft} />
+        </BuyerInfoRow>
+        <BuyerInfoRow label="联系人" value={intent?.contact_name || ''} field="contact_name" editingField={editingField} saving={saving} disabled={!intent} onEdit={startEditing} onSave={saveField} onCancel={() => setEditingField(null)}>
+          <input className="input" value={textDraft} onChange={(event) => setTextDraft(event.target.value)} autoFocus />
+        </BuyerInfoRow>
+        <BuyerInfoRow label="联系方式" value={contactInfoText(intent?.contact_info_json)} field="contact_info" editingField={editingField} saving={saving} disabled={!intent} onEdit={startEditing} onSave={saveField} onCancel={() => setEditingField(null)}>
+          <textarea className="input min-h-20 resize-y" value={textDraft} onChange={(event) => setTextDraft(event.target.value)} placeholder="电话、邮箱、微信等" autoFocus />
+        </BuyerInfoRow>
+        <BuyerInfoRow label="其他" value={party.notes || ''} field="notes" editingField={editingField} saving={saving} onEdit={startEditing} onSave={saveField} onCancel={() => setEditingField(null)}>
+          <textarea className="input min-h-28 resize-y" value={textDraft} onChange={(event) => setTextDraft(event.target.value)} autoFocus />
+        </BuyerInfoRow>
       </div>
-      <EditField label="主营业务"><textarea className="input min-h-20 resize-y" value={draft.main_business || ''} onChange={(event) => setField('main_business', event.target.value)} /></EditField>
-      <EditField label="资金实力/规模"><textarea className="input min-h-20 resize-y" value={draft.capital_strength_summary || ''} onChange={(event) => setField('capital_strength_summary', event.target.value)} /></EditField>
-      <EditField label="资料摘要"><textarea className="input min-h-20 resize-y" value={draft.profile_summary || ''} onChange={(event) => setField('profile_summary', event.target.value)} /></EditField>
-      <EditField label="备注"><textarea className="input min-h-24 resize-y" value={draft.notes || ''} onChange={(event) => setField('notes', event.target.value)} /></EditField>
-      <div className="flex justify-end gap-2">
-        <button type="button" onClick={() => { setDraft(partyDraft(party)); setEditing(false); }} className="border border-gray-200 px-4 py-2 text-sm text-gray-700">取消</button>
-        <button type="button" onClick={() => void save()} disabled={saving} className="bg-brand-600 px-4 py-2 text-sm text-white disabled:opacity-50">{saving ? '保存中' : '保存'}</button>
-      </div>
+      {!intent ? <p className="mt-2 text-xs text-gray-400">录入并购需求后即可维护行业、目标地区、联系人和联系方式。</p> : null}
+    </div>
+  );
+}
+
+function BuyerInfoRow({
+  label,
+  value,
+  field,
+  editingField,
+  saving,
+  disabled = false,
+  onEdit,
+  onSave,
+  onCancel,
+  children,
+}: {
+  label: string;
+  value: string;
+  field: BuyerInfoField;
+  editingField: BuyerInfoField | null;
+  saving: boolean;
+  disabled?: boolean;
+  onEdit: (field: BuyerInfoField) => void;
+  onSave: () => Promise<void>;
+  onCancel: () => void;
+  children: ReactNode;
+}) {
+  const editing = editingField === field;
+  return (
+    <div className="py-3">
+      {editing ? (
+        <div className="space-y-3">
+          <p className="text-xs font-medium text-gray-600">{label}</p>
+          {children}
+          <div className="flex justify-end gap-2">
+            <button type="button" disabled={saving} onClick={() => void onSave()} className="inline-flex items-center gap-1 bg-brand-600 px-3 py-1.5 text-xs text-white disabled:opacity-50">{saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}保存</button>
+            <button type="button" disabled={saving} onClick={onCancel} className="inline-flex items-center gap-1 border border-gray-200 px-3 py-1.5 text-xs text-gray-600"><X className="h-3.5 w-3.5" />取消</button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-start gap-3">
+          <span className="w-24 shrink-0 text-xs text-gray-500">{label}</span>
+          <span className={`min-w-0 flex-1 whitespace-pre-wrap text-sm ${value ? 'text-gray-800' : 'text-gray-300'}`}>{value || (disabled ? '录入需求后维护' : '未填写')}</span>
+          <button type="button" title={`编辑${label}`} disabled={disabled} onClick={() => onEdit(field)} className="p-1.5 text-gray-400 hover:bg-gray-100 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-30"><Pencil className="h-3.5 w-3.5" /></button>
+        </div>
+      )}
     </div>
   );
 }
@@ -293,8 +371,6 @@ function IntentAttachments({ intentId, onIntentRefresh }: { intentId: string; on
   );
 }
 
-function Info({ label, value, wide = false }: { label: string; value: string | number | null | undefined; wide?: boolean }) { return <div className={`flex gap-3 ${wide ? 'items-start' : 'items-baseline'}`}><span className="w-24 shrink-0 text-xs text-gray-500">{label}</span><span className="min-w-0 whitespace-pre-wrap text-sm text-gray-800">{value || '-'}</span></div>; }
-function EditField({ label, children }: { label: string; children: ReactNode }) { return <label className="block"><span className="mb-1 block text-xs font-medium text-gray-600">{label}</span>{children}</label>; }
 function LoadingText({ text }: { text: string }) { return <div className="flex items-center justify-center py-12 text-sm text-gray-400"><Loader2 className="mr-2 h-4 w-4 animate-spin" />{text}</div>; }
 function ErrorState({ message, onRetry }: { message: string; onRetry: () => void }) { return <div className="border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"><p>{message}</p><button type="button" onClick={onRetry} className="mt-2 text-xs font-medium underline">重新加载</button></div>; }
 function EmptyState({ title, description }: { title: string; description: string }) { return <div className="py-12 text-center"><Search className="mx-auto h-8 w-8 text-gray-300" /><p className="mt-2 text-sm text-gray-500">{title}</p><p className="mt-1 text-xs text-gray-400">{description}</p></div>; }
@@ -306,8 +382,61 @@ function AttachmentStatus({ item }: { item: AttachmentItem }) {
   return <span className={`shrink-0 px-1.5 py-0.5 text-[11px] ${color}`}>{labels[status]}</span>;
 }
 
-function partyDraft(party: BuyerParty): Partial<BuyerPartyCreate> { return { buyer_name: party.buyer_name, legal_name: party.legal_name || '', buyer_type: party.buyer_type || '', group_name: party.group_name || '', listed_status: party.listed_status || 'unknown', region_province: party.region_province || '', region_city: party.region_city || '', main_business: party.main_business || '', capital_strength_summary: party.capital_strength_summary || '', profile_summary: party.profile_summary || '', notes: party.notes || '' }; }
 function nullIfEmpty(value: string | null | undefined): string | null { return value?.trim() || null; }
+function isIntentField(field: BuyerInfoField): boolean { return ['industry', 'region', 'contact_name', 'contact_info'].includes(field); }
+function buyerLocationText(party: BuyerParty): string { return [party.region_province, party.region_city].filter(Boolean).join(' '); }
+function intentRegions(intent?: BuyerIntent | null): BuyerRegionConstraint[] {
+  return Array.isArray(intent?.region_constraints_json)
+    ? intent.region_constraints_json.filter((item) => Boolean(item?.province)).map((item) => ({ ...item }))
+    : [];
+}
+function regionText(intent?: BuyerIntent | null): string {
+  return intentRegions(intent).map((item) => {
+    const area = [item.province, item.city, item.district].filter(Boolean).join(' ');
+    const effect = item.effect === 'required' ? '必须' : item.effect === 'excluded' ? '排除' : '优先';
+    return `${area}（${effect}）`;
+  }).join('、');
+}
+function intentIndustryPairs(intent: BuyerIntent | null | undefined, taxonomy: IndustryOptionsResponse): IndustryPairValue[] {
+  if (!intent) return [];
+  const pairs: IndustryPairValue[] = (intent.industries_json || []).map((l1) => ({ l1 }));
+  for (const l2 of intent.industry_l2_json || []) {
+    const match = taxonomy.l2.find((item) => item.term === l2);
+    if (match) pairs.push({ l1: match.l1, l2 });
+  }
+  const seen = new Set<string>();
+  return pairs.filter((pair) => {
+    const key = `${pair.l1}:${pair.l2 || ''}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+function industryText(intent: BuyerIntent | null | undefined, taxonomy: IndustryOptionsResponse): string {
+  const pairs = intentIndustryPairs(intent, taxonomy);
+  const grouped = new Map<string, string[]>();
+  for (const pair of pairs) {
+    const l2 = grouped.get(pair.l1) || [];
+    if (pair.l2) l2.push(pair.l2);
+    grouped.set(pair.l1, l2);
+  }
+  const mappedL2 = new Set(pairs.flatMap((pair) => pair.l2 ? [pair.l2] : []));
+  const unmatchedL2 = (intent?.industry_l2_json || []).filter((l2) => !mappedL2.has(l2));
+  return [
+    ...[...grouped.entries()].map(([l1, l2]) => l2.length ? `${l1} / ${l2.join('、')}` : l1),
+    ...unmatchedL2,
+  ].join('；');
+}
+function contactInfoText(value: Record<string, unknown> | null | undefined): string {
+  if (!value || !Object.keys(value).length) return '';
+  if (typeof value.text === 'string') return value.text;
+  const labels: Record<string, string> = { phone: '电话', mobile: '手机', email: '邮箱', wechat: '微信' };
+  return Object.entries(value).flatMap(([key, item]) => {
+    if (item === null || item === undefined || item === '') return [];
+    const text = Array.isArray(item) ? item.join('、') : typeof item === 'object' ? JSON.stringify(item) : String(item);
+    return [`${labels[key] || key}：${text}`];
+  }).join('\n');
+}
 function attachmentKindLabel(item: AttachmentItem): string {
   const extension = (item.file_type || item.file_name.split('.').pop() || '').toLowerCase();
   if (item.extraction_strategy === 'multimodal_llm_direct') return '图片 · 模型直接读取';

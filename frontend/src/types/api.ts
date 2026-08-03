@@ -325,6 +325,7 @@ export interface BuyerIntent {
   intent_name: string;
   status: string;
   contact_name: string | null;
+  contact_info_json: Record<string, unknown>;
   raw_requirement_text: string | null;
   intent_summary: string | null;
   industry_primary: string | null;
@@ -652,6 +653,7 @@ export interface BuyerIntentCreate {
   intent_name: string;
   buyer_party_id?: string;
   contact_name?: string;
+  contact_info_json?: Record<string, unknown>;
   raw_requirement_text?: string;
   intent_summary?: string;
   industry_primary?: string;
@@ -747,6 +749,7 @@ export interface BuyerIntentUpdate {
   intent_name?: string;
   status?: string;
   contact_name?: string | null;
+  contact_info_json?: Record<string, unknown>;
   raw_requirement_text?: string | null;
   intent_summary?: string | null;
   industry_primary?: string | null;

@@ -716,13 +716,13 @@ function FieldEditor({ indicator, value, effect, onValue, onEffect }: {
   return <div>{header}<input className="input" value={stringValue(value)} onChange={(event) => onValue(event.target.value)} /></div>;
 }
 
-function RegionConstraintsEditor({ value, onChange }: { value: BuyerRegionConstraint[]; onChange: (value: BuyerRegionConstraint[]) => void }) {
+export function RegionConstraintsEditor({ value, onChange }: { value: BuyerRegionConstraint[]; onChange: (value: BuyerRegionConstraint[]) => void }) {
   return (
     <div className="space-y-2 border border-gray-200 bg-gray-50 p-3">
       {value.map((item, index) => (
-        <div key={`${item.province}-${item.city || ''}-${item.district || ''}-${index}`} className="grid gap-2 border-b border-gray-200 pb-2 lg:grid-cols-[1fr_8rem_auto]">
+        <div key={`${item.province}-${item.city || ''}-${item.district || ''}-${index}`} className="grid min-w-0 gap-2 border-b border-gray-200 pb-2 lg:grid-cols-[minmax(0,1fr)_8rem_auto]">
           <AdministrativeAreaPicker value={item} onChange={(area) => onChange(value.map((entry, itemIndex) => itemIndex === index ? { ...area, effect: item.effect } : entry))} />
-          <select value={item.effect} onChange={(event) => onChange(value.map((entry, itemIndex) => itemIndex === index ? { ...entry, effect: event.target.value as BuyerRegionConstraint['effect'] } : entry))} className="border border-gray-200 bg-white px-2 py-1.5 text-xs"><option value="required">必须</option><option value="preferred">优先</option><option value="excluded">排除</option></select>
+          <select value={item.effect} onChange={(event) => onChange(value.map((entry, itemIndex) => itemIndex === index ? { ...entry, effect: event.target.value as BuyerRegionConstraint['effect'] } : entry))} className="min-w-0 border border-gray-200 bg-white px-2 py-1.5 text-xs"><option value="required">必须</option><option value="preferred">优先</option><option value="excluded">排除</option></select>
           <button type="button" onClick={() => onChange(value.filter((_, itemIndex) => itemIndex !== index))} className="text-xs text-red-600">移除</button>
         </div>
       ))}

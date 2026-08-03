@@ -19,9 +19,11 @@ function areaCode(entries: Array<[string, string]>, name?: string): string {
 export default function AdministrativeAreaPicker({
   value,
   onChange,
+  showDistrict = true,
 }: {
   value: AdministrativeAreaValue;
   onChange: (value: AdministrativeAreaValue) => void;
+  showDistrict?: boolean;
 }) {
   const provinceCode = areaCode(areaEntries.province, value.province);
   const cityCode = areaCode(areaEntries.city, value.city);
@@ -29,19 +31,21 @@ export default function AdministrativeAreaPicker({
   const districtOptions = areaEntries.district.filter(([code]) => !cityCode || code.slice(0, 4) === cityCode.slice(0, 4));
 
   return (
-    <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-      <select value={value.province} onChange={(event) => onChange({ province: event.target.value })} className="border border-gray-200 bg-white px-2 py-1.5 text-xs">
+    <div className={`grid min-w-0 grid-cols-1 gap-2 ${showDistrict ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`}>
+      <select value={value.province} onChange={(event) => onChange({ province: event.target.value })} className="min-w-0 border border-gray-200 bg-white px-2 py-1.5 text-xs">
         <option value="">省（可不填）</option>
         {areaEntries.province.map(([code, name]) => <option key={code} value={name}>{name}</option>)}
       </select>
-      <select value={value.city || ''} onChange={(event) => onChange({ province: value.province, city: event.target.value || undefined })} disabled={!value.province} className="border border-gray-200 bg-white px-2 py-1.5 text-xs disabled:bg-gray-100">
+      <select value={value.city || ''} onChange={(event) => onChange({ province: value.province, city: event.target.value || undefined })} disabled={!value.province} className="min-w-0 border border-gray-200 bg-white px-2 py-1.5 text-xs disabled:bg-gray-100">
         <option value="">市（可不填）</option>
         {cityOptions.map(([code, name]) => <option key={code} value={name}>{name}</option>)}
       </select>
-      <select value={value.district || ''} onChange={(event) => onChange({ ...value, district: event.target.value || undefined })} disabled={!value.city} className="border border-gray-200 bg-white px-2 py-1.5 text-xs disabled:bg-gray-100">
-        <option value="">区/县（可不填）</option>
-        {districtOptions.map(([code, name]) => <option key={code} value={name}>{name}</option>)}
-      </select>
+      {showDistrict ? (
+        <select value={value.district || ''} onChange={(event) => onChange({ ...value, district: event.target.value || undefined })} disabled={!value.city} className="min-w-0 border border-gray-200 bg-white px-2 py-1.5 text-xs disabled:bg-gray-100">
+          <option value="">区/县（可不填）</option>
+          {districtOptions.map(([code, name]) => <option key={code} value={name}>{name}</option>)}
+        </select>
+      ) : null}
     </div>
   );
 }
