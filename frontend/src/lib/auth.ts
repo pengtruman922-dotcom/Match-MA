@@ -46,8 +46,6 @@ export function isLoggedIn(): boolean {
 
 export function isAdmin(): boolean {
   const user = getStoredUser();
-  // 老会话可能没有 role 字段（升级前存储的），默认按管理员处理，
-  // 后端仍会对每个请求做真实鉴权。
-  if (!user || !user.role) return true;
-  return user.role === 'admin';
+  // 前端权限展示也应失败关闭；老会话缺少 role 时重新登录即可恢复。
+  return user?.role === 'admin';
 }

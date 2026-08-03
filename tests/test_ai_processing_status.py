@@ -199,6 +199,14 @@ def test_research_enqueue_marks_target_researching() -> None:
     assert "researching" in source, "调研入队未写 information_status='researching'"
 
 
+def test_consultant_research_polling_uses_scoped_research_endpoint() -> None:
+    """顾问可发起本人标的调研，轮询不能误用管理员专属任务中心接口。"""
+    source = (REPO / "frontend/src/features/targets/TargetInfoPanel.tsx").read_text(encoding="utf-8")
+
+    assert "research.sellerTargetStatus(currentTarget.id)" in source
+    assert "backgroundJobs" not in source
+
+
 def test_research_outcome_releases_researching() -> None:
     source = (REPO / "backend/app/jobs/handlers/research.py").read_text(encoding="utf-8")
     assert "_mark_research_outcome" in source

@@ -10,7 +10,7 @@ import {
   Search,
   X,
 } from 'lucide-react';
-import { backgroundJobs, fieldSources, indicatorRegistry, meta, profileSections, research, sellerTargets } from '../../lib/api';
+import { fieldSources, indicatorRegistry, meta, profileSections, research, sellerTargets } from '../../lib/api';
 import { formatYuan } from '../../lib/format';
 import type {
   IndicatorRegistryResponse,
@@ -142,10 +142,10 @@ export default function TargetInfoPanel({
   useEffect(() => {
     if (!researchJobId) return;
     const timer = window.setInterval(() => {
-      void backgroundJobs
-        .get(researchJobId)
-        .then((job) => {
-          if (['succeeded', 'failed', 'canceled'].includes(job.status)) {
+      void research.sellerTargetStatus(currentTarget.id)
+        .then((status) => {
+          const job = status.latest_job;
+          if (job?.id === researchJobId && ['succeeded', 'failed', 'canceled'].includes(job.status)) {
             window.clearInterval(timer);
             setResearchJobId(null);
             setResearching(false);
@@ -161,7 +161,7 @@ export default function TargetInfoPanel({
         });
     }, 3000);
     return () => window.clearInterval(timer);
-  }, [load, researchJobId]);
+  }, [currentTarget.id, load, researchJobId]);
 
   // 调研可能从列表页或另一个浏览器标签发起，不能只依赖本页面保存的 job id。
   const refreshResearchState = useCallback(async () => {

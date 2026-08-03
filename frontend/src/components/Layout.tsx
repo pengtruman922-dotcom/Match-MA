@@ -9,10 +9,10 @@ const baseNavItems: Array<{ to: string; label: string; end?: boolean }> = [
   { to: '/recommendations', label: '智能推荐' },
   { to: '/board', label: '撮合看板' },
   { to: '/dashboard', label: '数据看板' },
-  { to: '/settings', label: '设置' },
 ];
 
 const adminNavItems: Array<{ to: string; label: string; end?: boolean }> = [
+  { to: '/settings', label: '设置' },
   { to: '/users', label: '账号管理' },
   { to: '/tasks', label: '任务中心' },
 ];

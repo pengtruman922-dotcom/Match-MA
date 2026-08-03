@@ -17,7 +17,6 @@ from backend.app.api.routes.recommendations import (
     _recommendation_session_is_processing,
     _recommendation_session_polling_hint,
 )
-from backend.app.config import get_settings
 
 SESSION_ID = UUID("00000000-0000-0000-0000-000000000001")
 BUYER_INTENT_ID = UUID("00000000-0000-0000-0000-000000000002")
@@ -182,9 +181,7 @@ class _MessageDb:
         return _MessageResult(self._rows)
 
 
-def test_owner_scoped_selected_item_must_come_from_session_candidates(monkeypatch) -> None:
-    monkeypatch.setenv("OWNER_SCOPE_ENFORCED", "true")
-    get_settings.cache_clear()
+def test_owner_scoped_selected_item_must_come_from_session_candidates() -> None:
     current_user = AuthContext(user_id=uuid4(), role="consultant", name="consultant")
     db = _MessageDb(
         [
@@ -232,4 +229,3 @@ def test_owner_scoped_selected_item_must_come_from_session_candidates(monkeypatc
         )
 
     assert exc_info.value.status_code == 403
-    get_settings.cache_clear()

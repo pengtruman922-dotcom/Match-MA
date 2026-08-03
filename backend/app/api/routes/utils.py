@@ -8,7 +8,6 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
-from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 
 
@@ -184,7 +183,9 @@ def owner_filter_options(db: Session, table: str, params: dict[str, Any]) -> lis
 
 
 def owner_scope_required(current_user: Any) -> bool:
-    return bool(get_settings().owner_scope_enforced and not current_user.is_admin)
+    # 数据归属是权限地板，不是可关闭的功能开关。管理员看全局；普通顾问的
+    # 所有读写路径都必须追加负责人范围，避免部署漏配环境变量时静默越权。
+    return not current_user.is_admin
 
 
 def scoped_params(params: dict[str, Any], current_user: Any) -> dict[str, Any]:
@@ -378,9 +379,9 @@ def relation_sole_owner_sql(alias: str) -> str:
     """看板「我全权的」视图筛选：标的侧与买家侧都归当前用户。
 
     与 relation_visible_sql 是 AND / OR 的关系，共用 :scope_user_id。
-    这是**视图筛选**，不是权限收紧——权限地板仍由 relation_visible_sql
-    在 owner_scope_enforced 打开时负责。因为 sole ⊆ involved，两者同时
-    出现时不会互相矛盾。
+    这是**视图筛选**，不是权限收紧——普通顾问的权限地板始终由
+    relation_visible_sql 负责。因为 sole ⊆ involved，两者同时出现时不会
+    互相矛盾。
     """
     return f"""(
         exists (
@@ -415,9 +416,8 @@ def relation_sole_owner_sql(alias: str) -> str:
 def relation_owner_sql(alias: str) -> str:
     """看板「指定负责人」视图筛选：任一方归 :owner_user_id 指定的账号。
 
-    与 relation_visible_sql 谓词同形，但用**独立参数**——两者可以同时出现
-    （管理员挑了某人，同时 owner_scope_enforced 又对非管理员生效），共用
-    一个参数名会让后写的值覆盖前一个，把权限地板悄悄改成视图筛选。
+    与 relation_visible_sql 谓词同形，但用**独立参数**——两者可以同时出现，
+    共用一个参数名会让后写的值覆盖前一个，把权限地板悄悄改成视图筛选。
     """
     return f"""(
         exists (
