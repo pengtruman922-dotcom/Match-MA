@@ -16,6 +16,7 @@ import inspect
 import pytest
 
 from backend.app.api.routes.seller_targets import (
+    SELLER_TARGET_OUT_COLUMNS,
     SELLER_TARGET_SEARCH_COLUMNS,
     _industry_filter,
     _industry_option_tree,
@@ -171,3 +172,12 @@ def test_target_list_does_not_aggregate_relation_events() -> None:
     assert "buyer_seller_relation" not in source
     assert "relation_event" not in source
     assert "latest_progress" not in source
+
+
+def test_target_list_exposes_pending_research_conflicts_without_frontend_n_plus_one() -> None:
+    source = inspect.getsource(list_seller_targets)
+
+    assert "pending_research_conflict_count" in source or "SELLER_TARGET_OUT_COLUMNS" in source
+    assert "research_proposal" in SELLER_TARGET_OUT_COLUMNS
+    assert "review_status = 'pending_review'" in SELLER_TARGET_OUT_COLUMNS
+    assert "conflict_kind = 'same_period_conflict'" in SELLER_TARGET_OUT_COLUMNS

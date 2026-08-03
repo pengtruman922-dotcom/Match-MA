@@ -1015,25 +1015,19 @@ def _relation_of(
     new_content: str,
     new_as_of_date: str | None,
 ) -> str:
-    """Classify a claim against what is already on file — in code, not by asking.
+    """Compare profile text deterministically, without period heuristics.
 
-    The prompt never asked for `relation`, so every proposal came back
-    `supplement` and the UI could only ever say 「补充信息」. Whether two
-    statements describe the same period is a comparison, not a judgement call:
-    the model supplies the fact and its date, and this decides what that means
-    relative to the current revision.
+    Text has only two non-conflict cases: an empty current value receives a
+    supplement, or the two trimmed strings are exactly equal. Different
+    wording always needs a consultant decision, even when the researched item
+    carries a newer date; a date alone cannot prove that one narrative should
+    replace another.
     """
     current_content = str((current or {}).get("content_text") or "").strip()
     if not current_content:
         return "supplement"
     if current_content == new_content.strip():
         return "consistent"
-    current_as_of = str((current or {}).get("as_of_date") or "").strip()
-    new_as_of = str(new_as_of_date or "").strip()
-    if new_as_of and new_as_of != current_as_of:
-        # 新的一期覆盖旧的一期；没有旧日期时新日期同样算推进。
-        return "temporal_update" if new_as_of > current_as_of else "same_period_conflict"
-    # 同期（或都没标期间）却说得不一样 —— 这才是需要人看一眼的冲突。
     return "same_period_conflict"
 
 

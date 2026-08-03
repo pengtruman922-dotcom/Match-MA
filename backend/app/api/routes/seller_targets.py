@@ -96,6 +96,7 @@ class SellerTargetOut(BaseModel):
     information_status: str
     ai_processing_state: str
     ai_processing_detail: str
+    pending_research_conflict_count: int = 0
     research_job_type: str | None = None
     research_job_status: str | None = None
     industry_l1: str | None = None
@@ -336,6 +337,15 @@ SELLER_TARGET_OUT_COLUMNS = """
               (select au.name from app_user au where au.id = seller_target.owner_user_id) as owner_name,
               last_research_at::text as last_research_at, last_parse_at::text as last_parse_at,
               research_last_outcome,
+              (select count(*)
+               from research_proposal rp
+               where rp.team_id = seller_target.team_id
+                 and rp.workspace_id = seller_target.workspace_id
+                 and rp.entity_type = 'seller_target'
+                 and rp.entity_id = seller_target.id
+                 and rp.review_status = 'pending_review'
+                 and rp.conflict_kind = 'same_period_conflict'
+                 and rp.deleted_at is null) as pending_research_conflict_count,
               created_at::text as created_at, updated_at::text as updated_at
 """
 

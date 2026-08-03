@@ -18,6 +18,7 @@ from backend.app.jobs.handlers.research import (
     _chat_caller,
     _omit_fetched_page_text,
     _prepare_research_claims,
+    _relation_of,
     _should_auto_accept_research_proposal,
     _structured_fact_relation,
     normalize_research_output,
@@ -240,11 +241,7 @@ def test_structured_facts_are_limited_to_the_whitelist() -> None:
 
 
 def test_relation_is_decided_by_code_against_the_current_revision() -> None:
-    """判断两段话说的是不是同一期，是比较不是判断。
-
-    提示词从来没要求过 relation，于是每条建议都回落成 supplement，
-    界面上永远只会显示「补充信息」，「与当前信息冲突」不可能出现。
-    """
+    """画像文本只认空值补充与文字完全一致，日期不改变冲突结论。"""
     current = {
         "business_product": {"content_text": "旧的业务描述", "as_of_date": "2024-12-31"},
         "tech_team": {"content_text": "团队自研", "as_of_date": None},
@@ -253,7 +250,7 @@ def test_relation_is_decided_by_code_against_the_current_revision() -> None:
     claims, _ = normalize_research_output(
         {
             "profile_sections": [
-                # 新一期 → 时效更新
+                # 即使日期更新，文字不同仍由顾问确认
                 _profile_claim(content_text="新的业务描述", as_of_date="2025-12-31"),
                 # 内容与在档的一字不差 → 一致
                 _profile_claim(section_code="tech_team", content_text="团队自研"),
@@ -267,11 +264,25 @@ def test_relation_is_decided_by_code_against_the_current_revision() -> None:
     )
 
     assert [(claim["section_code"], claim["relation"]) for claim in claims] == [
-        ("business_product", "temporal_update"),
+        ("business_product", "same_period_conflict"),
         ("tech_team", "consistent"),
         ("ops_quality", "same_period_conflict"),
         ("deal_terms", "supplement"),
     ]
+
+
+def test_profile_text_relation_only_has_two_non_conflict_cases() -> None:
+    assert _relation_of(current=None, new_content="新增内容", new_as_of_date="2025-12-31") == "supplement"
+    assert _relation_of(
+        current={"content_text": " 完全一样 ", "as_of_date": "2024-12-31"},
+        new_content="完全一样",
+        new_as_of_date="2025-12-31",
+    ) == "consistent"
+    assert _relation_of(
+        current={"content_text": "原内容", "as_of_date": "2024-12-31"},
+        new_content="不同内容",
+        new_as_of_date="2025-12-31",
+    ) == "same_period_conflict"
 
 
 def test_coverage_without_result_stays_in_the_report_and_creates_no_proposal() -> None:
@@ -741,6 +752,99 @@ def test_proposal_api_exposes_the_normalized_value_without_losing_the_source_uni
     assert proposal["proposed_value_json"]["value"] == {"value": "8.32", "unit": "亿元"}
     assert proposal["normalized_proposed_value"] == 832_000_000
     assert proposal["is_actionable"] is True
+
+
+def test_proposal_api_normalizes_the_consultant_reviewed_value() -> None:
+    from backend.app.api.routes.research import _proposal_output
+
+    proposal = _proposal_output(
+        {
+            "id": UUID("11111111-1111-1111-1111-111111111111"),
+            "proposal_kind": "structured_fact",
+            "field_path": "current_revenue_yuan",
+            "proposed_value_json": {
+                "value": {"value": "8.32", "unit": "亿元"},
+                "reviewed_value": 810_000_000,
+            },
+            "current_value_json": {"value": 700_000_000},
+            "section_code": None,
+            "source_excerpt": "营业收入为8.32亿元",
+            "anchor_matches_json": [],
+        },
+        db=object(),
+    )
+
+    assert proposal["proposed_value_json"]["value"] == {"value": "8.32", "unit": "亿元"}
+    assert proposal["proposed_value_json"]["reviewed_value"] == 810_000_000
+    assert proposal["normalized_proposed_value"] == 810_000_000
+
+
+def test_modified_accept_applies_reviewed_value_and_preserves_original(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.app.services import research_apply
+
+    captured: dict[str, object] = {}
+
+    def capture_write(db, proposal, *, field_path, new_value, user_id, review_status):
+        captured.update(
+            field_path=field_path,
+            new_value=new_value,
+            user_id=user_id,
+            review_status=review_status,
+        )
+
+    monkeypatch.setattr(research_apply, "_write_structured_fact", capture_write)
+    proposed_value = {
+        "value": {"value": "8.32", "unit": "亿元"},
+        "reviewed_value": 810_000_000,
+    }
+    research_apply.apply_research_proposal(
+        None,
+        {
+            "id": "p1",
+            "entity_id": "e1",
+            "proposal_kind": "structured_fact",
+            "field_path": "current_revenue_yuan",
+            "proposed_value_json": proposed_value,
+        },
+        user_id="u1",
+    )
+
+    assert captured["new_value"] == Decimal("810000000")
+    assert proposed_value["value"] == {"value": "8.32", "unit": "亿元"}
+    assert proposed_value["reviewed_value"] == 810_000_000
+
+
+def test_review_status_only_rewrites_proposal_json_for_modified_accept() -> None:
+    from backend.app.api.routes.research import _set_proposal_review_status
+
+    class CaptureDb:
+        calls: list[tuple[str, dict]] = []
+
+        def execute(self, statement, params):
+            self.calls.append((str(statement), params))
+
+    db = CaptureDb()
+    proposal_id = UUID("11111111-1111-1111-1111-111111111111")
+    user_id = UUID("22222222-2222-2222-2222-222222222222")
+    _set_proposal_review_status(
+        db,
+        proposal_id,
+        review_status="accepted",
+        user_id=user_id,
+    )
+    _set_proposal_review_status(
+        db,
+        proposal_id,
+        review_status="accepted",
+        user_id=user_id,
+        proposed_value_json={"value": "调研原值", "reviewed_value": "顾问终值"},
+    )
+
+    assert "proposed_value_json =" not in db.calls[0][0]
+    assert "proposed_value_json" not in db.calls[0][1]
+    assert "proposed_value_json =" in db.calls[1][0]
+    assert db.calls[1][1]["proposed_value_json"]["value"] == "调研原值"
+    assert db.calls[1][1]["proposed_value_json"]["reviewed_value"] == "顾问终值"
 
 
 def test_field_writer_rejection_is_translated_so_one_bad_value_cannot_abort_the_run() -> None:

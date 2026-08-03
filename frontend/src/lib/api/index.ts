@@ -498,8 +498,13 @@ export const research = {
       entity_id: entityId,
       review_status: reviewStatus,
     })}`),
-  acceptProposal: (proposalId: string) =>
-    apiRequest<ResearchProposal>(`/research/proposals/${proposalId}/accept`, { method: 'POST' }),
+  acceptProposal: (proposalId: string, reviewedValue?: unknown) =>
+    apiRequest<ResearchProposal>(`/research/proposals/${proposalId}/accept`, {
+      method: 'POST',
+      ...(reviewedValue === undefined
+        ? {}
+        : { body: JSON.stringify({ reviewed_value: reviewedValue }) }),
+    }),
   rejectProposal: (proposalId: string) =>
     apiRequest<ResearchProposal>(`/research/proposals/${proposalId}/reject`, { method: 'POST' }),
 };

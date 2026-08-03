@@ -39,6 +39,7 @@ export function TargetStatusBadge({ item }: { item: SellerTarget }) {
 export function TargetAiProcessingBadge({ item }: { item: SellerTarget }) {
   const state = aiProcessingState(item);
   const active = isAiProcessingActive(state);
+  const pendingCount = item.pending_research_conflict_count || 0;
   const content = (
     <span
       title={aiProcessingDetail(item)}
@@ -48,13 +49,24 @@ export function TargetAiProcessingBadge({ item }: { item: SellerTarget }) {
       {AI_PROCESSING_LABELS[state]}
     </span>
   );
-  if (state === 'parse_failed') {
-    return <Link to={`/targets/${item.id}?tab=history`}>{content}</Link>;
-  }
-  if (state === 'research_failed') {
-    return <Link to={`/targets/${item.id}`}>{content}</Link>;
-  }
-  return content;
+  const status = state === 'parse_failed'
+    ? <Link to={`/targets/${item.id}?tab=history`}>{content}</Link>
+    : state === 'research_failed'
+      ? <Link to={`/targets/${item.id}`}>{content}</Link>
+      : content;
+  return (
+    <span className="inline-flex flex-wrap items-center justify-center gap-1">
+      {status}
+      {pendingCount > 0 && (
+        <Link
+          to={`/targets/${item.id}`}
+          className="whitespace-nowrap bg-amber-50 px-1.5 py-0.5 text-[11px] text-amber-700"
+        >
+          {pendingCount}项待确认
+        </Link>
+      )}
+    </span>
+  );
 }
 
 export function YesNoBadge({ value }: { value: string | null }) {

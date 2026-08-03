@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   Check,
   ChevronDown,
@@ -73,7 +73,6 @@ export default function TargetInfoPanel({
   const [researchJobId, setResearchJobId] = useState<string | null>(null);
   const [proposals, setProposals] = useState<ResearchProposal[]>([]);
   const [reviewingProposalId, setReviewingProposalId] = useState<string | null>(null);
-  const [showResearchConflicts, setShowResearchConflicts] = useState(false);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [error, setError] = useState<string | null>(null);
   const [registry, setRegistry] = useState<IndicatorRegistryResponse | null>(null);
@@ -96,13 +95,39 @@ export default function TargetInfoPanel({
         : [],
     [currentTarget, registry],
   );
-  const conflictProposals = useMemo(
-    () => proposals.filter((item) => item.conflict_kind === 'same_period_conflict'),
-    [proposals],
-  );
-  const otherPendingProposals = useMemo(
-    () => proposals.filter((item) => item.conflict_kind !== 'same_period_conflict'),
-    [proposals],
+  const proposalsByField = useMemo(() => {
+    const result = new Map<string, ResearchProposal[]>();
+    for (const proposal of proposals) {
+      if (proposal.proposal_kind !== 'structured_fact' || !proposal.field_path) continue;
+      const indicator = registry?.indicators.find((item) => item.column === proposal.field_path);
+      const slot = indicator?.fold_into || proposal.field_path;
+      result.set(slot, [...(result.get(slot) || []), proposal]);
+    }
+    return result;
+  }, [proposals, registry]);
+  const proposalsBySection = useMemo(() => {
+    const result = new Map<string, ResearchProposal[]>();
+    for (const proposal of proposals) {
+      if (proposal.proposal_kind !== 'profile_section' || !proposal.section_code) continue;
+      result.set(proposal.section_code, [...(result.get(proposal.section_code) || []), proposal]);
+    }
+    return result;
+  }, [proposals]);
+  const placedProposalIds = useMemo(() => {
+    const renderedFields = new Set(groups.flatMap((group) => group.fields.map((field) => field.field)));
+    const renderedSections = new Set(groups.flatMap((group) => group.sectionCode ? [group.sectionCode] : []));
+    return new Set([
+      ...Array.from(proposalsByField.entries())
+        .filter(([field]) => renderedFields.has(field))
+        .flatMap(([, items]) => items.map((item) => item.id)),
+      ...Array.from(proposalsBySection.entries())
+        .filter(([section]) => renderedSections.has(section))
+        .flatMap(([, items]) => items.map((item) => item.id)),
+    ]);
+  }, [groups, proposalsByField, proposalsBySection]);
+  const unplacedProposals = useMemo(
+    () => proposals.filter((item) => !placedProposalIds.has(item.id)),
+    [placedProposalIds, proposals],
   );
 
   useEffect(() => setCurrentTarget(target), [target]);
@@ -249,10 +274,14 @@ export default function TargetInfoPanel({
     }
   };
 
-  const reviewProposal = async (proposalId: string, decision: 'accept' | 'reject') => {
+  const reviewProposal = async (
+    proposalId: string,
+    decision: 'accept' | 'reject',
+    reviewedValue?: unknown,
+  ) => {
     setReviewingProposalId(proposalId);
     try {
-      if (decision === 'accept') await research.acceptProposal(proposalId);
+      if (decision === 'accept') await research.acceptProposal(proposalId, reviewedValue);
       else await research.rejectProposal(proposalId);
       await load();
     } catch (err) {
@@ -322,62 +351,17 @@ export default function TargetInfoPanel({
         </p>
       )}
 
-      {conflictProposals.length > 0 && (
-        <div className="border border-amber-100 bg-amber-50/50 px-4 py-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <p className="text-xs font-medium text-amber-800">调研发现 {conflictProposals.length} 个与当前信息冲突的字段</p>
-              <p className="mt-1 text-xs text-amber-700">系统没有自动覆盖，请集中核对后再决定是否采纳。</p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setShowResearchConflicts((value) => !value)}
-              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-amber-800 hover:bg-amber-100"
-            >
-              {showResearchConflicts ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-              {showResearchConflicts ? '收起冲突' : '查看冲突'}
-            </button>
-          </div>
-          {showResearchConflicts ? (
-            <div className="mt-2 space-y-2">
-              {conflictProposals.map((proposal) => (
-                <ProposalCard
-                  key={proposal.id}
-                  proposal={proposal}
-                  registry={registry}
-                  busy={reviewingProposalId === proposal.id}
-                  onReview={reviewProposal}
-                />
-              ))}
-            </div>
-          ) : null}
-        </div>
-      )}
-
-      {otherPendingProposals.length > 0 && (
-        <div className="border border-amber-100 bg-amber-50/50 px-4 py-3">
-          <p className="text-xs font-medium text-amber-800">待确认调研建议（{otherPendingProposals.length}）</p>
-          <p className="mt-1 text-xs text-amber-700">这些是旧批次或非冲突建议，新调研的可追溯补充信息会自动写入。</p>
-          <div className="mt-2 space-y-2">
-            {otherPendingProposals.map((proposal) => (
-              <ProposalCard
-                key={proposal.id}
-                proposal={proposal}
-                registry={registry}
-                busy={reviewingProposalId === proposal.id}
-                onReview={reviewProposal}
-              />
-            ))}
-          </div>
-        </div>
-      )}
-
       {groups.map((group) => {
         const section = group.sectionCode ? sectionByCode.get(group.sectionCode) : undefined;
         const filled = groupFilledCount(group);
         const isEmpty = filled === 0 && !section;
+        const pendingCount = group.fields.reduce(
+          (count, field) => count + (proposalsByField.get(field.field)?.length || 0),
+          group.sectionCode ? (proposalsBySection.get(group.sectionCode)?.length || 0) : 0,
+        );
         // 整组全空的默认折叠：信息页有 50+ 字段，全展开会把有内容的部分淹掉。
-        const isCollapsed = collapsed[group.key] ?? isEmpty;
+        // 有待确认项的分组必须默认展开，让冲突出现在字段原位而不是藏在顶部卡片里。
+        const isCollapsed = collapsed[group.key] ?? (isEmpty && pendingCount === 0);
         return (
           <section key={group.key} className="border border-gray-200 bg-white">
             <button
@@ -396,6 +380,7 @@ export default function TargetInfoPanel({
               <span className="text-xs text-gray-400">
                 {group.fields.length > 0 && `${filled}/${group.fields.length} 字段`}
                 {group.sectionCode && ' · 含其他补充栏'}
+                {pendingCount > 0 && <span className="ml-1 text-amber-700">· {pendingCount}项待确认</span>}
               </span>
             </button>
             {!isCollapsed && (
@@ -403,6 +388,16 @@ export default function TargetInfoPanel({
                 {group.fields.length > 0 && (
                   <div className="grid grid-cols-1 gap-x-8 gap-y-2 sm:grid-cols-2">
                     {group.fields.map((field) => {
+                      const proposalCards = (proposalsByField.get(field.field) || []).map((proposal) => (
+                        <ProposalCard
+                          key={proposal.id}
+                          proposal={proposal}
+                          registry={registry}
+                          industryOptions={industryOptions}
+                          busy={reviewingProposalId === proposal.id}
+                          onReview={reviewProposal}
+                        />
+                      ));
                       const shared = {
                         field,
                         editing: editing === `field:${field.field}`,
@@ -411,6 +406,7 @@ export default function TargetInfoPanel({
                         onShowEvidence: (source: FieldValueSource) => setSelectedEvidence(source),
                         onStart: () => { setEditing(`field:${field.field}`); setDraft(String((currentTarget as unknown as Record<string, unknown>)[field.field] ?? '')); },
                         onCancel: () => setEditing(null),
+                        proposalCards,
                       };
                       if (field.field === 'industry_pairs_json') {
                         return <IndustryPairsField key={field.field} {...shared} pairs={currentTarget.industry_pairs_json || []} options={industryOptions} onSave={(value) => saveField(field.field, value)} />;
@@ -440,6 +436,16 @@ export default function TargetInfoPanel({
                     }}
                     onCancel={() => setEditing(null)}
                     onSave={save}
+                    proposalCards={(proposalsBySection.get(group.sectionCode) || []).map((proposal) => (
+                      <ProposalCard
+                        key={proposal.id}
+                        proposal={proposal}
+                        registry={registry}
+                        industryOptions={industryOptions}
+                        busy={reviewingProposalId === proposal.id}
+                        onReview={reviewProposal}
+                      />
+                    ))}
                   />
                 )}
               </div>
@@ -447,6 +453,23 @@ export default function TargetInfoPanel({
           </section>
         );
       })}
+      {unplacedProposals.length > 0 && (
+        <div className="border border-amber-100 bg-amber-50/50 px-4 py-3">
+          <p className="text-xs font-medium text-amber-800">其他待确认调研项（{unplacedProposals.length}）</p>
+          <div className="mt-2 space-y-2">
+            {unplacedProposals.map((proposal) => (
+              <ProposalCard
+                key={proposal.id}
+                proposal={proposal}
+                registry={registry}
+                industryOptions={industryOptions}
+                busy={reviewingProposalId === proposal.id}
+                onReview={reviewProposal}
+              />
+            ))}
+          </div>
+        </div>
+      )}
       {selectedEvidence && (
         <ResearchEvidenceDrawer
           source={selectedEvidence}
@@ -459,9 +482,10 @@ export default function TargetInfoPanel({
   );
 }
 
-function StructuredField({ field, editing, draft, saving, source, onStart, onCancel, onDraft, onSave, onShowEvidence }: {
+function StructuredField({ field, editing, draft, saving, source, proposalCards, onStart, onCancel, onDraft, onSave, onShowEvidence }: {
   field: InfoGroup['fields'][number]; editing: boolean; draft: string; saving: boolean;
   source?: FieldValueSource;
+  proposalCards: ReactNode;
   onStart: () => void; onCancel: () => void; onDraft: (value: string) => void; onSave: (value: unknown) => Promise<void>;
   onShowEvidence: (source: FieldValueSource) => void;
 }) {
@@ -480,6 +504,7 @@ function StructuredField({ field, editing, draft, saving, source, onStart, onCan
         <button type="button" disabled={saving} onClick={() => void save()} className="text-brand-600"><Check className="h-3.5 w-3.5" /></button><button type="button" onClick={onCancel} className="text-gray-400"><X className="h-3.5 w-3.5" /></button>
       </div> : <button type="button" disabled={!field.writable} onClick={onStart} className={`group flex w-full items-center justify-between text-left text-sm ${field.value ? 'text-gray-800' : 'text-gray-300'} ${field.writable ? 'hover:text-brand-600' : ''}`}><span>{field.value || '-'}</span>{field.writable && <Pencil className="h-3 w-3 opacity-0 group-hover:opacity-100" />}</button>}
       {!editing && <FieldCaption source={source} onShowEvidence={onShowEvidence} />}
+      {proposalCards}
     </div>
   </div>;
 }
@@ -489,6 +514,7 @@ type SpecialFieldProps = {
   editing: boolean;
   saving: boolean;
   source?: FieldValueSource;
+  proposalCards: ReactNode;
   onStart: () => void;
   onCancel: () => void;
   onShowEvidence: (source: FieldValueSource) => void;
@@ -507,7 +533,7 @@ function FieldLabel({ field }: { field: InfoGroup['fields'][number] }) {
   return <span className="flex w-28 shrink-0 items-center gap-1 pt-1 text-xs text-gray-500">{field.label}{field.screening && <span title="参与筛选与打分" className="bg-brand-50 px-1 text-[10px] font-medium text-brand-700">筛</span>}</span>;
 }
 
-function IndustryPairsField({ field, editing, saving, source, onStart, onCancel, onShowEvidence, pairs, options, onSave }: SpecialFieldProps & {
+function IndustryPairsField({ field, editing, saving, source, proposalCards, onStart, onCancel, onShowEvidence, pairs, options, onSave }: SpecialFieldProps & {
   pairs: Array<{ l1: string; l2?: string }>;
   options: IndustryOptionsResponse;
   onSave: (value: Array<{ l1: string; l2?: string }>) => Promise<void>;
@@ -529,11 +555,12 @@ function IndustryPairsField({ field, editing, saving, source, onStart, onCancel,
         <IndustryPairsEditor value={draftPairs} options={options} onChange={setDraftPairs} />
         <div className="flex items-center gap-2"><button type="button" disabled={saving} onClick={() => void onSave(draftPairs)} className="inline-flex items-center gap-1 bg-brand-600 px-2.5 py-1 text-xs text-white disabled:opacity-40"><Check className="h-3 w-3" />保存</button><button type="button" onClick={onCancel} className="text-xs text-gray-400 hover:text-gray-600">取消</button></div>
       </div> : <><button type="button" disabled={!field.writable} onClick={onStart} className={`group flex w-full items-center justify-between text-left text-sm ${display ? 'text-gray-800' : 'text-gray-300'} ${field.writable ? 'hover:text-brand-600' : ''}`}><span>{display || '-'}</span>{field.writable && <Pencil className="h-3 w-3 opacity-0 group-hover:opacity-100" />}</button><FieldCaption source={source} onShowEvidence={onShowEvidence} /></>}
+      {proposalCards}
     </div>
   </div>;
 }
 
-function LocationField({ field, editing, saving, source, onStart, onCancel, onShowEvidence, target, onSave }: SpecialFieldProps & {
+function LocationField({ field, editing, saving, source, proposalCards, onStart, onCancel, onShowEvidence, target, onSave }: SpecialFieldProps & {
   target: SellerTarget;
   onSave: (changes: Record<string, unknown>) => Promise<void>;
 }) {
@@ -554,6 +581,7 @@ function LocationField({ field, editing, saving, source, onStart, onCancel, onSh
     <FieldLabel field={field} />
     <div className="min-w-0 flex-1">
       {editing ? <div className="space-y-2 border border-gray-200 bg-gray-50 p-2"><AdministrativeAreaPicker value={{ province, city: city || undefined, district: district || undefined }} onChange={(value) => { setProvince(value.province); setCity(value.city || ''); setDistrict(value.district || ''); }} /><p className="text-[10px] text-gray-400">变更上级会自动清空下级；筛选仍按省、市、区三个字段命中。</p><div className="flex items-center gap-2"><button type="button" disabled={saving} onClick={() => void onSave({ location_province: province || null, location_city: city || null, location_district: district || null })} className="inline-flex items-center gap-1 bg-brand-600 px-2.5 py-1 text-xs text-white disabled:opacity-40"><Check className="h-3 w-3" />保存</button><button type="button" onClick={onCancel} className="text-xs text-gray-400 hover:text-gray-600">取消</button></div></div> : <><button type="button" disabled={!field.writable} onClick={onStart} className={`group flex w-full items-center justify-between text-left text-sm ${display ? 'text-gray-800' : 'text-gray-300'} ${field.writable ? 'hover:text-brand-600' : ''}`}><span>{display || '-'}</span>{field.writable && <Pencil className="h-3 w-3 opacity-0 group-hover:opacity-100" />}</button><FieldCaption source={source} onShowEvidence={onShowEvidence} /></>}
+      {proposalCards}
     </div>
   </div>;
 }
@@ -569,6 +597,7 @@ function ProfileBlock({
   onStartEdit,
   onCancel,
   onSave,
+  proposalCards,
 }: {
   code: string;
   section: ProfileSection | undefined;
@@ -580,6 +609,7 @@ function ProfileBlock({
   onStartEdit: () => void;
   onCancel: () => void;
   onSave: (code: string) => Promise<void>;
+  proposalCards: ReactNode;
 }) {
   return (
     <div className={hasFields ? 'mt-3 border-t border-dashed border-gray-100 pt-3' : ''}>
@@ -647,6 +677,7 @@ function ProfileBlock({
           )}
         </>
       )}
+      {proposalCards}
     </div>
   );
 }
@@ -661,13 +692,15 @@ function profileSourceLabel(sourceType: string | null): string {
 function ProposalCard({
   proposal,
   registry,
+  industryOptions,
   busy,
   onReview,
 }: {
   proposal: ResearchProposal;
   registry: IndicatorRegistryResponse | null;
+  industryOptions: IndustryOptionsResponse;
   busy: boolean;
-  onReview: (proposalId: string, decision: 'accept' | 'reject') => Promise<void>;
+  onReview: (proposalId: string, decision: 'accept' | 'reject', reviewedValue?: unknown) => Promise<void>;
 }) {
   // Proposal payloads deliberately retain their source shape (for example
   // money is { value, unit }); render both snapshots through field metadata
@@ -686,9 +719,48 @@ function ProposalCard({
       ? [proposal.source_url]
       : [];
   const actionable = proposal.is_actionable !== false && !proposal.validation_error;
+  const [modifying, setModifying] = useState(false);
+  const [editDraft, setEditDraft] = useState('');
+  const [industryDraft, setIndustryDraft] = useState<Array<{ l1: string; l2?: string }>>([]);
+  const [editError, setEditError] = useState<string | null>(null);
+
+  const beginModify = () => {
+    const initial = proposalEditableValue(proposal);
+    if (proposal.field_path === 'industry_pairs_json') {
+      setIndustryDraft(proposalIndustryPairs(initial));
+    } else {
+      setEditDraft(initial === null || initial === undefined ? '' : String(initial));
+    }
+    setEditError(null);
+    setModifying(true);
+  };
+
+  const acceptModified = async () => {
+    let reviewedValue: unknown = editDraft.trim();
+    if (proposal.field_path === 'industry_pairs_json') {
+      reviewedValue = industryDraft;
+      if (!industryDraft.length) {
+        setEditError('请至少选择一个行业。');
+        return;
+      }
+    } else if (indicator?.kind === 'yuan' || indicator?.kind === 'ratio') {
+      const numeric = Number(editDraft);
+      if (!editDraft.trim() || !Number.isFinite(numeric)) {
+        setEditError('请输入有效数字。');
+        return;
+      }
+      reviewedValue = numeric;
+    } else if (!editDraft.trim()) {
+      setEditError('修改后的内容不能为空。');
+      return;
+    }
+    setEditError(null);
+    await onReview(proposal.id, 'accept', reviewedValue);
+    setModifying(false);
+  };
 
   return (
-    <div className="border border-amber-100 bg-white px-3 py-2 text-xs">
+    <div className="mt-2 border-l-2 border-amber-300 bg-amber-50/60 px-3 py-2 text-xs">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="font-medium text-gray-700">
@@ -708,7 +780,7 @@ function ProposalCard({
             </p>
           )}
           {!actionable && (
-            <p className="mt-1 text-red-600">格式无效：{proposal.validation_error || '该建议无法写入，只能忽略'}</p>
+            <p className="mt-1 text-red-600">原调研值格式无效：{proposal.validation_error || '请修改后再采纳'}</p>
           )}
           {sources.map((url) => (
             <a
@@ -723,7 +795,7 @@ function ProposalCard({
             </a>
           ))}
         </div>
-        <div className="flex shrink-0 gap-1.5">
+        {!modifying && <div className="flex shrink-0 flex-wrap justify-end gap-1.5">
           {actionable && (
             <button
               type="button"
@@ -731,9 +803,17 @@ function ProposalCard({
               onClick={() => void onReview(proposal.id, 'accept')}
               className="bg-brand-600 px-2 py-1 text-white disabled:opacity-50"
             >
-              确认
+              采纳
             </button>
           )}
+          <button
+            type="button"
+            disabled={busy}
+            onClick={beginModify}
+            className="border border-amber-300 bg-white px-2 py-1 text-amber-800 disabled:opacity-50"
+          >
+            修改并采纳
+          </button>
           <button
             type="button"
             disabled={busy}
@@ -742,10 +822,75 @@ function ProposalCard({
           >
             忽略
           </button>
-        </div>
+        </div>}
       </div>
+      {modifying && (
+        <div className="mt-2 space-y-2 border-t border-amber-200 pt-2">
+          {proposal.field_path === 'industry_pairs_json' ? (
+            <IndustryPairsEditor value={industryDraft} options={industryOptions} onChange={setIndustryDraft} />
+          ) : indicator?.kind === 'enum' ? (
+            <select
+              value={editDraft}
+              onChange={(event) => setEditDraft(event.target.value)}
+              className="w-full border border-amber-200 bg-white px-2 py-1 text-xs outline-none focus:border-amber-500"
+            >
+              {indicator.enum_options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select>
+          ) : proposal.proposal_kind === 'profile_section' || indicator?.kind === 'text' ? (
+            <textarea
+              value={editDraft}
+              onChange={(event) => setEditDraft(event.target.value)}
+              rows={3}
+              className="w-full border border-amber-200 bg-white px-2 py-1 text-xs outline-none focus:border-amber-500"
+            />
+          ) : (
+            <input
+              type={indicator?.kind === 'yuan' || indicator?.kind === 'ratio' ? 'number' : 'text'}
+              value={editDraft}
+              onChange={(event) => setEditDraft(event.target.value)}
+              className="w-full border border-amber-200 bg-white px-2 py-1 text-xs outline-none focus:border-amber-500"
+            />
+          )}
+          {editError && <p className="text-red-600">{editError}</p>}
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void acceptModified()}
+              className="bg-brand-600 px-2.5 py-1 text-white disabled:opacity-50"
+            >
+              保存并采纳
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => setModifying(false)}
+              className="px-2 py-1 text-gray-500"
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
+}
+
+function proposalEditableValue(proposal: ResearchProposal): unknown {
+  if (proposal.proposal_kind === 'profile_section') {
+    return proposal.proposed_value_json.content_text ?? '';
+  }
+  return proposal.normalized_proposed_value ?? proposal.proposed_value_json.value ?? '';
+}
+
+function proposalIndustryPairs(value: unknown): Array<{ l1: string; l2?: string }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    const pair = asRecord(item);
+    const l1 = String(pair?.l1 || '').trim();
+    const l2 = String(pair?.l2 || '').trim();
+    return l1 ? [{ l1, ...(l2 ? { l2 } : {}) }] : [];
+  });
 }
 
 type ProposalValueSide = 'current' | 'proposed';

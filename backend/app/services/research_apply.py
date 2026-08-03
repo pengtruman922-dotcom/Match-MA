@@ -80,7 +80,8 @@ def _apply_profile_proposal(
     review_status: str,
 ) -> None:
     value = proposal.get("proposed_value_json") or {}
-    content = str(value.get("content_text") or "").strip()
+    raw_content = value["reviewed_value"] if "reviewed_value" in value else value.get("content_text")
+    content = str(raw_content or "").strip()
     # 调研查过但确实没有公开信息时提议 not_found —— 这是被确认的缺口，
     # 和「从未调研」在推荐里含义不同，因此是一条内容为空的合法建议。
     info_status = "not_found" if str(value.get("info_status")) == "not_found" else "filled"
@@ -107,6 +108,7 @@ def _apply_profile_proposal(
             "conflict_kind": proposal.get("conflict_kind"),
             "sources": value.get("sources") or [],
             "auto_accepted": review_status == "auto_accepted",
+            "user_modified": "reviewed_value" in value,
         },
     )
 
@@ -121,7 +123,12 @@ def _apply_structured_fact_proposal(
     field_path = str(proposal.get("field_path") or "")
     if field_path not in RESEARCH_STRUCTURED_FIELDS:
         raise ResearchApplyError("不支持该基础事实字段。")
-    raw_value = (proposal.get("proposed_value_json") or {}).get("value")
+    proposed_value = proposal.get("proposed_value_json") or {}
+    raw_value = (
+        proposed_value["reviewed_value"]
+        if "reviewed_value" in proposed_value
+        else proposed_value.get("value")
+    )
     new_value = normalize_structured_fact(
         db,
         field_path,
@@ -187,6 +194,7 @@ def _write_structured_fact(
                 "source_title": proposal.get("source_title"),
                 "conflict_kind": proposal.get("conflict_kind"),
                 "auto_accepted": review_status == "auto_accepted",
+                "user_modified": "reviewed_value" in (proposal.get("proposed_value_json") or {}),
             },
             write_unchanged_field_source=proposal.get("conflict_kind") == "consistent",
         ),

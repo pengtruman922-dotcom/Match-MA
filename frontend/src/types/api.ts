@@ -17,6 +17,7 @@ export interface SellerTarget {
   information_status: string;
   ai_processing_state: 'parsing' | 'research_queued' | 'researching' | 'research_mapping' | 'parse_failed' | 'research_failed' | 'completed' | 'never';
   ai_processing_detail: string;
+  pending_research_conflict_count?: number;
   research_job_type?: 'seller_target_research' | 'seller_target_research_map' | null;
   research_job_status?: 'queued' | 'running' | 'retry_waiting' | null;
   // L1/L2 是唯一展示与筛选行业维度；原始表述保存在更新/证据审计中。

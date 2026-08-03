@@ -95,6 +95,13 @@ class ResearchProposalOut(BaseModel):
     validation_error: str | None = None
 
 
+class ResearchProposalAcceptRequest(BaseModel):
+    # Optional request body on the endpoint keeps the original one-click
+    # accept contract. When present, this required member is the consultant's
+    # final value; the original researched value remains in the proposal JSON.
+    reviewed_value: Any
+
+
 @router.post("/seller-targets/{seller_target_id}", response_model=ResearchJobOut, status_code=status.HTTP_201_CREATED)
 def create_seller_research_job(
     seller_target_id: UUID,
@@ -348,6 +355,7 @@ def list_research_proposals(
 def accept_research_proposal(
     proposal_id: UUID,
     current_user: CurrentUser,
+    payload: ResearchProposalAcceptRequest | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     proposal = _get_research_proposal(db, proposal_id)
@@ -362,8 +370,14 @@ def accept_research_proposal(
             status_code=status.HTTP_409_CONFLICT,
             detail="Only pending research proposals can be accepted.",
         )
+    reviewed_proposed_value: dict[str, Any] | None = None
+    proposal_to_apply = proposal
+    if payload is not None:
+        reviewed_proposed_value = dict(proposal.get("proposed_value_json") or {})
+        reviewed_proposed_value["reviewed_value"] = payload.reviewed_value
+        proposal_to_apply = {**proposal, "proposed_value_json": reviewed_proposed_value}
     try:
-        apply_research_proposal(db, proposal, user_id=current_user.user_id)
+        apply_research_proposal(db, proposal_to_apply, user_id=current_user.user_id)
     except ResearchApplyError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     _set_proposal_review_status(
@@ -371,6 +385,7 @@ def accept_research_proposal(
         proposal_id,
         review_status="accepted",
         user_id=current_user.user_id,
+        proposed_value_json=reviewed_proposed_value,
     )
     db.commit()
     return _proposal_output(_get_research_proposal(db, proposal_id), db=db)
@@ -506,24 +521,34 @@ def _set_proposal_review_status(
     *,
     review_status: str,
     user_id: UUID,
+    proposed_value_json: dict[str, Any] | None = None,
 ) -> None:
-    db.execute(
-        text(
-            """
+    assignments = [
+        "review_status = :review_status",
+        "reviewed_by = :user_id",
+        "reviewed_at = now()",
+        "updated_at = now()",
+    ]
+    if proposed_value_json is not None:
+        assignments.append("proposed_value_json = :proposed_value_json")
+    statement = text(
+        f"""
             update research_proposal
-            set review_status = :review_status, reviewed_by = :user_id,
-                reviewed_at = now(), updated_at = now()
+            set {', '.join(assignments)}
             where id = :proposal_id and team_id = :team_id and workspace_id = :workspace_id
-            """
-        ),
-        {
-            "proposal_id": proposal_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "review_status": review_status,
-            "user_id": user_id,
-        },
+        """
     )
+    params: dict[str, Any] = {
+        "proposal_id": proposal_id,
+        "team_id": DEFAULT_TEAM_ID,
+        "workspace_id": DEFAULT_WORKSPACE_ID,
+        "review_status": review_status,
+        "user_id": user_id,
+    }
+    if proposed_value_json is not None:
+        statement = statement.bindparams(bindparam("proposed_value_json", type_=JSONB))
+        params["proposed_value_json"] = proposed_value_json
+    db.execute(statement, params)
 
 
 def _get_research_proposal(db: Session, proposal_id: UUID) -> dict[str, Any]:
@@ -571,10 +596,15 @@ def _proposal_output(row: Any, *, db: Session | None = None) -> dict[str, Any]:
         and result.get("proposal_kind") == "structured_fact"
     ):
         try:
+            effective_value = (
+                result["proposed_value_json"]["reviewed_value"]
+                if "reviewed_value" in result["proposed_value_json"]
+                else result["proposed_value_json"].get("value")
+            )
             normalized_value = normalize_structured_fact(
                 db,
                 str(result.get("field_path") or ""),
-                result["proposed_value_json"].get("value"),
+                effective_value,
                 source_excerpt=result.get("source_excerpt"),
             )
             result["normalized_proposed_value"] = _json_safe_value(normalized_value)
