@@ -721,6 +721,28 @@ def test_invalid_legacy_pending_proposal_is_not_actionable_in_the_api() -> None:
     assert "不是数字" in proposal["validation_error"]
 
 
+def test_proposal_api_exposes_the_normalized_value_without_losing_the_source_unit() -> None:
+    from backend.app.api.routes.research import _proposal_output
+
+    proposal = _proposal_output(
+        {
+            "id": UUID("11111111-1111-1111-1111-111111111111"),
+            "proposal_kind": "structured_fact",
+            "field_path": "current_revenue_yuan",
+            "proposed_value_json": {"value": {"value": "8.32", "unit": "亿元"}},
+            "current_value_json": {"value": 700_000_000},
+            "section_code": None,
+            "source_excerpt": "营业收入为8.32亿元",
+            "anchor_matches_json": [],
+        },
+        db=object(),
+    )
+
+    assert proposal["proposed_value_json"]["value"] == {"value": "8.32", "unit": "亿元"}
+    assert proposal["normalized_proposed_value"] == 832_000_000
+    assert proposal["is_actionable"] is True
+
+
 def test_field_writer_rejection_is_translated_so_one_bad_value_cannot_abort_the_run() -> None:
     """FieldWriteError 和 ResearchApplyError 是兄弟类。
 

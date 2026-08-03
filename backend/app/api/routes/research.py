@@ -15,7 +15,7 @@ from backend.app.api.authn import CurrentUser
 from backend.app.api.routes.utils import ensure_entity_visible, ensure_entity_writable
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
-from backend.app.jobs.handlers.common import _get_default_node_config
+from backend.app.jobs.handlers.common import _get_default_node_config, _json_safe_value
 from backend.app.jobs.handlers.research import RESEARCH_NODE_NAME
 from backend.app.services.profile_sections import PROFILE_SECTION_LABELS
 from backend.app.services.research_apply import (
@@ -76,6 +76,10 @@ class ResearchProposalOut(BaseModel):
     field_path: str | None
     proposed_value_json: dict[str, Any]
     current_value_json: dict[str, Any]
+    # The stored proposal keeps the source amount/unit verbatim.  This additive
+    # response field exposes the same canonical value the write path will use,
+    # so review clients do not have to duplicate money/ratio normalization.
+    normalized_proposed_value: Any | None = None
     conflict_kind: str
     period_label: str | None
     as_of_date: str | None
@@ -559,6 +563,7 @@ def _proposal_output(row: Any, *, db: Session | None = None) -> dict[str, Any]:
     result["anchor_matches_json"] = list(result.get("anchor_matches_json") or [])
     result["proposed_value_json"] = dict(result.get("proposed_value_json") or {})
     result["current_value_json"] = dict(result.get("current_value_json") or {})
+    result["normalized_proposed_value"] = None
     validation_error = str(result["proposed_value_json"].get("validation_error") or "").strip() or None
     if (
         validation_error is None
@@ -566,11 +571,13 @@ def _proposal_output(row: Any, *, db: Session | None = None) -> dict[str, Any]:
         and result.get("proposal_kind") == "structured_fact"
     ):
         try:
-            normalize_structured_fact(
+            normalized_value = normalize_structured_fact(
                 db,
                 str(result.get("field_path") or ""),
                 result["proposed_value_json"].get("value"),
+                source_excerpt=result.get("source_excerpt"),
             )
+            result["normalized_proposed_value"] = _json_safe_value(normalized_value)
         except ResearchApplyError as exc:
             validation_error = str(exc)
     result["validation_error"] = validation_error

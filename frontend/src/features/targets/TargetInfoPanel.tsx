@@ -344,6 +344,7 @@ export default function TargetInfoPanel({
                 <ProposalCard
                   key={proposal.id}
                   proposal={proposal}
+                  registry={registry}
                   busy={reviewingProposalId === proposal.id}
                   onReview={reviewProposal}
                 />
@@ -362,6 +363,7 @@ export default function TargetInfoPanel({
               <ProposalCard
                 key={proposal.id}
                 proposal={proposal}
+                registry={registry}
                 busy={reviewingProposalId === proposal.id}
                 onReview={reviewProposal}
               />
@@ -658,21 +660,26 @@ function profileSourceLabel(sourceType: string | null): string {
 
 function ProposalCard({
   proposal,
+  registry,
   busy,
   onReview,
 }: {
   proposal: ResearchProposal;
+  registry: IndicatorRegistryResponse | null;
   busy: boolean;
   onReview: (proposalId: string, decision: 'accept' | 'reject') => Promise<void>;
 }) {
-  // 调研查过但没有公开信息时提议 not_found —— 内容为空是正常的，
-  // 它提议的是「确认这一栏是缺口」而不是一段描述。
-  const proposed =
-    proposal.proposal_kind !== 'profile_section'
-      ? String(proposal.proposed_value_json.value || '')
-      : proposal.proposed_value_json.info_status === 'not_found'
-        ? '公开渠道未找到相关信息，建议标记为暂无信息'
-        : String(proposal.proposed_value_json.content_text || '');
+  // Proposal payloads deliberately retain their source shape (for example
+  // money is { value, unit }); render both snapshots through field metadata
+  // instead of coercing those objects into "[object Object]".
+  const indicator = proposal.field_path
+    ? registry?.indicators.find((item) => item.column === proposal.field_path)
+    : undefined;
+  const fieldLabel = proposal.section_label || indicator?.label || proposal.field_path || '调研建议';
+  const currentValue = formatProposalValue(proposal, 'current', indicator);
+  const proposedValue = formatProposalValue(proposal, 'proposed', indicator);
+  const currentPeriod = proposalPeriod(proposal, 'current');
+  const proposedPeriod = proposalPeriod(proposal, 'proposed');
   const sources = Array.isArray(proposal.proposed_value_json.sources)
     ? (proposal.proposed_value_json.sources as string[])
     : proposal.source_url
@@ -685,10 +692,21 @@ function ProposalCard({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="font-medium text-gray-700">
-            {proposal.section_label || proposal.field_path}
+            {fieldLabel}
             <span className="ml-2 font-normal text-amber-700">{conflictLabel(proposal.conflict_kind)}</span>
           </p>
-          <p className="mt-1 text-gray-600">{proposed}</p>
+          <div className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1 text-gray-700">
+            <span className="text-gray-400">当前</span>
+            <span className="break-words">{currentValue}</span>
+            <span className="text-amber-700">调研</span>
+            <span className="break-words font-medium text-amber-800">{proposedValue}</span>
+          </div>
+          {(currentPeriod || proposedPeriod) && (
+            <p className="mt-1 text-[11px] text-gray-400">
+              时间：{currentPeriod ? `当前 ${currentPeriod}` : '当前 -'}
+              {proposedPeriod ? ` · 调研 ${proposedPeriod}` : ''}
+            </p>
+          )}
           {!actionable && (
             <p className="mt-1 text-red-600">格式无效：{proposal.validation_error || '该建议无法写入，只能忽略'}</p>
           )}
@@ -728,6 +746,88 @@ function ProposalCard({
       </div>
     </div>
   );
+}
+
+type ProposalValueSide = 'current' | 'proposed';
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function displayRawProposalValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '-';
+  if (Array.isArray(value)) {
+    return value.length ? value.map(displayRawProposalValue).join('、') : '-';
+  }
+  const record = asRecord(value);
+  if (record) {
+    if (Object.prototype.hasOwnProperty.call(record, 'value')) {
+      const raw = displayRawProposalValue(record.value);
+      const unit = String(record.unit || '').trim();
+      return unit ? `${raw} ${unit}` : raw;
+    }
+    if (record.l1 || record.l2) {
+      return [record.l1, record.l2].filter(Boolean).map(String).join(' / ');
+    }
+    return Object.entries(record)
+      .map(([key, item]) => `${key}: ${displayRawProposalValue(item)}`)
+      .join('，');
+  }
+  return String(value);
+}
+
+function proposalPeriod(proposal: ResearchProposal, side: ProposalValueSide): string | null {
+  if (side === 'proposed') return proposal.period_label || proposal.as_of_date || null;
+  const current = proposal.current_value_json;
+  const period = current.financial_period_end_date || current.as_of_date || current.period_label;
+  return period ? String(period) : null;
+}
+
+function formatProposalValue(
+  proposal: ResearchProposal,
+  side: ProposalValueSide,
+  indicator: IndicatorRegistryResponse['indicators'][number] | undefined,
+): string {
+  const snapshot = side === 'current' ? proposal.current_value_json : proposal.proposed_value_json;
+  if (proposal.proposal_kind === 'profile_section') {
+    const content = snapshot.content_text;
+    return content ? String(content) : '-';
+  }
+
+  const raw = snapshot.value;
+  if (raw === null || raw === undefined || raw === '') return '-';
+  const normalized = side === 'proposed' ? proposal.normalized_proposed_value : raw;
+  const rawDisplay = displayRawProposalValue(raw);
+
+  if (indicator?.kind === 'enum') {
+    const option = indicator.enum_options.find((item) => item.value === String(raw));
+    return option?.label || rawDisplay;
+  }
+
+  if (indicator?.kind === 'yuan') {
+    const canonical = normalized === null || normalized === undefined ? null : Number(normalized);
+    const canonicalDisplay = canonical !== null && Number.isFinite(canonical)
+      ? `${formatYuan(canonical)}元`
+      : null;
+    if (side === 'proposed' && asRecord(raw)?.unit && canonicalDisplay) {
+      return `${rawDisplay}（规范化：${canonicalDisplay}）`;
+    }
+    return canonicalDisplay || rawDisplay;
+  }
+
+  if (indicator?.kind === 'ratio') {
+    const scalar = asRecord(normalized)?.value ?? normalized ?? asRecord(raw)?.value ?? raw;
+    const number = Number(scalar);
+    if (Number.isFinite(number)) {
+      return proposal.field_path === 'pe_ratio'
+        ? number.toFixed(1)
+        : `${Number(number.toFixed(1))}%`;
+    }
+  }
+
+  return rawDisplay;
 }
 
 function sourceDomain(url: string): string {

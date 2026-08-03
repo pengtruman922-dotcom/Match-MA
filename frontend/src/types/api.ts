@@ -2146,6 +2146,7 @@ export interface ResearchProposal {
   field_path: string | null;
   proposed_value_json: Record<string, unknown>;
   current_value_json: Record<string, unknown>;
+  normalized_proposed_value: unknown;
   conflict_kind: 'consistent' | 'supplement' | 'temporal_update' | 'same_period_conflict';
   period_label: string | null;
   as_of_date: string | null;
