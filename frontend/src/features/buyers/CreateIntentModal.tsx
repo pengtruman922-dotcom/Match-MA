@@ -119,8 +119,11 @@ export default function CreateIntentModal({ onClose, onCreated }: { onClose: () 
           const formData = new FormData();
           formData.set('raw_text', rawText);
           formData.set('input_type', 'mixed');
-          formData.set('auto_process', 'true');
-          formData.set('process_after_ocr', 'true');
+          // 新建买家需求只走 buyer_intent_parse（语义解析 + 规范化）。
+          // business_update 在这里仅承载附件/OCR，不能再触发通用业务更新抽取，
+          // 否则同一份材料会被两条链分别写一次。
+          formData.set('auto_process', 'false');
+          formData.set('process_after_ocr', 'false');
           formData.set('include_attachment_text', 'true');
           formData.set('auto_parse_linked_objects', 'true');
           formData.set('parse_entity_types', JSON.stringify(['buyer_intent']));

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -38,7 +39,7 @@ from backend.app.jobs.handlers.traces import (
     _insert_buyer_intent_parse_trace,
 )
 from backend.app.jobs.queue import JobClaim
-from backend.app.registry.indicators import indicators_for
+from backend.app.registry.indicators import indicator_by_column, indicators_for
 from backend.app.registry.nodes import buyer_intent_legacy_node_name, buyer_intent_two_stage_node_names
 from backend.app.services.buyer_intent_industry import normalize_buyer_intent_industry_changes
 from backend.app.services.listed_status import legacy_listed_status
@@ -154,6 +155,7 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
         )
 
     _set_buyer_intent_parse_stage(db, job.id, "writing")
+    parsed_output_json = _route_scoped_confirmation_items(parsed_output_json)
     changes, normalization_notes = _normalize_buyer_intent_parse_changes(parsed_output_json, raw_requirement_text)
     normalization_notes.extend(_normalize_buyer_intent_industry_changes(db, changes))
     if "region_constraints_json" in changes:
@@ -162,6 +164,13 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
         changes["needs_confirmation_json"] = _merge_confirmation_items(
             changes.get("needs_confirmation_json"), region_pending
         )
+    changes = _reconcile_buyer_intent_scope(
+        db,
+        current_fields=buyer_intent,
+        candidate_changes=changes,
+        normalization_notes=normalization_notes,
+        scope_label="公共条件",
+    )
     changes["parsed_requirement_json"] = {
         "source": "buyer_intent_two_stage" if pipeline_mode == "two_stage" else "buyer_intent_parser",
         "raw_requirement_text": raw_requirement_text,
@@ -200,6 +209,7 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
         db,
         buyer_intent_id=buyer_intent_id,
         raw_sections=(parsed_output_json or {}).get("profile_sections"),
+        structured_fields={**buyer_intent, **changes},
         normalization_notes=normalization_notes,
     )
     scenario_count = _replace_buyer_intent_scenarios(
@@ -344,6 +354,7 @@ def _apply_buyer_intent_profile_sections(
     *,
     buyer_intent_id: UUID,
     raw_sections: Any,
+    structured_fields: dict[str, Any],
     normalization_notes: list[str],
 ) -> int:
     """把模型产出的模块「其他」落库。
@@ -353,6 +364,11 @@ def _apply_buyer_intent_profile_sections(
     """
     sections, notes = normalize_profile_section_items(raw_sections, entity_type="buyer_intent")
     normalization_notes.extend(notes)
+    sections = _remove_structured_profile_duplicates(
+        sections,
+        structured_fields=structured_fields,
+        normalization_notes=normalization_notes,
+    )
     written = 0
     for section in sections:
         try:
@@ -376,6 +392,65 @@ def _apply_buyer_intent_profile_sections(
             # 不该把已经解析好的几十个字段一起回滚 —— 留痕，继续。
             normalization_notes.append(f"profile_section_rejected:{section['section_code']}:{exc}")
     return written
+
+
+_PROFILE_CLAUSE_SPLIT = re.compile(r"[，,；;。\n]+")
+_PROFILE_COMPARE_NOISE = re.compile(r"[\s：:，,；;。、“”‘’\"'（）()【】\[\]·—_-]+")
+
+
+def _remove_structured_profile_duplicates(
+    sections: list[dict[str, Any]],
+    *,
+    structured_fields: dict[str, Any],
+    normalization_notes: list[str],
+) -> list[dict[str, Any]]:
+    """Keep “其他” for genuinely unstructured facts, not a second field copy."""
+    structured_texts: list[str] = []
+    for indicator in indicators_for("buyer_intent"):
+        if not indicator.group or indicator.default_effect is not None:
+            continue
+        value = structured_fields.get(indicator.column)
+        if not _has_reconciliation_value(value):
+            continue
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            if isinstance(item, (dict, list)):
+                continue
+            normalized = _profile_compare_text(item)
+            if len(normalized) >= 3:
+                structured_texts.append(normalized)
+
+    if not structured_texts:
+        return sections
+
+    output: list[dict[str, Any]] = []
+    for section in sections:
+        kept: list[str] = []
+        removed = 0
+        for clause in _PROFILE_CLAUSE_SPLIT.split(str(section.get("content_text") or "")):
+            clause = clause.strip()
+            if not clause:
+                continue
+            normalized_clause = _profile_compare_text(clause)
+            duplicate = len(normalized_clause) >= 3 and any(
+                normalized_clause in structured or structured in normalized_clause
+                for structured in structured_texts
+            )
+            if duplicate:
+                removed += 1
+            else:
+                kept.append(clause)
+        if removed:
+            normalization_notes.append(
+                f"profile_section_removed_structured_duplicates:{section['section_code']}:{removed}"
+            )
+        if kept:
+            output.append({**section, "content_text": "；".join(kept)})
+    return output
+
+
+def _profile_compare_text(value: Any) -> str:
+    return _PROFILE_COMPARE_NOISE.sub("", str(value or "")).lower()
 
 
 def _buyer_intent_field_contract() -> list[dict[str, Any]]:
@@ -428,6 +503,264 @@ def _merge_confirmation_items(left: Any, right: Any) -> list[dict[str, Any]]:
             output.append(item)
     return output
 
+
+def _route_scoped_confirmation_items(parsed_output_json: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Move scenario questions out of the common layer before reconciliation.
+
+    Normalizer versions in production may put every question at the top level.
+    An explicit ``scope`` wins; when it is absent, a field that appears in
+    exactly one scenario (and not in common fields) is still unambiguous.
+    """
+    if not isinstance(parsed_output_json, dict):
+        return parsed_output_json
+    raw_pending = parsed_output_json.get("needs_confirmation")
+    raw_scenarios = parsed_output_json.get("scenarios")
+    if not isinstance(raw_pending, list) or not isinstance(raw_scenarios, list):
+        return parsed_output_json
+
+    scenarios = [dict(item) for item in raw_scenarios if isinstance(item, dict)]
+    if not scenarios:
+        return parsed_output_json
+    common_fields = parsed_output_json.get("fields")
+    common_field_names = set(common_fields) if isinstance(common_fields, dict) else set()
+    scenario_labels = [str(item.get("label") or item.get("name") or "").strip() for item in scenarios]
+    fields_to_scenarios: dict[str, list[int]] = {}
+    for index, scenario in enumerate(scenarios):
+        fields = scenario.get("fields") or scenario.get("conditions")
+        if not isinstance(fields, dict):
+            continue
+        for field in fields:
+            fields_to_scenarios.setdefault(str(field), []).append(index)
+
+    common_pending: list[Any] = []
+    for raw_item in raw_pending:
+        if not isinstance(raw_item, dict):
+            common_pending.append(raw_item)
+            continue
+        field = str(raw_item.get("field") or raw_item.get("field_name") or "").strip()
+        scope = _normalized_scope_label(raw_item.get("scope"))
+        target_index = next(
+            (
+                index
+                for index, label in enumerate(scenario_labels)
+                if scope and scope == _normalized_scope_label(label)
+            ),
+            None,
+        )
+        candidates = fields_to_scenarios.get(field, [])
+        if target_index is None and field not in common_field_names and len(candidates) == 1:
+            target_index = candidates[0]
+        if target_index is None:
+            common_pending.append(raw_item)
+            continue
+        target = scenarios[target_index]
+        target_pending = target.get("needs_confirmation")
+        target["needs_confirmation"] = [
+            *(target_pending if isinstance(target_pending, list) else []),
+            {**raw_item, "scope": scenario_labels[target_index]},
+        ]
+
+    return {
+        **parsed_output_json,
+        "needs_confirmation": common_pending,
+        "scenarios": scenarios,
+    }
+
+
+def _normalized_scope_label(value: Any) -> str:
+    return re.sub(r"[\s（）()【】\[\]·_-]+", "", str(value or "")).lower()
+
+
+_RECONCILIATION_INTERNAL_FIELDS = {
+    "raw_requirement_text",
+    "parsed_requirement_json",
+    "needs_confirmation_json",
+}
+
+
+def _reconcile_buyer_intent_scope(
+    db: Session,
+    *,
+    current_fields: dict[str, Any],
+    candidate_changes: dict[str, Any],
+    normalization_notes: list[str],
+    scope_label: str,
+) -> dict[str, Any]:
+    """Apply empty/equal/conflict policy at the final database boundary."""
+    candidates = dict(candidate_changes)
+    raw_pending = candidates.pop("needs_confirmation_json", [])
+    pending_fields = {
+        str(item.get("field") or "")
+        for item in raw_pending if isinstance(item, dict)
+    } if isinstance(raw_pending, list) else set()
+    pending_fallback_values: dict[str, Any] = {}
+    accepted: dict[str, Any] = {}
+    effective = dict(current_fields)
+    generated_pending: list[dict[str, Any]] = []
+
+    for field, proposed in candidates.items():
+        if field in _RECONCILIATION_INTERNAL_FIELDS:
+            accepted[field] = proposed
+            effective[field] = proposed
+            continue
+        if field == "condition_effects_json":
+            effects, effect_pending = _reconcile_condition_effects(
+                current_fields.get(field), proposed, scope_label=scope_label
+            )
+            if effects:
+                accepted[field] = effects
+                effective[field] = effects
+            generated_pending.extend(effect_pending)
+            continue
+        if not _has_reconciliation_value(proposed):
+            normalization_notes.append(f"ignored_empty_parse_value:{scope_label}:{field}")
+            continue
+        current = current_fields.get(field)
+        if field in pending_fields:
+            pending_fallback_values[field] = proposed
+        if not _has_reconciliation_value(current):
+            accepted[field] = proposed
+            effective[field] = proposed
+            normalization_notes.append(f"auto_filled_empty:{scope_label}:{field}")
+        elif _reconciliation_values_equal(current, proposed):
+            normalization_notes.append(f"unchanged_parse_value:{scope_label}:{field}")
+        else:
+            if field not in pending_fields:
+                generated_pending.append(
+                    {
+                        "field": field,
+                        "proposed_value": _json_safe_value(proposed),
+                        "reason": "新解析值与当前值不一致，请确认是否覆盖",
+                        "uncertain_part": "value",
+                        "scope": scope_label,
+                        "item_key": f"conflict:{_normalized_scope_label(scope_label)}:{field}",
+                    }
+                )
+            normalization_notes.append(f"held_conflict:{scope_label}:{field}")
+
+    reconciled_pending: list[dict[str, Any]] = []
+    for item in raw_pending if isinstance(raw_pending, list) else []:
+        if not isinstance(item, dict):
+            continue
+        entry = dict(item)
+        field = str(entry.get("field") or "")
+        if not field:
+            continue
+        if scope_label != "公共条件":
+            entry["scope"] = scope_label
+        if "proposed_value" not in entry:
+            reconciled_pending.append(entry)
+            continue
+        valid, normalized = _normalize_confirmation_proposed_value(
+            db, field=field, proposed_value=entry.get("proposed_value")
+        )
+        if not valid and field in pending_fallback_values:
+            valid, normalized = _normalize_confirmation_proposed_value(
+                db, field=field, proposed_value=pending_fallback_values[field]
+            )
+        if not valid:
+            entry["proposed_value_status"] = "invalid"
+            reconciled_pending.append(entry)
+            normalization_notes.append(f"invalid_confirmation_value:{scope_label}:{field}")
+            continue
+
+        entry["proposed_value"] = _json_safe_value(normalized)
+        uncertain_part = str(entry.get("uncertain_part") or "value").strip().lower()
+        if uncertain_part not in {"", "value"}:
+            entry["proposed_value_status"] = "requires_review"
+            reconciled_pending.append(entry)
+            continue
+        current = effective.get(field)
+        if not _has_reconciliation_value(current):
+            accepted[field] = normalized
+            effective[field] = normalized
+            normalization_notes.append(f"auto_filled_confirmed_empty:{scope_label}:{field}")
+        elif _reconciliation_values_equal(current, normalized):
+            normalization_notes.append(f"dropped_equal_confirmation:{scope_label}:{field}")
+        else:
+            entry.pop("proposed_value_status", None)
+            reconciled_pending.append(entry)
+
+    accepted["needs_confirmation_json"] = _merge_confirmation_items(
+        generated_pending, reconciled_pending
+    )
+    return accepted
+
+
+def _reconcile_condition_effects(
+    current: Any,
+    proposed: Any,
+    *,
+    scope_label: str,
+) -> tuple[dict[str, str], list[dict[str, Any]]]:
+    current_effects = current if isinstance(current, dict) else {}
+    proposed_effects = proposed if isinstance(proposed, dict) else {}
+    accepted = dict(current_effects)
+    pending: list[dict[str, Any]] = []
+    for field, effect in proposed_effects.items():
+        current_effect = current_effects.get(field)
+        if not current_effect or current_effect == effect:
+            accepted[str(field)] = str(effect)
+            continue
+        pending.append(
+            {
+                "field": str(field),
+                "reason": "新解析的条件作用与当前设置不一致，请确认必须/优先级",
+                "uncertain_part": "effect",
+                "effect": str(effect),
+                "scope": scope_label,
+                "item_key": f"effect-conflict:{_normalized_scope_label(scope_label)}:{field}",
+            }
+        )
+    return accepted, pending
+
+
+def _normalize_confirmation_proposed_value(
+    db: Session,
+    *,
+    field: str,
+    proposed_value: Any,
+) -> tuple[bool, Any]:
+    try:
+        indicator = indicator_by_column("buyer_intent", field)
+    except KeyError:
+        return False, None
+    value = proposed_value
+    if indicator.multi_value and not isinstance(value, list):
+        value = [value]
+    normalized, _ = _normalize_buyer_intent_parse_changes(
+        {"fields": {field: value}},
+        "",
+    )
+    _normalize_buyer_intent_industry_changes(db, normalized)
+    if field == "region_constraints_json" and field in normalized:
+        regions, _ = normalize_buyer_region_constraints(normalized[field])
+        normalized[field] = regions
+    result = normalized.get(field)
+    return _has_reconciliation_value(result), result
+
+
+def _has_reconciliation_value(value: Any) -> bool:
+    if value is None or value == "" or value == "unknown":
+        return False
+    if isinstance(value, (list, dict)) and not value:
+        return False
+    return True
+
+
+def _reconciliation_values_equal(left: Any, right: Any) -> bool:
+    return _canonical_reconciliation_value(left) == _canonical_reconciliation_value(right)
+
+
+def _canonical_reconciliation_value(value: Any) -> Any:
+    safe = _json_safe_value(value)
+    if isinstance(safe, dict):
+        return {key: _canonical_reconciliation_value(safe[key]) for key in sorted(safe)}
+    if isinstance(safe, list):
+        normalized = [_canonical_reconciliation_value(item) for item in safe]
+        return sorted(normalized, key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True, default=str))
+    return safe
+
 MAX_PARSED_SCENARIOS = 6
 
 
@@ -446,6 +779,12 @@ def _replace_buyer_intent_scenarios(
     """
     if not isinstance(raw_scenarios, list):
         return 0
+    existing_rows = _load_parser_scenarios(db, buyer_intent_id)
+    existing_by_label = {
+        _normalized_scope_label(row.get("label")): row
+        for row in existing_rows
+        if _normalized_scope_label(row.get("label"))
+    }
     parsed: list[tuple[str, dict[str, Any], list[dict[str, Any]], dict[str, str]]] = []
     for index, item in enumerate(raw_scenarios[:MAX_PARSED_SCENARIOS]):
         if not isinstance(item, dict):
@@ -453,12 +792,39 @@ def _replace_buyer_intent_scenarios(
         raw_fields = item.get("fields") or item.get("conditions") or {}
         pending = _normalize_confirmation_items(item.get("needs_confirmation"), BUYER_INTENT_PARSE_FIELDS)
         raw_fields = _remove_pending_condition_values(raw_fields, pending)
-        fields = _normalize_parsed_scenario_fields(db, raw_fields)
-        effects = normalize_condition_effects(item.get("condition_effects") or item.get("effects"))
+        label = str(item.get("label") or item.get("name") or f"方案{index + 1}").strip()[:120]
+        existing = existing_by_label.get(_normalized_scope_label(label), {})
+        current_fields = existing.get("fields_json") if isinstance(existing.get("fields_json"), dict) else {}
+        current_effects = (
+            existing.get("condition_effects_json")
+            if isinstance(existing.get("condition_effects_json"), dict)
+            else {}
+        )
+        scenario_notes: list[str] = []
+        reconciled = _reconcile_buyer_intent_scope(
+            db,
+            current_fields={**current_fields, "condition_effects_json": current_effects},
+            candidate_changes={
+                **_normalize_parsed_scenario_fields(db, raw_fields),
+                "needs_confirmation_json": pending,
+                "condition_effects_json": normalize_condition_effects(
+                    item.get("condition_effects") or item.get("effects")
+                ),
+            },
+            normalization_notes=scenario_notes,
+            scope_label=label,
+        )
+        pending = reconciled.pop("needs_confirmation_json", [])
+        effects = reconciled.pop("condition_effects_json", current_effects)
+        fields = {**current_fields, **reconciled}
         if not fields and not pending:
             continue
-        label = str(item.get("label") or item.get("name") or f"方案{index + 1}").strip()[:120]
         parsed.append((label, fields, pending, effects))
+
+    # A one-scenario output is the flat/common representation. On a reparse it
+    # is not authority to erase two already reviewed scenario scopes.
+    if len(parsed) < 2:
+        return len(existing_rows)
 
     db.execute(
         text(
@@ -478,10 +844,6 @@ def _replace_buyer_intent_scenarios(
             "workspace_id": DEFAULT_WORKSPACE_ID,
         },
     )
-    if len(parsed) < 2:
-        db.commit()
-        return 0
-
     for sort_order, (label, fields, pending, effects) in enumerate(parsed):
         db.execute(
             text(
@@ -514,6 +876,29 @@ def _replace_buyer_intent_scenarios(
         )
     db.commit()
     return len(parsed)
+
+
+def _load_parser_scenarios(db: Session, buyer_intent_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            select label, fields_json, needs_confirmation_json, condition_effects_json
+            from buyer_intent_scenario
+            where buyer_intent_id = :buyer_intent_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+              and source = 'parser'
+            order by sort_order, created_at
+            """
+        ),
+        {
+            "buyer_intent_id": buyer_intent_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
 
 
 def _normalize_parsed_scenario_fields(db: Session, raw_fields: Any) -> dict[str, Any]:
@@ -944,8 +1329,6 @@ def _remove_pending_condition_values(raw_fields: Any, pending: list[dict[str, An
                 for value in current
                 if json.dumps(value, ensure_ascii=False, sort_keys=True, default=str) not in proposed_json
             ]
-        else:
-            output.pop(field, None)
     return output
 
 

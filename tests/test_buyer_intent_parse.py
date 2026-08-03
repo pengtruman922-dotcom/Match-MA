@@ -15,7 +15,12 @@ from backend.app.jobs.handlers import (
     _normalize_yes_no_like,
     _validate_buyer_intent_parse_output,
 )
-from backend.app.jobs.handlers.buyer_intent_parse import _set_buyer_intent_parse_stage
+from backend.app.jobs.handlers.buyer_intent_parse import (
+    _reconcile_buyer_intent_scope,
+    _remove_structured_profile_duplicates,
+    _route_scoped_confirmation_items,
+    _set_buyer_intent_parse_stage,
+)
 
 JOB_ID = UUID("00000000-0000-0000-0000-000000000001")
 
@@ -68,7 +73,7 @@ def test_buyer_intent_parse_output_validation_requires_supported_fields() -> Non
     assert invalid["valid"] is False
 
 
-def test_pending_confirmation_field_is_stored_but_not_applied() -> None:
+def test_pending_confirmation_keeps_typed_candidate_for_final_reconciliation() -> None:
     changes, notes = _normalize_buyer_intent_parse_changes(
         {
             "fields": {
@@ -89,7 +94,7 @@ def test_pending_confirmation_field_is_stored_but_not_applied() -> None:
     )
 
     assert changes["industries_json"] == ["医药与健康"]
-    assert "min_revenue_yuan" not in changes
+    assert changes["min_revenue_yuan"] == 5_000_000
     assert changes["needs_confirmation_json"] == [
         {
             "field": "min_revenue_yuan",
@@ -99,6 +104,117 @@ def test_pending_confirmation_field_is_stored_but_not_applied() -> None:
         }
     ]
     assert "held_for_confirmation:min_revenue_yuan" in notes
+
+
+def test_confirmation_reconciliation_auto_fills_empty_and_drops_equal_pending() -> None:
+    changes, notes = _normalize_buyer_intent_parse_changes(
+        {
+            "fields": {"max_pe": 13},
+            "needs_confirmation": [
+                {
+                    "field": "max_pe",
+                    "proposed_value": "13倍原则性上限",
+                    "reason": "原则性上限",
+                }
+            ],
+        },
+        "PE原则上不超过13倍",
+    )
+
+    reconciled = _reconcile_buyer_intent_scope(
+        None,
+        current_fields={"max_pe": None},
+        candidate_changes=changes,
+        normalization_notes=notes,
+        scope_label="非上市公司方案",
+    )
+
+    assert reconciled["max_pe"] == 13
+    assert reconciled["needs_confirmation_json"] == []
+    assert "auto_filled_empty:非上市公司方案:max_pe" in notes
+    assert "dropped_equal_confirmation:非上市公司方案:max_pe" in notes
+
+
+def test_confirmation_reconciliation_only_holds_nonempty_different_value() -> None:
+    reconciled = _reconcile_buyer_intent_scope(
+        None,
+        current_fields={"max_pe": 13},
+        candidate_changes={"max_pe": 15, "needs_confirmation_json": []},
+        normalization_notes=[],
+        scope_label="公共条件",
+    )
+
+    assert "max_pe" not in reconciled
+    assert reconciled["needs_confirmation_json"] == [
+        {
+            "field": "max_pe",
+            "proposed_value": 15,
+            "reason": "新解析值与当前值不一致，请确认是否覆盖",
+            "uncertain_part": "value",
+            "scope": "公共条件",
+            "item_key": "conflict:公共条件:max_pe",
+        }
+    ]
+
+
+def test_confirmation_reconciliation_marks_invalid_value_non_actionable() -> None:
+    reconciled = _reconcile_buyer_intent_scope(
+        None,
+        current_fields={"max_market_cap_yuan": None},
+        candidate_changes={
+            "needs_confirmation_json": [
+                {
+                    "field": "max_market_cap_yuan",
+                    "proposed_value": "50亿至100亿区间放宽标准",
+                    "reason": "区间含义不明确",
+                }
+            ]
+        },
+        normalization_notes=[],
+        scope_label="上市公司方案",
+    )
+
+    assert "max_market_cap_yuan" not in reconciled
+    assert reconciled["needs_confirmation_json"][0]["proposed_value_status"] == "invalid"
+    assert reconciled["needs_confirmation_json"][0]["scope"] == "上市公司方案"
+
+
+def test_scoped_confirmation_is_routed_out_of_common_layer() -> None:
+    routed = _route_scoped_confirmation_items(
+        {
+            "fields": {"industries_json": ["医疗健康"]},
+            "needs_confirmation": [
+                {"field": "max_pe", "proposed_value": 13, "reason": "需确认"}
+            ],
+            "scenarios": [
+                {"label": "上市公司方案", "fields": {"max_market_cap_yuan": 5_000_000_000}},
+                {"label": "非上市公司方案", "fields": {"max_pe": 13}},
+            ],
+        }
+    )
+
+    assert routed["needs_confirmation"] == []
+    assert routed["scenarios"][1]["needs_confirmation"][0]["scope"] == "非上市公司方案"
+
+
+def test_profile_other_removes_structured_field_duplicates() -> None:
+    notes: list[str] = []
+    sections = _remove_structured_profile_duplicates(
+        [
+            {
+                "section_code": "intent_financial",
+                "content_text": "负债率原则上不超过70%；关注业务稳定性；可接受适当溢价",
+            }
+        ],
+        structured_fields={
+            "debt_ratio_requirement_summary": "负债率原则上不超过70%",
+            "premium_tolerance_summary": "可接受适当溢价",
+        },
+        normalization_notes=notes,
+    )
+
+    assert sections[0]["content_text"] == "关注业务稳定性"
+    assert notes == ["profile_section_removed_structured_duplicates:intent_financial:2"]
 
 
 def test_pending_multi_value_items_are_isolated_individually() -> None:

@@ -9,6 +9,7 @@ from backend.app.api.routes.business_updates import (
     _compact_sample_run,
     _enrich_review_action,
     _entity_ref,
+    _is_dedicated_buyer_intent_ingest,
     _parse_metadata_json_form,
     _parse_entity_types_form,
     _parse_uuid_list_form,
@@ -25,6 +26,21 @@ from backend.app.api.routes.business_updates import (
 BUSINESS_UPDATE_ID = UUID("00000000-0000-0000-0000-000000000001")
 SELLER_TARGET_ID = UUID("00000000-0000-0000-0000-000000000002")
 ACTION_ID = UUID("00000000-0000-0000-0000-000000000003")
+
+
+def test_buyer_create_upload_uses_dedicated_intent_parser_only() -> None:
+    assert _is_dedicated_buyer_intent_ingest(
+        metadata={"source": "frontend_buyer_create_modal"},
+        buyer_intent_ids=[BUSINESS_UPDATE_ID],
+        auto_parse_linked_objects=True,
+        parse_entity_types=["buyer_intent"],
+    ) is True
+    assert _is_dedicated_buyer_intent_ingest(
+        metadata={"source": "business_update_drawer"},
+        buyer_intent_ids=[BUSINESS_UPDATE_ID],
+        auto_parse_linked_objects=True,
+        parse_entity_types=["buyer_intent"],
+    ) is False
 
 
 def test_review_action_grouping_matches_review_page_tabs() -> None:

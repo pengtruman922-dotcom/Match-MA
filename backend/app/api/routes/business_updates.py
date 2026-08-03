@@ -427,6 +427,22 @@ def create_business_update(
     return _append_ingest_metadata(dict(row), follow_up)
 
 
+def _is_dedicated_buyer_intent_ingest(
+    *,
+    metadata: dict[str, Any],
+    buyer_intent_ids: list[UUID],
+    auto_parse_linked_objects: bool,
+    parse_entity_types: list[str],
+) -> bool:
+    """Keep the buyer-create attachment route on its dedicated parser only."""
+    return bool(
+        metadata.get("source") == "frontend_buyer_create_modal"
+        and buyer_intent_ids
+        and auto_parse_linked_objects
+        and set(parse_entity_types) == {"buyer_intent"}
+    )
+
+
 @router.post("/upload", response_model=BusinessUpdateUploadOut, status_code=status.HTTP_201_CREATED)
 def upload_business_update(
     current_user: CurrentUser,
@@ -474,6 +490,17 @@ def upload_business_update(
         followup_event_type=followup_event_type,
     )
     form_metadata = _parse_metadata_json_form(metadata_json)
+    dedicated_buyer_intent_parse_only = _is_dedicated_buyer_intent_ingest(
+        metadata=form_metadata,
+        buyer_intent_ids=buyer_intent_ids,
+        auto_parse_linked_objects=auto_parse_linked_objects,
+        parse_entity_types=parse_types,
+    )
+    # 旧版前端曾同时打开专用需求解析和通用业务更新抽取，导致同一附件
+    # 分别写入 buyer_intent 两次。来源级保险放在服务端，避免缓存中的旧前端
+    # 或手工复用这组参数时再次双跑；通用业务更新入口本身不受影响。
+    effective_auto_process = auto_process and not dedicated_buyer_intent_parse_only
+    effective_process_after_ocr = process_after_ocr and not dedicated_buyer_intent_parse_only
     settings = get_settings()
 
     row = _insert_business_update_row(
@@ -488,6 +515,7 @@ def upload_business_update(
             **scope_metadata,
             "source": "business_update_multipart_upload",
             "upload_mode": "mixed",
+            "dedicated_buyer_intent_parse_only": dedicated_buyer_intent_parse_only,
         },
         actor_user_id=current_user.user_id,
     )
@@ -515,13 +543,13 @@ def upload_business_update(
                     mock_extracted_text=None,
                     auto_parse_linked_objects=auto_parse_linked_objects,
                     parse_entity_types=parse_types,
-                    process_after_ocr=process_after_ocr,
+                    process_after_ocr=effective_process_after_ocr,
                     include_attachment_text=include_attachment_text,
                 )
             )
 
     process_job = None
-    if auto_process and (not ocr_jobs or not process_after_ocr):
+    if effective_auto_process and (not ocr_jobs or not effective_process_after_ocr):
         process_job = _enqueue_business_update_process_job(
             db,
             business_update_id=row["id"],
@@ -529,7 +557,7 @@ def upload_business_update(
             source="business_update_multipart_upload",
         )
 
-    if auto_process and ocr_jobs and process_after_ocr:
+    if effective_auto_process and ocr_jobs and effective_process_after_ocr:
         _ensure_followup_timeline_event(db, business_update_id=row["id"], job_id=None)
 
     if process_job or ocr_jobs:

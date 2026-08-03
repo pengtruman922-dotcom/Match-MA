@@ -160,7 +160,22 @@ export default function BuyerIntentRequirements({
     const key = confirmationKey(item);
     setResolvingItem(key);
     try {
-      const proposed = replacement === undefined ? item.proposed_value : replacement;
+      const rawProposed = replacement === undefined ? item.proposed_value : replacement;
+      let proposed = rawProposed;
+      if (action === 'apply') {
+        const indicator = indicators.find((entry) => entry.column === item.field);
+        const normalized = normalizePendingProposedValue(indicator, rawProposed);
+        if (
+          replacement === undefined
+          && (item.proposed_value_status || (item.uncertain_part && item.uncertain_part !== 'value'))
+        ) {
+          throw new Error('该建议包含类型、作用范围或规则含义的不确定性，请修改为合法字段值后再采纳。');
+        }
+        if (!normalized.valid) {
+          throw new Error('建议值不符合字段类型，请修改后再采纳。');
+        }
+        proposed = normalized.value;
+      }
       if (item.scenario) {
         const scenario = item.scenario;
         const nextPending = scenario.needs_confirmation_json.filter((entry) => !sameConfirmation(entry, item));
@@ -461,6 +476,7 @@ function InlineConditionEditor({
                         resolvingItem={resolvingItem}
                         onResolve={onResolvePending}
                         onModify={onModifyPending}
+                        indicators={indicators}
                       />
                     ) : null}
                   </div>
@@ -476,7 +492,7 @@ function InlineConditionEditor({
       {orphanPending.map((item, index) => (
         <div key={`${confirmationKey(item)}:${index}`} className="border-t border-amber-100 px-4 py-3">
           <div className="flex items-center gap-3"><EffectBadge effect="pending" /><span className="text-xs text-gray-500">{item.field}</span></div>
-          <PendingItems items={[item]} resolvingItem={resolvingItem} onResolve={onResolvePending} onModify={onModifyPending} />
+          <PendingItems items={[item]} resolvingItem={resolvingItem} onResolve={onResolvePending} onModify={onModifyPending} indicators={indicators} />
         </div>
       ))}
 
@@ -671,24 +687,32 @@ function ConditionRowEditor({ row, fields, effects, taxonomy, onFields, onEffect
   );
 }
 
-function PendingItems({ items, resolvingItem, onResolve, onModify }: {
+function PendingItems({ items, resolvingItem, onResolve, onModify, indicators }: {
   items: PendingItem[];
   resolvingItem: string | null;
   onResolve: (item: PendingItem, action: 'apply' | 'discard', replacement?: unknown) => Promise<void>;
   onModify: (item: PendingItem) => void;
+  indicators: IndicatorMeta[];
 }) {
   return (
     <div className="mt-3 divide-y divide-amber-100 border border-amber-200 bg-amber-50/50 px-3">
       {items.map((item, index) => {
         const key = confirmationKey(item);
+        const indicator = indicators.find((entry) => entry.column === item.field);
+        const normalized = normalizePendingProposedValue(indicator, item.proposed_value);
+        const canApplyDirectly = item.proposed_value !== undefined
+          && !item.proposed_value_status
+          && (!item.uncertain_part || item.uncertain_part === 'value')
+          && normalized.valid;
         return (
           <div key={`${key}:${index}`} className="py-3 text-sm">
             <div className="flex flex-wrap items-center gap-2"><EffectBadge effect="pending" />{item.effect ? <EffectBadge effect={item.effect} /> : null}<span className="text-xs text-gray-500">确认前不参加初筛和软排序</span></div>
             <p className="mt-1 text-gray-700">{item.reason}</p>
             {item.proposed_value !== undefined ? <p className="mt-1 whitespace-pre-wrap text-xs text-gray-500">AI 建议值：{displayUnknown(item.proposed_value)}</p> : null}
+            {item.proposed_value !== undefined && !canApplyDirectly ? <p className="mt-1 text-xs text-amber-700">该值不能直接写入，请先修改为符合字段类型的明确值。</p> : null}
             {item.evidence ? <p className="mt-1 text-xs text-gray-500">原文：{item.evidence}</p> : null}
             <div className="mt-2 flex flex-wrap gap-2">
-              {item.proposed_value !== undefined ? <button type="button" disabled={resolvingItem === key} onClick={() => void onResolve(item, 'apply')} className="border border-amber-300 bg-white px-2.5 py-1 text-xs text-amber-800 disabled:opacity-50">采纳建议值</button> : null}
+              {canApplyDirectly ? <button type="button" disabled={resolvingItem === key} onClick={() => void onResolve(item, 'apply')} className="border border-amber-300 bg-white px-2.5 py-1 text-xs text-amber-800 disabled:opacity-50">采纳建议值</button> : null}
               {item.proposed_value !== undefined ? <button type="button" disabled={resolvingItem === key} onClick={() => onModify(item)} className="border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-600 disabled:opacity-50">修改并采纳</button> : null}
               <button type="button" disabled={resolvingItem === key} onClick={() => void onResolve(item, 'discard')} className="border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-600 disabled:opacity-50">不设置该条件</button>
             </div>
@@ -923,6 +947,46 @@ function normalizeFieldValue(indicator: IndicatorMeta, value: unknown, scenario:
     return normalized;
   }
   return value;
+}
+
+function normalizePendingProposedValue(
+  indicator: IndicatorMeta | undefined,
+  value: unknown,
+): { valid: true; value: unknown } | { valid: false; value?: undefined } {
+  if (!indicator || value === undefined || value === null || value === '') return { valid: false };
+  if (indicator.kind === 'yuan' || indicator.kind === 'ratio') {
+    const numericText = typeof value === 'number' ? String(value) : String(value).trim();
+    if (!numericText) return { valid: false };
+    const number = Number(numericText);
+    return Number.isFinite(number) ? { valid: true, value: number } : { valid: false };
+  }
+  if (indicator.kind === 'text') {
+    const normalized = typeof value === 'string' ? value.trim() : '';
+    return normalized ? { valid: true, value: normalized } : { valid: false };
+  }
+  if (indicator.kind === 'enum') {
+    const normalized = typeof value === 'string' ? value.trim() : '';
+    return indicator.enum_options.some((option) => option.value === normalized)
+      ? { valid: true, value: normalized }
+      : { valid: false };
+  }
+  if (indicator.kind === 'json') {
+    if (indicator.editor === 'region_multi') {
+      const values = Array.isArray(value) ? value : [value];
+      const valid = values.length > 0 && values.every(
+        (item) => Boolean(item) && typeof item === 'object' && typeof (item as { province?: unknown }).province === 'string' && Boolean((item as { province: string }).province.trim()),
+      );
+      return valid ? { valid: true, value: values } : { valid: false };
+    }
+    if (indicator.multi_value) {
+      const values = (Array.isArray(value) ? value : [value]).filter(
+        (item) => item !== null && item !== undefined && String(item).trim() !== '',
+      );
+      return values.length ? { valid: true, value: values } : { valid: false };
+    }
+    return typeof value === 'object' ? { valid: true, value } : { valid: false };
+  }
+  return { valid: false };
 }
 
 function formatConditionRow(

@@ -282,6 +282,7 @@ export interface BuyerIntentConfirmationItem {
   effect?: ConditionEffect;
   scope?: string;
   item_key?: string;
+  proposed_value_status?: 'invalid' | 'requires_review';
 }
 
 export interface BuyerRegionConstraint {
