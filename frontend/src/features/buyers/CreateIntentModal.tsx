@@ -22,10 +22,7 @@ const DEFAULT_BUYER_INTAKE_FORM: BuyerIntakeForm = {
 
 export default function CreateIntentModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
   const [dedupCheck, setDedupCheck] = useState<BuyerPartyDedupCheck | null>(null);
-  const [dedupChecked, setDedupChecked] = useState(false);
   const [checkingDedup, setCheckingDedup] = useState(false);
-  const [selectedBuyerPartyId, setSelectedBuyerPartyId] = useState<string | null>(null);
-  const [selectedBuyerName, setSelectedBuyerName] = useState<string | null>(null);
   const [form, setForm] = useState<BuyerIntakeForm>(DEFAULT_BUYER_INTAKE_FORM);
   const [saving, setSaving] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -103,37 +100,16 @@ export default function CreateIntentModal({ onClose, onCreated }: { onClose: () 
     setFileError(null);
   }
 
-  const handleDedupCheck = async () => {
-    const buyerName = form.buyer_name.trim();
-    if (!buyerName) return;
-    setCheckingDedup(true);
-    try {
-      const response = await buyerParties.dedupCheck({ q: buyerName, limit: 5 });
-      setDedupCheck(response);
-      setDedupChecked(true);
-    } catch {
-      setDedupCheck(null);
-      setDedupChecked(true);
-    } finally {
-      setCheckingDedup(false);
-    }
-  };
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const buyerName = form.buyer_name.trim();
-    if (!buyerName) return;
-
+  const createBuyerIntent = async (buyerPartyId: string | null, buyerName: string) => {
     setSaving(true);
     setSubmitError(null);
     try {
       const materialText = form.raw_requirement_text.trim();
       const shouldParse = selectedFiles.length > 0 || materialText.length > 0;
       const rawText = buildBuyerIntakeRawText(buyerName, materialText);
-      const buyerPartyId = selectedBuyerPartyId
-        || (await buyerParties.create({ buyer_name: buyerName })).id;
+      const resolvedBuyerPartyId = buyerPartyId || (await buyerParties.create({ buyer_name: buyerName })).id;
       const createdIntent = await buyerIntents.create({
-        buyer_party_id: buyerPartyId,
+        buyer_party_id: resolvedBuyerPartyId,
         intent_name: defaultBuyerIntentName(buyerName),
         raw_requirement_text: shouldParse ? rawText : undefined,
       });
@@ -153,7 +129,7 @@ export default function CreateIntentModal({ onClose, onCreated }: { onClose: () 
             'metadata_json',
             JSON.stringify({
               source: 'frontend_buyer_create_modal',
-              buyer_party_id: buyerPartyId,
+              buyer_party_id: resolvedBuyerPartyId,
               buyer_intent_id: createdIntent.id,
               buyer_name: buyerName,
             })
@@ -172,88 +148,66 @@ export default function CreateIntentModal({ onClose, onCreated }: { onClose: () 
     }
   };
 
-  const selectExistingBuyer = async (buyerName: string) => {
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const buyerName = form.buyer_name.trim();
+    if (!buyerName || saving || checkingDedup) return;
+
+    setCheckingDedup(true);
     setSubmitError(null);
     try {
-      const suggestions = await buyerParties.suggestions({ q: buyerName, limit: 10 });
-      const exact = suggestions.find((item) => item.buyer_name.trim().toLowerCase() === buyerName.trim().toLowerCase());
-      if (!exact) throw new Error('当前账号无法选用这条买家记录');
-      setSelectedBuyerPartyId(exact.id);
-      setSelectedBuyerName(exact.buyer_name);
-      updateForm('buyer_name', exact.buyer_name);
+      const response = await buyerParties.dedupCheck({ q: buyerName });
+      if (response.matches.length > 0) {
+        setDedupCheck(response);
+        return;
+      }
+      await createBuyerIntent(null, buyerName);
     } catch (error) {
-      setSubmitError(error instanceof Error ? error.message : '选用已有买家失败');
+      setSubmitError(error instanceof Error ? error.message : '买家查重失败，请稍后重试');
+    } finally {
+      setCheckingDedup(false);
     }
   };
 
-  return (
-    <Modal title="新建买家需求" onClose={onClose}>
-      <form onSubmit={handleSubmit} className="space-y-5">
-        <div className="border border-brand-100 bg-brand-50 px-3 py-2.5 text-xs text-brand-800 flex gap-2">
-          <Building2 className="w-4 h-4 mt-0.5 shrink-0" />
-          <p className="leading-relaxed">
-            一次录入一个买家的一项并购需求。需求创建后独立推荐和推进；同一买家的基础信息可以复用。
-          </p>
-        </div>
+  const closeDedupConfirmation = () => {
+    if (saving) return;
+    setDedupCheck(null);
+    setSubmitError(null);
+  };
 
-        <Field label="买家名称 *">
-          <div className="flex gap-2">
+  return (
+    <>
+      <Modal title="新建买家需求" onClose={onClose}>
+        <form onSubmit={handleSubmit} className="space-y-5">
+          <div className="border border-brand-100 bg-brand-50 px-3 py-2.5 text-xs text-brand-800 flex gap-2">
+            <Building2 className="w-4 h-4 mt-0.5 shrink-0" />
+            <p className="leading-relaxed">
+              一次录入一个买家的一项并购需求。需求创建后独立推荐和推进；同一买家的基础信息可以复用。
+            </p>
+          </div>
+
+          <Field label="买家名称 *">
             <input
               type="text"
               value={form.buyer_name}
               onChange={(e) => {
                 updateForm('buyer_name', e.target.value);
-                setDedupChecked(false);
                 setDedupCheck(null);
-                setSelectedBuyerPartyId(null);
-                setSelectedBuyerName(null);
               }}
               placeholder="例如：北控集团、杭州某上市公司"
-              className="input flex-1"
+              className="input w-full"
               autoFocus
             />
-            <button
-              type="button"
-              onClick={handleDedupCheck}
-              disabled={checkingDedup || !form.buyer_name.trim()}
-              className="px-3 py-2 border border-gray-200 text-sm text-gray-700 hover:border-brand-500 hover:text-brand-600 disabled:opacity-50 whitespace-nowrap"
-            >
-              {checkingDedup ? '查重中' : '查重'}
-            </button>
-          </div>
-        </Field>
+          </Field>
 
-        {dedupChecked && Boolean(dedupCheck?.matches.length) && (
-          <div className="border border-amber-200 bg-amber-50 p-3 space-y-2">
-            <p className="text-xs font-medium text-amber-700">发现相似买家，请确认是否重复录入：</p>
-            {dedupCheck!.matches.map((match) => (
-              <div key={`${match.buyer_name}-${match.match_type}`} className={`flex items-center justify-between gap-3 border px-3 py-2 text-sm ${selectedBuyerName === match.buyer_name ? 'border-brand-300 bg-white' : 'border-amber-100 bg-amber-50/50'}`}>
-                <div className="text-gray-800">
-                  <span className="font-medium">{match.buyer_name}</span>
-                  {match.legal_name && <span className="text-xs text-gray-500"> · {match.legal_name}</span>}
-                  <span className="ml-2 text-xs text-amber-700">负责人：{match.owner_name || '未指派'}</span>
-                  <span className="ml-2 text-xs text-gray-500">匹配：{dedupMatchLabel(match.match_type)}</span>
-                </div>
-                <button type="button" onClick={() => void selectExistingBuyer(match.buyer_name)} className="shrink-0 border border-amber-300 bg-white px-2.5 py-1 text-xs text-amber-800">
-                  {selectedBuyerName === match.buyer_name ? '已选用' : '使用该买家'}
-                </button>
-              </div>
-            ))}
-            <p className="text-xs text-amber-700">同一买家的不同需求可分别创建，并共享这条买家基础信息。</p>
-          </div>
-        )}
-        {dedupChecked && !dedupCheck?.matches.length && (
-          <p className="text-xs text-emerald-600">未发现同名买家。</p>
-        )}
-
-        <Field label="需求材料">
-          <textarea
-            value={form.raw_requirement_text}
-            onChange={(e) => updateForm('raw_requirement_text', e.target.value)}
-            className="input min-h-[170px] resize-y leading-relaxed"
-            placeholder={'可粘贴买家的聊天记录、邮件、投资偏好或访谈纪要。\n建议包含：关注行业、地区范围、上市/非上市偏好、市值或估值、利润/PE/负债率、股权比例、交易方式、排除项。\n示例：关注长三角医药健康资产，净利润2000万以上，优先控股并表，不接受重大诉讼或执行风险。'}
-          />
-        </Field>
+          <Field label="需求材料">
+            <textarea
+              value={form.raw_requirement_text}
+              onChange={(e) => updateForm('raw_requirement_text', e.target.value)}
+              className="input min-h-[170px] resize-y leading-relaxed"
+              placeholder={'可粘贴买家的聊天记录、邮件、投资偏好或访谈纪要。\n建议包含：关注行业、地区范围、上市/非上市偏好、市值或估值、利润/PE/负债率、股权比例、交易方式、排除项。\n示例：关注长三角医药健康资产，净利润2000万以上，优先控股并表，不接受重大诉讼或执行风险。'}
+            />
+          </Field>
 
         <div>
           <label className="block text-xs font-medium text-gray-600 mb-1">附件/截图</label>
@@ -292,15 +246,73 @@ export default function CreateIntentModal({ onClose, onCreated }: { onClose: () 
           </p>
           <div className="flex justify-end gap-2">
             <button type="button" onClick={onClose} className="px-4 py-2 text-sm border border-gray-200 text-gray-700">取消</button>
-            <button type="submit" disabled={saving || !form.buyer_name.trim()} className="px-4 py-2 text-sm bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50 inline-flex items-center gap-2">
-              {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-              {saving ? '创建中...' : selectedFiles.length > 0 || form.raw_requirement_text.trim() ? '创建需求并解析' : '创建需求'}
+            <button type="submit" disabled={saving || checkingDedup || !form.buyer_name.trim()} className="px-4 py-2 text-sm bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50 inline-flex items-center gap-2">
+              {(saving || checkingDedup) && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+              {checkingDedup ? '查重中...' : saving ? '创建中...' : selectedFiles.length > 0 || form.raw_requirement_text.trim() ? '创建需求并解析' : '创建需求'}
             </button>
           </div>
         </div>
-      </form>
-    </Modal>
+        </form>
+      </Modal>
+
+      {dedupCheck && dedupCheck.matches.length > 0 && (
+        <Modal title="发现疑似重复买家" onClose={closeDedupConfirmation} wide>
+          <div className="space-y-4">
+            <div className="border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+              系统在全库中发现以下疑似重复买家。你可以复用已有买家创建本次需求，也可以继续新建买家。
+            </div>
+            <div className="space-y-2">
+              {dedupCheck.matches.map((match) => (
+                <div key={match.id} className="flex items-center justify-between gap-4 border border-gray-200 bg-white px-4 py-3">
+                  <div className="min-w-0 text-sm text-gray-800">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <span className="font-medium">{match.buyer_name}</span>
+                      {match.legal_name && <span className="text-xs text-gray-500">法律主体：{match.legal_name}</span>}
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-gray-500">
+                      <span>负责人：{match.owner_name || '未指派'}</span>
+                      <span>匹配：{dedupMatchLabel(match.match_type)}</span>
+                      <span>状态：{buyerPartyStatusLabel(match.status)}</span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void createBuyerIntent(match.id, match.buyer_name)}
+                    disabled={saving}
+                    className="shrink-0 border border-brand-200 bg-brand-50 px-3 py-1.5 text-xs font-medium text-brand-700 hover:border-brand-400 hover:bg-brand-100 disabled:opacity-50"
+                  >
+                    使用并创建
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            {submitError && <div className="border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{submitError}</div>}
+
+            <div className="flex justify-end gap-2 border-t border-gray-100 pt-4">
+              <button type="button" onClick={closeDedupConfirmation} disabled={saving} className="px-4 py-2 text-sm border border-gray-200 text-gray-700 disabled:opacity-50">取消</button>
+              <button
+                type="button"
+                onClick={() => void createBuyerIntent(null, form.buyer_name.trim())}
+                disabled={saving}
+                className="px-4 py-2 text-sm bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50 inline-flex items-center gap-2"
+              >
+                {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                {saving ? '创建中...' : '新建买家并创建'}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </>
   );
+}
+
+function buyerPartyStatusLabel(status: string): string {
+  if (status === 'active') return '活跃';
+  if (status === 'archived') return '已归档';
+  if (status === 'merged') return '已合并';
+  return status;
 }
 
 function defaultBuyerIntentName(buyerName: string): string {

@@ -397,7 +397,7 @@ def create_buyer_intent(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     if payload.buyer_party_id is not None:
-        ensure_entity_writable(db, current_user, entity_type="buyer_party", entity_id=payload.buyer_party_id)
+        _ensure_buyer_party_available_for_intent(db, payload.buyer_party_id)
     row = db.execute(
         text(
             """
@@ -1332,27 +1332,32 @@ def _get_buyer_intent_or_404(db: Session, buyer_intent_id: UUID) -> dict[str, An
     return dict(row)
 
 
-def _resolve_intent_owner(payload: BuyerIntentCreate, current_user: AuthContext, db: Session) -> UUID:
-    """意向负责人：管理员可指定；否则默认继承所属买家的负责人，兜底为创建人。"""
+def _ensure_buyer_party_available_for_intent(db: Session, buyer_party_id: UUID) -> None:
+    exists = db.execute(
+        text(
+            """
+            select 1
+            from buyer_party
+            where id = :buyer_party_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            """
+        ),
+        {
+            "buyer_party_id": buyer_party_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).scalar()
+    if not exists:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Buyer party not found.")
+
+
+def _resolve_intent_owner(payload: BuyerIntentCreate, current_user: AuthContext) -> UUID:
+    """新需求归创建人负责；管理员仍可显式指定其他负责人。"""
     if current_user.is_admin and payload.owner_user_id:
         return payload.owner_user_id
-    if payload.buyer_party_id:
-        buyer_owner = db.execute(
-            text(
-                """
-                select owner_user_id from buyer_party
-                where id = :buyer_party_id and team_id = :team_id
-                  and workspace_id = :workspace_id and deleted_at is null
-                """
-            ),
-            {
-                "buyer_party_id": payload.buyer_party_id,
-                "team_id": DEFAULT_TEAM_ID,
-                "workspace_id": DEFAULT_WORKSPACE_ID,
-            },
-        ).scalar()
-        if buyer_owner:
-            return buyer_owner
     return current_user.user_id
 
 
@@ -1364,7 +1369,7 @@ def _buyer_intent_params(payload: BuyerIntentCreate, current_user: AuthContext, 
         "team_id": DEFAULT_TEAM_ID,
         "workspace_id": DEFAULT_WORKSPACE_ID,
         "buyer_party_id": payload.buyer_party_id,
-        "owner_user_id": _resolve_intent_owner(payload, current_user, db),
+        "owner_user_id": _resolve_intent_owner(payload, current_user),
         "intent_name": payload.intent_name.strip(),
         "contact_name": payload.contact_name,
         "contact_info_json": payload.contact_info_json or {},

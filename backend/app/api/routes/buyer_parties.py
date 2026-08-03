@@ -115,6 +115,7 @@ class BuyerPartySuggestionOut(BaseModel):
 
 
 class BuyerPartyDedupMatchOut(BaseModel):
+    id: UUID
     buyer_name: str
     legal_name: str | None = None
     owner_name: str | None = None
@@ -362,18 +363,30 @@ def buyer_party_filter_options(current_user: CurrentUser, db: Session = Depends(
 def buyer_party_dedup_check(
     current_user: CurrentUser,
     q: str = Query(min_length=1, max_length=100),
-    limit: int = Query(default=5, ge=1, le=10),
+    limit: int | None = Query(default=None, ge=1, le=100),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     query = q.strip()
     if not query:
         return {"exists": False, "query": "", "matches": []}
 
+    escaped_query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    limit_sql = "limit :limit" if limit is not None else ""
+    params: dict[str, Any] = {
+        "team_id": DEFAULT_TEAM_ID,
+        "workspace_id": DEFAULT_WORKSPACE_ID,
+        "q": query,
+        "name_pattern": f"%{escaped_query}%",
+    }
+    if limit is not None:
+        params["limit"] = limit
+
     rows = db.execute(
         text(
-            """
+            rf"""
             with candidate as (
               select
+                bp.id,
                 bp.buyer_name,
                 bp.legal_name,
                 coalesce(au.name, '未指派') as owner_name,
@@ -381,12 +394,26 @@ def buyer_party_dedup_check(
                 case
                   when lower(bp.buyer_name) = lower(:q) then 'buyer_name'
                   when lower(coalesce(bp.legal_name, '')) = lower(:q) then 'legal_name'
+                  when exists (
+                    select 1
+                    from jsonb_array_elements_text(coalesce(bp.aliases_json, '[]'::jsonb)) alias_name
+                    where lower(alias_name) = lower(:q)
+                  ) then 'alias'
+                  when bp.buyer_name ilike :name_pattern escape '\' then 'buyer_name'
+                  when coalesce(bp.legal_name, '') ilike :name_pattern escape '\' then 'legal_name'
                   else 'alias'
                 end as match_type,
                 case
                   when lower(bp.buyer_name) = lower(:q) then 1
                   when lower(coalesce(bp.legal_name, '')) = lower(:q) then 2
-                  else 3
+                  when exists (
+                    select 1
+                    from jsonb_array_elements_text(coalesce(bp.aliases_json, '[]'::jsonb)) alias_name
+                    where lower(alias_name) = lower(:q)
+                  ) then 3
+                  when bp.buyer_name ilike :name_pattern escape '\' then 4
+                  when coalesce(bp.legal_name, '') ilike :name_pattern escape '\' then 5
+                  else 6
                 end as priority,
                 bp.updated_at
               from buyer_party bp
@@ -395,27 +422,22 @@ def buyer_party_dedup_check(
                 and bp.workspace_id = :workspace_id
                 and bp.deleted_at is null
                 and (
-                  lower(bp.buyer_name) = lower(:q)
-                  or lower(coalesce(bp.legal_name, '')) = lower(:q)
+                  bp.buyer_name ilike :name_pattern escape '\'
+                  or coalesce(bp.legal_name, '') ilike :name_pattern escape '\'
                   or exists (
                     select 1
-                    from jsonb_array_elements_text(bp.aliases_json) alias_name
-                    where lower(alias_name) = lower(:q)
+                    from jsonb_array_elements_text(coalesce(bp.aliases_json, '[]'::jsonb)) alias_name
+                    where alias_name ilike :name_pattern escape '\'
                   )
                 )
             )
-            select buyer_name, legal_name, owner_name, match_type, status
+            select id, buyer_name, legal_name, owner_name, match_type, status
             from candidate
-            order by priority asc, updated_at desc
-            limit :limit
+            order by priority asc, updated_at desc, buyer_name asc
+            {limit_sql}
             """
         ),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "q": query,
-            "limit": limit,
-        },
+        params,
     ).mappings().all()
     matches = [dict(row) for row in rows]
     return {"exists": bool(matches), "query": query, "matches": matches}

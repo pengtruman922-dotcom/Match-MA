@@ -235,6 +235,7 @@ export interface BuyerPartySuggestion {
 }
 
 export interface BuyerPartyDedupMatch {
+  id: string;
   buyer_name: string;
   legal_name: string | null;
   owner_name: string | null;
