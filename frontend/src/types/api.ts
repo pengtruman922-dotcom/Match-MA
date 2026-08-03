@@ -1,3 +1,13 @@
+/**
+ * 买家条件的规则档位，只有两态：必须（初筛硬门槛）和优先（只影响排序）。
+ * 对应 backend/app/services/recommendation_conditions.py 的 CONDITION_EFFECTS。
+ *
+ * 曾经有第三个取值 deep_eval，2026-08-02 随买家需求页重构下线（迁移 012 已洗掉
+ * 库里的残值）。当时这个联合类型在本文件里被抄了 6 遍、组件里还有第 7 遍，
+ * 只改了组件那份，CI 的 typecheck 因此红了两个提交。现在只留这一份。
+ */
+export type ConditionEffect = 'required' | 'preferred';
+
 export interface SellerTarget {
   id: string;
   target_name: string;
@@ -264,7 +274,7 @@ export interface BuyerIntentConfirmationItem {
   evidence?: string;
   uncertain_part?: string;
   operator?: string;
-  effect?: 'required' | 'preferred' | 'deep_eval';
+  effect?: ConditionEffect;
   scope?: string;
   item_key?: string;
 }
@@ -344,7 +354,7 @@ export interface BuyerIntent {
   equity_requirement_type: string | null;
   preferred_listed_status: string | null;
   acceptable_listed_status_json?: string[];
-  condition_effects_json?: Record<string, 'required' | 'preferred' | 'deep_eval'>;
+  condition_effects_json?: Record<string, ConditionEffect>;
   listing_board_requirement_summary: string | null;
   financing_stage_requirement_summary: string | null;
   budget_min_yuan: string | null;
@@ -669,7 +679,7 @@ export interface BuyerIntentCreate {
   equity_requirement_type?: string;
   preferred_listed_status?: string;
   acceptable_listed_status_json?: string[];
-  condition_effects_json?: Record<string, 'required' | 'preferred' | 'deep_eval'>;
+  condition_effects_json?: Record<string, ConditionEffect>;
   listing_board_requirement_summary?: string;
   financing_stage_requirement_summary?: string;
   budget_min_yuan?: number;
@@ -764,7 +774,7 @@ export interface BuyerIntentUpdate {
   equity_requirement_type?: string | null;
   preferred_listed_status?: string | null;
   acceptable_listed_status_json?: string[];
-  condition_effects_json?: Record<string, 'required' | 'preferred' | 'deep_eval'>;
+  condition_effects_json?: Record<string, ConditionEffect>;
   listing_board_requirement_summary?: string | null;
   financing_stage_requirement_summary?: string | null;
   budget_min_yuan?: number | null;
@@ -1195,7 +1205,7 @@ export interface IndicatorMeta {
   fold_into: string | null;
   target_column: string | null;
   operator: string | null;
-  default_effect: 'required' | 'preferred' | 'deep_eval' | null;
+  default_effect: ConditionEffect | null;
   effect_editable: boolean;
   scenario_allowed: boolean;
   multi_value: boolean;
@@ -1853,7 +1863,7 @@ export interface BuyerIntentScenario {
   active: boolean;
   fields_json: Record<string, unknown>;
   needs_confirmation_json: BuyerIntentConfirmationItem[];
-  condition_effects_json: Record<string, 'required' | 'preferred' | 'deep_eval'>;
+  condition_effects_json: Record<string, ConditionEffect>;
   source: string;
   created_at: string;
   updated_at: string;
@@ -1865,7 +1875,7 @@ export interface BuyerIntentScenarioWrite {
   active: boolean;
   fields_json: Record<string, unknown>;
   needs_confirmation_json?: BuyerIntentConfirmationItem[];
-  condition_effects_json?: Record<string, 'required' | 'preferred' | 'deep_eval'>;
+  condition_effects_json?: Record<string, ConditionEffect>;
 }
 
 export interface RecommendationCandidateResponse {

@@ -20,6 +20,7 @@ import type {
   BuyerIntentScenario,
   BuyerIntentUpdate,
   BuyerRegionConstraint,
+  ConditionEffect,
   IndicatorGroupMeta,
   IndicatorMeta,
   IndicatorRegistryResponse,
@@ -32,9 +33,9 @@ import { hasReadableEvidence, sourceDetailText } from '../features/shared/fieldS
 import { fieldLabel } from '../lib/fieldLabels';
 import AdministrativeAreaPicker from './AdministrativeAreaPicker';
 
-// 规则只有两态：必须（初筛硬门槛）、优先（只影响排序）。
-// 标准化不了、不适合初筛的内容不再逐字段标「仅深评」，统一进模块的「其他」。
-type ConditionEffect = 'required' | 'preferred';
+// 规则只有两态（ConditionEffect 定义在 types/api.ts，跟着接口契约走）：必须是
+// 初筛硬门槛、优先只影响排序。标准化不了、不适合初筛的内容不再逐字段标「仅深评」，
+// 统一进模块的「其他」。
 type PendingItem = BuyerIntentConfirmationItem & { scopeLabel: string; scenario?: BuyerIntentScenario };
 type ConditionRowDefinition = {
   key: string;
@@ -335,7 +336,13 @@ function InlineConditionEditor({
     setDraftEffects(Object.fromEntries(
       row.indicators
         .filter((indicator) => indicator.effect_editable && indicator.editor !== 'region_multi')
-        .map((indicator) => [indicator.column, effectiveEffect(indicator, effects, fields[indicator.column])]),
+        .flatMap((indicator) => {
+          // 草稿只装真规则。眼下每个可编辑字段都有 default_effect，这里取不到 null；
+          // 真出现了也宁可不进草稿（保存时不碰这个字段），也别把 null 写进
+          // condition_effects_json —— 那是个后端会当垃圾丢掉的值。
+          const effect = effectiveEffect(indicator, effects, fields[indicator.column]);
+          return effect ? [[indicator.column, effect] as const] : [];
+        }),
     ));
     setEditingKey(row.key);
   };

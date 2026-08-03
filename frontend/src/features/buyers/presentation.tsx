@@ -1,5 +1,5 @@
 import { Loader2 } from 'lucide-react';
-import type { BuyerIntent, BuyerIntentParseStatus } from '../../types/api';
+import type { BuyerIntent, BuyerIntentParseStatus, ConditionEffect } from '../../types/api';
 import { valueLabel } from '../../lib/fieldLabels';
 import { formatCompactMoney } from '../../lib/format';
 
@@ -89,7 +89,7 @@ export function dedupMatchLabel(value: string): string {
   return value;
 }
 
-export type RequirementChip = { key: string; label: string; effect: 'required' | 'preferred'; title: string };
+export type RequirementChip = { key: string; label: string; effect: ConditionEffect; title: string };
 
 /**
  * 各维度的默认匹配作用，来源是 backend/app/registry/indicators.py 的 BUYER_INDICATORS
@@ -106,8 +106,8 @@ const DEFAULT_EFFECTS = {
 
 type ChipColumn = keyof typeof DEFAULT_EFFECTS;
 
-/** 返回该维度的生效作用；deep_eval 表示不进列表。 */
-function resolveEffect(item: BuyerIntent, column: ChipColumn): 'required' | 'preferred' | 'deep_eval' {
+/** 返回该维度的生效作用。规则只有两态，六个维度都会进列表。 */
+function resolveEffect(item: BuyerIntent, column: ChipColumn): ConditionEffect {
   return item.condition_effects_json?.[column] || DEFAULT_EFFECTS[column];
 }
 
@@ -133,7 +133,6 @@ function chip(
   build: () => { label: string; title: string } | null,
 ): RequirementChip | null {
   const effect = resolveEffect(item, column);
-  if (effect === 'deep_eval') return null;
   const built = build();
   if (!built) return null;
   return { key, label: built.label, effect, title: built.title };
