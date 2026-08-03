@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
+import { Loader2, Trash2 } from 'lucide-react';
 import { buyerParties, users } from '../../lib/api';
-import { isAdmin } from '../../lib/auth';
+import { canManageOwnedEntity, isAdmin } from '../../lib/auth';
 import type {
   AppUserOption,
   BuyerParty,
@@ -47,6 +48,7 @@ export default function PartiesList({
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const admin = isAdmin();
   const [ownerOptions, setOwnerOptions] = useState<AppUserOption[]>([]);
   const [assignOwnerId, setAssignOwnerId] = useState('');
@@ -162,6 +164,20 @@ export default function PartiesList({
     });
   };
 
+  const handleDelete = async (item: BuyerParty) => {
+    if (!window.confirm(`确认删除买家主体「${item.buyer_name}」？删除后不会出现在列表和推荐候选里。`)) return;
+    setDeletingId(item.id);
+    try {
+      await buyerParties.delete(item.id);
+      await buyerParties.filterOptions().then(setFilterOptions).catch(() => {});
+      fetchData();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '删除失败');
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
   const handleBulkDelete = async () => {
     const ids = Array.from(selectedIds);
     if (!ids.length) return;
@@ -262,7 +278,16 @@ export default function PartiesList({
               <tr><td colSpan={9} className="px-4 py-8 text-center"><div className="w-5 h-5 border-2 border-brand-600 border-t-transparent rounded-full animate-spin mx-auto" /></td></tr>
             ) : items.length === 0 ? (
               <tr><td colSpan={9} className="px-4 py-8 text-center text-gray-400">暂无匹配的买家主体</td></tr>
-            ) : items.map((item) => <PartyRow key={item.id} item={item} selected={selectedIds.has(item.id)} onSelectedChange={(checked) => toggleSelected(item.id, checked)} />)}
+            ) : items.map((item) => (
+              <PartyRow
+                key={item.id}
+                item={item}
+                selected={selectedIds.has(item.id)}
+                onSelectedChange={(checked) => toggleSelected(item.id, checked)}
+                onDelete={() => handleDelete(item)}
+                deleting={deletingId === item.id}
+              />
+            ))}
           </tbody>
         </table>
       </div>
@@ -274,8 +299,21 @@ export default function PartiesList({
   );
 }
 
-function PartyRow({ item, selected, onSelectedChange }: { item: BuyerParty; selected: boolean; onSelectedChange: (checked: boolean) => void }) {
+function PartyRow({
+  item,
+  selected,
+  onSelectedChange,
+  onDelete,
+  deleting,
+}: {
+  item: BuyerParty;
+  selected: boolean;
+  onSelectedChange: (checked: boolean) => void;
+  onDelete: () => void;
+  deleting: boolean;
+}) {
   const region = [item.region_province, item.region_city].filter(Boolean).join(' ') || '-';
+  const canDelete = canManageOwnedEntity(item.owner_user_id);
   return (
     <tr className="hover:bg-brand-50/30 transition-colors">
       <td className="px-4 py-3"><input type="checkbox" checked={selected} onChange={(event) => onSelectedChange(event.target.checked)} aria-label={`选择${item.buyer_name}`} className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600" /></td>
@@ -286,7 +324,22 @@ function PartyRow({ item, selected, onSelectedChange }: { item: BuyerParty; sele
       <td className="px-4 py-3 text-gray-600 truncate max-w-[240px]" title={item.main_business || undefined}>{item.main_business || '-'}</td>
       <td className="px-4 py-3 text-center"><PartyStatusBadge status={item.status} /></td>
       <td className="px-4 py-3 text-gray-600">{item.owner_name || <span className="text-gray-300">未指派</span>}</td>
-      <td className="px-4 py-3 text-center"><Link to={`/buyers/${item.id}`} className="text-xs text-brand-600 hover:text-brand-700 font-medium">查看</Link></td>
+      <td className="px-4 py-3 text-center">
+        <div className="inline-flex items-center gap-1">
+          <Link to={`/buyers/${item.id}`} className="px-2 py-1 text-xs text-brand-600 hover:text-brand-700 font-medium">查看</Link>
+          {canDelete && (
+            <button
+              type="button"
+              onClick={onDelete}
+              disabled={deleting}
+              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-red-600 hover:bg-red-50 disabled:opacity-50"
+            >
+              {deleting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+              删除
+            </button>
+          )}
+        </div>
+      </td>
     </tr>
   );
 }

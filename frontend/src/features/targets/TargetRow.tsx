@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom';
 import { Loader2, Sparkles, Trash2 } from 'lucide-react';
-import { isAdmin } from '../../lib/auth';
+import { canManageOwnedEntity } from '../../lib/auth';
 import type { SellerTarget } from '../../types/api';
 import { ClampedLink, ClampedText } from '../../components/Clamped';
 import { formatMonthDayTime, formatPercent, formatYuan } from '../../lib/format';
@@ -42,6 +42,7 @@ export default function TargetRow({
     ? `${price.kind === 'asking' ? '报价' : '估值'}：${formatYuan(price.value)}${price.kind === 'asking' ? '（明确报价）' : ''}`
     : '';
   const ratioText = formatTransferRatio(item);
+  const canDelete = canManageOwnedEntity(item.owner_user_id);
 
   return (
     <tr className="group hover:bg-brand-50/30 transition-colors">
@@ -93,7 +94,7 @@ export default function TargetRow({
             <Sparkles className="w-3 h-3" />
             推荐买家
           </Link>
-          {isAdmin() && (
+          {canDelete && (
             <button
               type="button"
               onClick={onDelete}

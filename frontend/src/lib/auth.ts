@@ -49,3 +49,9 @@ export function isAdmin(): boolean {
   // 前端权限展示也应失败关闭；老会话缺少 role 时重新登录即可恢复。
   return user?.role === 'admin';
 }
+
+/** Match the API's owner-only write scope for target and buyer-party rows. */
+export function canManageOwnedEntity(ownerUserId: string | null | undefined): boolean {
+  const user = getStoredUser();
+  return user?.role === 'admin' || Boolean(user?.user_id && user.user_id === ownerUserId);
+}

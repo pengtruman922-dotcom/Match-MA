@@ -714,8 +714,8 @@ def delete_buyer_party(
     current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> None:
-    require_admin(current_user)
     _get_buyer_party_or_404(db, buyer_party_id)
+    ensure_entity_writable(db, current_user, entity_type="buyer_party", entity_id=buyer_party_id)
     _soft_delete_buyer_parties(db, [buyer_party_id], actor_user_id=current_user.user_id)
     db.commit()
     return None

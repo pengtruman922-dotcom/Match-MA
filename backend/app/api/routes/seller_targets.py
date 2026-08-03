@@ -1299,8 +1299,8 @@ def delete_seller_target(
     current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> None:
-    require_admin(current_user)
     _get_seller_target_or_404(db, seller_target_id)
+    ensure_entity_writable(db, current_user, entity_type="seller_target", entity_id=seller_target_id)
     _soft_delete_seller_targets(db, [seller_target_id], actor_user_id=current_user.user_id)
     db.commit()
     return None
