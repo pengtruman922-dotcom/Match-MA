@@ -3,7 +3,7 @@ import { Loader2, Sparkles, Trash2 } from 'lucide-react';
 import { isAdmin } from '../../lib/auth';
 import type { SellerTarget } from '../../types/api';
 import { ClampedLink, ClampedText } from '../../components/Clamped';
-import { formatPercent, formatYuan } from '../../lib/format';
+import { formatMonthDayTime, formatPercent, formatYuan } from '../../lib/format';
 import { isParsingTarget } from './filters';
 import UpdateEntryMenu from '../../components/UpdateEntryMenu';
 import type { BusinessUpdateProcessingScope } from '../../types/api';
@@ -80,18 +80,9 @@ export default function TargetRow({
       <td className="px-4 py-3 text-center"><YesNoBadge value={item.can_control} /></td>
       <td className="px-4 py-3 text-center"><YesNoBadge value={item.can_consolidate} /></td>
       <td className="px-4 py-3 text-gray-600">
-        {item.latest_progress_at ? (
-          <div>
-            <p className="text-[11px] font-mono text-gray-400">{formatProgressTime(item.latest_progress_at)}</p>
-            <ClampedText value={item.latest_progress_content || ''} className="mt-0.5 text-xs" />
-          </div>
-        ) : (
-          '-'
-        )}
-      </td>
-      <td className="px-4 py-3 text-gray-600">
         {item.owner_name ? <ClampedText value={item.owner_name} /> : <span className="text-gray-300">未指派</span>}
       </td>
+      <td className="whitespace-nowrap px-4 py-3 text-gray-500">{formatMonthDayTime(item.updated_at)}</td>
       <td className="sticky right-0 z-20 bg-white px-4 py-3 group-hover:bg-brand-50">
         <div className="flex items-center gap-1 whitespace-nowrap">
           <UpdateEntryMenu compact onSelect={onOpenUpdateDrawer} />
@@ -117,9 +108,4 @@ export default function TargetRow({
       </td>
     </tr>
   );
-}
-
-function formatProgressTime(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 }

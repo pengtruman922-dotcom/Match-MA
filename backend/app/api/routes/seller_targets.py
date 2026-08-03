@@ -150,8 +150,6 @@ class SellerTargetOut(BaseModel):
     research_last_outcome: str | None = None
     created_at: str
     updated_at: str
-    latest_progress_at: str | None = None
-    latest_progress_content: str | None = None
 
 
 class SellerTargetListOut(BaseModel):
@@ -591,28 +589,8 @@ def list_seller_targets(
             select
 {SELLER_TARGET_OUT_COLUMNS},
               active_research_job.job_type as research_job_type,
-              active_research_job.status as research_job_status,
-              lp.event_time::text as latest_progress_at,
-              coalesce(lp.content, lp.title, lp.next_step) as latest_progress_content
+              active_research_job.status as research_job_status
             from seller_target
-            left join lateral (
-              select e.event_time, e.content, e.title, e.next_step
-              from buyer_seller_relation r
-              join relation_event e
-                on e.relation_id = r.id
-               and e.team_id = r.team_id
-               and e.workspace_id = r.workspace_id
-               and e.deleted_at is null
-              join buyer_intent bi on bi.id = r.buyer_intent_id and bi.deleted_at is null
-              left join buyer_party bp on bp.id = r.buyer_party_id and bp.deleted_at is null
-              where r.seller_target_id = seller_target.id
-                and r.team_id = seller_target.team_id
-                and r.workspace_id = seller_target.workspace_id
-                and r.deleted_at is null
-                and (r.buyer_party_id is null or bp.id is not null)
-              order by e.event_time desc, e.created_at desc
-              limit 1
-            ) lp on true
 {ACTIVE_RESEARCH_JOB_LATERAL_SQL}
             where {where_sql}
             order by updated_at desc

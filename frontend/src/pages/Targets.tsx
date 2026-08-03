@@ -160,12 +160,7 @@ export default function Targets() {
               && fresh.ai_processing_state === item.ai_processing_state
             ) return item;
             changed = true;
-            // The detail endpoint does not aggregate relation events; keep the list values.
-            return {
-              ...fresh,
-              latest_progress_at: item.latest_progress_at,
-              latest_progress_content: item.latest_progress_content,
-            };
+            return fresh;
           });
           return changed ? next : prev;
         });
@@ -518,21 +513,21 @@ export default function Targets() {
                 <th className="w-[120px] text-left px-4 py-3 font-medium text-gray-600">出售比例</th>
                 <th className="w-[76px] text-center px-4 py-3 font-medium text-gray-600">控股</th>
                 <th className="w-[76px] text-center px-4 py-3 font-medium text-gray-600">并表</th>
-                <th className="w-[200px] text-left px-4 py-3 font-medium text-gray-600">最近推进</th>
                 <th className="w-[100px] text-left px-4 py-3 font-medium text-gray-600">负责人</th>
+                <th className="w-[112px] text-left px-4 py-3 font-medium text-gray-600">更新时间</th>
                 <th className="sticky right-0 top-0 z-40 w-[210px] bg-gray-50 text-left px-4 py-3 font-medium text-gray-600">操作</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {loading ? (
                 <tr>
-                  <td colSpan={20} className="px-4 py-8 text-center">
+                  <td colSpan={19} className="px-4 py-8 text-center">
                     <div className="w-5 h-5 border-2 border-brand-600 border-t-transparent rounded-full animate-spin mx-auto" />
                   </td>
                 </tr>
               ) : items.length === 0 ? (
                 <tr>
-                  <td colSpan={20} className="px-4 py-8 text-center text-gray-400">暂无匹配的标的数据</td>
+                  <td colSpan={19} className="px-4 py-8 text-center text-gray-400">暂无匹配的标的数据</td>
                 </tr>
               ) : (
                 items.map((item) => (

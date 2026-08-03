@@ -68,8 +68,6 @@ export interface SellerTarget {
   owner_name?: string | null;
   created_at: string;
   updated_at: string;
-  latest_progress_at?: string | null;
-  latest_progress_content?: string | null;
   last_research_at?: string | null;
   last_parse_at?: string | null;
   research_last_outcome?: 'found' | 'found_but_rejected' | 'no_public_information' | 'failed' | null;

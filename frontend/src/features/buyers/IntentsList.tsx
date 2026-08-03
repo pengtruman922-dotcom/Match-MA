@@ -10,7 +10,7 @@ import type {
   BuyerIntentSuggestion,
   BusinessUpdateProcessingScope,
 } from '../../types/api';
-import { shortDate } from '../../lib/format';
+import { formatMonthDayTime } from '../../lib/format';
 import BulkActionBar from '../../components/BulkActionBar';
 import PaginationFooter from '../../components/PaginationFooter';
 import ListToolbar from './ListToolbar';
@@ -323,7 +323,7 @@ export default function IntentsList({
               <th className="text-center px-4 py-3 font-medium text-gray-600">解析状态</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">推荐状态</th>
               <th className="text-left px-4 py-3 font-medium text-gray-600">负责人</th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600">最近更新</th>
+              <th className="text-left px-4 py-3 font-medium text-gray-600">更新时间</th>
               <th className="sticky right-0 top-0 z-40 bg-gray-50 px-2 py-3 text-center font-medium text-gray-600">操作</th>
             </tr>
           </thead>
@@ -399,7 +399,7 @@ function IntentRow({
       <td className="px-4 py-3 text-center align-middle"><ParseStatusBadge item={item} /></td>
       <td className="px-4 py-3 text-center align-middle"><IntentStatusBadge status={item.status} /></td>
       <td className="px-4 py-3 align-middle text-gray-600"><p className="line-clamp-2" title={item.owner_name || '未指派'}>{item.owner_name || <span className="text-gray-300">未指派</span>}</p></td>
-      <td className="whitespace-nowrap px-4 py-3 align-middle text-gray-500">{shortDate(item.updated_at)}</td>
+      <td className="whitespace-nowrap px-4 py-3 align-middle text-gray-500">{formatMonthDayTime(item.updated_at)}</td>
       <td className={`sticky right-0 z-20 px-2 py-3 align-middle ${frozen}`}>
         <div className="flex items-center justify-center gap-1 whitespace-nowrap">
           <UpdateEntryMenu compact onSelect={onRecord} />

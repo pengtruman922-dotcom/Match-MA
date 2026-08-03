@@ -165,13 +165,9 @@ def test_blank_query_adds_nothing() -> None:
     assert params == {}
 
 
-def test_latest_progress_uses_only_live_scoped_relation_events() -> None:
+def test_target_list_does_not_aggregate_relation_events() -> None:
     source = inspect.getsource(list_seller_targets)
 
-    assert "from buyer_seller_relation r" in source
-    assert "join relation_event e" in source
-    assert "e.deleted_at is null" in source
-    assert "r.deleted_at is null" in source
-    assert "bi.deleted_at is null" in source
-    assert "r.team_id = seller_target.team_id" in source
-    assert "r.workspace_id = seller_target.workspace_id" in source
+    assert "buyer_seller_relation" not in source
+    assert "relation_event" not in source
+    assert "latest_progress" not in source
