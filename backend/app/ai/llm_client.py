@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 from urllib import error, request
@@ -135,6 +136,83 @@ def call_openai_compatible_chat(
         finish_reason=choice.get("finish_reason"),
         assistant_message=assistant_message,
     )
+
+
+def stream_openai_compatible_chat(
+    *,
+    base_url: str,
+    api_key_secret_ref: str | None,
+    model_name: str,
+    messages: list[dict[str, Any]],
+    temperature: float | None,
+    top_p: float | None,
+    max_tokens: int | None,
+    timeout_seconds: int,
+    api_key_encrypted: str | None = None,
+) -> Iterator[str]:
+    """Yield content deltas from an OpenAI-compatible `stream: true` response.
+
+    Deliberately separate from `call_openai_compatible_chat` and deliberately
+    tool-free. Streaming a turn that carries tools means reassembling
+    tool_call arguments from per-index fragments, which is the messiest part of
+    the protocol; the only turn we stream is the final, tool-free write-up, so
+    that work is avoided rather than done. Anything needing tools keeps using
+    the buffered call.
+    """
+    api_key = _get_api_key(api_key_secret_ref, api_key_encrypted)
+    endpoint = base_url.rstrip("/") + "/chat/completions"
+    payload: dict[str, Any] = {
+        "model": model_name,
+        "messages": messages,
+        "stream": True,
+    }
+    if temperature is not None:
+        payload["temperature"] = float(temperature)
+    if top_p is not None:
+        payload["top_p"] = float(top_p)
+    if max_tokens is not None:
+        payload["max_tokens"] = int(max_tokens)
+
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json; charset=utf-8",
+        "Accept": "text/event-stream",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    req = request.Request(endpoint, data=body, headers=headers, method="POST")
+    try:
+        response = request.urlopen(req, timeout=timeout_seconds)
+    except error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        raise LlmCallError(f"LLM HTTP {exc.code}: {error_body}") from exc
+    except error.URLError as exc:
+        raise LlmCallError(f"LLM stream failed: {exc.reason}") from exc
+    except (TimeoutError, ConnectionError) as exc:
+        raise LlmCallError(f"LLM stream timed out after {timeout_seconds}s: {exc!r}") from exc
+
+    try:
+        for raw_line in response:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[len("data:"):].strip()
+            if data == "[DONE]":
+                return
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                # provider 偶发的心跳/注释行，跳过而不是终止整个流。
+                continue
+            for choice in chunk.get("choices") or []:
+                delta = (choice.get("delta") or {}).get("content")
+                if delta:
+                    yield str(delta)
+    except (TimeoutError, ConnectionError) as exc:
+        raise LlmCallError(f"LLM stream dropped after {timeout_seconds}s: {exc!r}") from exc
+    finally:
+        response.close()
 
 
 def _parse_tool_calls(value: Any) -> tuple[ToolCall, ...]:

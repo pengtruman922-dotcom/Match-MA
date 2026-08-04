@@ -1371,6 +1371,58 @@ def _latest_parsed_document(db: Session, attachment_id: UUID) -> dict[str, Any] 
     return dict(row) if row else None
 
 
+class AttachmentExtractedTextOut(BaseModel):
+    attachment_id: UUID
+    parse_status: str
+    text: str
+    truncated: bool
+
+
+@router.get("/{attachment_id}/extracted-text", response_model=AttachmentExtractedTextOut)
+def get_attachment_extracted_text(
+    attachment_id: UUID,
+    current_user: CurrentUser,
+    max_chars: int = Query(default=20000, ge=1, le=200000),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Return the OCR/extraction text for one attachment.
+
+    The pipeline already stores the whole document body in
+    `evidence_span.text_excerpt`; the ocr-status endpoint only ever exposes a
+    500-char display preview of it. The recommendation page needs the real
+    thing to use an uploaded requirement document as its input, and it must be
+    able to do so without binding the attachment to any entity.
+    """
+    _ensure_attachment_visible(db, current_user, attachment_id)
+    parsed_document = _latest_parsed_document(db, attachment_id)
+    row = db.execute(
+        text(
+            """
+            select text_excerpt
+            from evidence_span
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and attachment_id = :attachment_id
+              and text_excerpt is not null
+            order by length(text_excerpt) desc, created_at desc
+            limit 1
+            """
+        ),
+        {
+            "attachment_id": attachment_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    full_text = str((row or {}).get("text_excerpt") or "")
+    return {
+        "attachment_id": attachment_id,
+        "parse_status": str((parsed_document or {}).get("parse_status") or "pending"),
+        "text": full_text[:max_chars],
+        "truncated": len(full_text) > max_chars,
+    }
+
+
 def _evidence_spans(db: Session, attachment_id: UUID) -> list[dict[str, Any]]:
     rows = db.execute(
         text(

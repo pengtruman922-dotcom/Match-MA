@@ -1,4 +1,8 @@
 import type {
+  AttachmentExtractedText,
+  AttachmentOcrStatus,
+  AttachmentUploadResult,
+  RecommendationAgentTurn,
   SearchConfigOverview,
   SearchProviderTestResult,
   OcrConfigOverview,
@@ -98,7 +102,7 @@ import type {
   TaskCenterData,
 } from '../../types/api';
 import type { AuthUser, LoginResponse } from '../auth';
-import { apiBlobResponse, apiRequest, buildQuery } from './client';
+import { apiBlobResponse, apiEventStream, apiRequest, buildQuery } from './client';
 
 export const auth = {
   login: (data: { username: string; password: string }) =>
@@ -303,6 +307,19 @@ export const attachments = {
     method: 'POST',
     body: JSON.stringify({ force: true }),
   }),
+  /** 不带 entity_type/entity_id：上传一份需求文件不该创建任何业务对象。 */
+  uploadUnbound: (file: File, options?: { autoStartOcr?: boolean }) => {
+    const form = new FormData();
+    form.set('file', file);
+    form.set('auto_start_ocr', String(options?.autoStartOcr ?? true));
+    form.set('auto_parse_linked_objects', 'false');
+    return apiRequest<AttachmentUploadResult>('/attachments/upload', { method: 'POST', body: form });
+  },
+  ocrStatus: (id: string) => apiRequest<AttachmentOcrStatus>(`/attachments/${id}/ocr-status`),
+  extractedText: (id: string, params?: { max_chars?: number }) =>
+    apiRequest<AttachmentExtractedText>(
+      `/attachments/${id}/extracted-text${buildQuery(params || {})}`,
+    ),
 };
 
 export const extractedActions = {
@@ -758,6 +775,16 @@ export const debugApi = {
 };
 
 export const recommendations = {
+  agentTurn: (data: { mode: 'buyer_to_target'; session_id?: string; user_message: string }) =>
+    apiRequest<RecommendationAgentTurn>('/recommendations/agent-turn', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  answerStream: (sessionId: string, turnId: string, options?: { signal?: AbortSignal }) =>
+    apiEventStream(
+      `/recommendations/sessions/${sessionId}/turns/${turnId}/answer-stream`,
+      options,
+    ),
   candidates: (data: RecommendationCandidateRequest) =>
     apiRequest<RecommendationCandidateResponse>('/recommendations/candidates', {
       method: 'POST',

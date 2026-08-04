@@ -2,6 +2,9 @@
 builder = "NIXPACKS"
 
 [deploy]
-startCommand = "python -m backend.app.worker --queue llm --sleep 2"
+# 推荐 Agent 一轮跑满工具预算可以超过 5 分钟。stale 窗口留在默认 300s 会让
+# 还在干活的任务被判死（agent 任务 max_attempts=1，判死即 failed，不会重跑，
+# 但用户会看到一轮失败的推荐）。窗口必须盖得住队列里最慢的任务。
+startCommand = "python -m backend.app.worker --queue llm --sleep 2 --stale-after 1800"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3

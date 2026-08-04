@@ -51,6 +51,8 @@ EXPECTED_NODE_NAMES = frozenset({
     "recommendation_deep_eval",
     "recommendation_deep_eval_to_target",
     "recommendation_deep_eval_to_buyer",
+    "recommendation_agent_to_target",
+    "recommendation_answer_writer_to_target",
     "recommendation_query_parser",
     "recommendation_target_report_writer",
     "recommendation_buyer_report_writer",
@@ -180,8 +182,9 @@ def test_must_configure_excludes_nodes_that_have_an_understudy() -> None:
     for spec in NODES:
         if spec.understudy is not None:
             assert spec.node_name not in required
-    # 旧共用报告节点退役、两个专属报告节点接替，必配总数净增 1。
-    assert len(required) == 12
+    # 旧共用报告节点退役、两个专属报告节点接替，必配总数净增 1；
+    # 推荐 Agent 与回答撰写各一个正向节点，且刻意没有代跑，再净增 2。
+    assert len(required) == 14
     assert "buyer_intent_semantic_parser" not in required
     assert "recommendation_deep_eval_to_target" not in required
     assert "recommendation_deep_eval" in required

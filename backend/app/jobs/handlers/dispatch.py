@@ -20,6 +20,7 @@ from backend.app.jobs.handlers.model_node_test import (
     _handle_model_node_test,
 )
 from backend.app.jobs.handlers.recommendation import (
+    _handle_recommendation_agent,
     _handle_recommendation_report_generate,
     _handle_recommendation_rerank,
 )
@@ -74,6 +75,8 @@ def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
         return _handle_buyer_intent_search_doc_rebuild(db, job)
     if job.job_type == "embedding_generate":
         return _handle_embedding_generate(db, job)
+    if job.job_type == "recommendation_agent":
+        return _handle_recommendation_agent(db, job)
     if job.job_type == "recommendation_report_generate":
         return _handle_recommendation_report_generate(db, job)
     if job.job_type in {"recommendation_rerank", "recommendation_deep_eval"}:

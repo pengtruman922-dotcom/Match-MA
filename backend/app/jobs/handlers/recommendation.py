@@ -11,6 +11,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
+from backend.app.ai.tool_loop import run_tool_loop
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
 from backend.app.jobs.handlers.common import (
     _get_default_node_config,
@@ -28,8 +29,16 @@ from backend.app.jobs.queue import JobClaim
 from backend.app.registry.nodes import (
     deep_eval_node_by_mode,
     deep_eval_understudy_node_name,
+    recommendation_agent_node_by_mode,
     report_writer_node_by_type,
 )
+from backend.app.services.recommendation_agent_tools import (
+    MAX_DETAIL_TARGETS_TOTAL,
+    MAX_SEARCH_CALLS,
+    RECOMMENDATION_AGENT_TOOLS,
+    RecommendationAgentTools,
+)
+from backend.app.services.recommendation_flow import search_targets_for_agent
 from backend.app.services.profile_sections import (
     PROFILE_TOTAL_BUDGET,
     buyer_party_fact_block,
@@ -280,6 +289,247 @@ DEEP_EVAL_MAX_WORKERS = 4
 DEEP_EVAL_NODE_BY_MODE = deep_eval_node_by_mode()
 
 DEEP_EVAL_FALLBACK_NODE = deep_eval_understudy_node_name()
+
+
+# 编排 Agent。刻意没有共用兜底节点：两个方向的工具集不同，一份提示词兜不住。
+RECOMMENDATION_AGENT_NODE_BY_MODE = recommendation_agent_node_by_mode()
+
+# tool_loop 的默认 8000 装不下 30 条候选摘要；调大到能容纳一次满额 search_targets。
+AGENT_TOOL_RESULT_LIMIT = 16000
+AGENT_MAX_ITERATIONS = 12
+
+# 用户对整次推荐的耐心是 2-5 分钟，编排阶段留 4 分钟，剩下的给流式写作。
+# 这同时是对 worker stale 窗口（1800s）的第二道保险：迭代上限管不住单次调用
+# 很慢的情况，墙钟能。
+AGENT_WALL_CLOCK_BUDGET_SECONDS = 240
+
+
+def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object]:
+    """Run one agent turn: understand, screen, read a few, hand over a brief.
+
+    The turn deliberately stops at the brief. Prose generation is a separate,
+    tool-free node the API streams (see the answer-stream endpoint), which is
+    what lets the user watch words appear instead of a spinner.
+    """
+    session_id = _resolve_entity_id(job, expected_entity_type="recommendation_session")
+    if session_id is None:
+        raise ValueError("recommendation_agent job requires a recommendation_session entity_id.")
+
+    payload = job.payload_json or {}
+    mode = str(payload.get("mode") or "")
+    turn_id = str(payload.get("turn_id") or "")
+    user_message = str(payload.get("user_message") or "").strip()
+    if mode not in RECOMMENDATION_AGENT_NODE_BY_MODE:
+        raise ValueError(f"No recommendation agent node is registered for mode {mode!r}.")
+    if not turn_id:
+        raise ValueError("recommendation_agent job requires a turn_id.")
+    if not user_message:
+        raise ValueError("recommendation_agent job requires a user_message.")
+
+    node_name = RECOMMENDATION_AGENT_NODE_BY_MODE[mode]
+    node_config = _get_default_node_config(db, node_name)
+
+    agent_context = {
+        "user_message": user_message,
+        "conversation": payload.get("conversation") or [],
+        "budgets": {
+            "max_search_calls": MAX_SEARCH_CALLS,
+            "max_detail_targets": MAX_DETAIL_TARGETS_TOTAL,
+            "max_tool_iterations": AGENT_MAX_ITERATIONS,
+        },
+    }
+    messages = _render_prompt_messages(node_config, {"recommendation_context_json": agent_context})
+
+    def step_sink(step: dict[str, Any]) -> None:
+        _insert_agent_step_message(
+            db,
+            session_id=session_id,
+            turn_id=turn_id,
+            job_id=job.id,
+            step=step,
+        )
+        # 立刻提交，否则前端要等整个 agent 跑完才看得到过程。
+        db.commit()
+
+    tools = RecommendationAgentTools(
+        db,
+        search_targets_fn=search_targets_for_agent,
+        step_sink=step_sink,
+    )
+    started = time.perf_counter()
+    try:
+        loop = run_tool_loop(
+            chat=_agent_chat_caller(node_config),
+            messages=messages,
+            tools=RECOMMENDATION_AGENT_TOOLS,
+            execute_tool=tools.execute,
+            max_iterations=AGENT_MAX_ITERATIONS,
+            tool_result_limit=AGENT_TOOL_RESULT_LIMIT,
+            early_stop_instruction=lambda: _agent_early_stop(tools, started),
+        )
+    except LlmCallError as exc:
+        _insert_recommendation_agent_trace(
+            db,
+            job=job,
+            session_id=session_id,
+            node_config=node_config,
+            status="failed",
+            input_json=agent_context,
+            conversation=messages,
+            loop=None,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            tools=tools,
+            error_message=str(exc),
+        )
+        db.commit()
+        raise
+
+    if tools.ask_user_payload is not None:
+        _insert_agent_question_message(
+            db,
+            session_id=session_id,
+            turn_id=turn_id,
+            job_id=job.id,
+            payload=tools.ask_user_payload,
+        )
+        outcome = "asked_user"
+        brief = None
+    else:
+        brief = _build_answer_brief(loop.result.parsed_output_json, tools=tools, mode=mode)
+        _insert_agent_brief_message(
+            db,
+            session_id=session_id,
+            turn_id=turn_id,
+            job_id=job.id,
+            brief=brief,
+        )
+        outcome = "brief_ready"
+
+    _insert_recommendation_agent_trace(
+        db,
+        job=job,
+        session_id=session_id,
+        node_config=node_config,
+        status="succeeded",
+        input_json=agent_context,
+        conversation=loop.messages + [{"role": "assistant", "content": loop.result.raw_output_text}],
+        loop=loop,
+        latency_ms=loop.usage.latency_ms,
+        tools=tools,
+    )
+    db.commit()
+    return {
+        "handled": True,
+        "job_type": job.job_type,
+        "session_id": str(session_id),
+        "turn_id": turn_id,
+        "outcome": outcome,
+        "search_calls": len(tools.search_calls),
+        "detail_targets": len(tools.detail_target_ids),
+        "recommended_count": len((brief or {}).get("recommended") or []),
+    }
+
+
+def _agent_early_stop(tools: RecommendationAgentTools, started: float) -> str | None:
+    """Two reasons to cut the loop short, both of which must still produce output."""
+    if tools.should_stop:
+        return (
+            "已向用户提问，本轮到此结束。请只输出一个 JSON 对象，"
+            '形如 {"asked_user": true}，不要再调用任何工具。'
+        )
+    if time.perf_counter() - started >= AGENT_WALL_CLOCK_BUDGET_SECONDS:
+        return (
+            "本轮编排时间已用尽。请立即基于已获得的候选给出最终 JSON 结果，"
+            "不要再调用任何工具。"
+        )
+    return None
+
+
+def _agent_chat_caller(node_config: dict[str, Any]):
+    """Bind node config for the loop; JSON format only on the tool-free turn."""
+
+    def chat(*, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None):
+        return call_openai_compatible_chat(
+            base_url=node_config["base_url"],
+            api_key_secret_ref=node_config["api_key_secret_ref"],
+            api_key_encrypted=node_config.get("api_key_encrypted"),
+            model_name=node_config["model_name"],
+            messages=messages,
+            temperature=node_config["temperature"],
+            top_p=node_config["top_p"],
+            max_tokens=node_config["max_tokens"],
+            timeout_seconds=node_config["timeout_seconds"] or 300,
+            response_format=None if tools else node_config["response_format"],
+            tools=tools,
+        )
+
+    return chat
+
+
+def _build_answer_brief(
+    raw_output: dict[str, Any] | None,
+    *,
+    tools: RecommendationAgentTools,
+    mode: str,
+) -> dict[str, Any]:
+    """Merge the agent's picks with code-held facts.
+
+    The numbers in the final answer come from `facts` here, not from whatever
+    the model retyped — a model that paraphrases 2800万 as 2800万元 is fine, one
+    that invents 3200万 is not, and this is the join that removes the chance.
+    """
+    data = raw_output if isinstance(raw_output, dict) else {}
+    recommended: list[dict[str, Any]] = []
+    for item in (data.get("recommended") or [])[:10]:
+        if not isinstance(item, dict):
+            continue
+        target_id = str(item.get("id") or "").strip()
+        candidate = tools.candidates_by_id.get(target_id)
+        if candidate is None:
+            # 模型报了一个不在候选里的 id：丢掉而不是照抄，宁可少推荐一家。
+            continue
+        recommended.append(
+            {
+                "id": target_id,
+                "name": candidate.get("seller_target_name"),
+                "facts": candidate.get("facts") or {},
+                "reason_points": [str(point) for point in (item.get("reason_points") or [])][:5],
+                "watch_out": str(item.get("watch_out") or "").strip() or None,
+                "already_in_progress": candidate.get("relation_status"),
+                "other_buyer_in_deep_progress": bool(
+                    candidate.get("seller_target_has_other_deep_progress")
+                ),
+            }
+        )
+    runner_ups = [
+        {
+            "name": str(item.get("name") or "").strip(),
+            "note": str(item.get("note") or "").strip() or None,
+        }
+        for item in (data.get("runner_ups") or [])[:5]
+        if isinstance(item, dict) and str(item.get("name") or "").strip()
+    ]
+    last_eligible = next(
+        (
+            call.get("eligible_count")
+            for call in reversed(tools.search_calls)
+            if call.get("eligible_count") is not None
+        ),
+        None,
+    )
+    return {
+        "mode": mode,
+        "understanding": str(data.get("understanding") or "").strip() or None,
+        "search_story": tools.process_steps(),
+        "total_eligible": last_eligible,
+        "recommended": recommended,
+        "runner_ups": runner_ups,
+        "follow_up_suggestions": [
+            str(item).strip()
+            for item in (data.get("follow_up_suggestions") or [])[:4]
+            if str(item or "").strip()
+        ],
+    }
 
 
 def _get_deep_eval_node_config(db: Session, mode: str) -> dict[str, Any]:
@@ -1093,6 +1343,187 @@ def _insert_recommendation_report_message(
         ),
         {"session_id": session_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
     )
+
+def _insert_agent_message(
+    db: Session,
+    *,
+    session_id: UUID,
+    turn_id: str,
+    job_id: UUID,
+    message_type: str,
+    content: dict[str, Any],
+) -> None:
+    """One shape for every agent-produced message; turn_id is what groups them."""
+    db.execute(
+        text(
+            """
+            insert into recommendation_message (
+              team_id, workspace_id, session_id, role, content,
+              content_type, metadata_json, created_by
+            )
+            values (
+              :team_id, :workspace_id, :session_id, 'tool', :content,
+              'json', :metadata_json, :created_by
+            )
+            """
+        ).bindparams(bindparam("metadata_json", type_=JSONB)),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "session_id": session_id,
+            "content": _json_dumps({"message_type": message_type, "turn_id": turn_id, **content}),
+            "metadata_json": {
+                "message_type": message_type,
+                "turn_id": turn_id,
+                "job_id": str(job_id),
+            },
+            "created_by": SYSTEM_USER_ID,
+        },
+    )
+
+
+def _insert_agent_step_message(
+    db: Session,
+    *,
+    session_id: UUID,
+    turn_id: str,
+    job_id: UUID,
+    step: dict[str, Any],
+) -> None:
+    _insert_agent_message(
+        db,
+        session_id=session_id,
+        turn_id=turn_id,
+        job_id=job_id,
+        message_type="agent_step",
+        content={"step": _json_safe_dict(step)},
+    )
+
+
+def _insert_agent_question_message(
+    db: Session,
+    *,
+    session_id: UUID,
+    turn_id: str,
+    job_id: UUID,
+    payload: dict[str, Any],
+) -> None:
+    _insert_agent_message(
+        db,
+        session_id=session_id,
+        turn_id=turn_id,
+        job_id=job_id,
+        message_type="agent_question",
+        content={"question": _json_safe_dict(payload)},
+    )
+
+
+def _insert_agent_brief_message(
+    db: Session,
+    *,
+    session_id: UUID,
+    turn_id: str,
+    job_id: UUID,
+    brief: dict[str, Any],
+) -> None:
+    _insert_agent_message(
+        db,
+        session_id=session_id,
+        turn_id=turn_id,
+        job_id=job_id,
+        message_type="agent_brief",
+        content={"brief": _json_safe_dict(brief)},
+    )
+
+
+def _insert_recommendation_agent_trace(
+    db: Session,
+    *,
+    job: JobClaim,
+    session_id: UUID,
+    node_config: dict[str, Any],
+    status: str,
+    input_json: dict[str, Any],
+    conversation: list[dict[str, Any]],
+    loop: Any | None,
+    latency_ms: int,
+    tools: RecommendationAgentTools,
+    error_message: str | None = None,
+) -> None:
+    """One row per agent turn, not per LLM call — same rule as research."""
+    usage = loop.usage if loop else None
+    db.execute(
+        text(
+            """
+            insert into ai_trace (
+              team_id, workspace_id, trace_type, node_name,
+              job_id, correlation_id, entity_type, entity_id,
+              provider_config_id, node_config_id, prompt_template_id,
+              provider_name, model_name, prompt_version, status,
+              input_json, prompt_messages_json, raw_output_text,
+              parsed_output_json, schema_validation_json,
+              error_message, latency_ms, prompt_tokens,
+              completion_tokens, total_tokens, created_by, finished_at,
+              metadata_json
+            ) values (
+              :team_id, :workspace_id, 'llm', :node_name,
+              :job_id, :correlation_id, 'recommendation_session', :entity_id,
+              :provider_config_id, :node_config_id, :prompt_template_id,
+              :provider_name, :model_name, :prompt_version, :status,
+              :input_json, :prompt_messages_json, :raw_output_text,
+              :parsed_output_json, :schema_validation_json,
+              :error_message, :latency_ms, :prompt_tokens,
+              :completion_tokens, :total_tokens, :created_by, now(),
+              :metadata_json
+            )
+            """
+        ).bindparams(
+            bindparam("input_json", type_=JSONB),
+            bindparam("prompt_messages_json", type_=JSONB),
+            bindparam("parsed_output_json", type_=JSONB),
+            bindparam("schema_validation_json", type_=JSONB),
+            bindparam("metadata_json", type_=JSONB),
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "node_name": node_config["node_name"],
+            "job_id": job.id,
+            "correlation_id": job.correlation_id,
+            "entity_id": session_id,
+            "provider_config_id": node_config["provider_config_id"],
+            "node_config_id": node_config["node_config_id"],
+            "prompt_template_id": node_config.get("prompt_template_id"),
+            "provider_name": node_config["provider_name"],
+            "model_name": node_config["model_name"],
+            "prompt_version": node_config.get("prompt_version"),
+            "status": status,
+            "input_json": _json_safe_dict(input_json),
+            "prompt_messages_json": {"messages": _json_safe_dict({"value": conversation})["value"]},
+            "raw_output_text": (loop.result.raw_output_text if loop else None),
+            "parsed_output_json": (
+                _json_safe_dict(loop.result.parsed_output_json)
+                if loop and isinstance(loop.result.parsed_output_json, dict)
+                else None
+            ),
+            "schema_validation_json": {
+                "valid": bool(loop and isinstance(loop.result.parsed_output_json, dict)),
+                "hit_iteration_limit": bool(loop and loop.hit_iteration_limit),
+            },
+            "error_message": error_message,
+            "latency_ms": latency_ms,
+            "prompt_tokens": usage.prompt_tokens if usage else None,
+            "completion_tokens": usage.completion_tokens if usage else None,
+            "total_tokens": usage.total_tokens if usage else None,
+            "created_by": SYSTEM_USER_ID,
+            "metadata_json": {
+                "llm_calls": usage.llm_calls if usage else 0,
+                "tool_calls_by_name": usage.tool_calls_by_name if usage else {},
+                **tools.as_trace_payload(),
+            },
+        },
+    )
+
 
 def _insert_recommendation_rerank_message(
     db: Session,

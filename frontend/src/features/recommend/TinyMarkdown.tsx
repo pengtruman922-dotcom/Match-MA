@@ -110,7 +110,9 @@ function readTable(lines: string[], start: number): MarkdownTable | null {
   }
   const header = splitTableRow(lines[start]);
   const separator = splitTableRow(lines[start + 1]);
-  if (!header.length || header.length > 4 || header.length !== separator.length) return null;
+  // 8 列：完整候选列表是 7 列（序号/名称/净利/地区/控股/PE/推荐度），
+  // 上限卡在 4 会让整张表被当成普通段落丢掉。
+  if (!header.length || header.length > 8 || header.length !== separator.length) return null;
   if (!separator.every((cell) => /^:?-{3,}:?$/.test(cell.replace(/\s/g, '')))) return null;
 
   const rows: string[][] = [];
@@ -147,11 +149,27 @@ function splitTableRow(line: string): string[] {
 }
 
 function renderInline(text: string): ReactNode {
-  const parts = text.split(/(\*\*[^*]+\*\*)/g);
+  // 只认站内链接。链接由后端按候选表精确回填，模型永远不产出 URL；
+  // 这里再拒一次外部地址，免得哪天正文里混进 http 就变成可点的外链。
+  const parts = text.split(/(\*\*[^*]+\*\*|\[[^\]]+\]\(\/[^)\s]*\))/g);
   if (parts.length === 1) return text;
   return parts.map((part, index) => {
     if (part.startsWith('**') && part.endsWith('**')) {
       return <strong key={index} className="font-semibold text-gray-900">{part.slice(2, -2)}</strong>;
+    }
+    const link = /^\[([^\]]+)\]\((\/[^)\s]*)\)$/.exec(part);
+    if (link) {
+      return (
+        <a
+          key={index}
+          href={link[2]}
+          target="_blank"
+          rel="noreferrer"
+          className="text-brand-600 underline decoration-brand-300 underline-offset-2 hover:text-brand-700"
+        >
+          {link[1]}
+        </a>
+      );
     }
     return part;
   });

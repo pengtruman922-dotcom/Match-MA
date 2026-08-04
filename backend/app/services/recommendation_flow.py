@@ -17,6 +17,7 @@ from backend.app.api.routes.utils import (
     recommendation_session_visible_sql,
 )
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+from backend.app.registry.indicators import indicator_by_column
 from backend.app.services.industry_taxonomy import classify_terms, load_term_levels
 from backend.app.services.recommendation_conditions import (
     condition_effect,
@@ -1232,6 +1233,7 @@ def _candidate_targets_for_intent(
             gaps=gaps,
             meta=meta,
             risk_summary=item.get("risk_summary") or item.get("gap_summary"),
+            facts=_target_facts(item),
         )
         _apply_semantic_keyword_match(
             candidate,
@@ -1260,6 +1262,21 @@ def _candidate_targets_for_intent(
         ),
         mode="buyer_to_target",
     )
+
+
+def search_targets_for_agent(
+    db: Session,
+    anchor: dict[str, Any],
+    limit: int,
+) -> dict[str, Any]:
+    """The agent's screening tool, bound to the same code path as everything else.
+
+    Deliberately a thin public alias rather than a second implementation: the
+    agent must not be able to screen by rules the rest of the system does not
+    apply. `anchor` comes from `anchor_from_filters` and carries no id, so no
+    scenario rows are loaded and the implicit single-scenario path is used.
+    """
+    return _candidate_targets_for_intent(db, anchor, limit)
 
 
 def _candidate_intents_for_target(
@@ -1605,6 +1622,81 @@ def _with_resolved_exclusions(db: Session, intent: dict[str, Any]) -> dict[str, 
     return resolved
 
 
+def _money_text(value: Any) -> str | None:
+    number = _optional_float(value)
+    if number is None:
+        return None
+    if number >= 100000000:
+        return f"{number / 100000000:.1f}亿".replace(".0亿", "亿")
+    if number >= 10000:
+        return f"{number / 10000:.0f}万"
+    return str(int(number))
+
+
+def _enum_label(column: str, value: Any) -> str | None:
+    """Chinese label for a seller_target enum, straight from the registry.
+
+    Going through the registry rather than a local dict is what keeps these
+    labels from drifting away from the ones the rest of the system shows.
+    """
+    code = str(value or "").strip()
+    if not code or code == "unknown":
+        return None
+    try:
+        options = indicator_by_column("seller_target", column).enum_options or ()
+    except KeyError:
+        return None
+    for option_code, option_label in options:
+        if option_code == code:
+            return option_label
+    return code
+
+
+def _target_facts(item: dict[str, Any]) -> dict[str, Any]:
+    """The hard numbers a client manager reads first, in LLM-ready form.
+
+    Raw values are kept alongside the formatted text so a table can sort on
+    them; the text form is what the writer node quotes.
+    """
+    region = "".join(
+        str(value) for value in (
+            item.get("location_province"),
+            item.get("location_city"),
+            item.get("location_district"),
+        ) if value
+    )
+    industry = " / ".join(
+        str(value) for value in (item.get("industry_l1"), item.get("industry_l2")) if value
+    )
+    pe_ratio = _optional_float(item.get("pe_ratio"))
+    debt_ratio = _optional_float(item.get("current_debt_ratio"))
+    transfer_max = _optional_float(item.get("transfer_ratio_max"))
+    facts: dict[str, Any] = {
+        "industry": industry or None,
+        "region": region or None,
+        "revenue_yuan": _optional_float(item.get("current_revenue_yuan")),
+        "revenue_text": _money_text(item.get("current_revenue_yuan")),
+        "net_profit_yuan": _optional_float(item.get("current_net_profit_yuan")),
+        "net_profit_text": _money_text(item.get("current_net_profit_yuan")),
+        "total_profit_text": _money_text(item.get("current_total_profit_yuan")),
+        "valuation_text": _money_text(item.get("valuation_yuan")),
+        "asking_price_text": _money_text(item.get("asking_price_yuan")),
+        "market_cap_text": _money_text(item.get("market_cap_yuan")),
+        "pe_ratio": pe_ratio,
+        "debt_ratio": debt_ratio,
+        "can_control": _enum_label("can_control", item.get("can_control")),
+        "can_consolidate": _enum_label("can_consolidate", item.get("can_consolidate")),
+        "transfer_ratio_max": transfer_max,
+        "listed_status": _enum_label("listed_status", item.get("listed_status")),
+        "cash_flow_status": _enum_label("cash_flow_status", item.get("cash_flow_status")),
+        "profitability_status": _enum_label("profitability_status", item.get("profitability_status")),
+        "management_retention_possible": _enum_label(
+            "management_retention_possible", item.get("management_retention_possible")
+        ),
+    }
+    return {key: value for key, value in facts.items() if value is not None}
+
+
 def _build_candidate_row(
     *,
     mode: str,
@@ -1620,9 +1712,13 @@ def _build_candidate_row(
     gaps: list[str],
     meta: dict[str, Any],
     risk_summary: Any,
+    facts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "rank": 0,
+        # 硬数据（净利/地区/控股/PE…）。SQL 本来就查出来了，过去在这里被丢掉，
+        # 结果推荐文案只能写评价、写不出数字。Agent 与写作节点都靠它。
+        "facts": facts or {},
         "mode": mode,
         "seller_target_id": seller_target_id,
         "seller_target_name": seller_target_name,
@@ -2886,6 +2982,190 @@ def _enqueue_recommendation_report_job(
         },
     ).mappings().one()
     return row["id"]
+
+
+def _agent_turn_messages(db: Session, session_id: UUID, turn_id: str) -> list[dict[str, Any]]:
+    """Every message this agent turn produced, decoded."""
+    decoded: list[dict[str, Any]] = []
+    for message in _list_recommendation_messages(db, session_id=session_id, limit=500, offset=0):
+        metadata = message.get("metadata_json") if isinstance(message.get("metadata_json"), dict) else {}
+        if str(metadata.get("turn_id") or "") != turn_id:
+            continue
+        if message.get("content_type") == "json":
+            content = _json_loads(message.get("content") or "{}")
+        else:
+            content = {"text": message.get("content")}
+        decoded.append({**message, "decoded_content": content, "message_type": metadata.get("message_type")})
+    return decoded
+
+
+def find_agent_turn_brief(db: Session, session_id: UUID, turn_id: str) -> dict[str, Any] | None:
+    for message in _agent_turn_messages(db, session_id, turn_id):
+        if message["message_type"] == "agent_brief":
+            brief = message["decoded_content"].get("brief")
+            if isinstance(brief, dict):
+                return brief
+    return None
+
+
+def find_agent_turn_answer(db: Session, session_id: UUID, turn_id: str) -> dict[str, Any] | None:
+    """The persisted answer, if this turn already produced one.
+
+    This is what makes the stream resumable: a reconnect after the write has
+    landed replays the stored text instead of paying for a second generation.
+    """
+    for message in _agent_turn_messages(db, session_id, turn_id):
+        if message["message_type"] == "agent_answer":
+            return {
+                "id": message.get("id"),
+                "markdown": message["decoded_content"].get("markdown") or "",
+            }
+    return None
+
+
+def insert_agent_answer_message(
+    db: Session,
+    *,
+    session_id: UUID,
+    turn_id: str,
+    markdown: str,
+    model_name: str | None,
+    generation_mode: str,
+) -> UUID:
+    row = db.execute(
+        _message_returning_statement(
+            """
+            insert into recommendation_message (
+              team_id, workspace_id, session_id, role, content,
+              content_type, metadata_json, created_by
+            )
+            values (
+              :team_id, :workspace_id, :session_id, 'assistant', :content,
+              'json', :metadata_json, :created_by
+            )
+            """
+        ).bindparams(bindparam("metadata_json", type_=JSONB)),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "session_id": session_id,
+            "content": _json_dumps(
+                {"message_type": "agent_answer", "turn_id": turn_id, "markdown": markdown}
+            ),
+            "metadata_json": {
+                "message_type": "agent_answer",
+                "turn_id": turn_id,
+                "model_name": model_name,
+                "generation_mode": generation_mode,
+            },
+            "created_by": DEFAULT_ADMIN_USER_ID,
+        },
+    ).mappings().one()
+    return row["id"]
+
+
+def _enqueue_recommendation_agent_job(
+    db: Session,
+    *,
+    session_id: UUID,
+    mode: str,
+    turn_id: str,
+    user_message: str,
+    conversation: list[dict[str, Any]],
+    created_by: UUID,
+) -> UUID:
+    """Queue one agent turn on the llm queue.
+
+    max_attempts is 1 on purpose: a retry would re-run the whole tool loop and
+    bill a second time, and the user is watching a progress line that already
+    shows what the first attempt did. Failures surface as a failed turn, not as
+    a silent second run.
+    """
+    payload = _json_loads(
+        _json_dumps(
+            {
+                "session_id": session_id,
+                "mode": mode,
+                "turn_id": turn_id,
+                "user_message": user_message,
+                "conversation": conversation,
+            }
+        )
+    )
+    row = db.execute(
+        text(
+            """
+            insert into background_job (
+              team_id, workspace_id, job_type, priority, queue_name,
+              entity_type, entity_id, idempotency_key, payload_json,
+              max_attempts, created_by, metadata_json
+            )
+            values (
+              :team_id, :workspace_id, 'recommendation_agent', 100, 'llm',
+              'recommendation_session', :session_id, :idempotency_key, :payload_json,
+              1, :created_by, :metadata_json
+            )
+            returning id
+            """
+        ).bindparams(
+            bindparam("payload_json", type_=JSONB),
+            bindparam("metadata_json", type_=JSONB),
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "session_id": session_id,
+            "idempotency_key": f"recommendation_agent:{session_id}:{turn_id}",
+            "payload_json": payload,
+            "created_by": created_by,
+            "metadata_json": {"source": "recommendation_agent_api", "turn_id": turn_id},
+        },
+    ).mappings().one()
+    return row["id"]
+
+
+def _agent_turn_conversation(db: Session, session_id: UUID) -> list[dict[str, Any]]:
+    """Prior turns, compressed to what the next turn actually needs.
+
+    Full candidate payloads are deliberately left out: the agent re-screens
+    every turn, so replaying old result sets would only spend context on
+    numbers that may already be stale.
+    """
+    messages = _list_recommendation_messages(db, session_id=session_id, limit=200, offset=0)
+    conversation: list[dict[str, Any]] = []
+    for message in messages:
+        role = str(message.get("role") or "")
+        content = message.get("content")
+        if role == "user":
+            text_value = content if isinstance(content, str) else str(content or "")
+            if text_value.strip():
+                conversation.append({"role": "user", "content": text_value.strip()})
+            continue
+        if role == "assistant":
+            text_value = content if isinstance(content, str) else str(content or "")
+            if text_value.strip():
+                conversation.append({"role": "assistant", "content": text_value.strip()})
+            continue
+        if role == "tool" and message.get("content_type") == "json":
+            # content 是 JSON 文本，不是 dict —— 表里这一列是 text。
+            decoded = _json_loads(content or "{}")
+            if decoded.get("message_type") != "agent_brief":
+                continue
+            brief = decoded.get("brief") or {}
+            conversation.append(
+                {
+                    "role": "assistant",
+                    "content": _json_dumps(
+                        {
+                            "understanding": brief.get("understanding"),
+                            "recommended_names": [
+                                item.get("name") for item in (brief.get("recommended") or [])
+                            ],
+                        }
+                    ),
+                }
+            )
+    return conversation[-20:]
 
 
 def _enqueue_recommendation_rerank_job(

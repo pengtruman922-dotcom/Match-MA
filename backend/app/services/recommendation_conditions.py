@@ -113,6 +113,19 @@ def _coerce_value(kind: str, value: Any) -> Any | None:
     return None
 
 
+def coerce_condition_value(field: str, value: Any) -> Any | None:
+    """Public whitelist coercion for one condition field.
+
+    The agent's `search_targets` arguments go through here, so a filter the
+    scoring engine does not understand is dropped rather than silently carried
+    into the anchor as an unrecognised key.
+    """
+    kind = OVERRIDE_FIELD_KINDS.get(field)
+    if kind is None:
+        return None
+    return _coerce_value(kind, value)
+
+
 def normalize_parse_result(raw: Any) -> dict[str, Any]:
     """Whitelist-filter the LLM extraction into a safe, typed structure."""
     data = raw if isinstance(raw, dict) else {}

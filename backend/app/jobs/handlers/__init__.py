@@ -204,6 +204,8 @@ from backend.app.jobs.handlers.recommendation import (
     _get_recommendation_report_for_job,
     _get_recommendation_session_for_report,
     _get_selected_items_for_recommendation_report,
+    _build_answer_brief,
+    _handle_recommendation_agent,
     _handle_recommendation_report_generate,
     _handle_recommendation_rerank,
     _insert_recommendation_report_message,

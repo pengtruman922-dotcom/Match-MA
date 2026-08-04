@@ -68,6 +68,10 @@ class NodeSpec:
     # 推荐报告节点的业务类型。报告方向与深评方向是两套独立映射，不能共用
     # recommendation_mode，否则同一方向的两个节点会在 dict 推导时互相覆盖。
     report_type: str | None = None
+    # 推荐 Agent 与回答撰写节点的方向。同理，各自独立一套映射 —— 三者共用
+    # recommendation_mode 会让同方向的节点互相覆盖。
+    agent_mode: str | None = None
+    answer_writer_mode: str | None = None
     # 与本节点同属一个 "and" 组的其他节点；仅 understudy_kind == "and" 时有值。
     understudy_group: tuple[str, ...] = field(default_factory=tuple)
 
@@ -226,6 +230,42 @@ NODES: tuple[NodeSpec, ...] = (
         default_temperature=0.2,
         default_timeout_seconds=180,
         sort_order=110,
+    ),
+    NodeSpec(
+        node_name="recommendation_agent_to_target",
+        label="推荐编排 Agent·为买家找标的",
+        domain="recommendation",
+        node_type="llm",
+        description=(
+            "把一段自然语言并购需求变成推荐结果的编排者：理解需求、决定筛几次、"
+            "读少数候选的详情、产出写作素材包。初筛与打分仍由代码执行，"
+            "本节点只选择工具参数，永远拿不到全库。"
+        ),
+        runtime_inputs=("用户输入的需求原文", "本次对话历史", "可用过滤条件与预算"),
+        prompt_variables=("recommendation_context_json",),
+        agent_mode="buyer_to_target",
+        default_temperature=0.2,
+        default_timeout_seconds=300,
+        sort_order=115,
+    ),
+    NodeSpec(
+        node_name="recommendation_answer_writer_to_target",
+        label="推荐回答撰写·为买家找标的",
+        domain="recommendation",
+        node_type="llm",
+        description=(
+            "拿 Agent 产出的素材包写成可直接复制给客户的一段话。"
+            "单次调用、不带工具，因此可以在 API 侧流式输出。"
+        ),
+        runtime_inputs=("写作素材包（需求理解、筛选过程、候选详情）",),
+        prompt_variables=("answer_brief_json",),
+        answer_writer_mode="buyer_to_target",
+        # 产物是给人看的正文，不是 JSON。
+        output_mode="text",
+        response_format=None,
+        default_temperature=0.4,
+        default_timeout_seconds=180,
+        sort_order=118,
     ),
     NodeSpec(
         node_name="recommendation_query_parser",
@@ -408,6 +448,8 @@ PROMPT_VARIABLE_LABELS: dict[str, str] = {
     "user_message": "用户在推荐对话中输入的消息",
     "report_context_json": "报告上下文 JSON",
     "selected_items_json": "已选推荐项 JSON",
+    "recommendation_context_json": "推荐编排上下文 JSON（需求原文、对话历史、可用条件与预算）",
+    "answer_brief_json": "推荐回答写作素材包 JSON",
 }
 
 
@@ -542,6 +584,29 @@ def report_writer_node_by_type() -> dict[str, str]:
     if set(mapping) != expected:
         raise ValueError(f"推荐报告节点类型必须为 {sorted(expected)}，实际为 {sorted(mapping)}")
     return mapping
+
+
+def recommendation_agent_node_by_mode() -> dict[str, str]:
+    """推荐方向 → 编排 Agent 节点。
+
+    没有共用兜底节点，也不该有：两个方向的工具集本身就不同
+    （search_targets vs search_intents），一份提示词换个变量兜不住。
+    方向没注册就是没有，运行时按缺配置处理。
+    """
+    return {
+        spec.agent_mode: spec.node_name
+        for spec in NODES
+        if spec.lifecycle == "active" and spec.agent_mode
+    }
+
+
+def recommendation_answer_writer_node_by_mode() -> dict[str, str]:
+    """推荐方向 → 回答撰写节点（无工具、可流式）。"""
+    return {
+        spec.answer_writer_mode: spec.node_name
+        for spec in NODES
+        if spec.lifecycle == "active" and spec.answer_writer_mode
+    }
 
 
 def prompt_variable_label(name: str) -> str:

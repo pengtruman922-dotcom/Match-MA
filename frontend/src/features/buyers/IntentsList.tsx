@@ -404,7 +404,8 @@ function IntentRow({
       <td className={`sticky right-0 z-20 px-2 py-3 align-middle ${frozen}`}>
         <div className="flex items-center justify-center gap-1 whitespace-nowrap">
           <UpdateEntryMenu compact onSelect={onRecord} />
-          <Link to={`/recommendations?mode=buyer-to-target&intentId=${item.id}`} className="inline-flex items-center gap-1 px-2 py-1 text-xs text-brand-600 transition-colors hover:bg-brand-50"><Sparkles className="h-3 w-3" />推荐标的</Link>
+          {/* 推荐页现在从一段需求文本起步，所以带上 intentId 让它预填该需求的原文。 */}
+          <Link to={`/recommendations?intentId=${item.id}`} className="inline-flex items-center gap-1 px-2 py-1 text-xs text-brand-600 transition-colors hover:bg-brand-50"><Sparkles className="h-3 w-3" />推荐标的</Link>
           {canDelete && (
             <button
               type="button"

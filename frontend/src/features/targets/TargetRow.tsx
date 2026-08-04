@@ -1,5 +1,4 @@
-import { Link } from 'react-router-dom';
-import { Loader2, Sparkles, Trash2 } from 'lucide-react';
+import { Loader2, Trash2 } from 'lucide-react';
 import { canManageOwnedEntity } from '../../lib/auth';
 import type { SellerTarget } from '../../types/api';
 import { ClampedLink, ClampedText } from '../../components/Clamped';
@@ -87,13 +86,8 @@ export default function TargetRow({
       <td className="sticky right-0 z-20 bg-white px-4 py-3 group-hover:bg-brand-50">
         <div className="flex items-center gap-1 whitespace-nowrap">
           <UpdateEntryMenu compact onSelect={onOpenUpdateDrawer} />
-          <Link
-            to={`/recommendations?mode=target-to-buyer&targetId=${item.id}`}
-            className="inline-flex items-center gap-1 px-2 py-1 text-xs text-brand-600 hover:bg-white transition-colors"
-          >
-            <Sparkles className="w-3 h-3" />
-            推荐买家
-          </Link>
+          {/* 「推荐买家」入口随反向方向一起下线：推荐页本轮只做「为买家找标的」，
+              留一个点进去做不了事的链接比暂时没有这个入口更糟。反向 Agent 化后恢复。 */}
           {canDelete && (
             <button
               type="button"

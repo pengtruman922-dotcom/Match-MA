@@ -1943,6 +1943,64 @@ export interface RecommendationMessage {
   created_at: string;
 }
 
+export interface AttachmentUploadResult {
+  attachment: { id: string; file_name: string; file_type: string | null };
+  ocr_job: { job_id: string; status: string } | null;
+}
+
+export interface AttachmentOcrStatus {
+  attachment: Record<string, unknown>;
+  latest_job: { status: string; [key: string]: unknown } | null;
+  latest_parsed_document: { parse_status: string; [key: string]: unknown } | null;
+}
+
+export interface AttachmentExtractedText {
+  attachment_id: string;
+  parse_status: string;
+  text: string;
+  truncated: boolean;
+}
+
+export interface RecommendationAgentTurn {
+  session_id: string;
+  turn_id: string;
+  job_id: string;
+  queue_name: string;
+}
+
+/** 一次筛选调用的记录。过程行直接渲染它，让用户看见 Agent 做了什么决定。 */
+export interface RecommendationAgentSearchStep {
+  kind?: string;
+  call_index?: number;
+  note?: string | null;
+  filters?: Record<string, unknown>;
+  count_only?: boolean;
+  eligible_count?: number | null;
+  scan_count?: number | null;
+  conflict_count?: number | null;
+  returned_count?: number;
+  count?: number;
+  total?: number;
+}
+
+export interface RecommendationAgentQuestion {
+  questions: { question: string; options: string[] }[];
+  reason?: string | null;
+}
+
+export interface RecommendationAgentBrief {
+  mode: string;
+  understanding?: string | null;
+  total_eligible?: number | null;
+  search_story?: RecommendationAgentSearchStep[];
+  recommended?: {
+    id: string;
+    name?: string | null;
+    facts?: Record<string, unknown>;
+  }[];
+  follow_up_suggestions?: string[];
+}
+
 export interface RecommendationSelectedItemCreate {
   mode: 'buyer_to_target' | 'target_to_buyer';
   seller_target_id?: string | null;

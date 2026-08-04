@@ -127,7 +127,9 @@ services:
 
   worker-llm:
     <<: *backend
-    command: ["python", "-m", "backend.app.worker", "--queue", "llm", "--sleep", "2"]
+    # 推荐 Agent 一轮跑满工具预算可以超过 5 分钟，默认 300s 的 stale 窗口会把
+    # 还在干活的任务判死。窗口必须盖得住队列里最慢的任务（与 railway.worker-llm.toml 同步）。
+    command: ["python", "-m", "backend.app.worker", "--queue", "llm", "--sleep", "2", "--stale-after", "1800"]
 
   worker-ocr:
     <<: *backend

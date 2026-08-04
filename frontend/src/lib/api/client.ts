@@ -56,6 +56,71 @@ export async function apiRequest<T>(path: string, options?: RequestInit): Promis
   return response.json() as Promise<T>;
 }
 
+export interface ApiStreamEvent {
+  event: string;
+  data: Record<string, unknown>;
+}
+
+/**
+ * Read a text/event-stream endpoint.
+ *
+ * Not `EventSource`: that API cannot send an Authorization header, and every
+ * endpoint here is bearer-authenticated. Reading the body with fetch keeps the
+ * same auth path as every other call.
+ */
+export async function* apiEventStream(
+  path: string,
+  options?: { signal?: AbortSignal },
+): AsyncGenerator<ApiStreamEvent> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    headers: { Accept: 'text/event-stream', ...authHeaders() },
+    signal: options?.signal,
+  });
+  if (!response.ok) {
+    throw new Error(`API ${response.status}: ${await response.text()}`);
+  }
+  if (!response.body) {
+    throw new Error('当前浏览器不支持流式响应');
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // 事件以空行分隔；最后一段可能只收到一半，留在 buffer 里等下一个 chunk。
+      let separator = buffer.indexOf('\n\n');
+      while (separator !== -1) {
+        const rawEvent = buffer.slice(0, separator);
+        buffer = buffer.slice(separator + 2);
+        const parsed = parseSseEvent(rawEvent);
+        if (parsed) yield parsed;
+        separator = buffer.indexOf('\n\n');
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function parseSseEvent(raw: string): ApiStreamEvent | null {
+  let event = 'message';
+  const dataLines: string[] = [];
+  for (const line of raw.split('\n')) {
+    if (line.startsWith('event:')) event = line.slice(6).trim();
+    else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+  }
+  if (!dataLines.length) return null;
+  try {
+    return { event, data: JSON.parse(dataLines.join('\n')) as Record<string, unknown> };
+  } catch {
+    return null;
+  }
+}
+
 export async function apiBlobResponse(path: string, options?: RequestInit): Promise<Response> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...options,

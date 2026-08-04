@@ -1,16 +1,26 @@
+import json
 from decimal import Decimal
 from typing import Any, Literal
 from urllib.parse import quote
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
+from backend.app.ai.llm_client import stream_openai_compatible_chat
 from backend.app.api.authn import CurrentUser
+from backend.app.jobs.handlers.common import _get_default_node_config, _render_prompt_messages
+from backend.app.registry.nodes import recommendation_answer_writer_node_by_mode
+from backend.app.services.recommendation_answer import (
+    backfill_target_links,
+    build_answer_prompt_variables,
+    fallback_answer_markdown,
+    target_link_map,
+)
 from backend.app.api.routes.utils import (
     ensure_entity_writable,
     ensure_recommendation_session_visible,
@@ -19,7 +29,7 @@ from backend.app.api.routes.utils import (
     recommendation_session_visible_sql,
 )
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
-from backend.app.db import get_db
+from backend.app.db import get_db, session_scope
 from backend.app.services.recommendation_conditions import (
     apply_condition_actions,
     apply_overrides_to_anchor,
@@ -55,7 +65,12 @@ from backend.app.services.recommendation_flow import (  # noqa: F401 - re-export
     _compact_recommendation_report,
     _compact_selected_item,
     _count_by_key,
+    _agent_turn_conversation,
     _create_recommendation_session,
+    find_agent_turn_answer,
+    find_agent_turn_brief,
+    insert_agent_answer_message,
+    _enqueue_recommendation_agent_job,
     _enqueue_recommendation_report_job,
     _enqueue_recommendation_rerank_job,
     _enrich_candidates_for_frontend,
@@ -134,6 +149,19 @@ from backend.app.services.report_docx import (
 
 router = APIRouter(prefix="/recommendations", tags=["recommendations"])
 
+# 一次输入的上限。4000 是给手打需求定的，一份上传的需求文档轻松超过；
+# 正文由前端从附件正文取出后走同一个字段，所以两处共用这个上限。
+AGENT_INPUT_MAX_CHARS = 20000
+
+# 自建部署的 Caddy 开着 encode gzip，会把 SSE 攒在缓冲区里等压缩，
+# 逐字流式就变成一次性吐完。no-transform 让代理不要动响应体；
+# X-Accel-Buffering 是给 nginx 一类反代看的，Caddy 无视它也无害。
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache, no-transform",
+    "X-Accel-Buffering": "no",
+    "Connection": "keep-alive",
+}
+
 
 class RecommendationCandidateRequest(BaseModel):
     mode: str = Field(pattern="^(buyer_to_target|target_to_buyer)$")
@@ -142,7 +170,7 @@ class RecommendationCandidateRequest(BaseModel):
     # A one-off request is deliberately not persisted as a fake buyer intent or
     # seller target.  The text is kept only in the recommendation session
     # snapshot and drives a read-only temporary-filter session.
-    temporary_input: str | None = Field(default=None, max_length=4000)
+    temporary_input: str | None = Field(default=None, max_length=AGENT_INPUT_MAX_CHARS)
     limit: int = Field(default=20, ge=1, le=50)
     create_session: bool = True
     enable_rerank: bool = True
@@ -1062,6 +1090,197 @@ def get_recommendation_session_page_state(
         "bundle": bundle,
         "polling_hint": _recommendation_session_polling_hint(summary, session_id=session_id),
     }
+
+
+class RecommendationAgentTurnRequest(BaseModel):
+    mode: str = Field(pattern="^(buyer_to_target)$")
+    session_id: UUID | None = None
+    # 一段需求原文，或后续对话里的补充。上传的需求文件由前端取正文后走同一个字段。
+    user_message: str = Field(min_length=1, max_length=AGENT_INPUT_MAX_CHARS)
+
+
+class RecommendationAgentTurnOut(BaseModel):
+    session_id: UUID
+    turn_id: str
+    job_id: UUID
+    queue_name: str
+
+
+@router.post(
+    "/agent-turn",
+    response_model=RecommendationAgentTurnOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def create_recommendation_agent_turn(
+    payload: RecommendationAgentTurnRequest,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Start one agent turn. Returns immediately; progress arrives by polling.
+
+    A session created here has no anchor entity by design — the whole point of
+    the page is that the consultant does not have to create a buyer intent
+    first. The temporary-filter flag rides along so the existing guards keep
+    relations from ever being created out of one.
+    """
+    user_message = payload.user_message.strip()
+    if not user_message:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="user_message is required.")
+
+    if payload.session_id is not None:
+        ensure_recommendation_session_visible(db, current_user, payload.session_id)
+        session = _get_recommendation_session_or_404(db, payload.session_id)
+        if session["mode"] != payload.mode:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Session mode does not match the request mode.",
+            )
+        session_id = payload.session_id
+    else:
+        session_id = _create_recommendation_session(
+            db,
+            mode=payload.mode,
+            buyer_intent_id=None,
+            buyer_party_id=None,
+            seller_target_id=None,
+            user_message=None,
+            initial_snapshot={"agent_session": True, "first_message": user_message},
+            candidates=[],
+            created_by=current_user.user_id,
+            is_temporary_filter=True,
+        )
+
+    conversation = _agent_turn_conversation(db, session_id)
+    _insert_recommendation_message(
+        db,
+        session_id=session_id,
+        role="user",
+        content_type="text",
+        content=user_message,
+        metadata_json={"message_type": "agent_user_message"},
+        created_by=current_user.user_id,
+    )
+    turn_id = uuid4().hex
+    job_id = _enqueue_recommendation_agent_job(
+        db,
+        session_id=session_id,
+        mode=payload.mode,
+        turn_id=turn_id,
+        user_message=user_message,
+        conversation=conversation,
+        created_by=current_user.user_id,
+    )
+    _touch_recommendation_session(db, session_id)
+    db.commit()
+    return {
+        "session_id": session_id,
+        "turn_id": turn_id,
+        "job_id": job_id,
+        "queue_name": "llm",
+    }
+
+
+def _sse(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@router.get("/sessions/{session_id}/turns/{turn_id}/answer-stream")
+def stream_recommendation_answer(
+    session_id: UUID,
+    turn_id: str,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    """Stream the final write-up for one agent turn.
+
+    This is the only streamed call in the system, and it is streamed here in
+    the API rather than in the worker because there is no worker→browser
+    channel (the queue is a Postgres table; there is no Redis). Everything the
+    generator needs is read *before* the response is returned: the request
+    session closes as soon as this function returns, so the generator opens its
+    own session for the final write.
+    """
+    ensure_recommendation_session_visible(db, current_user, session_id)
+    _get_recommendation_session_or_404(db, session_id)
+
+    existing = find_agent_turn_answer(db, session_id, turn_id)
+    if existing is not None:
+        replay = existing
+        return StreamingResponse(
+            iter([
+                _sse("delta", {"text": replay["markdown"]}),
+                _sse("done", {"markdown": replay["markdown"], "message_id": str(replay["id"]), "replayed": True}),
+            ]),
+            media_type="text/event-stream",
+            headers=_SSE_HEADERS,
+        )
+
+    brief = find_agent_turn_brief(db, session_id, turn_id)
+    if brief is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This turn has no writer brief yet; the agent may still be running.",
+        )
+
+    node_name = recommendation_answer_writer_node_by_mode().get(str(brief.get("mode") or ""))
+    node_config = None
+    if node_name:
+        try:
+            node_config = _get_default_node_config(db, node_name)
+        except Exception:
+            node_config = None
+
+    link_map = target_link_map(brief)
+
+    def persist(markdown: str, *, mode: str) -> str:
+        # 独立 session：请求的那个已经随函数返回关掉了。
+        with session_scope() as write_db:
+            message_id = insert_agent_answer_message(
+                write_db,
+                session_id=session_id,
+                turn_id=turn_id,
+                markdown=markdown,
+                model_name=(node_config or {}).get("model_name"),
+                generation_mode=mode,
+            )
+            _touch_recommendation_session(write_db, session_id)
+        return str(message_id)
+
+    def generate():
+        if node_config is None:
+            markdown = backfill_target_links(fallback_answer_markdown(brief), link_map)
+            yield _sse("delta", {"text": markdown})
+            yield _sse("done", {"markdown": markdown, "message_id": persist(markdown, mode="fallback")})
+            return
+
+        chunks: list[str] = []
+        try:
+            for delta in stream_openai_compatible_chat(
+                base_url=node_config["base_url"],
+                api_key_secret_ref=node_config["api_key_secret_ref"],
+                api_key_encrypted=node_config.get("api_key_encrypted"),
+                model_name=node_config["model_name"],
+                messages=_render_prompt_messages(node_config, build_answer_prompt_variables(brief)),
+                temperature=node_config["temperature"],
+                top_p=node_config["top_p"],
+                max_tokens=node_config["max_tokens"],
+                timeout_seconds=node_config["timeout_seconds"] or 180,
+            ):
+                chunks.append(delta)
+                yield _sse("delta", {"text": delta})
+        except Exception as exc:  # noqa: BLE001 - 生成失败要给出可用兜底，不是空页面
+            markdown = backfill_target_links(fallback_answer_markdown(brief), link_map)
+            yield _sse("error", {"message": str(exc)})
+            yield _sse("delta", {"text": markdown})
+            yield _sse("done", {"markdown": markdown, "message_id": persist(markdown, mode="fallback")})
+            return
+
+        # 回填放在落库这一步：流式增量里做替换要处理跨 chunk 的半个名字，
+        # 而前端在 done 事件里拿到的就是最终带链接的正文。
+        markdown = backfill_target_links("".join(chunks).strip(), link_map)
+        yield _sse("done", {"markdown": markdown, "message_id": persist(markdown, mode="llm")})
+
+    return StreamingResponse(generate(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
 @router.post(
