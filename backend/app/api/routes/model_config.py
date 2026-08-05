@@ -1,4 +1,5 @@
 
+import re
 from collections.abc import Callable
 from typing import Any, Literal
 from uuid import UUID, uuid4
@@ -1078,6 +1079,7 @@ def list_prompts(
 @router.post("/prompts", response_model=PromptOut, status_code=status.HTTP_201_CREATED)
 def create_prompt(payload: PromptCreate, db: Session = Depends(get_db)) -> dict[str, Any]:
     _validate_prompt_payload(db, payload.node_name, payload.template_engine)
+    _validate_prompt_variables(payload.node_name, payload.system_prompt, payload.user_prompt_template)
     if payload.is_default:
         _clear_default_prompt(db, payload.node_name)
     row = db.execute(
@@ -1120,6 +1122,12 @@ def update_prompt(prompt_id: UUID, payload: PromptUpdate, db: Session = Depends(
     if "template_engine" in data:
         _validate_choice("template_engine", data["template_engine"], TEMPLATE_ENGINES)
     _validate_prompt_payload(db, current["node_name"], data.get("template_engine") or current["template_engine"])
+    # 编辑也要过一遍：把 {{ }} 改成 { } 的那一刻就坏了，跟新建时一样看不出来。
+    _validate_prompt_variables(
+        str(current["node_name"]),
+        data["system_prompt"] if "system_prompt" in data else current["system_prompt"],
+        data["user_prompt_template"] if "user_prompt_template" in data else current["user_prompt_template"],
+    )
     if data.get("is_default") is True:
         _clear_default_prompt(db, str(current["node_name"]))
     row = _update_prompt_row(db, prompt_id=prompt_id, data=data)
@@ -1755,6 +1763,47 @@ def _validate_node_payload(data: dict[str, Any]) -> None:
     _validate_choice("output_mode", data.get("output_mode"), OUTPUT_MODES)
     if data.get("node_type") == "embedding" and data.get("embedding_dimension") is None:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="embedding_dimension is required for embedding nodes.")
+
+
+_SINGLE_BRACE_VARIABLE = re.compile(r"(?<!\{)\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}(?!\})")
+
+
+def _validate_prompt_variables(
+    node_name: str,
+    system_prompt: str | None,
+    user_prompt_template: str | None,
+) -> None:
+    """Catch a template that will render as literal placeholder text.
+
+    A prompt with the wrong brace style saves fine, renders fine, and then the
+    model is handed the words `{answer_brief_json}` instead of the data — it
+    replies asking where the data went, and nothing anywhere says why. Both
+    checks below are unambiguous mistakes, not style opinions.
+    """
+    spec = node_by_name(node_name)
+    if spec is None or not spec.prompt_variables:
+        return
+    declared = set(spec.prompt_variables)
+    body = f"{system_prompt or ''}\n{user_prompt_template or ''}"
+
+    wrong_syntax = sorted(declared.intersection(_SINGLE_BRACE_VARIABLE.findall(body)))
+    if wrong_syntax:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Template variables must be written as {{{{ name }}}}: "
+                f"{', '.join(wrong_syntax)} used single braces and would render literally."
+            ),
+        )
+
+    if not declared.intersection(extract_template_variables(system_prompt, user_prompt_template)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Prompt for {node_name} references none of its variables "
+                f"({', '.join(sorted(declared))}); the model would receive no runtime data."
+            ),
+        )
 
 
 def _validate_prompt_payload(db: Session, node_name: str, template_engine: str | None) -> None:
