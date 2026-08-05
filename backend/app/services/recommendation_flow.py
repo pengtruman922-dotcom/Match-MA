@@ -225,7 +225,9 @@ def _list_running_recommendation_session_ids(
             with running_jobs as (
               select
                 case
-                  when job.job_type in ('recommendation_deep_eval', 'recommendation_rerank')
+                  when job.job_type in (
+                         'recommendation_deep_eval', 'recommendation_rerank', 'recommendation_agent'
+                       )
                     and job.entity_type = 'recommendation_session'
                     then job.entity_id
                   when job.payload_json ? 'session_id'
@@ -237,7 +239,10 @@ def _list_running_recommendation_session_ids(
               from background_job job
               where job.team_id = :team_id
                 and job.workspace_id = :workspace_id
-                and job.job_type in ('recommendation_deep_eval', 'recommendation_rerank', 'recommendation_report_generate')
+                and job.job_type in (
+                      'recommendation_deep_eval', 'recommendation_rerank',
+                      'recommendation_report_generate', 'recommendation_agent'
+                    )
                 and job.status in ('queued', 'running', 'retry_waiting')
             )
             select distinct session_id
@@ -301,7 +306,7 @@ def _build_recommendation_session_summary(
     )
     return {
         "session": session,
-        "display": _recommendation_session_display(session),
+        "display": _recommendation_session_display(session, messages=messages),
         "candidate_counts": {
             "initial": len(initial_candidates),
             "reranked": len(reranked_candidates),
@@ -321,9 +326,62 @@ def _build_recommendation_session_summary(
     }
 
 
-def _recommendation_session_display(session: dict[str, Any]) -> dict[str, Any]:
+AGENT_SESSION_TITLE_MAX_CHARS = 24
+
+
+def _agent_session_first_message(session: dict[str, Any]) -> str:
+    """The question this conversation opened with.
+
+    Stored twice on purpose: `anonymous_input_snapshot` is what the session
+    search matches on, the snapshot json is the belt-and-braces copy for rows
+    written before that column was populated.
+    """
+    snapshot = session.get("initial_condition_snapshot_json")
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    for value in (session.get("anonymous_input_snapshot"), snapshot.get("first_message")):
+        text_value = str(value or "").strip()
+        if text_value:
+            return text_value
+    return ""
+
+
+def _count_agent_turns(messages: list[dict[str, Any]] | None) -> int:
+    if not messages:
+        return 0
+    turn_ids = {
+        str((message.get("metadata_json") or {}).get("turn_id") or "")
+        for message in messages
+        if isinstance(message.get("metadata_json"), dict)
+    }
+    turn_ids.discard("")
+    return len(turn_ids)
+
+
+def _recommendation_session_display(
+    session: dict[str, Any],
+    *,
+    messages: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     mode = session.get("mode")
     is_temporary_filter = bool((session.get("metadata_json") or {}).get("temporary_filter"))
+    snapshot = session.get("initial_condition_snapshot_json")
+    is_agent_session = bool((snapshot if isinstance(snapshot, dict) else {}).get("agent_session"))
+    if is_agent_session:
+        # 一屏全是「临时条件筛选」就等于没有标题；开场那句话才是用户认得出的东西。
+        first_message = _agent_session_first_message(session)
+        title = first_message[:AGENT_SESSION_TITLE_MAX_CHARS] or "新对话"
+        if len(first_message) > AGENT_SESSION_TITLE_MAX_CHARS:
+            title = f"{title}…"
+        turn_count = _count_agent_turns(messages)
+        return {
+            "title": title,
+            "subtitle": f"{turn_count} 轮对话" if turn_count else "尚未开始",
+            "mode_label": "买家找标的" if mode == "buyer_to_target" else "标的找买家",
+            "anchor": {"entity_type": None, "entity_id": None},
+            "primary_action": "agent_chat",
+            "turn_count": turn_count,
+            "route": f"/recommend?session={session['id']}",
+        }
     if is_temporary_filter:
         return {
             "title": "临时条件筛选",
@@ -331,6 +389,7 @@ def _recommendation_session_display(session: dict[str, Any]) -> dict[str, Any]:
             "mode_label": "买家找标的" if mode == "buyer_to_target" else "标的找买家",
             "anchor": {"entity_type": None, "entity_id": None},
             "primary_action": "temporary_filter",
+            "turn_count": 0,
             "route": f"/recommendations/sessions/{session['id']}",
         }
     if mode == "buyer_to_target":
@@ -349,6 +408,7 @@ def _recommendation_session_display(session: dict[str, Any]) -> dict[str, Any]:
         "mode_label": "买家找标的" if mode == "buyer_to_target" else "标的找买家",
         "anchor": anchor,
         "primary_action": primary_action,
+        "turn_count": 0,
         "route": f"/recommendations/sessions/{session['id']}",
     }
 
@@ -1277,6 +1337,15 @@ def search_targets_for_agent(
     scenario rows are loaded and the implicit single-scenario path is used.
     """
     return _candidate_targets_for_intent(db, anchor, limit)
+
+
+def target_facts_for_agent(target_row: dict[str, Any]) -> dict[str, Any]:
+    """Facts for a target the agent pulled by id rather than through screening.
+
+    Same formatter the screened candidates go through, so a target that entered
+    by id quotes identical numbers to one that came out of the funnel.
+    """
+    return _target_facts(target_row)
 
 
 def _candidate_intents_for_target(
@@ -3023,6 +3092,57 @@ def find_agent_turn_answer(db: Session, session_id: UUID, turn_id: str) -> dict[
     return None
 
 
+def agent_turn_aborted(db: Session, session_id: UUID, turn_id: str) -> bool:
+    """Whether this turn carries a stop marker.
+
+    The single source of truth for "was this turn stopped": the worker, the
+    stream and the history builder all ask here. Three processes can race to
+    finish a turn the user just stopped, so the rule is that the marker wins
+    regardless of what else managed to land.
+    """
+    row = db.execute(
+        text(
+            """
+            select 1
+            from recommendation_message
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and session_id = :session_id
+              and metadata_json ->> 'message_type' = 'agent_aborted'
+              and metadata_json ->> 'turn_id' = :turn_id
+            limit 1
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "session_id": session_id,
+            "turn_id": turn_id,
+        },
+    ).first()
+    return row is not None
+
+
+def insert_agent_aborted_message(
+    db: Session,
+    *,
+    session_id: UUID,
+    turn_id: str,
+    created_by: UUID = DEFAULT_ADMIN_USER_ID,
+) -> None:
+    """Mark a turn stopped, written the moment the user asks rather than when
+    the worker notices — otherwise a closed tab would leave no record at all."""
+    _insert_recommendation_message(
+        db,
+        session_id=session_id,
+        role="tool",
+        content_type="json",
+        content={"message_type": "agent_aborted", "turn_id": turn_id},
+        metadata_json={"message_type": "agent_aborted", "turn_id": turn_id},
+        created_by=created_by,
+    )
+
+
 def insert_agent_answer_message(
     db: Session,
     *,
@@ -3071,7 +3191,8 @@ def _enqueue_recommendation_agent_job(
     mode: str,
     turn_id: str,
     user_message: str,
-    conversation: list[dict[str, Any]],
+    history_context: str,
+    attachment_ids: list[str],
     created_by: UUID,
 ) -> UUID:
     """Queue one agent turn on the llm queue.
@@ -3088,7 +3209,8 @@ def _enqueue_recommendation_agent_job(
                 "mode": mode,
                 "turn_id": turn_id,
                 "user_message": user_message,
-                "conversation": conversation,
+                "history_context": history_context,
+                "attachment_ids": attachment_ids,
             }
         )
     )
@@ -3124,48 +3246,87 @@ def _enqueue_recommendation_agent_job(
     return row["id"]
 
 
-def _agent_turn_conversation(db: Session, session_id: UUID) -> list[dict[str, Any]]:
-    """Prior turns, compressed to what the next turn actually needs.
+AGENT_HISTORY_MAX_TURNS = 6
+# 兜底而已，正常 6 轮远到不了。超了按整轮丢，不截断。
+AGENT_HISTORY_MAX_CHARS = 40000
 
-    Full candidate payloads are deliberately left out: the agent re-screens
-    every turn, so replaying old result sets would only spend context on
-    numbers that may already be stale.
+
+def _agent_history_turns(db: Session, session_id: UUID) -> list[dict[str, Any]]:
+    """Turns that actually completed, oldest first.
+
+    A turn only counts once both halves exist. A stopped turn, or one whose
+    write-up never landed, is dropped whole: half a turn reads to the model as
+    an unanswered question and pulls the next turn into answering it again.
     """
-    messages = _list_recommendation_messages(db, session_id=session_id, limit=200, offset=0)
-    conversation: list[dict[str, Any]] = []
+    messages = _list_recommendation_messages(db, session_id=session_id, limit=500, offset=0)
+    order: list[str] = []
+    turns: dict[str, dict[str, Any]] = {}
+    pending_question: str | None = None
+
+    def ensure(turn_id: str) -> dict[str, Any]:
+        entry = turns.get(turn_id)
+        if entry is None:
+            entry = {"question": "", "answer": "", "aborted": False}
+            turns[turn_id] = entry
+            order.append(turn_id)
+        return entry
+
     for message in messages:
-        role = str(message.get("role") or "")
-        content = message.get("content")
-        if role == "user":
-            text_value = content if isinstance(content, str) else str(content or "")
-            if text_value.strip():
-                conversation.append({"role": "user", "content": text_value.strip()})
+        metadata = message.get("metadata_json") if isinstance(message.get("metadata_json"), dict) else {}
+        turn_id = str(metadata.get("turn_id") or "")
+        if str(message.get("role") or "") == "user":
+            question = str(message.get("content") or "").strip()
+            if turn_id:
+                ensure(turn_id)["question"] = question
+                pending_question = None
+            else:
+                # 早于 turn_id 落到用户消息上的那批行，只能靠先后顺序认亲。
+                pending_question = question
             continue
-        if role == "assistant":
-            text_value = content if isinstance(content, str) else str(content or "")
-            if text_value.strip():
-                conversation.append({"role": "assistant", "content": text_value.strip()})
+        if not turn_id or message.get("content_type") != "json":
             continue
-        if role == "tool" and message.get("content_type") == "json":
+        entry = ensure(turn_id)
+        if pending_question and not entry["question"]:
+            entry["question"] = pending_question
+            pending_question = None
+        message_type = str(metadata.get("message_type") or "")
+        if message_type == "agent_answer":
             # content 是 JSON 文本，不是 dict —— 表里这一列是 text。
-            decoded = _json_loads(content or "{}")
-            if decoded.get("message_type") != "agent_brief":
-                continue
-            brief = decoded.get("brief") or {}
-            conversation.append(
-                {
-                    "role": "assistant",
-                    "content": _json_dumps(
-                        {
-                            "understanding": brief.get("understanding"),
-                            "recommended_names": [
-                                item.get("name") for item in (brief.get("recommended") or [])
-                            ],
-                        }
-                    ),
-                }
-            )
-    return conversation[-20:]
+            decoded = _json_loads(message.get("content") or "{}")
+            entry["answer"] = str(decoded.get("markdown") or "").strip()
+        elif message_type == "agent_aborted":
+            entry["aborted"] = True
+
+    complete = [
+        turns[turn_id]
+        for turn_id in order
+        if not turns[turn_id]["aborted"] and turns[turn_id]["question"] and turns[turn_id]["answer"]
+    ]
+    return complete[-AGENT_HISTORY_MAX_TURNS:]
+
+
+def agent_history_context(db: Session, session_id: UUID) -> str:
+    """Previous turns, verbatim, tagged so the agent cannot mistake them for now.
+
+    Verbatim rather than summarised on purpose: the consultant's follow-up
+    ("把第二家换掉") is written against the exact words on their screen, so
+    anything the agent reads that differs from what the user read is a chance
+    to misunderstand. Tool results stay out — the agent re-screens every turn
+    and replaying old result sets would only spend context on stale numbers.
+    """
+    turns = _agent_history_turns(db, session_id)
+    blocks: list[str] = []
+    budget = AGENT_HISTORY_MAX_CHARS
+    # 从最近一轮往回收，装不下就停 —— 丢掉的永远是最旧的整轮。
+    for turn in reversed(turns):
+        block = f"<user>：{turn['question']}\n<AI>：{turn['answer']}"
+        if len(block) > budget:
+            break
+        budget -= len(block)
+        blocks.append(block)
+    if not blocks:
+        return ""
+    return "<history_context>\n{}\n</history_context>".format("\n\n".join(reversed(blocks)))
 
 
 def _enqueue_recommendation_rerank_job(

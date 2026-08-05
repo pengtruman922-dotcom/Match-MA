@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { History, Loader2, Search, X } from 'lucide-react';
 import { recommendations } from '../../lib/api';
 import { isAdmin } from '../../lib/auth';
+import { formatRelativeTime } from '../../lib/format';
 import type { RecommendationSessionSummary } from '../../types/api';
 
 export default function SessionPicker({ onPick }: { onPick: (sessionId: string) => void }) {
@@ -10,6 +11,7 @@ export default function SessionPicker({ onPick }: { onPick: (sessionId: string) 
   const [sessions, setSessions] = useState<RecommendationSessionSummary[]>([]);
   const [query, setQuery] = useState('');
   const [loadFailed, setLoadFailed] = useState(false);
+  const [runningIds, setRunningIds] = useState<Set<string>>(new Set());
   const requestSequence = useRef(0);
   const admin = isAdmin();
 
@@ -34,13 +36,20 @@ export default function SessionPicker({ onPick }: { onPick: (sessionId: string) 
           const page = await recommendations.page();
           const seen = new Set<string>();
           const merged: RecommendationSessionSummary[] = [];
+          const live = new Set<string>();
+          for (const summary of page.running_sessions) {
+            if (summary.session?.id) live.add(summary.session.id);
+          }
           for (const summary of [...page.running_sessions, ...page.recent_sessions]) {
             const id = summary.session?.id;
             if (!id || seen.has(id)) continue;
             seen.add(id);
             merged.push(summary);
           }
-          if (requestSequence.current === sequence) setSessions(merged.slice(0, 12));
+          if (requestSequence.current === sequence) {
+            setSessions(merged.slice(0, 12));
+            setRunningIds(live);
+          }
         }
       } catch {
         if (requestSequence.current === sequence) {
@@ -116,7 +125,7 @@ export default function SessionPicker({ onPick }: { onPick: (sessionId: string) 
             ) : (
               <div className="max-h-80 overflow-y-auto py-1">
                 {sessions.map((summary) => {
-                  const running = ['queued', 'running', 'retry_waiting'].includes(String(summary.rerank_status?.status || ''));
+                  const running = runningIds.has(summary.session.id);
                   const creatorUsername = typeof summary.session.created_by_username === 'string'
                     ? summary.session.created_by_username
                     : null;
@@ -151,9 +160,8 @@ export default function SessionPicker({ onPick }: { onPick: (sessionId: string) 
                         )}
                       </div>
                       <p className="ml-3.5 mt-0.5 text-[11px] text-gray-400">
-                        {summary.candidate_counts.latest} 候选 · 已选 {Number(summary.selected_status?.active_count ?? 0)}
-                        {Number(summary.report_status?.report_count ?? 0) > 0 && ` · ${Number(summary.report_status?.report_count)} 报告`}
-                        {running && ' · 深评进行中'}
+                        {summary.display.subtitle || '—'}
+                        {` · ${formatRelativeTime(String(summary.activity?.last_activity_at || summary.session.updated_at || ''))}`}
                       </p>
                     </button>
                   );

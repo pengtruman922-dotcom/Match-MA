@@ -65,7 +65,9 @@ from backend.app.services.recommendation_flow import (  # noqa: F401 - re-export
     _compact_recommendation_report,
     _compact_selected_item,
     _count_by_key,
-    _agent_turn_conversation,
+    agent_history_context,
+    agent_turn_aborted,
+    insert_agent_aborted_message,
     _create_recommendation_session,
     find_agent_turn_answer,
     find_agent_turn_brief,
@@ -152,6 +154,8 @@ router = APIRouter(prefix="/recommendations", tags=["recommendations"])
 # 一次输入的上限。4000 是给手打需求定的，一份上传的需求文档轻松超过；
 # 正文由前端从附件正文取出后走同一个字段，所以两处共用这个上限。
 AGENT_INPUT_MAX_CHARS = 20000
+# 与 image_multimodal_max_count 同量级；再多一次对话也读不过来。
+AGENT_MAX_IMAGE_ATTACHMENTS = 6
 
 # 自建部署的 Caddy 开着 encode gzip，会把 SSE 攒在缓冲区里等压缩，
 # 逐字流式就变成一次性吐完。no-transform 让代理不要动响应体；
@@ -1097,6 +1101,8 @@ class RecommendationAgentTurnRequest(BaseModel):
     session_id: UUID | None = None
     # 一段需求原文，或后续对话里的补充。上传的需求文件由前端取正文后走同一个字段。
     user_message: str = Field(min_length=1, max_length=AGENT_INPUT_MAX_CHARS)
+    # 图片没有正文可以先取出来给用户看，所以只传 id，由 worker 交给多模态模型直读。
+    attachment_ids: list[UUID] = Field(default_factory=list, max_length=AGENT_MAX_IMAGE_ATTACHMENTS)
 
 
 class RecommendationAgentTurnOut(BaseModel):
@@ -1143,31 +1149,35 @@ def create_recommendation_agent_turn(
             buyer_intent_id=None,
             buyer_party_id=None,
             seller_target_id=None,
-            user_message=None,
+            # 开场那句话也落进 anonymous_input_snapshot：会话搜索匹配的就是这一列。
+            user_message=user_message,
             initial_snapshot={"agent_session": True, "first_message": user_message},
             candidates=[],
             created_by=current_user.user_id,
             is_temporary_filter=True,
         )
 
-    conversation = _agent_turn_conversation(db, session_id)
+    # turn_id 先生成：用户消息也带上它，这一轮的问题和它的回答才有明确归属，
+    # 「中止的轮次不进上下文」也才有得判断。
+    turn_id = uuid4().hex
+    history_context = agent_history_context(db, session_id)
     _insert_recommendation_message(
         db,
         session_id=session_id,
         role="user",
         content_type="text",
         content=user_message,
-        metadata_json={"message_type": "agent_user_message"},
+        metadata_json={"message_type": "agent_user_message", "turn_id": turn_id},
         created_by=current_user.user_id,
     )
-    turn_id = uuid4().hex
     job_id = _enqueue_recommendation_agent_job(
         db,
         session_id=session_id,
         mode=payload.mode,
         turn_id=turn_id,
         user_message=user_message,
-        conversation=conversation,
+        history_context=history_context,
+        attachment_ids=[str(value) for value in payload.attachment_ids],
         created_by=current_user.user_id,
     )
     _touch_recommendation_session(db, session_id)
@@ -1178,6 +1188,36 @@ def create_recommendation_agent_turn(
         "job_id": job_id,
         "queue_name": "llm",
     }
+
+
+@router.post(
+    "/sessions/{session_id}/turns/{turn_id}/abort",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def abort_recommendation_agent_turn(
+    session_id: UUID,
+    turn_id: str,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Stop one agent turn wherever it happens to be.
+
+    The marker is written here, immediately, rather than by whichever process
+    is running — the tab may be closing, and a stop the database never heard
+    about would come back as context on the next turn.
+    """
+    ensure_recommendation_session_visible(db, current_user, session_id)
+    _get_recommendation_session_or_404(db, session_id)
+    if not agent_turn_aborted(db, session_id, turn_id):
+        insert_agent_aborted_message(
+            db,
+            session_id=session_id,
+            turn_id=turn_id,
+            created_by=current_user.user_id,
+        )
+        _touch_recommendation_session(db, session_id)
+        db.commit()
+    return {"session_id": str(session_id), "turn_id": turn_id, "aborted": True}
 
 
 def _sse(event: str, data: dict[str, Any]) -> str:
@@ -1202,6 +1242,12 @@ def stream_recommendation_answer(
     """
     ensure_recommendation_session_visible(db, current_user, session_id)
     _get_recommendation_session_or_404(db, session_id)
+
+    if agent_turn_aborted(db, session_id, turn_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This turn was stopped.",
+        )
 
     existing = find_agent_turn_answer(db, session_id, turn_id)
     if existing is not None:

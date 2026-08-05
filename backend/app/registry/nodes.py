@@ -241,8 +241,12 @@ NODES: tuple[NodeSpec, ...] = (
             "读少数候选的详情、产出写作素材包。初筛与打分仍由代码执行，"
             "本节点只选择工具参数，永远拿不到全库。"
         ),
-        runtime_inputs=("用户输入的需求原文", "本次对话历史", "可用过滤条件与预算"),
-        prompt_variables=("recommendation_context_json",),
+        runtime_inputs=(
+            "用户输入的需求原文",
+            "最近 6 轮已完成对话的原文（中止的轮次不带）",
+            "可用过滤条件与预算",
+        ),
+        prompt_variables=("recommendation_context_json", "history_context"),
         agent_mode="buyer_to_target",
         default_temperature=0.2,
         default_timeout_seconds=300,
@@ -446,6 +450,7 @@ PROMPT_VARIABLE_LABELS: dict[str, str] = {
     "candidates_json": "候选清单 JSON",
     "current_conditions_json": "当前生效的推荐条件 JSON",
     "user_message": "用户在推荐对话中输入的消息",
+    "history_context": "最近 6 轮已完成对话的原文（<history_context> 标签包裹，中止的轮次不带）",
     "report_context_json": "报告上下文 JSON",
     "selected_items_json": "已选推荐项 JSON",
     "recommendation_context_json": "推荐编排上下文 JSON（需求原文、对话历史、可用条件与预算）",

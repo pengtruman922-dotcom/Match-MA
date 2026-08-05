@@ -15,6 +15,19 @@ export function formatMonthDayTime(value: string | null | undefined): string {
   return `${month}-${day} ${hour}:${minute}`;
 }
 
+/** 「3 分钟前」。超过一周就没人再按相对时间找了，直接给日期。 */
+export function formatRelativeTime(value: string | null | undefined): string {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (seconds < 60) return '刚刚';
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`;
+  if (seconds < 604800) return `${Math.floor(seconds / 86400)} 天前`;
+  return formatMonthDayTime(value);
+}
+
 export function formatCompactMoney(value: number): string {
   if (!Number.isFinite(value)) return '-';
   if (Math.abs(value) < 10000) return `${value.toFixed(0)}元`;

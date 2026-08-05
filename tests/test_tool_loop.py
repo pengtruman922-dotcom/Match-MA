@@ -10,7 +10,7 @@ from backend.app.ai.llm_client import (
     ToolCall,
     _parse_tool_calls,
 )
-from backend.app.ai.tool_loop import run_tool_loop
+from backend.app.ai.tool_loop import ToolLoopAborted, run_tool_loop
 
 
 def _tool_call(name: str, arguments: dict, call_id: str = "call_1") -> ToolCall:
@@ -342,3 +342,66 @@ def test_tools_are_only_sent_when_provided(monkeypatch) -> None:
     call(tools=[{"type": "function", "function": {"name": "web_search"}}], tool_choice="auto")
     assert sent["payload"]["tools"][0]["function"]["name"] == "web_search"
     assert sent["payload"]["tool_choice"] == "auto"
+
+
+# -- 用户点了停止 ---------------------------------------------------------
+
+
+def test_abort_stops_without_spending_another_model_call() -> None:
+    """停止不是「收个尾」：不再多花一次调用去凑一个用户已经不想要的答案。"""
+    calls: list[str] = []
+    stop = {"now": False}
+
+    def chat(*, messages, tools):
+        calls.append("chat")
+        if len(calls) == 1:
+            return _reply(tool_calls=(_tool_call("search", {"q": "x"}),))
+        return _reply('{"done": true}')
+
+    def execute(call: ToolCall):
+        stop["now"] = True
+        return {"ok": True}
+
+    with pytest.raises(ToolLoopAborted) as excinfo:
+        run_tool_loop(
+            chat=chat,
+            messages=[{"role": "user", "content": "找标的"}],
+            tools=[],
+            execute_tool=execute,
+            should_abort=lambda: stop["now"],
+        )
+
+    # 第一次调用 + 一次工具，然后就停了 —— 没有第二次调用。
+    assert calls == ["chat"]
+    assert excinfo.value.usage.llm_calls == 1
+    assert excinfo.value.usage.tool_calls_by_name == {"search": 1}
+
+
+def test_abort_before_the_first_call_spends_nothing() -> None:
+    def chat(*, messages, tools):
+        raise AssertionError("已经要求停止了，不该再调模型")
+
+    with pytest.raises(ToolLoopAborted) as excinfo:
+        run_tool_loop(
+            chat=chat,
+            messages=[{"role": "user", "content": "找标的"}],
+            tools=[],
+            execute_tool=lambda call: {},
+            should_abort=lambda: True,
+        )
+
+    assert excinfo.value.usage.llm_calls == 0
+
+
+def test_without_should_abort_the_loop_is_unchanged() -> None:
+    def chat(*, messages, tools):
+        return _reply('{"done": true}')
+
+    result = run_tool_loop(
+        chat=chat,
+        messages=[{"role": "user", "content": "找标的"}],
+        tools=[],
+        execute_tool=lambda call: {},
+    )
+
+    assert result.result.parsed_output_json == {"done": True}

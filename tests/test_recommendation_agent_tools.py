@@ -77,7 +77,7 @@ def test_anchor_survives_garbage_filters() -> None:
 
 
 def test_search_budget_returns_an_error_the_model_can_read() -> None:
-    tools = RecommendationAgentTools(db=None, search_targets_fn=_fake_search())
+    tools = RecommendationAgentTools(db=None, target_facts_fn=dict, search_targets_fn=_fake_search())
 
     for _ in range(MAX_SEARCH_CALLS):
         result = tools.execute(_call("search_targets", {"filters": {"industries_json": ["制造业"]}}))
@@ -89,7 +89,7 @@ def test_search_budget_returns_an_error_the_model_can_read() -> None:
 
 
 def test_search_limit_is_clamped() -> None:
-    tools = RecommendationAgentTools(db=None, search_targets_fn=_fake_search(count=99))
+    tools = RecommendationAgentTools(db=None, target_facts_fn=dict, search_targets_fn=_fake_search(count=99))
 
     result = tools.execute(
         _call("search_targets", {"filters": {}, "limit": 500})
@@ -99,7 +99,7 @@ def test_search_limit_is_clamped() -> None:
 
 
 def test_count_only_skips_candidate_payload() -> None:
-    tools = RecommendationAgentTools(db=None, search_targets_fn=_fake_search())
+    tools = RecommendationAgentTools(db=None, target_facts_fn=dict, search_targets_fn=_fake_search())
 
     result = tools.execute(_call("search_targets", {"filters": {}, "count_only": True}))
 
@@ -109,7 +109,7 @@ def test_count_only_skips_candidate_payload() -> None:
 
 
 def test_ask_user_is_capped_at_one_turn_and_stops_the_loop() -> None:
-    tools = RecommendationAgentTools(db=None, search_targets_fn=_fake_search())
+    tools = RecommendationAgentTools(db=None, target_facts_fn=dict, search_targets_fn=_fake_search())
 
     first = tools.execute(
         _call("ask_user", {"questions": [{"question": "哪个方向？", "options": ["精密制造", "都可以"]}]})
@@ -124,7 +124,7 @@ def test_ask_user_is_capped_at_one_turn_and_stops_the_loop() -> None:
 
 
 def test_ask_user_truncates_to_three_questions() -> None:
-    tools = RecommendationAgentTools(db=None, search_targets_fn=_fake_search())
+    tools = RecommendationAgentTools(db=None, target_facts_fn=dict, search_targets_fn=_fake_search())
 
     tools.execute(
         _call(
@@ -137,7 +137,7 @@ def test_ask_user_truncates_to_three_questions() -> None:
 
 
 def test_detail_budget_counts_across_calls() -> None:
-    tools = RecommendationAgentTools(db=None, search_targets_fn=_fake_search())
+    tools = RecommendationAgentTools(db=None, target_facts_fn=dict, search_targets_fn=_fake_search())
     ids = [f"id-{index}" for index in range(MAX_DETAIL_TARGETS_TOTAL + 4)]
 
     # db 为 None，取详情会在 SQL 那步炸；这里只验预算记账，所以先塞满配额。
@@ -148,7 +148,7 @@ def test_detail_budget_counts_across_calls() -> None:
 
 
 def test_unknown_tool_reports_instead_of_raising() -> None:
-    tools = RecommendationAgentTools(db=None, search_targets_fn=_fake_search())
+    tools = RecommendationAgentTools(db=None, target_facts_fn=dict, search_targets_fn=_fake_search())
 
     assert "error" in tools.execute(_call("rm_rf", {}))
 
@@ -237,3 +237,83 @@ def test_target_facts_drops_unknowns_rather_than_reporting_them() -> None:
     assert facts["net_profit_text"] == "2800万"
     assert facts["can_control"] == "是"
     assert "can_consolidate" not in facts
+
+
+# -- 按 id 取详情的标的也要登记成候选 --------------------------------------
+
+
+class _FakeResult:
+    def __init__(self, rows: list[dict]) -> None:
+        self._rows = rows
+
+    def mappings(self) -> "_FakeResult":
+        return self
+
+    def all(self) -> list[dict]:
+        return self._rows
+
+
+class _FakeDb:
+    """Answers the two queries `_get_target_detail` makes, in order."""
+
+    def __init__(self, target_rows: list[dict], deep_rows: list[dict]) -> None:
+        self._results = [_FakeResult(target_rows), _FakeResult(deep_rows)]
+
+    def execute(self, *_args, **_kwargs) -> _FakeResult:
+        return self._results.pop(0)
+
+
+def _detail_tools(monkeypatch, target_rows, deep_rows=()):
+    monkeypatch.setattr(
+        "backend.app.services.recommendation_agent_tools.load_profile_sections",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(
+        "backend.app.services.recommendation_agent_tools.render_profile_text",
+        lambda *args, **kwargs: "",
+    )
+    return RecommendationAgentTools(
+        db=_FakeDb(list(target_rows), list(deep_rows)),
+        target_facts_fn=lambda row: {"net_profit_text": "2800万", "region": row["location_city"]},
+        search_targets_fn=_fake_search(),
+    )
+
+
+_DETAIL_ROW = {
+    "id": "t-9",
+    "target_name": "杭州XX精密制造",
+    "business_summary": "精密件",
+    "transaction_summary": None,
+    "risk_summary": None,
+    "gap_summary": None,
+    "location_city": "杭州",
+}
+
+
+def test_detail_registers_the_target_so_a_follow_up_can_recommend_it(monkeypatch) -> None:
+    """跟进问题拿的是上一轮正文里的 id，不登记就会被最终那道 join 丢掉。"""
+    tools = _detail_tools(monkeypatch, [_DETAIL_ROW])
+
+    tools.execute(_call("get_target_detail", {"target_ids": ["t-9"]}))
+
+    candidate = tools.candidates_by_id["t-9"]
+    assert candidate["seller_target_name"] == "杭州XX精密制造"
+    assert candidate["facts"]["net_profit_text"] == "2800万"
+
+
+def test_detail_still_carries_the_other_buyer_warning(monkeypatch) -> None:
+    tools = _detail_tools(monkeypatch, [_DETAIL_ROW], [{"seller_target_id": "t-9"}])
+
+    tools.execute(_call("get_target_detail", {"target_ids": ["t-9"]}))
+
+    assert tools.candidates_by_id["t-9"]["seller_target_has_other_deep_progress"] is True
+
+
+def test_detail_does_not_overwrite_a_screened_candidate(monkeypatch) -> None:
+    tools = _detail_tools(monkeypatch, [_DETAIL_ROW])
+    screened = {"seller_target_id": "t-9", "seller_target_name": "初筛来的", "facts": {"pe_ratio": 7}}
+    tools.candidates_by_id["t-9"] = screened
+
+    tools.execute(_call("get_target_detail", {"target_ids": ["t-9"]}))
+
+    assert tools.candidates_by_id["t-9"] is screened

@@ -11,15 +11,23 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
-from backend.app.ai.tool_loop import run_tool_loop
+from backend.app.ai.tool_loop import ToolLoopAborted, run_tool_loop
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
+from backend.app.config import get_settings
 from backend.app.jobs.handlers.common import (
+    _attach_multimodal_images,
+    _attachment_file_bytes,
     _get_default_node_config,
     _json_dumps,
     _json_safe_dict,
     _optional_uuid,
     _render_prompt_messages,
     _resolve_entity_id,
+)
+from backend.app.services.image_inputs import (
+    ImageInputError,
+    is_supported_multimodal_image,
+    prepare_image_for_multimodal,
 )
 from backend.app.jobs.handlers.traces import (
     _insert_recommendation_report_llm_trace,
@@ -38,7 +46,11 @@ from backend.app.services.recommendation_agent_tools import (
     RECOMMENDATION_AGENT_TOOLS,
     RecommendationAgentTools,
 )
-from backend.app.services.recommendation_flow import search_targets_for_agent
+from backend.app.services.recommendation_flow import (
+    agent_turn_aborted,
+    search_targets_for_agent,
+    target_facts_for_agent,
+)
 from backend.app.services.profile_sections import (
     PROFILE_TOTAL_BUDGET,
     buyer_party_fact_block,
@@ -331,14 +343,37 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
 
     agent_context = {
         "user_message": user_message,
-        "conversation": payload.get("conversation") or [],
         "budgets": {
             "max_search_calls": MAX_SEARCH_CALLS,
             "max_detail_targets": MAX_DETAIL_TARGETS_TOTAL,
             "max_tool_iterations": AGENT_MAX_ITERATIONS,
         },
     }
-    messages = _render_prompt_messages(node_config, {"recommendation_context_json": agent_context})
+    # 历史单独一个变量而不是塞进 JSON：塞进去会被转义成一行 \n，标签就不再是
+    # 模型看得见的边界了。
+    attachment_ids = [str(value) for value in (payload.get("attachment_ids") or []) if str(value or "").strip()]
+    images, image_summaries = _agent_image_inputs(db, attachment_ids)
+    if images:
+        # 只放摘要，不放 data_url —— 图片本身走 multimodal parts，塞进 JSON 会被
+        # 重复计费一次。
+        agent_context["images"] = image_summaries
+
+    messages = _render_prompt_messages(
+        node_config,
+        {
+            "recommendation_context_json": agent_context,
+            "history_context": str(payload.get("history_context") or ""),
+        },
+    )
+    if images:
+        messages = _attach_multimodal_images(
+            messages,
+            images,
+            instruction=(
+                "以下图片是客户发来的需求材料，请直接阅读并从中提取并购或出售需求。"
+                "不要输出附件 id 或图片链接。"
+            ),
+        )
 
     def step_sink(step: dict[str, Any]) -> None:
         _insert_agent_step_message(
@@ -354,6 +389,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
     tools = RecommendationAgentTools(
         db,
         search_targets_fn=search_targets_for_agent,
+        target_facts_fn=target_facts_for_agent,
         step_sink=step_sink,
     )
     started = time.perf_counter()
@@ -366,7 +402,34 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             max_iterations=AGENT_MAX_ITERATIONS,
             tool_result_limit=AGENT_TOOL_RESULT_LIMIT,
             early_stop_instruction=lambda: _agent_early_stop(tools, started),
+            should_abort=lambda: agent_turn_aborted(db, session_id, turn_id),
         )
+    except ToolLoopAborted as aborted:
+        # 标记已经由取消接口写好了，这里只留一条轨迹说明跑到哪一步停的。
+        _insert_recommendation_agent_trace(
+            db,
+            job=job,
+            session_id=session_id,
+            node_config=node_config,
+            status="succeeded",
+            input_json=agent_context,
+            conversation=aborted.messages,
+            loop=None,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            tools=tools,
+            error_message="用户中止了本轮编排。",
+        )
+        db.commit()
+        return {
+            "handled": True,
+            "job_type": job.job_type,
+            "session_id": str(session_id),
+            "turn_id": turn_id,
+            "outcome": "aborted",
+            "search_calls": len(tools.search_calls),
+            "detail_targets": len(tools.detail_target_ids),
+            "recommended_count": 0,
+        }
     except LlmCallError as exc:
         _insert_recommendation_agent_trace(
             db,
@@ -383,6 +446,34 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
         )
         db.commit()
         raise
+
+    if agent_turn_aborted(db, session_id, turn_id):
+        # 停止发生在最后一次模型调用期间：素材不落库，否则页面会在「任务已停止」
+        # 底下再冒出一段回答。
+        _insert_recommendation_agent_trace(
+            db,
+            job=job,
+            session_id=session_id,
+            node_config=node_config,
+            status="succeeded",
+            input_json=agent_context,
+            conversation=loop.messages,
+            loop=loop,
+            latency_ms=loop.usage.latency_ms,
+            tools=tools,
+            error_message="用户中止了本轮编排。",
+        )
+        db.commit()
+        return {
+            "handled": True,
+            "job_type": job.job_type,
+            "session_id": str(session_id),
+            "turn_id": turn_id,
+            "outcome": "aborted",
+            "search_calls": len(tools.search_calls),
+            "detail_targets": len(tools.detail_target_ids),
+            "recommended_count": 0,
+        }
 
     if tools.ask_user_payload is not None:
         _insert_agent_question_message(
@@ -428,6 +519,71 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
         "detail_targets": len(tools.detail_target_ids),
         "recommended_count": len((brief or {}).get("recommended") or []),
     }
+
+
+def _agent_image_inputs(db: Session, attachment_ids: list[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Screenshots the consultant pasted, ready to hand to a multimodal model.
+
+    Images never went through OCR — the platform's policy is that they go
+    straight to the model — so unlike a document there is no text to preview.
+    Attachments are looked up by id and not by entity link, because this page
+    creates no entity to link them to.
+    """
+    if not attachment_ids:
+        return [], []
+    settings = get_settings()
+    rows = db.execute(
+        text(
+            """
+            select a.id, a.file_name, a.file_type, a.mime_type, a.file_size,
+                   a.storage_path, a.metadata_json
+            from attachment a
+            where a.team_id = :team_id
+              and a.workspace_id = :workspace_id
+              and a.deleted_at is null
+              and a.id in :attachment_ids
+            """
+        ).bindparams(bindparam("attachment_ids", expanding=True)),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "attachment_ids": attachment_ids,
+        },
+    ).mappings().all()
+
+    images: list[dict[str, Any]] = []
+    summaries: list[dict[str, Any]] = []
+    for row in rows:
+        attachment = _json_safe_dict(row)
+        if not is_supported_multimodal_image(attachment):
+            continue
+        if len(images) >= settings.image_multimodal_max_count:
+            break
+        if int(attachment.get("file_size") or 0) > settings.image_multimodal_max_upload_bytes:
+            continue
+        try:
+            prepared = prepare_image_for_multimodal(
+                _attachment_file_bytes(attachment, max_bytes=settings.image_multimodal_max_upload_bytes),
+                attachment_id=str(attachment["id"]),
+                file_name=str(attachment.get("file_name") or "image"),
+                mime_type=str(attachment.get("mime_type") or ""),
+                max_side=settings.image_multimodal_max_side,
+                jpeg_quality=settings.image_multimodal_jpeg_quality,
+                target_bytes=settings.image_multimodal_target_bytes,
+            )
+        except ImageInputError:
+            # 一张读不出来的图不该让整轮推荐失败。
+            continue
+        images.append(
+            {
+                "attachment_id": prepared.attachment_id,
+                "file_name": prepared.file_name,
+                "data_url": prepared.data_url,
+                "mime_type": prepared.mime_type,
+            }
+        )
+        summaries.append(prepared.trace_summary())
+    return images, summaries
 
 
 def _agent_early_stop(tools: RecommendationAgentTools, started: float) -> str | None:

@@ -12,13 +12,14 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 from backend.app.ai.llm_client import ToolCall
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.services.profile_sections import load_profile_sections, render_profile_text
 from backend.app.services.recommendation_conditions import coerce_condition_value
+from backend.app.services.relation_flow import DEEP_PROGRESS_STATUSES
 
 # 预算。超了不是抛异常终止运行，而是把「你已经用完」作为工具结果回给模型，
 # 让它用手上的信息收尾 —— 跟 tool_loop 处理工具报错的策略一致。
@@ -238,11 +239,13 @@ class RecommendationAgentTools:
         db: Session,
         *,
         search_targets_fn: Any,
+        target_facts_fn: Any,
         step_sink: Any = None,
     ) -> None:
         self._db = db
         # 注入而不是直接 import，避免 recommendation_flow <-> 本模块的循环依赖。
         self._search_targets_fn = search_targets_fn
+        self._target_facts_fn = target_facts_fn
         # 每记录一步就回调一次。handler 用它把过程写进消息表并提交，
         # 前端轮询才能在 agent 还在跑的时候看到「已筛选 2 次」。
         self._step_sink = step_sink
@@ -382,10 +385,25 @@ class RecommendationAgentTools:
         sections = load_profile_sections(
             self._db, entity_type="seller_target", entity_ids=[row["id"] for row in rows]
         )
+        # 按 id 直接取到的标的也要登记成候选。跟进问题（「第二个再详细点」）拿的是
+        # 上一轮正文里的 id，不登记的话最终那道 join 会把它当成模型编的 id 丢掉，
+        # 用户得到的是一片空白。事实仍然来自代码，红线不变。
+        unseen = [str(row["id"]) for row in rows if str(row["id"]) not in self.candidates_by_id]
+        deep_progress_ids = self._targets_in_deep_progress(unseen) if unseen else set()
+
         details = []
         for row in rows:
             key = str(row["id"])
-            candidate = self.candidates_by_id.get(key) or {}
+            candidate = self.candidates_by_id.get(key)
+            if candidate is None:
+                candidate = {
+                    "seller_target_id": key,
+                    "seller_target_name": row["target_name"],
+                    "facts": self._target_facts_fn(dict(row)),
+                    "relation_status": None,
+                    "seller_target_has_other_deep_progress": key in deep_progress_ids,
+                }
+                self.candidates_by_id[key] = candidate
             details.append(
                 {
                     "id": key,
@@ -402,6 +420,36 @@ class RecommendationAgentTools:
         if truncated:
             payload["note"] = f"超出上限的 id 未读取，累计上限 {MAX_DETAIL_TARGETS_TOTAL} 个。"
         return payload
+
+    def _targets_in_deep_progress(self, target_ids: list[str]) -> set[str]:
+        """Which of these are already in due diligence / agreement with someone.
+
+        An agent session has no buyer intent of its own, so the seller-side
+        warning is the only conflict signal that means anything here — and it is
+        exactly the one a client manager must not be allowed to miss.
+        """
+        rows = self._db.execute(
+            text(
+                """
+                select distinct seller_target_id::text as seller_target_id
+                from buyer_seller_relation
+                where team_id = :team_id and workspace_id = :workspace_id
+                  and deleted_at is null
+                  and seller_target_id in :target_ids
+                  and status in :deep_statuses
+                """
+            ).bindparams(
+                bindparam("target_ids", expanding=True),
+                bindparam("deep_statuses", expanding=True),
+            ),
+            {
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+                "target_ids": target_ids,
+                "deep_statuses": list(DEEP_PROGRESS_STATUSES),
+            },
+        ).mappings().all()
+        return {row["seller_target_id"] for row in rows}
 
     def _ask_user(self, arguments: dict[str, Any]) -> Any:
         if self.ask_user_payload is not None:

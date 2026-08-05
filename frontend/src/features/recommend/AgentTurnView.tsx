@@ -14,6 +14,8 @@ export interface AgentTurnState {
   answerDone: boolean;
   streaming: boolean;
   failed: string | null;
+  /** 用户点了停止。终态，不重试、不续接、不进下一轮上下文。 */
+  aborted: boolean;
   elapsedSeconds: number;
 }
 
@@ -26,7 +28,7 @@ export default function AgentTurnView({
   onSendSuggestion: (text: string) => void;
   onRetry: () => void;
 }) {
-  const running = !turn.answerDone && !turn.failed && !turn.question;
+  const running = !turn.answerDone && !turn.failed && !turn.question && !turn.aborted;
 
   return (
     <div className="space-y-3" data-testid="agent-turn" data-turn-id={turn.turnId}>
@@ -44,7 +46,11 @@ export default function AgentTurnView({
 
       {turn.question && <ClarifyBlock question={turn.question} onPick={onSendSuggestion} />}
 
-      {turn.failed && (
+      {turn.aborted && (
+        <p className="text-sm text-gray-500" data-testid="agent-aborted">任务已停止。</p>
+      )}
+
+      {turn.failed && !turn.aborted && (
         <div className="flex items-start gap-2 border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <div className="space-y-1">

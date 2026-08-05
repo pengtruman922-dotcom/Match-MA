@@ -376,3 +376,57 @@ def test_create_selected_item_only_writes_collection(monkeypatch) -> None:
     assert "insert into recommendation_selected_item" in db.statements[0]
     assert "buyer_seller_relation" not in db.statements[0]
     assert "relation_event" not in db.statements[0]
+
+
+# -- Agent 会话在「最近推荐」里必须彼此可辨 --------------------------------
+
+
+def _agent_session(first_message: str) -> dict:
+    return {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "mode": "buyer_to_target",
+        "metadata_json": {"temporary_filter": True},
+        "initial_condition_snapshot_json": {"agent_session": True, "first_message": first_message},
+        "anonymous_input_snapshot": first_message,
+    }
+
+
+def _turn_messages(count: int) -> list[dict]:
+    return [{"metadata_json": {"turn_id": f"t{index}"}} for index in range(count)]
+
+
+def test_agent_session_is_titled_by_its_opening_question() -> None:
+    display = _recommendation_session_display(
+        _agent_session("客户想收华东的精密制造"),
+        messages=_turn_messages(2),
+    )
+
+    assert display["title"] == "客户想收华东的精密制造"
+    assert display["subtitle"] == "2 轮对话"
+    assert display["primary_action"] == "agent_chat"
+
+
+def test_long_opening_questions_are_elided_not_dropped() -> None:
+    display = _recommendation_session_display(_agent_session("需求" * 40), messages=[])
+
+    assert display["title"].endswith("…")
+    assert len(display["title"]) == 25
+
+
+def test_agent_session_route_points_at_the_chat_page() -> None:
+    display = _recommendation_session_display(_agent_session("找标的"), messages=[])
+
+    assert display["route"].startswith("/recommend?session=")
+
+
+def test_legacy_temporary_filter_sessions_keep_their_old_label() -> None:
+    display = _recommendation_session_display(
+        {
+            "id": "22222222-2222-2222-2222-222222222222",
+            "mode": "buyer_to_target",
+            "metadata_json": {"temporary_filter": True},
+            "initial_condition_snapshot_json": {},
+        }
+    )
+
+    assert display["title"] == "临时条件筛选"

@@ -775,7 +775,12 @@ export const debugApi = {
 };
 
 export const recommendations = {
-  agentTurn: (data: { mode: 'buyer_to_target'; session_id?: string; user_message: string }) =>
+  agentTurn: (data: {
+    mode: 'buyer_to_target';
+    session_id?: string;
+    user_message: string;
+    attachment_ids?: string[];
+  }) =>
     apiRequest<RecommendationAgentTurn>('/recommendations/agent-turn', {
       method: 'POST',
       body: JSON.stringify(data),
@@ -784,6 +789,11 @@ export const recommendations = {
     apiEventStream(
       `/recommendations/sessions/${sessionId}/turns/${turnId}/answer-stream`,
       options,
+    ),
+  abortTurn: (sessionId: string, turnId: string) =>
+    apiRequest<{ session_id: string; turn_id: string; aborted: boolean }>(
+      `/recommendations/sessions/${sessionId}/turns/${turnId}/abort`,
+      { method: 'POST' },
     ),
   candidates: (data: RecommendationCandidateRequest) =>
     apiRequest<RecommendationCandidateResponse>('/recommendations/candidates', {

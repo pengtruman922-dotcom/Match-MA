@@ -56,6 +56,20 @@ class ToolLoopResult:
     json_finalization_attempted: bool
 
 
+class ToolLoopAborted(Exception):
+    """`should_abort` went true: the caller asked to stop, so nothing finishes.
+
+    Distinct from `early_stop_instruction`, which spends one more model call
+    asking for a wrap-up. An abort is a user pressing stop — spending tokens to
+    round off an answer they already said they do not want is the wrong trade.
+    """
+
+    def __init__(self, usage: ToolLoopUsage, messages: list[dict[str, Any]]) -> None:
+        super().__init__("tool loop aborted")
+        self.usage = usage
+        self.messages = messages
+
+
 def run_tool_loop(
     *,
     chat: Callable[..., ChatCompletionResult],
@@ -66,6 +80,7 @@ def run_tool_loop(
     tool_result_limit: int = DEFAULT_TOOL_RESULT_LIMIT,
     final_turn_instruction: str = "已达到工具调用上限。请立即基于已获得的信息输出最终结果，不要再调用任何工具。",
     early_stop_instruction: Callable[[], str | None] | None = None,
+    should_abort: Callable[[], bool] | None = None,
 ) -> ToolLoopResult:
     """Drive `chat` until it answers instead of asking for tools.
 
@@ -74,11 +89,20 @@ def run_tool_loop(
     receives one ToolCall and returns anything JSON-serialisable; raising is
     allowed — the error goes back to the model as that tool's result, which it
     can usually recover from, rather than losing the whole run.
+
+    `should_abort` is polled at the two points where nothing is in flight, so a
+    stop lands within one model call plus one tool call — an in-flight HTTP
+    request is not interrupted, it is simply the last thing that runs.
     """
     conversation = list(messages)
     usage = ToolLoopUsage()
 
+    def abort_requested() -> bool:
+        return should_abort is not None and should_abort()
+
     for iteration in range(max_iterations):
+        if abort_requested():
+            raise ToolLoopAborted(usage, conversation)
         result = chat(messages=conversation, tools=tools)
         usage.record_llm(result)
         if not result.tool_calls:
@@ -119,6 +143,8 @@ def run_tool_loop(
                     "content": _tool_result_content(call, execute_tool, tool_result_limit),
                 }
             )
+        if abort_requested():
+            raise ToolLoopAborted(usage, conversation)
         if early_stop_instruction is not None:
             instruction = early_stop_instruction()
             if instruction:
