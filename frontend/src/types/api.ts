@@ -1968,6 +1968,19 @@ export interface RecommendationAgentTurn {
   queue_name: string;
 }
 
+/** 轮询消息表看不出「还在想」和「已经死了」的区别，这个端点补上这一半。 */
+export interface RecommendationAgentTurnStatus {
+  session_id: string;
+  turn_id: string;
+  job_status: string;
+  failed: boolean;
+  aborted: boolean;
+  error_code: string | null;
+  error_message: string | null;
+  /** 原始异常，只有管理员拿得到。 */
+  error_detail: string | null;
+}
+
 /** 一次筛选调用的记录。过程行直接渲染它，让用户看见 Agent 做了什么决定。 */
 export interface RecommendationAgentSearchStep {
   kind?: string;

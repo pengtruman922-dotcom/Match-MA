@@ -67,6 +67,7 @@ from backend.app.services.recommendation_flow import (  # noqa: F401 - re-export
     _count_by_key,
     agent_history_context,
     agent_turn_aborted,
+    find_agent_turn_job,
     insert_agent_aborted_message,
     _create_recommendation_session,
     find_agent_turn_answer,
@@ -1149,8 +1150,11 @@ def create_recommendation_agent_turn(
             buyer_intent_id=None,
             buyer_party_id=None,
             seller_target_id=None,
+            user_message=None,
             # 开场那句话也落进 anonymous_input_snapshot：会话搜索匹配的就是这一列。
-            user_message=user_message,
+            # 走 input_snapshot_only 而不是 user_message —— 后者会顺手再插一条
+            # 消息，而这一轮的用户消息由下面带着 turn_id 自己写。
+            input_snapshot_only=user_message,
             initial_snapshot={"agent_session": True, "first_message": user_message},
             candidates=[],
             created_by=current_user.user_id,
@@ -1187,6 +1191,52 @@ def create_recommendation_agent_turn(
         "turn_id": turn_id,
         "job_id": job_id,
         "queue_name": "llm",
+    }
+
+
+JOB_STATUS_MESSAGES = {
+    "stale_running_job": "这一轮跑得太久被系统回收了。可以重试，或把需求说得更具体一些。",
+}
+DEFAULT_TURN_FAILURE_MESSAGE = "这一轮没能跑完。"
+
+
+@router.get("/sessions/{session_id}/turns/{turn_id}/status")
+def get_recommendation_agent_turn_status(
+    session_id: UUID,
+    turn_id: str,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Whether this turn is still working, and if not, why it stopped.
+
+    Polling the message table alone cannot tell "thinking" from "dead": a job
+    that fails writes no message, so the page would spin until its own timeout.
+    Scoped by session visibility rather than admin, because the person who has
+    to read this is the consultant whose recommendation just failed.
+    """
+    ensure_recommendation_session_visible(db, current_user, session_id)
+    _get_recommendation_session_or_404(db, session_id)
+
+    job = find_agent_turn_job(db, session_id, turn_id)
+    job_status = str((job or {}).get("status") or "missing")
+    failed = job_status in {"failed", "cancelled"}
+    error_code = str((job or {}).get("error_code") or "") or None
+    return {
+        "session_id": str(session_id),
+        "turn_id": turn_id,
+        "job_status": job_status,
+        "failed": failed,
+        "aborted": agent_turn_aborted(db, session_id, turn_id),
+        "error_code": error_code,
+        "error_message": (
+            JOB_STATUS_MESSAGES.get(error_code or "", DEFAULT_TURN_FAILURE_MESSAGE)
+            if failed
+            else None
+        ),
+        # 原始错误只给管理员：顾问看到的是上面那句人话。
+        "error_detail": str((job or {}).get("error_message") or "") or None
+        if failed and current_user.is_admin
+        else None,
     }
 
 

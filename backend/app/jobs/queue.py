@@ -195,13 +195,17 @@ def mark_job_failed(
                 updated_at = now(),
                 error_code = :error_code,
                 error_message = :error_message,
+                -- cast 不能省：jsonb_build_object 是变参 "any"，Postgres 推不出
+                -- 裸参数的类型，会抛 AmbiguousParameter。而这个异常发生在 worker
+                -- 记录失败的路上，抛出去就会带走整个进程，任务停在 running 直到
+                -- stale 清扫器把它判死 —— 真实的失败原因永远丢失。
                 error_detail_json = :error_detail_json || jsonb_build_object(
                   'previous_failures',
                   coalesce(error_detail_json -> 'previous_failures', '[]'::jsonb)
                     || jsonb_build_array(jsonb_build_object(
                          'attempt', attempt_count,
-                         'error_code', :error_code,
-                         'error_message', left(:error_message, 2000),
+                         'error_code', cast(:error_code as text),
+                         'error_message', left(cast(:error_message as text), 2000),
                          'recorded_at', now()::text
                        ))
                 )

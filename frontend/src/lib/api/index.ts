@@ -3,6 +3,7 @@ import type {
   AttachmentOcrStatus,
   AttachmentUploadResult,
   RecommendationAgentTurn,
+  RecommendationAgentTurnStatus,
   SearchConfigOverview,
   SearchProviderTestResult,
   OcrConfigOverview,
@@ -789,6 +790,10 @@ export const recommendations = {
     apiEventStream(
       `/recommendations/sessions/${sessionId}/turns/${turnId}/answer-stream`,
       options,
+    ),
+  turnStatus: (sessionId: string, turnId: string) =>
+    apiRequest<RecommendationAgentTurnStatus>(
+      `/recommendations/sessions/${sessionId}/turns/${turnId}/status`,
     ),
   abortTurn: (sessionId: string, turnId: string) =>
     apiRequest<{ session_id: string; turn_id: string; aborted: boolean }>(

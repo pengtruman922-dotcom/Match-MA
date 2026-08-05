@@ -2821,7 +2821,16 @@ def _create_recommendation_session(
     candidates: list[dict[str, Any]],
     created_by: UUID,
     is_temporary_filter: bool = False,
+    input_snapshot_only: str | None = None,
 ) -> UUID:
+    """Create a session.
+
+    `user_message` both fills `anonymous_input_snapshot` and writes a first
+    message; `input_snapshot_only` fills the column without writing anything.
+    The agent flow needs the latter — it writes its own user message with a
+    turn_id attached, and passing `user_message` here would store the question
+    twice.
+    """
     row = db.execute(
         text(
             """
@@ -2851,7 +2860,7 @@ def _create_recommendation_session(
             "buyer_intent_id": buyer_intent_id,
             "buyer_party_id": buyer_party_id,
             "seller_target_id": seller_target_id,
-            "anonymous_input_snapshot": user_message,
+            "anonymous_input_snapshot": user_message or input_snapshot_only,
             "initial_condition_snapshot_json": _json_safe(initial_snapshot),
             "latest_condition_snapshot_json": _json_safe(initial_snapshot),
             "created_by": created_by,
@@ -3090,6 +3099,33 @@ def find_agent_turn_answer(db: Session, session_id: UUID, turn_id: str) -> dict[
                 "markdown": message["decoded_content"].get("markdown") or "",
             }
     return None
+
+
+def find_agent_turn_job(db: Session, session_id: UUID, turn_id: str) -> dict[str, Any] | None:
+    """The queued job behind one agent turn, found by its deterministic key.
+
+    Exists so the page can tell "still working" from "died" without going
+    through the admin-only job API — a consultant has to be able to see why
+    their own recommendation failed.
+    """
+    row = db.execute(
+        text(
+            """
+            select status, error_code, error_message,
+                   started_at::text as started_at, finished_at::text as finished_at
+            from background_job
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and idempotency_key = :idempotency_key
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "idempotency_key": f"recommendation_agent:{session_id}:{turn_id}",
+        },
+    ).mappings().one_or_none()
+    return dict(row) if row is not None else None
 
 
 def agent_turn_aborted(db: Session, session_id: UUID, turn_id: str) -> bool:

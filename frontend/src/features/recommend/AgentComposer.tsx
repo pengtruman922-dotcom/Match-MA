@@ -1,6 +1,15 @@
-import { useEffect, useRef, useState } from 'react';
-import type { ChangeEvent, ClipboardEvent, DragEvent } from 'react';
-import { FileText, Image as ImageIcon, Loader2, Paperclip, Send, Square, X } from 'lucide-react';
+import { useRef, useState } from 'react';
+import type { ChangeEvent, ClipboardEvent, DragEvent, ReactNode } from 'react';
+import {
+  ClipboardList,
+  FileText,
+  Image as ImageIcon,
+  Loader2,
+  Paperclip,
+  Send,
+  Square,
+  X,
+} from 'lucide-react';
 
 export type RecommendMode = 'buyer_to_target' | 'target_to_buyer';
 
@@ -9,37 +18,78 @@ export const AGENT_INPUT_MAX_CHARS = 20000;
 export interface ComposerAttachment {
   key: string;
   name: string;
-  /** 文档读成正文进输入框；图片没有正文可读，原图交给多模态模型。 */
-  kind: 'document' | 'image';
+  /**
+   * 文档读成正文、图片交给多模态模型、requirement 是带进来的已有买家需求。
+   * 三者都不占用输入框 —— 那里只放用户自己要说的话。
+   */
+  kind: 'document' | 'image' | 'requirement';
   status: 'reading' | 'ready' | 'failed';
   error?: string;
+  /** 有值时胶囊可点开只读预览：要发出去的东西，用户发之前得看得见。 */
+  preview?: string;
 }
 
+const CHIP_ICONS = {
+  image: ImageIcon,
+  requirement: ClipboardList,
+  document: FileText,
+} as const;
+
 function AttachmentChip({ item, onRemove }: { item: ComposerAttachment; onRemove: () => void }) {
-  const tone =
-    item.status === 'failed'
-      ? 'border-red-200 bg-red-50 text-red-700'
-      : 'border-gray-200 bg-gray-50 text-gray-600';
+  const [open, setOpen] = useState(false);
+  const failed = item.status === 'failed';
+  const Icon = CHIP_ICONS[item.kind];
+  const expandable = Boolean(item.preview) && !failed;
+
   return (
-    <span className={`inline-flex max-w-full items-center gap-1.5 border px-2 py-1 text-xs ${tone}`}>
-      {item.status === 'reading' ? (
-        <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
-      ) : item.kind === 'image' ? (
-        <ImageIcon className="h-3 w-3 shrink-0" />
-      ) : (
-        <FileText className="h-3 w-3 shrink-0" />
-      )}
-      <span className="truncate">{item.name}</span>
-      {item.status === 'reading' && <span className="shrink-0 text-gray-400">读取中</span>}
-      {item.status === 'failed' && <span className="shrink-0">{item.error || '读取失败'}</span>}
-      <button
-        type="button"
-        onClick={onRemove}
-        aria-label={`移除 ${item.name}`}
-        className="shrink-0 text-gray-400 hover:text-red-600"
+    <span className="relative inline-flex max-w-full">
+      <span
+        className={`inline-flex max-w-full items-center gap-1.5 border px-2 py-1 text-xs ${
+          failed ? 'border-red-200 bg-red-50 text-red-700' : 'border-gray-200 bg-gray-50 text-gray-600'
+        }`}
       >
-        <X className="h-3 w-3" />
-      </button>
+        {item.status === 'reading' ? (
+          <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+        ) : (
+          <Icon className="h-3 w-3 shrink-0" />
+        )}
+        {expandable ? (
+          <button
+            type="button"
+            onClick={() => setOpen((value) => !value)}
+            className="truncate hover:text-brand-600 hover:underline"
+            title="点开看要发出去的内容"
+          >
+            {item.name}
+          </button>
+        ) : (
+          <span className="truncate">{item.name}</span>
+        )}
+        {item.status === 'reading' && <span className="shrink-0 text-gray-400">读取中</span>}
+        {failed && <span className="shrink-0">{item.error || '读取失败'}</span>}
+        <button
+          type="button"
+          onClick={onRemove}
+          aria-label={`移除 ${item.name}`}
+          className="shrink-0 text-gray-400 hover:text-red-600"
+        >
+          <X className="h-3 w-3" />
+        </button>
+      </span>
+      {open && expandable && (
+        <>
+          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
+          <div className="absolute bottom-[calc(100%+6px)] left-0 z-40 w-[420px] max-w-[80vw] border border-gray-200 bg-white p-3 shadow-lg">
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+              <span className="truncate text-xs font-medium text-gray-700">{item.name}</span>
+              <span className="shrink-0 text-[11px] text-gray-400">发送时随消息一起带上</span>
+            </div>
+            <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words text-xs leading-relaxed text-gray-600">
+              {item.preview}
+            </pre>
+          </div>
+        </>
+      )}
     </span>
   );
 }
@@ -68,7 +118,7 @@ export default function AgentComposer({
   accept,
   policyHint,
   onNewConversation,
-  prefill,
+  sourcePicker,
 }: {
   mode: RecommendMode;
   onModeChange: (mode: RecommendMode) => void;
@@ -87,24 +137,20 @@ export default function AgentComposer({
   accept: string;
   policyHint: string | null;
   onNewConversation: () => void;
-  /** 从买家需求列表点进来时带的原文。只填一次，之后用户完全接管这个框。 */
-  prefill?: string | null;
+  /** 「从已有买家需求带入」入口，由页面按当前方向决定给谁。 */
+  sourcePicker?: ReactNode;
 }) {
   const [value, setValue] = useState('');
   const [dragging, setDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const prefilledRef = useRef<string | null>(null);
 
-  // 每换一个需求就重填一次；同一个值不重复覆盖用户已经改过的内容。
-  useEffect(() => {
-    if (!prefill || prefill === prefilledRef.current) return;
-    prefilledRef.current = prefill;
-    setValue(prefill.slice(0, AGENT_INPUT_MAX_CHARS));
-  }, [prefill]);
+  // 带了需求或附件时，光按发送也成立 —— 内容不在输入框里，但确实有东西要发。
+  const hasPayload = attachments.some((item) => item.status === 'ready');
+  const canSubmit = Boolean(value.trim() || hasPayload);
 
   const submit = () => {
+    if (!canSubmit || busy) return;
     const message = value.trim();
-    if (!message || busy) return;
     setValue('');
     onSubmit(message);
   };
@@ -151,18 +197,9 @@ export default function AgentComposer({
     >
       <div className="flex items-center justify-between gap-2 border-b border-gray-100 px-3 py-1.5">
         {locked ? (
-          <>
-            <span className="text-xs text-gray-500" data-testid="mode-locked">
-              {mode === 'buyer_to_target' ? '为买家找标的' : '为标的找买家'} · 已锁定
-            </span>
-            <button
-              type="button"
-              onClick={onNewConversation}
-              className="text-xs text-brand-600 hover:underline"
-            >
-              换方向 › 新对话
-            </button>
-          </>
+          <span className="text-xs text-gray-500" data-testid="mode-locked">
+            {mode === 'buyer_to_target' ? '为买家找标的' : '为标的找买家'} · 已锁定
+          </span>
         ) : (
           <div className="flex items-center gap-4" role="radiogroup" aria-label="推荐方向">
             <ModeRadio
@@ -179,6 +216,19 @@ export default function AgentComposer({
             />
           </div>
         )}
+        {/* 带入入口跟着方向走，对话中途也在 —— 顾问随时可能想起来「就是那个买家」。 */}
+        <div className="flex shrink-0 items-center gap-3">
+          {sourcePicker}
+          {locked && (
+            <button
+              type="button"
+              onClick={onNewConversation}
+              className="text-xs text-brand-600 hover:underline"
+            >
+              换方向 › 新对话
+            </button>
+          )}
+        </div>
       </div>
 
       <textarea
@@ -245,7 +295,7 @@ export default function AgentComposer({
           <button
             type="button"
             onClick={submit}
-            disabled={!value.trim()}
+            disabled={!canSubmit}
             className="inline-flex items-center gap-1.5 bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-40"
             data-testid="agent-send"
           >

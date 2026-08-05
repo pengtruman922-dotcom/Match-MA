@@ -14,7 +14,14 @@ def main() -> None:
     print(f"Match-MA Railway start: service={service_name or '<unknown>'} role={role}", flush=True)
 
     if role == "worker-llm":
-        _exec([sys.executable, "-m", "backend.app.worker", "--queue", "llm", "--sleep", "2"])
+        # 推荐 Agent 一轮跑满工具预算会超过 5 分钟，默认 300s 的 stale 窗口盖不住，
+        # 还在干活的任务会被判死（agent 任务 max_attempts=1，判死即 failed）。
+        # 注意：Railway 实际执行的是本脚本，不是 railway.worker-llm.toml 里的
+        # startCommand —— 只改 toml 不会生效。
+        _exec([
+            sys.executable, "-m", "backend.app.worker",
+            "--queue", "llm", "--sleep", "2", "--stale-after", "1800",
+        ])
     if role == "worker-research":
         # 调研跑 5~15 分钟，stale 窗口必须盖得住，否则多副本之间会互相判死。
         _exec([

@@ -28,14 +28,17 @@ const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp'];
 interface PendingAttachment {
   key: string;
   name: string;
-  kind: 'document' | 'image';
+  kind: 'document' | 'image' | 'requirement';
   status: 'reading' | 'ready' | 'failed';
   error?: string;
-  /** 文档：读出来的正文。发送时拼进消息。 */
+  /** 文档正文 / 带入的需求正文。发送时拼进消息，不进输入框。 */
   text?: string;
   /** 图片：交给多模态模型的附件 id。 */
   attachmentId?: string;
 }
+
+/** 带进来的需求只留一条：一轮对话服务一个买家，两份条件只会被搅成一锅。 */
+const REQUIREMENT_KEY = 'requirement';
 
 function isImageFile(file: File): boolean {
   if (file.type.startsWith('image/')) return true;
@@ -51,7 +54,6 @@ export default function Recommend() {
   const [error, setError] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [uploadPolicy, setUploadPolicy] = useState<AttachmentUploadPolicy | null>(null);
-  const [prefill, setPrefill] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -161,9 +163,23 @@ export default function Recommend() {
         return;
       }
       try {
-        const messages = await recommendations.messages(activeSessionId, { limit: 500 });
+        // 任务状态和消息一起看：任务挂掉时一条消息都不会写，光看消息表只会
+        // 一直转到自己的超时，用户永远不知道为什么。
+        const [messages, status] = await Promise.all([
+          recommendations.messages(activeSessionId, { limit: 500 }),
+          recommendations.turnStatus(activeSessionId, turnId).catch(() => null),
+        ]);
         const { steps, question, brief, aborted } = applyMessages(turnId, messages);
         patchTurn(turnId, { steps });
+        if (status?.failed && !aborted) {
+          stopPolling();
+          patchTurn(turnId, {
+            failed: status.error_message || '这一轮没能跑完。',
+            answerDone: true,
+            streaming: false,
+          });
+          return;
+        }
         if (aborted) {
           // 另一个页签把这一轮停了。
           stopPolling();
@@ -247,15 +263,23 @@ export default function Recommend() {
   }, [activeTurn, patchTurn, sessionId, stopPolling, stopping]);
 
   const handleSubmit = useCallback((message: string) => {
-    const documentText = attachments
-      .filter((item) => item.kind === 'document' && item.status === 'ready' && item.text)
+    const ready = attachments.filter((item) => item.status === 'ready');
+    const requirement = ready.find((item) => item.kind === 'requirement');
+    const documentText = ready
+      .filter((item) => item.kind === 'document' && item.text)
       .map((item) => `【${item.name}】\n${item.text}`)
       .join('\n\n');
-    const combined = documentText
-      ? `${message}\n\n【附件正文】\n${documentText}`.slice(0, AGENT_INPUT_MAX_CHARS)
-      : message;
-    const imageIds = attachments
-      .filter((item) => item.kind === 'image' && item.status === 'ready' && item.attachmentId)
+    const combined = [
+      requirement?.text ? `【已有买家需求：${requirement.name}】\n${requirement.text}` : '',
+      message,
+      documentText ? `【附件正文】\n${documentText}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n\n')
+      .slice(0, AGENT_INPUT_MAX_CHARS);
+    if (!combined.trim()) return;
+    const imageIds = ready
+      .filter((item) => item.kind === 'image' && item.attachmentId)
       .map((item) => item.attachmentId as string);
     void send(combined, imageIds);
   }, [attachments, send]);
@@ -380,13 +404,39 @@ export default function Recommend() {
    * rather than to anchor the session — the consultant can still edit it
    * before sending, and nothing is created either way.
    */
-  const prefillFromIntent = useCallback(async (intentId: string) => {
+  /**
+   * Bring an existing buyer intent in as a chip, not as text in the box.
+   *
+   * Dumping the requirement into the textarea buries whatever the consultant
+   * wanted to add underneath it. As a chip the box stays theirs, and the full
+   * requirement rides along on send — the same route a document's text takes.
+   */
+  const attachIntent = useCallback(async (intentId: string) => {
+    setError(null);
+    setAttachments((prev) => [
+      ...prev.filter((item) => item.kind !== 'requirement'),
+      { key: REQUIREMENT_KEY, name: '正在读取买家需求…', kind: 'requirement', status: 'reading' },
+    ]);
     try {
-      setPrefill(intentToRequirementText(await buyerIntents.get(intentId)));
+      const intent = await buyerIntents.get(intentId);
+      const text = intentToRequirementText(intent);
+      if (!text.trim()) {
+        patchAttachment(REQUIREMENT_KEY, {
+          name: intent.intent_name,
+          status: 'failed',
+          error: '这条需求还没有可用信息',
+        });
+        return;
+      }
+      patchAttachment(REQUIREMENT_KEY, {
+        name: intent.intent_name,
+        status: 'ready',
+        text,
+      });
     } catch {
-      setError('加载买家需求失败，可以直接在输入框描述需求');
+      patchAttachment(REQUIREMENT_KEY, { status: 'failed', error: '加载失败' });
     }
-  }, []);
+  }, [patchAttachment]);
 
   useEffect(() => {
     attachmentsApi.uploadPolicy().then(setUploadPolicy).catch(() => {
@@ -401,8 +451,8 @@ export default function Recommend() {
     const sessionParam = searchParams.get('session');
     const intentParam = searchParams.get('intentId');
     if (sessionParam) void restoreSession(sessionParam);
-    else if (intentParam) void prefillFromIntent(intentParam);
-  }, [prefillFromIntent, restoreSession, searchParams]);
+    else if (intentParam) void attachIntent(intentParam);
+  }, [attachIntent, restoreSession, searchParams]);
 
   const openSession = (pickId: string) => {
     stopPolling();
@@ -419,12 +469,14 @@ export default function Recommend() {
   const policyHint = uploadPolicy
     ? `单文件 ${uploadPolicy.max_upload_mb} MB 以内；文档读正文，图片直接给模型看`
     : null;
-  const composerAttachments = attachments.map(({ key, name, kind, status, error: itemError }) => ({
+  const composerAttachments = attachments.map(({ key, name, kind, status, error: itemError, text }) => ({
     key,
     name,
     kind,
     status,
     error: itemError,
+    // 文档和需求都能点开看要发出去的原文；图片没有正文可看。
+    preview: kind === 'image' ? undefined : text,
   }));
 
   return (
@@ -447,65 +499,44 @@ export default function Recommend() {
         <div className="mb-2 border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</div>
       )}
 
-      {empty ? (
-        <div className="flex flex-1 flex-col items-center justify-center px-4">
-          <div className="w-full max-w-2xl">
-            <AgentComposer
-              mode={mode}
-              onModeChange={setMode}
-              locked={false}
-              busy={busy}
-              autoFocus
-              placeholder="客户想收华东的精密制造，净利 2000 万以上，要能控股，PE 不超 12"
-              onSubmit={handleSubmit}
-              onStop={() => void stopActiveTurn()}
-              stopping={stopping}
-              onPickFile={(file) => void handleFile(file)}
-              attachments={composerAttachments}
-              onRemoveAttachment={removeAttachment}
-              accept={accept}
-              policyHint={policyHint}
-              onNewConversation={startNewConversation}
-              prefill={prefill}
-            />
-            <div className="mt-2 flex justify-end">
-              <IntentPicker onPick={(intentId) => void prefillFromIntent(intentId)} />
-            </div>
-          </div>
-        </div>
-      ) : (
-        <>
-          <div className="flex-1 space-y-6 overflow-y-auto pr-1">
-            {turns.map((turn) => (
-              <AgentTurnView
-                key={turn.turnId}
-                turn={turn}
-                onSendSuggestion={(text) => void send(text)}
-                onRetry={() => void send(turn.userMessage)}
-              />
-            ))}
-            <div ref={bottomRef} />
-          </div>
-          <div className="mt-3">
-            <AgentComposer
-              mode={mode}
-              onModeChange={setMode}
-              locked
-              busy={busy}
-              placeholder="继续说…"
-              onSubmit={handleSubmit}
-              onStop={() => void stopActiveTurn()}
-              stopping={stopping}
-              onPickFile={(file) => void handleFile(file)}
-              attachments={composerAttachments}
-              onRemoveAttachment={removeAttachment}
-              accept={accept}
-              policyHint={policyHint}
-              onNewConversation={startNewConversation}
-            />
-          </div>
-        </>
-      )}
+      {/* 输入框永远贴底，空态上方就留白：位置不该随对话有没有开始而跳。 */}
+      <div className="flex-1 space-y-6 overflow-y-auto pr-1">
+        {turns.map((turn) => (
+          <AgentTurnView
+            key={turn.turnId}
+            turn={turn}
+            onSendSuggestion={(text) => void send(text)}
+            onRetry={() => void send(turn.userMessage)}
+          />
+        ))}
+        <div ref={bottomRef} />
+      </div>
+      <div className="mt-3">
+        <AgentComposer
+          mode={mode}
+          onModeChange={setMode}
+          locked={!empty}
+          busy={busy}
+          autoFocus={empty}
+          placeholder={
+            empty ? '客户想收华东的精密制造，净利 2000 万以上，要能控股，PE 不超 12' : '继续说…'
+          }
+          onSubmit={handleSubmit}
+          onStop={() => void stopActiveTurn()}
+          stopping={stopping}
+          onPickFile={(file) => void handleFile(file)}
+          attachments={composerAttachments}
+          onRemoveAttachment={removeAttachment}
+          accept={accept}
+          policyHint={policyHint}
+          onNewConversation={startNewConversation}
+          sourcePicker={
+            mode === 'buyer_to_target' ? (
+              <IntentPicker onPick={(intentId) => void attachIntent(intentId)} />
+            ) : null
+          }
+        />
+      </div>
     </div>
   );
 }

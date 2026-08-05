@@ -55,6 +55,11 @@ jobs:
         run: python scripts/verify_schema_against_snapshot.py
       - name: Apply any migrations after the baseline
         run: python -m alembic upgrade head
+      # 队列的 SQL 只有真库能验：jsonb_build_object 里的裸参数在 Postgres 上会
+      # 抛 AmbiguousParameter，而那条语句是 worker 记录失败用的 —— 崩了就等于
+      # 任何任务失败都会带走 worker 进程。
+      - name: Exercise the job-queue SQL against the fresh database
+        run: python -m pytest tests/test_job_queue_sql.py -q
 
   frontend:
     name: Frontend typecheck + build
