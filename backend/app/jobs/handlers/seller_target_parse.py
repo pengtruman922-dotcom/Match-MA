@@ -11,7 +11,12 @@ from sqlalchemy.orm import Session
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
 from backend.app.jobs.queue import JobClaim
-from backend.app.registry.indicators import writable_columns, writable_enum_values
+from backend.app.registry.indicators import (
+    multi_value_enum_values,
+    seller_target_fact_columns,
+    writable_columns,
+    writable_enum_values,
+)
 from backend.app.services.field_writer import WriteProvenance, write_seller_target_fields
 from backend.app.services.industry_taxonomy import (
     industry_l1_prompt_list,
@@ -28,6 +33,7 @@ from backend.app.jobs.handlers.common import (
     _join_lines,
     _json_safe_dict,
     _normalize_allowed_enum,
+    _normalize_closed_list_values,
     _normalize_seller_listed_status,
     _normalize_yes_no_like,
     _optional_decimal,
@@ -173,25 +179,12 @@ def _handle_seller_target_parse(db: Session, job: JobClaim) -> dict[str, object]
     }
 
 def _get_seller_target_for_parse(db: Session, seller_target_id: UUID) -> dict[str, Any]:
+    # 事实列来自注册表，不是外部输入，可以安全拼接（同 common._fetch_seller_targets）。
     row = db.execute(
         text(
-            """
+            f"""
             select
-              id, target_name, target_type, target_subject_name, information_status,
-              industry_l1, industry_l2, industry_pairs_json, location_province, location_city,
-              location_district, listed_status,
-              market_cap_yuan, current_revenue_yuan, current_net_profit_yuan,
-              current_total_profit_yuan, current_assets_yuan, current_debt_ratio,
-              current_operating_cash_flow_yuan, financial_period_label,
-              profitability_status, cash_flow_status, operation_stability_status,
-              valuation_yuan, valuation_date, asking_price_yuan, asking_price_date,
-              pe_ratio, pe_source_type,
-              premium_rate, is_for_sale, can_control, can_consolidate,
-              accepts_minority_investment, transfer_ratio_min, transfer_ratio_max,
-              transfer_ratio_text, transfer_flexibility_type, consolidation_path_summary,
-              accepts_relocation, accepts_return_investment, management_team_summary,
-              management_retention_possible, earnout_dependency_status,
-              business_summary, transaction_summary, risk_summary, gap_summary
+              id, {", ".join(seller_target_fact_columns())}
             from seller_target
             where id = :seller_target_id
               and team_id = :team_id
@@ -262,6 +255,8 @@ SELLER_TARGET_YES_NO_LIKE_FIELDS = {
 
 SELLER_TARGET_PARSE_ENUM_FIELDS = writable_enum_values()
 
+SELLER_TARGET_CLOSED_LIST_FIELDS = set(multi_value_enum_values())
+
 SELLER_TARGET_TEXT_LIMITS = {
     "target_name": 300,
     "target_subject_name": 300,
@@ -270,6 +265,10 @@ SELLER_TARGET_TEXT_LIMITS = {
     # business_summary is a short AI-written profile shown in list rows; cap it
     # so a model that echoes raw source material cannot flood the UI.
     "business_summary": 300,
+    # 主要产品是产品线枚举而不是又一段业务描述——给足空间列全，但不能变成
+    # business_summary 的副本。
+    "main_products_text": 400,
+    "stock_code": 40,
 }
 
 def _validate_seller_target_parse_output(parsed_output_json: dict[str, Any] | None) -> dict[str, Any]:
@@ -335,6 +334,15 @@ def _normalize_seller_target_parse_changes(
             continue
         if key == "listed_status":
             changes[key] = _normalize_seller_listed_status(value)
+            continue
+        # 闭集多值列先于标量枚举判断：它们也在 ENUM_FIELDS 里（同样声明了
+        # enum_options），但值是数组，走标量分支会被整条丢掉。
+        if key in SELLER_TARGET_CLOSED_LIST_FIELDS:
+            normalized_values = _normalize_closed_list_values(key, value)
+            if normalized_values:
+                changes[key] = normalized_values
+            else:
+                notes.append(f"dropped_{key}:no_recognised_values")
             continue
         if key in SELLER_TARGET_PARSE_ENUM_FIELDS:
             changes[key] = _normalize_allowed_enum(value, SELLER_TARGET_PARSE_ENUM_FIELDS[key])

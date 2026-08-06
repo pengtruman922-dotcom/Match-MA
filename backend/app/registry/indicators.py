@@ -79,7 +79,25 @@ _TARGET_TYPE = (
 _LISTED_STATUS = (("listed", "已上市"), ("unlisted", "未上市"), ("pre_ipo", "拟上市"), ("unknown", "未知"))
 _PROFITABILITY = (("profitable", "盈利"), ("loss_making", "亏损"), ("break_even", "盈亏平衡"), ("unknown", "未知"))
 _CASH_FLOW = (("stable_positive", "稳定为正"), ("positive", "为正"), ("negative", "为负"), ("unstable", "不稳定"), ("unknown", "未知"))
-_OPERATION_STABILITY = (("stable", "稳定"), ("unstable", "不稳定"), ("unknown", "未知"), ("needs_review", "待核实"))
+# 问卷第 6 项「能否接受标的公司有重大风险」把风险类型枚举好了，照抄即可。
+# 三种状态由同一个字段表达：[] 未核查 / ["none"] 已核查无风险 / 其余已核查有风险。
+_MAJOR_RISK_FLAGS = (
+    ("litigation", "涉诉"),
+    ("equity_frozen", "股权冻结"),
+    ("enforcement", "被执行"),
+    ("violation", "违规违法"),
+    ("none", "已核查无重大风险"),
+)
+# 问卷第 7 项「交易方式（多选）」。与控股维度（can_control / can_consolidate /
+# accepts_minority_investment）正交：增资扩股可以控股也可以参股，股权转让同理。
+# 两个维度都要留，不能互相派生。
+_TRANSACTION_STRUCTURES = (
+    ("equity_transfer", "股权转让（老股）"),
+    ("capital_increase", "增资扩股（新股）"),
+    ("asset_purchase", "资产收购"),
+    ("merger", "吸收合并"),
+    ("other", "其他"),
+)
 _TRANSFER_FLEXIBILITY = (
     ("control_available", "可控股"), ("consolidation_available", "可并表"),
     ("minority_available", "可少数股权"), ("full_sale_available", "可整体出售"),
@@ -107,6 +125,11 @@ SELLER_TARGET_INDICATORS: tuple[Indicator, ...] = (
     # 业务与产品
     Indicator("industry_pairs_json", "所属行业", "business_product", "json", screening=True, writable_by=_BOTH_MANUAL),
     Indicator("business_summary", "业务摘要", "business_product", "text", writable_by=_BOTH_MANUAL),
+    # 行业只到 L2：「做锂电池正极材料的」与「做锂电池 PACK 的」归在同一个 L2 下。
+    # 产品词是长尾，建受控字典的维护成本无上限且字典外的词会被丢弃，所以走自由
+    # 文本 + 深评。买家侧对手方是已存在的 industry_focus_tags_json（语义配对）。
+    # 不塞进 business_summary：后者有 300 字上限，塞进去会被截断。
+    Indicator("main_products_text", "主要产品", "business_product", "text", writable_by=_BOTH_MANUAL),
     # 技术与团队
     Indicator("management_retention_possible", "团队可留任", "tech_team", "enum", screening=True, writable_by=_PARSE_MANUAL, enum_options=_YES_NO_LIKE),
     Indicator("management_team_summary", "管理团队", "tech_team", "text", writable_by=_MANUAL),
@@ -121,12 +144,15 @@ SELLER_TARGET_INDICATORS: tuple[Indicator, ...] = (
     # Internal comparison key.  The mapper must provide as_of_date on each
     # financial fact; research_apply derives this column instead of asking the
     # model to invent a second period field.  fold_into keeps it out of the UI.
-    Indicator("financial_period_end_date", "财务期间截止日", "ops_quality", "date", writable_by=_RESEARCH, fold_into="financial_period_label"),
+    #
+    # 解析也要能写：解析是标的的主要入口，只给 research 会让「防止旧期覆盖新期」
+    # 与同期冲突判定对解析写入的数据全部失效。
+    Indicator("financial_period_end_date", "财务期间截止日", "ops_quality", "date", writable_by=_RESEARCH | _PARSE, fold_into="financial_period_label"),
     Indicator("profitability_status", "盈利状态", "ops_quality", "enum", screening=True, writable_by=_ALL, enum_options=_PROFITABILITY),
     Indicator("cash_flow_status", "现金流状态", "ops_quality", "enum", screening=True, writable_by=_ALL, enum_options=_CASH_FLOW),
-    Indicator("operation_stability_status", "经营稳定性", "ops_quality", "enum", writable_by=_ALL, enum_options=_OPERATION_STABILITY),
     # 交易属性
     Indicator("listed_status", "上市状态", "deal_terms", "enum", screening=True, writable_by=_BOTH_MANUAL, enum_options=_LISTED_STATUS),
+    Indicator("stock_code", "股票代码", "deal_terms", "text", writable_by=_BOTH_MANUAL),
     Indicator("listing_market_region", "上市地", "deal_terms", "enum", screening=True, writable_by=_MANUAL | _RESEARCH, enum_options=_MARKET_REGION),
     Indicator("market_cap_yuan", "市值", "deal_terms", "yuan", screening=True, writable_by=_ALL),
     Indicator("valuation_yuan", "估值", "deal_terms", "yuan", screening=True, writable_by=_ALL),
@@ -147,9 +173,18 @@ SELLER_TARGET_INDICATORS: tuple[Indicator, ...] = (
     Indicator("accepts_relocation", "接受迁址", "deal_terms", "enum", screening=True, writable_by=_PARSE_MANUAL, enum_options=_YES_NO_LIKE),
     Indicator("accepts_return_investment", "接受返投", "deal_terms", "enum", screening=True, writable_by=_PARSE_MANUAL, enum_options=_YES_NO_LIKE),
     Indicator("earnout_dependency_status", "对赌依赖", "deal_terms", "enum", writable_by=_PARSE_MANUAL, enum_options=_EARNOUT),
+    # screening=False 是本轮的事实陈述而不是判断：买家侧对手方
+    # （transaction_types_json 改闭集）与打分维度都在下一轮。标成 True 会让信息页
+    # 的「筛」角标撒谎——顾问补了这个字段，筛选与打分其实都不看。下一轮接线时改。
+    Indicator("acceptable_transaction_structures_json", "可接受交易结构", "deal_terms", "json", writable_by=_PARSE_MANUAL, enum_options=_TRANSACTION_STRUCTURES, multi_value=True),
     Indicator("transaction_summary", "交易摘要", "deal_terms", "text", writable_by=_PARSE_MANUAL),
     # 出售诉求
     Indicator("is_for_sale", "是否还卖", "deal_terms", "enum", writable_by=_PARSE_MANUAL, enum_options=_YES_NO_LIKE),
+    # 风险的可筛选投影；risk_summary 继续承担明细（哪个案子、金额多少、进展如何），
+    # 两者的关系与 industry_pairs_json ↔ 画像栏一致。
+    # 调研可写是有意的：工商公开信息正是调研 Agent 最擅长核的，存量标的的风险
+    # 只能靠它回填。screening 同上，下一轮接线时改。
+    Indicator("major_risk_flags_json", "重大风险", "deal_terms", "json", writable_by=_ALL, enum_options=_MAJOR_RISK_FLAGS, multi_value=True),
     Indicator("risk_summary", "风险摘要", "deal_terms", "text", writable_by=_ALL),
     # 系统状态不是信息页业务事实，不允许手动编辑。交易状态（lifecycle_status）
     # 由详情页下拉维护，走专用流程，不进注册表。
@@ -260,3 +295,42 @@ def writable_enum_values(entity: str = "seller_target") -> dict[str, set[str]]:
         for indicator in indicators_for(entity)
         if indicator.enum_options is not None
     }
+
+
+def multi_value_enum_values(entity: str = "seller_target") -> dict[str, set[str]]:
+    """闭集多值列的合法元素取值。
+
+    与 writable_enum_values 的区别只在形状：这些列存的是数组，归一化时要逐个
+    元素过字典而不是整体比对。买家侧原来在 handlers/common.py 手写了两项，
+    标的侧新增闭集列时没人会想起去补那份手写表——所以改成从注册表派生。
+    """
+    return {
+        indicator.column: {code for code, _ in indicator.enum_options}
+        for indicator in indicators_for(entity)
+        if indicator.enum_options is not None and indicator.multi_value
+    }
+
+
+# 注册表之外、但要跟着事实列一起被读出来的 seller_target 列。
+# industry_l1 / industry_l2 是 industry_pairs_json 的兼容投影（总纲 §2.3），
+# gap_summary 是零写入的历史列（判死待办，六处读路径仍在，见施工单 0806 §三）。
+_SELLER_TARGET_EXTRA_FACT_COLUMNS: tuple[str, ...] = (
+    "industry_l1",
+    "industry_l2",
+    "gap_summary",
+)
+
+
+def seller_target_fact_columns() -> list[str]:
+    """标的事实列的唯一清单，给各处 SELECT 拼投影用。
+
+    以前信息页、解析、采纳、业务更新各手写一份，加一列要逐个改，漏掉任何一处
+    的表现都是「字段存进去了但某个页面/某条链路看不见」，最难查。列名来自注册表
+    不是外部输入，可以安全拼接（同 handlers/common.py 的 _fetch_seller_targets）。
+
+    只含事实列。id、时间戳、owner、lifecycle_status 这类系统列由调用方自己加，
+    因为每处要的不一样。
+    """
+    return [indicator.column for indicator in SELLER_TARGET_INDICATORS] + list(
+        _SELLER_TARGET_EXTRA_FACT_COLUMNS
+    )

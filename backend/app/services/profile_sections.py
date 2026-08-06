@@ -31,7 +31,7 @@ PROFILE_SECTIONS: tuple[tuple[str, str, int], ...] = (
     # (section_code, 中文栏目名, 送深评时的字符预算)
     ("identity", "身份与地区", 200),
     ("business_product", "业务与产品", 400),
-    ("tech_team", "技术与团队能力", 300),
+    ("tech_team", "技术与团队", 300),
     ("ops_quality", "经营质量", 300),
     ("deal_terms", "交易属性与出售诉求", 400),
 )

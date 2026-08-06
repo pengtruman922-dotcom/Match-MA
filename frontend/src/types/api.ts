@@ -24,10 +24,12 @@ export interface SellerTarget {
   industry_l1: string | null;
   industry_l2: string | null;
   industry_pairs_json: Array<{ l1: string; l2?: string }>;
+  main_products_text: string | null;
   location_province: string | null;
   location_city: string | null;
   location_district: string | null;
   listed_status: string | null;
+  stock_code: string | null;
   listing_market_region: string | null;
   market_cap_yuan: string | null;
   current_revenue_yuan: string | null;
@@ -39,7 +41,6 @@ export interface SellerTarget {
   financial_period_label: string | null;
   profitability_status: string | null;
   cash_flow_status: string | null;
-  operation_stability_status: string | null;
   valuation_yuan: string | null;
   valuation_date: string | null;
   asking_price_yuan: string | null;
@@ -61,8 +62,11 @@ export interface SellerTarget {
   management_team_summary: string | null;
   management_retention_possible: string | null;
   earnout_dependency_status: string | null;
+  acceptable_transaction_structures_json: string[];
   business_summary: string | null;
   transaction_summary: string | null;
+  // [] 未核查 / ['none'] 已核查无风险 / 其余已核查有风险，三种状态一个字段表达。
+  major_risk_flags_json: string[];
   risk_summary: string | null;
   gap_summary: string | null;
   owner_user_id?: string | null;

@@ -23,7 +23,9 @@ from backend.app.registry.indicators import (
     SELLER_TARGET_INDICATORS,
     GROUPS,
     indicators_for,
+    multi_value_enum_values,
     screening_columns,
+    seller_target_fact_columns,
     writable_columns,
     writable_enum_values,
 )
@@ -36,6 +38,7 @@ R4A_MIGRATION = REPO / "database/migrations/002_target_information_model.sql"
 R5_MIGRATION = REPO / "database/migrations/004_information_refinement.sql"
 RESEARCH_PERIOD_MIGRATION = REPO / "database/migrations/009_research_financial_period_guard.sql"
 BUYER_CONTRACT_MIGRATION = REPO / "database/migrations/011_buyer_intent_condition_contract.sql"
+TARGET_FACTS_MIGRATION = REPO / "database/migrations/015_target_risk_and_structure_facts.sql"
 
 
 def test_consumers_derive_from_the_registry() -> None:
@@ -86,6 +89,21 @@ def test_registry_enum_values_valid_for_both_entities() -> None:
             assert accepted, f"{entity}.{column} 注册表枚举含 DB 不接受的值"
 
 
+def test_closed_list_columns_match_their_db_check() -> None:
+    """多值枚举列的 check 约束写的是 `not in (...)`，_db_accepts 认不出这种形状。
+
+    这类列的漂移方式很隐蔽：注册表加一个取值、忘了改迁移，结果是解析归一化放行、
+    DB 在写入的最后一刻整条打回。所以单独比对一次。
+    """
+    sql = TARGET_FACTS_MIGRATION.read_text(encoding="utf-8")
+    for column, values in multi_value_enum_values().items():
+        block = re.search(rf"constraint chk_seller_target_{column}\b.*?not in \((.*?)\)", sql, re.S)
+        assert block, f"{column} 在迁移里没有元素级 check 约束"
+        assert values == set(re.findall(r"'([a-z_]+)'", block.group(1))), (
+            f"{column} 注册表枚举与 DB check 约束不一致"
+        )
+
+
 def _scorer_reads() -> set[str]:
     source = RECOMMENDATION_FLOW.read_text(encoding="utf-8")
     fields = set(re.findall(r"target\.get\(\"([a-z_0-9]+)\"", source))
@@ -120,18 +138,57 @@ def test_every_indicator_is_a_real_seller_target_column() -> None:
     missing = {ind.column for ind in SELLER_TARGET_INDICATORS} - columns
     migration_sql = R4A_MIGRATION.read_text(encoding="utf-8")
     refinement_sql = R5_MIGRATION.read_text(encoding="utf-8")
-    assert missing <= {"location_province", "location_city", "location_district", "industry_pairs_json", "financial_period_end_date"}, (
-        f"注册表引用了 seller_target 不存在的列：{sorted(missing)}"
+    target_facts_sql = TARGET_FACTS_MIGRATION.read_text(encoding="utf-8")
+    post_baseline_columns = {
+        "location_province": (migration_sql, "add column location_province text"),
+        "location_city": (migration_sql, "add column location_city text"),
+        "location_district": (migration_sql, "add column location_district text"),
+        "industry_pairs_json": (refinement_sql, "add column industry_pairs_json jsonb"),
+        "financial_period_end_date": (
+            RESEARCH_PERIOD_MIGRATION.read_text(encoding="utf-8"),
+            "add column if not exists financial_period_end_date date",
+        ),
+        "major_risk_flags_json": (target_facts_sql, "add column if not exists major_risk_flags_json jsonb"),
+        "acceptable_transaction_structures_json": (
+            target_facts_sql,
+            "add column if not exists acceptable_transaction_structures_json jsonb",
+        ),
+        "main_products_text": (target_facts_sql, "add column if not exists main_products_text text"),
+        "stock_code": (target_facts_sql, "add column if not exists stock_code text"),
+    }
+    assert missing <= set(post_baseline_columns), (
+        f"注册表引用了 seller_target 不存在的列：{sorted(missing - set(post_baseline_columns))}"
     )
     for column in missing:
-        if column == "industry_pairs_json":
-            assert f"add column {column} jsonb" in refinement_sql
-        elif column == "financial_period_end_date":
-            assert f"add column if not exists {column} date" in RESEARCH_PERIOD_MIGRATION.read_text(encoding="utf-8")
-        else:
-            assert f"add column {column} text" in migration_sql
+        sql, expected = post_baseline_columns[column]
+        assert expected in sql, f"{column} 没有对应的建列迁移"
     for retired in ("industry_primary", "industry_secondary", "registered_province", "registered_city", "headquarter_province", "headquarter_city", "raw_region_text", "region_granularity"):
         assert f"drop column {retired}" in migration_sql
+    # 判死的列不能还留在注册表里——注册表是写入白名单的事实源，留着等于允许写。
+    assert "drop column if exists operation_stability_status" in target_facts_sql
+    assert "operation_stability_status" not in {ind.column for ind in SELLER_TARGET_INDICATORS}
+
+
+def test_fact_projection_is_derived_everywhere_it_is_read() -> None:
+    """标的事实列的 SELECT 投影只能有一份。
+
+    以前信息页 / 解析 / 采纳 / 业务更新各手写一份，加一列漏改一处的表现是
+    「字段存进去了但某个页面看不见」，最难查。推荐域的两处（recommendation_flow、
+    recommendation_agent_tools）仍是手写，是有意的：它们只取打分需要的子集，
+    收敛它们要动打分文件。
+    """
+    projection = seller_target_fact_columns()
+    assert set(projection) >= {ind.column for ind in SELLER_TARGET_INDICATORS}
+    assert len(projection) == len(set(projection)), "投影里有重复列名"
+    for relative in (
+        "backend/app/api/routes/seller_targets.py",
+        "backend/app/api/routes/update_logs.py",
+        "backend/app/jobs/handlers/seller_target_parse.py",
+        "backend/app/services/extracted_action_apply.py",
+        "backend/app/services/business_update_flow.py",
+    ):
+        source = (REPO / relative).read_text(encoding="utf-8")
+        assert "seller_target_fact_columns" in source, f"{relative} 没有走派生投影"
 
 
 def test_every_indicator_group_key_is_declared() -> None:

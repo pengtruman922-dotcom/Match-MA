@@ -100,7 +100,7 @@ def test_writing_a_section_lands_in_the_update_timeline() -> None:
     metadata = params["metadata_json"]
     assert metadata["profile_section_id"] == str(NEW_SECTION_ID)
     assert metadata["superseded_profile_section_id"] == str(OLD_SECTION_ID)
-    assert metadata["section_label"] == "技术与团队能力"
+    assert metadata["section_label"] == "技术与团队"
 
 
 def test_first_write_records_no_previous_value() -> None:

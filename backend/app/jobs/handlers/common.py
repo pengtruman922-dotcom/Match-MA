@@ -12,7 +12,11 @@ from sqlalchemy.orm import Session
 from backend.app.ai.prompting import render_template
 from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
-from backend.app.registry.indicators import writable_columns, writable_enum_values
+from backend.app.registry.indicators import (
+    multi_value_enum_values,
+    writable_columns,
+    writable_enum_values,
+)
 from backend.app.jobs.queue import JobClaim
 from backend.app.services.attachment_storage import (
     AttachmentStorageError,
@@ -890,9 +894,12 @@ def _normalize_requirement_strength(value: Any) -> str:
     return REQUIREMENT_STRENGTH_ALIASES.get(text_value, "unknown")
 
 
+# 派生自指标注册表：两侧所有闭集多值列的合法元素。原来只有买家侧两项，且是
+# 手写的——标的侧新增闭集列（重大风险、交易结构）时不会有人想起来补那份手写表，
+# 结果是模型吐什么就存什么，DB 的 check 约束再把整条更新打回去。
 CLOSED_LIST_FIELD_VALUES = {
-    "acceptable_cash_flow_status_json": {"stable_positive", "positive", "negative", "unstable", "unknown"},
-    "acceptable_profitability_status_json": {"profitable", "loss_making", "break_even", "unknown"},
+    **multi_value_enum_values("buyer_intent"),
+    **multi_value_enum_values(),
 }
 
 
@@ -1059,6 +1066,18 @@ def _normalize_field_value(
 ) -> Any:
     if not enum_fields or field not in enum_fields:
         return value
+
+    # 闭集多值列存的是数组：整体做标量归一会得到 "['litigation']" 这种字符串，
+    # 一律落进 dropped_invalid_enum。逐元素过字典，全被丢弃时才跳过该字段——
+    # 空数组在重大风险上是「未核查」，与「已核查无风险」是两回事，不能凭空写。
+    if field in CLOSED_LIST_FIELD_VALUES:
+        normalized_values = _normalize_closed_list_values(field, value)
+        if not normalized_values:
+            notes.append(f"{field}:{value}->dropped_invalid_enum")
+            return _SKIP_FIELD
+        if normalized_values != value:
+            notes.append(f"{field}:{value}->{normalized_values}")
+        return normalized_values
 
     if field == "listed_status":
         normalized = _normalize_seller_listed_status(value)

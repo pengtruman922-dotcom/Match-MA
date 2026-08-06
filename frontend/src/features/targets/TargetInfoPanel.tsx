@@ -414,6 +414,10 @@ export default function TargetInfoPanel({
                       if (field.field === 'location_province') {
                         return <LocationField key={field.field} {...shared} target={currentTarget} onSave={saveFields} />;
                       }
+                      if (field.kind === 'json' && field.multiValue && field.enumOptions.length > 0) {
+                        const values = (currentTarget as unknown as Record<string, unknown>)[field.field];
+                        return <MultiEnumField key={field.field} {...shared} values={Array.isArray(values) ? (values as string[]) : []} onSave={(value) => saveField(field.field, value)} />;
+                      }
                       return <StructuredField
                         key={field.field} {...shared} draft={draft}
                         onDraft={setDraft} onSave={(value) => saveField(field.field, value)}
@@ -555,6 +559,48 @@ function IndustryPairsField({ field, editing, saving, source, proposalCards, onS
         <IndustryPairsEditor value={draftPairs} options={options} onChange={setDraftPairs} />
         <div className="flex items-center gap-2"><button type="button" disabled={saving} onClick={() => void onSave(draftPairs)} className="inline-flex items-center gap-1 bg-brand-600 px-2.5 py-1 text-xs text-white disabled:opacity-40"><Check className="h-3 w-3" />保存</button><button type="button" onClick={onCancel} className="text-xs text-gray-400 hover:text-gray-600">取消</button></div>
       </div> : <><button type="button" disabled={!field.writable} onClick={onStart} className={`group flex w-full items-center justify-between text-left text-sm ${display ? 'text-gray-800' : 'text-gray-300'} ${field.writable ? 'hover:text-brand-600' : ''}`}><span>{display || '-'}</span>{field.writable && <Pencil className="h-3 w-3 opacity-0 group-hover:opacity-100" />}</button><FieldCaption source={source} onShowEvidence={onShowEvidence} /></>}
+      {proposalCards}
+    </div>
+  </div>;
+}
+
+/**
+ * 闭集多值列的编辑器（重大风险、可接受交易结构）。
+ *
+ * 取值和中文名都来自注册表，这里不认识任何具体字段——下一个多值枚举列加进
+ * 注册表就自动可编辑。「重大风险」的空数组含义是「未核查」，与已核查无风险
+ * （勾上「已核查无重大风险」）是两回事，所以取消全部勾选是合法操作。
+ */
+function MultiEnumField({ field, editing, saving, source, proposalCards, onStart, onCancel, onShowEvidence, values, onSave }: SpecialFieldProps & {
+  values: string[];
+  onSave: (value: string[]) => Promise<void>;
+}) {
+  const [draftValues, setDraftValues] = useState<string[]>(values);
+
+  useEffect(() => {
+    if (editing) {
+      setDraftValues(values);
+    }
+  }, [editing, values]);
+
+  const toggle = (value: string) => {
+    setDraftValues((current) => (current.includes(value) ? current.filter((item) => item !== value) : [...current, value]));
+  };
+
+  return <div className="flex items-start gap-2 sm:col-span-2">
+    <FieldLabel field={field} />
+    <div className="min-w-0 flex-1">
+      {editing ? <div className="space-y-2 border border-gray-200 bg-gray-50 p-2">
+        <div className="flex flex-wrap gap-x-3 gap-y-1">
+          {field.enumOptions.map((option) => (
+            <label key={option.value} className="flex items-center gap-1 text-xs text-gray-700">
+              <input type="checkbox" checked={draftValues.includes(option.value)} onChange={() => toggle(option.value)} className="h-3 w-3" />
+              {option.label}
+            </label>
+          ))}
+        </div>
+        <div className="flex items-center gap-2"><button type="button" disabled={saving} onClick={() => void onSave(draftValues)} className="inline-flex items-center gap-1 bg-brand-600 px-2.5 py-1 text-xs text-white disabled:opacity-40"><Check className="h-3 w-3" />保存</button><button type="button" onClick={onCancel} className="text-xs text-gray-400 hover:text-gray-600">取消</button></div>
+      </div> : <><button type="button" disabled={!field.writable} onClick={onStart} className={`group flex w-full items-center justify-between text-left text-sm ${field.value ? 'text-gray-800' : 'text-gray-300'} ${field.writable ? 'hover:text-brand-600' : ''}`}><span>{field.value || '-'}</span>{field.writable && <Pencil className="h-3 w-3 opacity-0 group-hover:opacity-100" />}</button><FieldCaption source={source} onShowEvidence={onShowEvidence} /></>}
       {proposalCards}
     </div>
   </div>;

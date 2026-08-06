@@ -300,6 +300,18 @@ def normalize_structured_fact(
         return _money_to_yuan(field_path, value)
     if indicator is not None and indicator.kind == "ratio":
         return _ratio_value(field_path, value)
+    if indicator is not None and indicator.kind == "json":
+        # 闭集多值列的建议值是数组。不接住的话下面的 str() 会把它压成
+        # "['litigation']"，写入端再以「must be a JSON object or array」拒绝——
+        # 报错位置离病因很远。取值合法性仍由 field_writer 从同一份注册表判定。
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            raise ResearchApplyError(f"{field_path} 需要数组。")
+        cleaned = [str(item).strip() for item in value if str(item).strip()]
+        if not cleaned:
+            raise ResearchApplyError("建议值为空。")
+        return cleaned
 
     text_value = str(value or "").strip()
     if not text_value:

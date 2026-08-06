@@ -15,6 +15,7 @@ from backend.app.api.routes.utils import (
 )
 from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+from backend.app.registry.indicators import seller_target_fact_columns
 from backend.app.services.attachment_storage import (
     AttachmentStorageError,
     AttachmentTooLargeError,
@@ -1138,18 +1139,12 @@ def _review_page_bound_entities(
 def _seller_targets_by_ids(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
     if not ids:
         return []
+    # 事实列来自注册表，不是外部输入，可以安全拼接（同 common._fetch_seller_targets）。
     rows = db.execute(
         text(
-            """
+            f"""
             select
-              id, target_name, target_type, industry_l1, industry_l2, industry_pairs_json,
-              location_province, location_city, location_district, listed_status,
-              current_revenue_yuan, current_net_profit_yuan, current_total_profit_yuan,
-              valuation_yuan, asking_price_yuan, pe_ratio, is_for_sale,
-              can_control, can_consolidate, accepts_minority_investment,
-              transfer_ratio_min, transfer_ratio_max, transfer_ratio_text,
-              transfer_flexibility_type, information_status,
-              business_summary, transaction_summary, risk_summary, gap_summary,
+              id, {", ".join(seller_target_fact_columns())},
               updated_at::text as updated_at
             from seller_target
             where team_id = :team_id

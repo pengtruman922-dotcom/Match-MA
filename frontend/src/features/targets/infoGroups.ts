@@ -17,6 +17,8 @@ export type InfoField = {
   screening?: boolean;
   kind: IndicatorMeta['kind'];
   enumOptions: IndicatorMeta['enum_options'];
+  /** 闭集多值列（重大风险、可接受交易结构）：展示成顿号串，编辑成多选。 */
+  multiValue: boolean;
   writable: boolean;
 };
 
@@ -64,6 +66,15 @@ function formatValue(indicator: IndicatorMeta, target: SellerTarget, helpers: In
   switch (indicator.kind) {
     case 'yuan':
       return raw ? helpers.formatYuan(String(raw)) : null;
+    case 'json': {
+      // 闭集多值列。空数组是一个有含义的状态（重大风险：未核查），但它和「已核查
+      // 无风险」的区别由 `none` 这个取值承担，所以这里空数组仍然显示为占位符。
+      if (!indicator.multi_value || !Array.isArray(raw)) return text(raw);
+      const labels = raw.map(
+        (item) => indicator.enum_options.find((option) => option.value === item)?.label || String(item),
+      );
+      return labels.join('、') || null;
+    }
     case 'enum':
       // `unknown` is a stored, intentional state.  It remains distinct from
       // NULL for scoring and audit, but the information page presents both as
@@ -97,6 +108,7 @@ export function buildInfoGroups(
         screening: indicator.screening || undefined,
         kind: indicator.kind,
         enumOptions: indicator.enum_options,
+        multiValue: indicator.multi_value,
         writable: indicator.writable_by.includes('manual'),
       })),
   }));

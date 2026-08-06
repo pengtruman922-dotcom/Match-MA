@@ -28,7 +28,7 @@ from backend.app.api.routes.utils import (
 from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
-from backend.app.registry.indicators import writable_columns
+from backend.app.registry.indicators import seller_target_fact_columns, writable_columns
 from backend.app.services.field_writer import FieldWriteError, WriteProvenance, write_seller_target_fields
 from backend.app.services.industry_taxonomy import normalize_industry_pairs
 from backend.app.services.attachment_storage import (
@@ -102,10 +102,12 @@ class SellerTargetOut(BaseModel):
     industry_l1: str | None = None
     industry_l2: str | None = None
     industry_pairs_json: list[dict[str, str]] = Field(default_factory=list)
+    main_products_text: str | None = None
     location_province: str | None
     location_city: str | None
     location_district: str | None
     listed_status: str
+    stock_code: str | None = None
     listing_market_region: str | None = None
     market_cap_yuan: Decimal | None
     current_revenue_yuan: Decimal | None
@@ -117,7 +119,6 @@ class SellerTargetOut(BaseModel):
     financial_period_label: str | None
     profitability_status: str | None
     cash_flow_status: str | None
-    operation_stability_status: str | None
     valuation_yuan: Decimal | None
     valuation_date: str | None
     asking_price_yuan: Decimal | None
@@ -139,8 +140,11 @@ class SellerTargetOut(BaseModel):
     management_team_summary: str | None
     management_retention_possible: str
     earnout_dependency_status: str | None
+    acceptable_transaction_structures_json: list[str] = Field(default_factory=list)
     business_summary: str | None
     transaction_summary: str | None
+    # [] 未核查 / ["none"] 已核查无风险 / 其余已核查有风险，三种状态一个字段表达。
+    major_risk_flags_json: list[str] = Field(default_factory=list)
     risk_summary: str | None
     gap_summary: str | None
     owner_user_id: UUID | None = None
@@ -167,10 +171,12 @@ class SellerTargetUpdate(BaseModel):
     industry_l1: str | None = None
     industry_l2: str | None = None
     industry_pairs_json: list[dict[str, str]] | None = None
+    main_products_text: str | None = Field(default=None, max_length=400)
     location_province: str | None = None
     location_city: str | None = None
     location_district: str | None = None
     listed_status: str | None = None
+    stock_code: str | None = Field(default=None, max_length=40)
     market_cap_yuan: Decimal | None = None
     current_revenue_yuan: Decimal | None = None
     current_net_profit_yuan: Decimal | None = None
@@ -181,7 +187,6 @@ class SellerTargetUpdate(BaseModel):
     financial_period_label: str | None = None
     profitability_status: str | None = None
     cash_flow_status: str | None = None
-    operation_stability_status: str | None = None
     valuation_yuan: Decimal | None = None
     valuation_date: str | None = Field(default=None, max_length=80)
     asking_price_yuan: Decimal | None = None
@@ -203,9 +208,11 @@ class SellerTargetUpdate(BaseModel):
     management_team_summary: str | None = None
     management_retention_possible: str | None = None
     earnout_dependency_status: str | None = None
+    acceptable_transaction_structures_json: list[str] | None = None
     lifecycle_status: Literal["active", "sold", "off_market"] | None = None
     business_summary: str | None = None
     transaction_summary: str | None = None
+    major_risk_flags_json: list[str] | None = None
     risk_summary: str | None = None
     owner_user_id: UUID | None = None
 
@@ -320,19 +327,12 @@ class SellerTargetAttachmentListOut(BaseModel):
     items: list[SellerTargetAttachmentItemOut]
 
 
-SELLER_TARGET_OUT_COLUMNS = """
-              id, target_name, target_type, target_subject_name, lifecycle_status, information_status,
-              industry_l1, industry_l2, industry_pairs_json, location_province, location_city, location_district,
-              listed_status, listing_market_region, market_cap_yuan, current_revenue_yuan, current_net_profit_yuan,
-              current_total_profit_yuan, current_assets_yuan, current_debt_ratio,
-              current_operating_cash_flow_yuan, financial_period_label, profitability_status,
-              cash_flow_status, operation_stability_status, valuation_yuan, valuation_date,
-              asking_price_yuan, asking_price_date,
-              pe_ratio, pe_source_type, premium_rate, is_for_sale, can_control, can_consolidate,
-              accepts_minority_investment, transfer_ratio_min, transfer_ratio_max, transfer_ratio_text,
-              transfer_flexibility_type, consolidation_path_summary, accepts_relocation,
-              accepts_return_investment, management_team_summary, management_retention_possible,
-              earnout_dependency_status, business_summary, transaction_summary, risk_summary, gap_summary,
+# 事实列来自指标注册表（唯一事实源），系统列在这里补。以前整份清单是手写的，
+# 与另外三处手写投影各自漂移；加一列漏改一处的表现是「字段存进去了但某个页面
+# 看不见」。列名不是外部输入，可以安全拼接。
+SELLER_TARGET_OUT_COLUMNS = f"""
+              id, lifecycle_status,
+              {", ".join(seller_target_fact_columns())},
               owner_user_id,
               (select au.name from app_user au where au.id = seller_target.owner_user_id) as owner_name,
               last_research_at::text as last_research_at, last_parse_at::text as last_parse_at,

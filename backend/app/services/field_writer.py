@@ -145,6 +145,20 @@ def _normalize_value(db: Session, indicator: Indicator, value: Any) -> Any:
     if indicator.kind == "json":
         if not isinstance(value, (list, dict)):
             raise FieldWriteError(f"{indicator.column} must be a JSON object or array.")
+        # 闭集多值列在这里就把字典外的取值拦下来，而不是让 DB 的 check 约束在
+        # 更新的最后一刻抛整条事务——那时报的是约束名，看不出是哪个取值不合法。
+        if indicator.multi_value and indicator.enum_options:
+            if not isinstance(value, list):
+                raise FieldWriteError(f"{indicator.column} must be a JSON array.")
+            valid = {code for code, _ in indicator.enum_options}
+            invalid = [item for item in value if item not in valid]
+            if invalid:
+                raise FieldWriteError(f"Invalid {indicator.column}: {invalid!r}")
+            deduplicated: list[Any] = []
+            for item in value:
+                if item not in deduplicated:
+                    deduplicated.append(item)
+            return deduplicated
         return value
     if not isinstance(value, str):
         raise FieldWriteError(f"{indicator.column} must be text.")
@@ -277,8 +291,15 @@ def write_seller_target_fields(
           and deleted_at is null
         """
     )
-    if "industry_pairs_json" in diff:
-        statement = statement.bindparams(bindparam("industry_pairs_json", type_=JSONB))
+    # 每个 jsonb 列都要显式绑定类型，否则驱动会把 Python list 当成数组字面量适配，
+    # 落库不是 jsonb。以前只有 industry_pairs_json 一列时是硬编码的。
+    json_bindings = [
+        bindparam(column, type_=JSONB)
+        for column in diff
+        if indicator_by_column("seller_target", column).kind == "json"
+    ]
+    if json_bindings:
+        statement = statement.bindparams(*json_bindings)
     db.execute(statement, statement_params)
 
     write_action_logs_for_diff(

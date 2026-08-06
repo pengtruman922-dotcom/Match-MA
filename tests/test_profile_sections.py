@@ -60,7 +60,7 @@ def test_no_information_is_explicit_rather_than_an_empty_string() -> None:
 
     rendered = render_profile_text(sections)
 
-    assert "【技术与团队能力】（暂无信息）" in rendered
+    assert "【技术与团队】（暂无信息）" in rendered
     assert "【交易属性与出售诉求】（不适用）" in rendered
 
 

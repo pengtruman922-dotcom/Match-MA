@@ -9,7 +9,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
-from backend.app.registry.indicators import writable_columns
+from backend.app.registry.indicators import seller_target_fact_columns, writable_columns
 from backend.app.api.routes.utils import (
     diff_payload,
     write_action_logs_for_diff,
@@ -597,21 +597,12 @@ def apply_buyer_intent_target_exclusion_action(
 
 
 def _get_seller_target_snapshot_or_404(db: Session, seller_target_id: UUID) -> dict[str, Any]:
+    # 事实列来自注册表，不是外部输入，可以安全拼接（同 common._fetch_seller_targets）。
     row = db.execute(
         text(
-            """
+            f"""
             select
-              target_name, target_subject_name, lifecycle_status,
-              industry_l1, industry_l2, industry_pairs_json, location_province, location_city,
-              location_district, listed_status,
-              current_revenue_yuan, current_net_profit_yuan, valuation_yuan,
-              current_total_profit_yuan, financial_period_label,
-              valuation_date, asking_price_yuan, asking_price_date, pe_ratio,
-              is_for_sale, can_control, can_consolidate, accepts_minority_investment,
-              transfer_ratio_min, transfer_ratio_max, transfer_ratio_text,
-              transfer_flexibility_type,
-              information_status,
-              business_summary, transaction_summary, risk_summary, gap_summary
+              lifecycle_status, {", ".join(seller_target_fact_columns())}
             from seller_target
             where id = :seller_target_id
               and team_id = :team_id

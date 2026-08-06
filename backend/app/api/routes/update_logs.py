@@ -19,6 +19,7 @@ from backend.app.api.routes.utils import (
 )
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
+from backend.app.registry.indicators import SELLER_TARGET_INDICATORS, seller_target_fact_columns
 from backend.app.services.attachment_status import (
     attachment_content_extraction_status,
     attachment_extraction_strategy,
@@ -1079,59 +1080,11 @@ ROLLBACK_TABLE_BY_ENTITY = {
 }
 
 ROLLBACK_FIELDS_BY_ENTITY = {
-    "seller_target": {
-        "target_name",
-        "target_type",
-        "target_subject_name",
-        "industry_l1",
-        "industry_l2",
-        "industry_pairs_json",
-        "location_province",
-        "location_city",
-        "location_district",
-        "listed_status",
-        "listing_market_region",
-        "market_cap_yuan",
-        "current_revenue_yuan",
-        "current_net_profit_yuan",
-        "current_total_profit_yuan",
-        "current_assets_yuan",
-        "current_debt_ratio",
-        "current_operating_cash_flow_yuan",
-        "financial_period_label",
-        "financial_period_end_date",
-        "profitability_status",
-        "cash_flow_status",
-        "operation_stability_status",
-        "valuation_yuan",
-        "valuation_date",
-        "asking_price_yuan",
-        "asking_price_date",
-        "pe_ratio",
-        "pe_source_type",
-        "premium_rate",
-        "is_for_sale",
-        "can_control",
-        "can_consolidate",
-        "accepts_minority_investment",
-        "transfer_ratio_min",
-        "transfer_ratio_max",
-        "transfer_ratio_text",
-        "transfer_flexibility_type",
-        "consolidation_path_summary",
-        "accepts_relocation",
-        "accepts_return_investment",
-        "management_team_summary",
-        "management_retention_possible",
-        "earnout_dependency_status",
-        # recommendation_status 已随 0727 状态合并删除；历史日志里仍有该 field_path，
-        # 不在此白名单意味着它们被标为不可回滚，而不是回滚时炸在缺列上。
-        "information_status",
-        "business_summary",
-        "transaction_summary",
-        "risk_summary",
-        "gap_summary",
-    },
+    # 标的侧派生自注册表的事实列清单。手写过一份，与它并行漂移了三个版本：
+    # 删掉的列（recommendation_status、operation_stability_status）留在里面、
+    # 新加的列忘了补。派生之后，「历史日志里有但现在没这列」自动落到
+    # 「标为不可回滚」而不是「回滚时炸在缺列上」——这正是原来注释想保住的行为。
+    "seller_target": set(seller_target_fact_columns()),
     "buyer_intent": {
         "intent_name",
         "status",
@@ -1215,7 +1168,13 @@ ROLLBACK_FIELDS_BY_ENTITY = {
 }
 
 JSONB_ROLLBACK_FIELDS = {
-    ("seller_target", "industry_pairs_json"),
+    # 标的侧的 jsonb 列跟着注册表走，加一列不用再想起来补这里；
+    # 买家侧仍是手写（本轮不动买家）。
+    *(
+        ("seller_target", indicator.column)
+        for indicator in SELLER_TARGET_INDICATORS
+        if indicator.kind == "json"
+    ),
     ("buyer_intent", "contact_info_json"),
     ("buyer_intent", "parsed_requirement_json"),
     ("buyer_intent", "region_constraints_json"),
