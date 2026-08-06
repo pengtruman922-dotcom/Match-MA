@@ -90,18 +90,21 @@ def test_registry_enum_values_valid_for_both_entities() -> None:
 
 
 def test_closed_list_columns_match_their_db_check() -> None:
-    """多值枚举列的 check 约束写的是 `not in (...)`，_db_accepts 认不出这种形状。
+    """多值枚举列的 check 约束是 jsonb 包含（`<@`），_db_accepts 认不出这种形状。
 
     这类列的漂移方式很隐蔽：注册表加一个取值、忘了改迁移，结果是解析归一化放行、
     DB 在写入的最后一刻整条打回。所以单独比对一次。
     """
     sql = TARGET_FACTS_MIGRATION.read_text(encoding="utf-8")
     for column, values in multi_value_enum_values().items():
-        block = re.search(rf"constraint chk_seller_target_{column}\b.*?not in \((.*?)\)", sql, re.S)
+        block = re.search(rf"constraint chk_seller_target_{column}\b.*?<@ '\[(.*?)\]'::jsonb", sql, re.S)
         assert block, f"{column} 在迁移里没有元素级 check 约束"
-        assert values == set(re.findall(r"'([a-z_]+)'", block.group(1))), (
+        assert values == set(re.findall(r'"([a-z_]+)"', block.group(1))), (
             f"{column} 注册表枚举与 DB check 约束不一致"
         )
+    # check 约束里不能有子查询（0A000），写了会在 preDeploy 阶段炸掉整次部署。
+    for statement in re.findall(r"check \((.*?)\n  \)", sql, re.S):
+        assert "select" not in statement.lower(), "check 约束里出现了子查询"
 
 
 def _scorer_reads() -> set[str]:

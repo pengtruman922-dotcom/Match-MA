@@ -11,30 +11,30 @@ alter table seller_target
 -- 元素级校验：数组里出现字典外的值，直接被 DB 拒。解析侧也会先丢弃非法取值
 -- （common.py 的闭集归一化），这里是最后一道，防手动 PATCH 与调研 apply 绕过。
 --
+-- 用 jsonb 包含运算符 `<@` 而不是 `not exists (select ... jsonb_array_elements)`：
+-- **PostgreSQL 的 check 约束里不允许出现子查询**（0A000: cannot use subquery in
+-- check constraint），写了会在 preDeploy 迁移阶段直接炸掉整次部署。
+-- `<@` 要求左侧每个元素都出现在右侧字典里，空数组恒为真；再配一个 jsonb_typeof
+-- 是因为裸标量字符串也满足 `<@`（'"litigation"' <@ '["litigation"]'为真）。
+--
 -- major_risk_flags_json 的三种状态用同一个字段表达，不再加第二列：
 --   []        未核查
 --   ["none"]  已核查，无重大风险
 --   [其他]    已核查，有对应风险
 alter table seller_target
+  drop constraint if exists chk_seller_target_major_risk_flags_json,
+  drop constraint if exists chk_seller_target_acceptable_transaction_structures_json;
+
+alter table seller_target
   add constraint chk_seller_target_major_risk_flags_json
   check (
     jsonb_typeof(major_risk_flags_json) = 'array'
-    and not exists (
-      select 1
-      from jsonb_array_elements(major_risk_flags_json) as flag
-      where jsonb_typeof(flag) <> 'string'
-         or flag #>> '{}' not in ('litigation', 'equity_frozen', 'enforcement', 'violation', 'none')
-    )
+    and major_risk_flags_json <@ '["litigation", "equity_frozen", "enforcement", "violation", "none"]'::jsonb
   ),
   add constraint chk_seller_target_acceptable_transaction_structures_json
   check (
     jsonb_typeof(acceptable_transaction_structures_json) = 'array'
-    and not exists (
-      select 1
-      from jsonb_array_elements(acceptable_transaction_structures_json) as structure
-      where jsonb_typeof(structure) <> 'string'
-         or structure #>> '{}' not in ('equity_transfer', 'capital_increase', 'asset_purchase', 'merger', 'other')
-    )
+    and acceptable_transaction_structures_json <@ '["equity_transfer", "capital_increase", "asset_purchase", "merger", "other"]'::jsonb
   );
 
 -- 与 industry_pairs_json 同一模式：闭集多值列建 GIN，下一轮接线时 not_overlap /
