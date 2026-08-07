@@ -42,7 +42,7 @@ from backend.app.jobs.handlers.research import (
 from backend.app.jobs.queue import JobClaim
 from backend.app.registry.indicators import Indicator, indicators_for
 from backend.app.services.industry_taxonomy import list_l1_terms
-from backend.app.services.profile_sections import PROFILE_SECTION_LABELS, load_profile_sections
+from backend.app.services.profile_sections import load_profile_sections, profile_sections_for
 from backend.app.services.research_apply import MONEY_UNIT_MULTIPLIERS, RESEARCH_AGENT_STRUCTURED_FIELDS
 
 # 报告全文进上下文，但不是无限：一份九模块报告正常在几千字，
@@ -252,12 +252,24 @@ def _mapping_context(db: Session, *, report: dict[str, Any]) -> dict[str, Any]:
                     " 该字段只表示公司层面的经营活动现金流量净额（总额）；"
                     "每股经营现金流、元/股等口径不是该字段，必须省略，且不得按股本倒推。"
                 )
+        if indicator.multi_value:
+            # 形状不说清楚，模型看到 allowed_values 就会回一个单值字符串。
+            # 由注册表派生而不是写进提示词正文：下一个闭集列自动获得同样的说明。
+            entry["multi_value"] = True
+            entry["note"] = (
+                "值是数组，元素只能取自 allowed_values；报告不支持任何一个取值时"
+                "省略该字段，不要输出空数组。"
+            )
         fields.append(entry)
 
     return {
         "report": report,
+        # 按实体取，不能用 PROFILE_SECTION_LABELS —— 那是买卖两侧合成的展示表，
+        # 喂给标的的映射节点会带上 intent_scope / intent_financial / intent_deal，
+        # 模型照做，下游再按实体把它们当 unknown_section 丢掉（实测 14 次）。
         "profile_section_catalog": [
-            {"code": code, "label": label} for code, label in PROFILE_SECTION_LABELS.items()
+            {"code": code, "label": label}
+            for code, label, _ in profile_sections_for("seller_target")
         ],
         "writable_fields": fields,
         "industry_l1_terms": list_l1_terms(db),

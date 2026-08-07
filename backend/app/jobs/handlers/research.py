@@ -36,11 +36,12 @@ from backend.app.jobs.handlers.common import (
 )
 from backend.app.jobs.queue import JobClaim
 from backend.app.jobs.retry_policy import is_transient_research_error, research_failure_is_final
+from backend.app.registry.indicators import seller_target_fact_columns
 from backend.app.services.profile_sections import (
     PROFILE_SECTION_CODES,
-    PROFILE_SECTION_LABELS,
     load_profile_sections,
     normalize_profile_section_items,
+    profile_sections_for,
 )
 from backend.app.services.research_apply import (
     CORE_FINANCIAL_FIELDS,
@@ -87,8 +88,14 @@ class ResearchClaimApplySummary:
 class ResearchContentInspectionError(LlmCallError):
     """The model rejected retrieved page text even after safe degradation."""
 
+# 按实体取。PROFILE_SECTION_LABELS 是买卖两侧合成的展示表，拿它当调研的栏目
+# 目录，等于告诉 agent「intent_scope / intent_financial / intent_deal 也是标的
+# 的栏目」—— 它照做，报告带着这些栏目，映射节点原样转发，最后被按实体判定的
+# normalize_profile_section_items 丢掉（实测 14 次）。它还会让
+# _current_profiles_for_prompt 多列 3 个永远「missing」的栏目，反过来诱导模型去填。
 PROFILE_SECTION_CATALOG: list[dict[str, str]] = [
-    {"code": code, "label": label} for code, label in PROFILE_SECTION_LABELS.items()
+    {"code": code, "label": label}
+    for code, label, _ in profile_sections_for("seller_target")
 ]
 
 RESEARCH_TOOLS: list[dict[str, Any]] = [
@@ -309,7 +316,12 @@ def _handle_seller_target_research(db: Session, job: JobClaim) -> dict[str, obje
         "target": _research_target_prompt_view(target),
         "current_profile_sections": _current_profiles_for_prompt(current_profiles),
         "profile_section_catalog": PROFILE_SECTION_CATALOG,
-        "allowed_structured_fields": sorted(RESEARCH_STRUCTURED_FIELDS),
+        # AGENT 版，不是 RESEARCH_STRUCTURED_FIELDS —— 后者含
+        # financial_period_end_date / financial_period_label 两个内部字段，
+        # 由代码从每条 claim 的 period_label 派生。把它们列进「你可以写的字段」，
+        # agent 就会当成普通字段输出，而 normalize_research_output 按
+        # RESEARCH_AGENT_STRUCTURED_FIELDS 过滤，原样丢弃并记 unsupported_field。
+        "allowed_structured_fields": sorted(RESEARCH_AGENT_STRUCTURED_FIELDS),
         "allowed_relations": sorted(RELATION_KINDS),
         "max_tool_calls": MAX_TOOL_ITERATIONS,
     }
@@ -466,7 +478,10 @@ def _handle_seller_target_research(db: Session, job: JobClaim) -> dict[str, obje
         job=job,
         target_id=target_id,
         claims=claims,
-        target_website=target.get("website"),
+        # seller_target 没有官网列（曾经有过 st.website，是它把一次调研整个炸掉的）。
+        # 来源一律按 public_web 归类，除非域名本身是监管/政府站点；
+        # 不从公司名去猜官方域名。与映射路径同一条规则。
+        target_website=None,
     )
     proposal_count = len([claim for claim in claims if claim["proposal_kind"] != "not_found"])
     outcome = "found" if proposal_count else "no_public_information"
@@ -584,6 +599,15 @@ def _prepare_research_claims(
         except ResearchApplyError as exc:
             claim["validation_error"] = str(exc)
             continue
+        new_period: str | None = None
+        if field_path in CORE_FINANCIAL_FIELDS:
+            # 期间要在算 relation 之前补齐：relation 读的就是 as_of_date，
+            # 后面的「同批期间必须一致」校验和落库比较读的也是它。
+            new_period = _claim_financial_period(claim)
+            if new_period is None:
+                claim["validation_error"] = f"{field_path} 缺少合法财务期间截止日。"
+                continue
+            claim["as_of_date"] = new_period
         claim["relation"] = _structured_fact_relation(
             field_path=field_path,
             current_value=current_value,
@@ -591,15 +615,10 @@ def _prepare_research_claims(
             current_period=current_financial_period,
             new_period=claim.get("as_of_date"),
         )
-        if field_path in CORE_FINANCIAL_FIELDS:
-            new_period = _valid_date(claim.get("as_of_date"))
-            if new_period is None:
-                claim["validation_error"] = f"{field_path} 缺少合法财务期间截止日。"
-                continue
-            if current_financial_period and new_period < current_financial_period:
-                claim["validation_error"] = (
-                    f"{field_path} 的期间 {new_period} 早于当前期间 {current_financial_period}，已阻止覆盖。"
-                )
+        if new_period is not None and current_financial_period and new_period < current_financial_period:
+            claim["validation_error"] = (
+                f"{field_path} 的期间 {new_period} 早于当前期间 {current_financial_period}，已阻止覆盖。"
+            )
 
     finance_periods = {
         str(claim.get("as_of_date"))
@@ -1167,14 +1186,19 @@ def research_source_type(url: str, *, target_website: str | None = None) -> str:
 
 
 def _get_research_target(db: Session, target_id: UUID) -> dict[str, Any]:
+    """标的当前事实，用于给 agent 交代「已经知道什么、还缺什么」。
+
+    以前是 12 列手写清单，而 agent 可见可写的结构化字段有 25 个 —— 于是它既不
+    知道库里已有的值（重复检索，token 白花），也不知道哪些字段等着它去填。
+    解析侧 0801 已经把同一个病改成注册表派生（`seller_target_context_columns`），
+    调研侧当时漏了。列名来自注册表不是外部输入，可以安全拼接。
+    """
+    projection = ", ".join(f"st.{column}" for column in seller_target_fact_columns())
     row = db.execute(
         text(
-            """
+            f"""
             select
-              st.id, st.target_name, st.target_subject_name,
-              st.industry_l1, st.industry_l2, st.industry_pairs_json,
-              st.location_province, st.location_city, st.location_district,
-              st.listed_status, st.financial_period_label, st.business_summary
+              st.id, {projection}
             from seller_target st
             where st.id = :target_id
               and st.team_id = :team_id
@@ -1379,6 +1403,21 @@ def _valid_date(value: Any) -> str | None:
         return date.fromisoformat(raw).isoformat()
     except ValueError:
         return None
+
+
+def _claim_financial_period(claim: dict[str, Any]) -> str | None:
+    """核心财务 claim 的期间截止日：先看 as_of_date，再退到 period_label。
+
+    两个提示词都强制要求「每个数字必须同时给出 period_label」，但 as_of_date 是
+    "YYYY-MM-DD or null"。实测出现过模型只给 period_label 的一整批财务字段，
+    六个指标一起被判「缺少合法财务期间截止日」丢掉 —— 而 2024年度 折算成
+    2024-12-31 是这个函数本来就会做的事，只是以前只用在库里的当前值上。
+
+    推不出来仍然返回 None：期间不明的财务数字不能进比较，更不能覆盖已有值。
+    """
+    return _valid_date(claim.get("as_of_date")) or _financial_period_from_label(
+        claim.get("period_label")
+    )
 
 
 def _financial_period_from_label(value: Any) -> str | None:
