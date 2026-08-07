@@ -38,6 +38,52 @@
 
 **「同批核心财务期间必须一致」这条校验不动** —— 回退发生在它之前，推出来的日期照样参与一致性检查。
 
+> **0807 修订**：本节两条结论都被生产实测推翻了，实际形态见 §1.3b。回退不够，得改成标签优先；一致性校验也不能不动。
+
+### 1.3b 期间：标签优先 + 主期间收敛（0807 追加）
+
+判据是 2026-08-07 对「浙江水晶光电科技股份有限公司」的一次真实调研：**五个核心财务字段全被拒**，
+标的的营收、净利润、经营现金流、总资产、资产负债率全空，数字只以散文留在「经营质量」栏目里。
+拒绝理由 `同批核心财务指标期间不一致：2024-06-30, 2024-12-31, 2025-04-10`。
+
+| 字段 | period_label | as_of_date | 摘录 |
+|---|---|---|---|
+| current_revenue_yuan | 2024年度 | **2025-04-10** | 「2025年4月10日，水晶光电发布2024年年报，营业总收入为62.78亿元」 |
+| current_net_profit_yuan | 2024年度 | **2025-04-10** | 同上 |
+| current_operating_cash_flow_yuan | 2024年度 | **2025-04-10** | 同上 |
+| current_assets_yuan | 2024年度 | 2024-12-31 | 正确 |
+| current_debt_ratio | 2024**半年度** | 2024-06-30 | 取自半年报，本来就是另一期 |
+
+两个独立缺陷，任何一个单独存在都足以清空这批数据：
+
+**（a）`as_of_date` 被填成公告日。** §1.3 的回退只在 `as_of_date` 缺失或非 ISO 时触发，
+而 `2025-04-10` 是合法 ISO 日期，回退根本没机会跑。改为 **`period_label` 优先**：
+标签是「这个数字属于哪一期」的语义陈述，日期格只是个格子；两者矛盾时错的一定是格子，
+何况 `financial_period_label` 落库用的就是标签，让它俩自相矛盾没有意义。
+标签解析不出来（「最近一期」）才退回 `as_of_date`。
+
+配套加**未来期间守卫** `_reported_period`：标签优先之后，「2026年度」在 2026 年 8 月会被折算成
+2026-12-31，一旦落库，此后任何真实期间都会撞上「不许旧期覆盖新期」，这一行被永久锁死。
+已披露的财务期间不可能在未来，超过今天的一律不认。
+
+**（b）整批作废改为主期间收敛。** 一行只能挂一个 `financial_period_end_date`，
+所以同批必须收敛到一个期间 —— 这个前提没错，错的是「发现两个期间就全杀」：
+上表里一个次要指标取自半年报，就带走了四个来自年报的核心数字。
+改为**取最新的那一期为主期间**，落选的逐条拒绝并写明它属于哪一期。
+同一次调研在新规则下会写入年报的四项，只拒资产负债率一项 ——
+这也是正确结论：半年报的负债率不是年报的负债率。
+
+按新旧选而不是按「哪一期覆盖字段多」选，是因为**批内批外必须同一套规则**：
+单条 claim 的「不许旧期覆盖新期」守卫就是按新旧判的。若批内按数量判，
+某行先按数量写进年报那一期之后，下一轮拿到新一期的少数几个指标时，
+行级守卫放行、批内规则却判它「不是主期间」，**这一行就永久锁死在旧期**。
+代价是承认的：新一期只有零星指标时，会挤掉旧一期更完整的一组。
+映射提示词的规则 9 已经要求模型「选最新的**完整**报告期、有更新的零散数据也优先取完整年报」，
+这个代价由上游来避免；代码只保证不会出现自相矛盾的两套新旧判据。
+
+回归在 `tests/test_research_context_and_periods.py`，其中
+`test_one_stray_period_no_longer_takes_the_whole_batch_down` 用的就是上表五条 claim 的原始形态。
+
 ### 1.4 调研 Agent 的标的视图改注册表派生（P1-4）
 
 `backend/app/jobs/handlers/research.py` 的 `_get_research_target`：12 列手写投影改为从注册表派生，与解析侧 `seller_target_context_columns()` 同一个做法。
@@ -50,9 +96,12 @@ agent 因此能看到库里已有什么、缺什么，也能看到本轮新增�
 
 **保存后必须回读一次，确认中文没有被替换成 `?`** —— 生产上两个提示词的尾段各有 199 / 若干个问号，就是这么来的。验收项见 §四。
 
-### 2.1 `seller_target_researcher` → v0.6.0
+### 2.1 `seller_target_researcher` → v0.6.1
 
 System 不变。User 模板整段替换为：
+
+> **v0.6.1（0807）**：只改了 `as_of_date` 的定义（输出结构里两处 + 规则 4）并新增规则 4b。
+> 已经发过 v0.6.0 的，可以只改这三处；下面是含改动的全文。判据见 §1.3b。
 
 ````
 Research context JSON:
@@ -67,7 +116,7 @@ Return exactly one JSON object of this shape:
       "content_text": "<qualitative description, Chinese>",
       "sources": ["https://..."],
       "source_excerpt": "<verbatim substring of the cited page>",
-      "as_of_date": "YYYY-MM-DD or null",
+      "as_of_date": "<END DATE of the reporting period, YYYY-MM-DD, or null>",
       "period_label": "<e.g. 2024年度, or null>"
     }
   ],
@@ -77,7 +126,7 @@ Return exactly one JSON object of this shape:
       "value": "<value>",
       "sources": ["https://..."],
       "source_excerpt": "<verbatim substring>",
-      "as_of_date": "YYYY-MM-DD or null",
+      "as_of_date": "<END DATE of the reporting period, YYYY-MM-DD, or null>",
       "period_label": "<or null>"
     }
   ]
@@ -92,8 +141,15 @@ Rules:
    supplied in the context.
 3. Omit a section entirely when the evidence does not support it. Do not fill
    it with "暂无相关信息" or similar.
-4. Separate different periods with `as_of_date` / `period_label`. If sources
-   conflict, report both with their own periods and quotes.
+4. `as_of_date` is the END DATE OF THE REPORTING PERIOD — never the date the
+   report was published, the announcement was made, or the article was written.
+   2024年度 → 2024-12-31; 2024年半年度 → 2024-06-30; 2025年三季度 → 2025-09-30.
+   "2025年4月10日发布2024年年报，营业总收入62.78亿元" is a 2024-12-31 figure,
+   not a 2025-04-10 one. Always give `period_label` alongside it, and make the
+   two agree. If sources conflict, report both with their own periods and quotes.
+4b. 营业收入、净利润、利润总额、总资产、资产负债率、经营性现金流这六项要尽量取自
+   **同一个报告期**（同一份定期报告）。同一期取不到的宁可省略 —— 一个标的只能
+   记录一个财务期间，混期的那一项不会被采纳。
 5. Company websites can support products and technical capability claims;
    ranking or market-leader claims need regulatory, government or independent
    authoritative evidence.
@@ -202,7 +258,7 @@ current_operating_cash_flow_yuan 只表示公司层面的「经营活动产生�
 
 **相对 v0.5.0 的改动**：M0 加股票代码；M1 加主要产品并划清与 `business_summary` 的界；M2 删「经营稳定性」（该字段已随迁移 `015` 判死）；M5 从「汇总进 risk_summary」改成枚举 + 明细两样都要，并写死三态语义；新增「经营现金流的口径」一节（**替换掉原来那段 199 个问号**）；禁查清单补「可接受交易结构」。
 
-### 2.2 `seller_target_research_mapper` → v0.4.0
+### 2.2 `seller_target_research_mapper` → v0.4.1
 
 System 不变。User 模板的规则 1–12 原样保留，**把坏掉的第 13、14 条替换成**：
 
@@ -218,6 +274,27 @@ System 不变。User 模板的规则 1–12 原样保留，**把坏掉的第 13�
     的 `allowed_values[].value`。报告没有支持任何一个取值时省略该字段，
     不要输出空数组。
 ````
+
+#### 2.2b v0.4.1（0807）——补 `as_of_date` 的定义
+
+v0.4.0 的规则 9、10 已经要求「六项核心财务取自同一期、`as_of_date` 与 `period_label` 都一致」，
+模型照样交出了三个不同的 `as_of_date`（而 `period_label` 四条都对）。原因是整份提示词里
+**从没说过 `as_of_date` 是什么**，只写了 `"YYYY-MM-DD or null"`；模型于是填成了原文里出现的
+那个日期 —— 年报发布日。规则再严也管不住一个没有定义的字段。
+
+在规则 10 之后插入：
+
+````
+10b. `as_of_date` is the END DATE of that reporting period, never the date the
+     report was published, the announcement was made, or the article was
+     written. 2024年度 → 2024-12-31; 2024年半年度 → 2024-06-30;
+     2025年三季度 → 2025-09-30. A sentence like "2025年4月10日发布2024年年报，
+     营业总收入62.78亿元" carries as_of_date 2024-12-31 and period_label
+     2024年度 — not 2025-04-10.
+````
+
+代码侧已经不再依赖模型答对这个（`period_label` 优先，见 §1.3b），这条只是把上游也修正，
+少一次无谓的拒绝。
 
 ---
 

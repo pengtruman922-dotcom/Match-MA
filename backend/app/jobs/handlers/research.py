@@ -620,18 +620,33 @@ def _prepare_research_claims(
                 f"{field_path} 的期间 {new_period} 早于当前期间 {current_financial_period}，已阻止覆盖。"
             )
 
-    finance_periods = {
-        str(claim.get("as_of_date"))
+    # 一行只能挂一个 financial_period_end_date，所以同批核心财务必须收敛到一个
+    # 期间。以前的做法是发现两个期间就整批作废 —— 实测里一个次要指标取自半年报
+    # （2024-06-30），就带走了同批四个来自年报的核心数字，标的的营收利润全空。
+    # 改成选主期间，取**最新**的那一期，落选的逐条拒绝并写明它属于哪一期；
+    # 顾问在建议卡上看到的是具体原因，不再是一句集体判词。
+    #
+    # 为什么按新旧而不是按「哪一期覆盖的字段多」：上面那条「不许旧期覆盖新期」
+    # 就是按新旧判的，批内批外必须同一套规则。按字段多寡选会把行永久锁在旧期 ——
+    # 先按数量写进年报那一期之后，下一轮拿到新一期的少数几个指标，行级守卫放行、
+    # 批内规则却判它「不是主期间」，这一行再也走不到新一期。
+    finance_claims = [
+        claim
         for claim in structured
         if claim.get("field_path") in CORE_FINANCIAL_FIELDS
         and not claim.get("validation_error")
         and claim.get("as_of_date")
-    }
-    if len(finance_periods) > 1:
-        message = f"同批核心财务指标期间不一致：{', '.join(sorted(finance_periods))}。"
-        for claim in structured:
-            if claim.get("field_path") in CORE_FINANCIAL_FIELDS:
-                claim["validation_error"] = message
+    ]
+    periods = {str(claim["as_of_date"]) for claim in finance_claims}
+    if len(periods) > 1:
+        dominant = max(periods)
+        for claim in finance_claims:
+            period = str(claim["as_of_date"])
+            if period != dominant:
+                claim["validation_error"] = (
+                    f"{claim.get('field_path')} 的期间 {period} 早于本批主期间 {dominant}，"
+                    "已单独拒绝（一个标的只能记录一个财务期间）。"
+                )
     return prepared
 
 
@@ -1406,18 +1421,34 @@ def _valid_date(value: Any) -> str | None:
 
 
 def _claim_financial_period(claim: dict[str, Any]) -> str | None:
-    """核心财务 claim 的期间截止日：先看 as_of_date，再退到 period_label。
+    """核心财务 claim 的期间截止日：先认 period_label，再退到 as_of_date。
 
-    两个提示词都强制要求「每个数字必须同时给出 period_label」，但 as_of_date 是
-    "YYYY-MM-DD or null"。实测出现过模型只给 period_label 的一整批财务字段，
-    六个指标一起被判「缺少合法财务期间截止日」丢掉 —— 而 2024年度 折算成
-    2024-12-31 是这个函数本来就会做的事，只是以前只用在库里的当前值上。
+    period_label 是「这个数字属于哪一期」的语义陈述，as_of_date 只是一个日期格。
+    映射提示词把后者写成 "YYYY-MM-DD or null" 而没说它是期间截止日，模型于是
+    经常填成公告日/报道日 —— 实测水晶光电一次调研里，营收、净利润、经营现金流
+    三项的 period_label 都是「2024年度」，as_of_date 却都是 2025-04-10，
+    因为摘录原文是「2025年4月10日…发布2024年年报」。合法 ISO 日期让旧的
+    as_of_date 优先顺序绕过了 period_label，同批凑出三个期间，五个字段全废。
+
+    标签能解析出来就以标签为准：两者不一致时错的一定是日期格，而且
+    financial_period_label 落库用的也是标签，让它俩自相矛盾没有意义。
 
     推不出来仍然返回 None：期间不明的财务数字不能进比较，更不能覆盖已有值。
     """
-    return _valid_date(claim.get("as_of_date")) or _financial_period_from_label(
-        claim.get("period_label")
-    )
+    return _reported_period(
+        _financial_period_from_label(claim.get("period_label"))
+    ) or _reported_period(_valid_date(claim.get("as_of_date")))
+
+
+def _reported_period(value: str | None) -> str | None:
+    """已披露的财务期间不可能在未来。
+
+    标签优先之后这条是必须的：「2026年度」在 2026 年 8 月会被折算成 2026-12-31，
+    一旦落库，后续任何真实期间都会撞上「不许旧期覆盖新期」而永久写不进来。
+    """
+    if value is None or value > date.today().isoformat():
+        return None
+    return value
 
 
 def _financial_period_from_label(value: Any) -> str | None:

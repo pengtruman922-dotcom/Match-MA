@@ -135,11 +135,39 @@ def _finance_claim(field_path: str, value: int, **overrides) -> dict:
 def test_period_label_backfills_a_missing_machine_date() -> None:
     assert _claim_financial_period({"as_of_date": None, "period_label": "2024年度"}) == "2024-12-31"
     assert _claim_financial_period({"as_of_date": "", "period_label": "2025年三季度"}) == "2025-09-30"
-    # 已有合法 ISO 日期时不动它。
-    assert _claim_financial_period({"as_of_date": "2025-06-30", "period_label": "2024年度"}) == "2025-06-30"
     # 推不出来仍然是 None：期间不明的财务数字不能进比较，更不能覆盖已有值。
     assert _claim_financial_period({"as_of_date": None, "period_label": "最近一期"}) is None
     assert _claim_financial_period({"as_of_date": None, "period_label": None}) is None
+
+
+def test_a_parseable_label_outranks_a_contradicting_machine_date() -> None:
+    """水晶光电那次的单元级复现：as_of_date 填的是年报**发布日**。
+
+    摘录原文「2025年4月10日，水晶光电发布2024年年报，营业总收入为62.78亿元」，
+    模型把 2025-04-10 填进了 as_of_date。它是合法 ISO 日期，所以旧的
+    「as_of_date 优先」顺序直接采信，同批凑出三个期间，五个财务字段全废。
+    """
+    assert (
+        _claim_financial_period({"as_of_date": "2025-04-10", "period_label": "2024年度"})
+        == "2024-12-31"
+    )
+    # 标签解析不出来时，日期格仍然是唯一线索。
+    assert (
+        _claim_financial_period({"as_of_date": "2025-06-30", "period_label": "最近一期"})
+        == "2025-06-30"
+    )
+
+
+def test_a_period_in_the_future_is_not_a_reported_period() -> None:
+    # 标签优先之后必须挡这个：未来期间一旦落库，「不许旧期覆盖新期」会让此后
+    # 任何真实期间都写不进来，把这一行永久锁死。
+    assert _claim_financial_period({"as_of_date": None, "period_label": "2099年度"}) is None
+    assert _claim_financial_period({"as_of_date": "2099-12-31", "period_label": None}) is None
+    # 挡掉的是标签，不是整条 claim：日期格给了合法的过去期间就用它。
+    assert (
+        _claim_financial_period({"as_of_date": "2025-12-31", "period_label": "2099年度"})
+        == "2025-12-31"
+    )
 
 
 def test_a_whole_financial_snapshot_survives_when_only_period_label_is_given() -> None:
@@ -166,16 +194,66 @@ def test_backfilled_period_still_faces_the_older_period_guard() -> None:
     assert "早于当前期间" in claims[0]["validation_error"]
 
 
-def test_backfilled_period_still_faces_the_mixed_period_guard() -> None:
+def test_one_stray_period_no_longer_takes_the_whole_batch_down() -> None:
+    """水晶光电那次的整批复现，用的就是生产里的五条 claim。
+
+    三条年报数字带着发布日 2025-04-10，总资产带 2024-12-31，资产负债率取自
+    半年报。旧规则数出三个期间 → 五个字段一起作废，标的的营收利润全空。
+    """
+    claims = _prepare_research_claims(
+        _RecordingDb({"financial_period_end_date": None}),
+        target_id=UUID("11111111-1111-1111-1111-111111111111"),
+        claims=[
+            _finance_claim("current_revenue_yuan", 6278000000, as_of_date="2025-04-10", period_label="2024年度"),
+            _finance_claim("current_net_profit_yuan", 1030000000, as_of_date="2025-04-10", period_label="2024年度"),
+            _finance_claim("current_operating_cash_flow_yuan", 1787000000, as_of_date="2025-04-10", period_label="2024年度"),
+            _finance_claim("current_assets_yuan", 11680000000, as_of_date="2024-12-31", period_label="2024年度"),
+            # 负债率在生产里是个百分号字符串，不是 {value, unit}。
+            {
+                "proposal_kind": "structured_fact",
+                "field_path": "current_debt_ratio",
+                "value": "17.22%",
+                "relation": "supplement",
+                "as_of_date": "2024-06-30",
+                "period_label": "2024年半年度",
+            },
+        ],
+    )
+    by_field = {claim["field_path"]: claim for claim in claims}
+    kept = {field: claim for field, claim in by_field.items() if not claim.get("validation_error")}
+    assert set(kept) == {
+        "current_revenue_yuan",
+        "current_net_profit_yuan",
+        "current_operating_cash_flow_yuan",
+        "current_assets_yuan",
+    }
+    assert {claim["as_of_date"] for claim in kept.values()} == {"2024-12-31"}
+    # 落选的那条要说清楚它属于哪一期、主期间是哪一期。
+    rejected = by_field["current_debt_ratio"]["validation_error"]
+    assert "2024-06-30" in rejected and "2024-12-31" in rejected
+
+
+def test_the_newest_period_wins_even_when_an_older_one_covers_more_fields() -> None:
+    """主期间按新旧选，不按覆盖字段多寡选。
+
+    代价是明摆着的：这里丢掉两个 2024 年度的指标，只留一个 2025 三季度的。
+    但按数量选会把这一行永久锁在旧期 —— 单条 claim 的「不许旧期覆盖新期」
+    守卫是按新旧判的，行级放行、批内以「不是主期间」拒掉，行就再也走不动了。
+    批内批外必须同一套规则。
+    """
     claims = _prepare_research_claims(
         _RecordingDb({"financial_period_end_date": None}),
         target_id=UUID("11111111-1111-1111-1111-111111111111"),
         claims=[
             _finance_claim("current_revenue_yuan", 120, as_of_date=None, period_label="2024年度"),
-            _finance_claim("current_net_profit_yuan", 12, as_of_date=None, period_label="2025年三季度"),
+            _finance_claim("current_net_profit_yuan", 12, as_of_date=None, period_label="2024年度"),
+            _finance_claim("current_assets_yuan", 900, as_of_date=None, period_label="2025年三季度"),
         ],
     )
-    assert all("期间不一致" in claim["validation_error"] for claim in claims)
+    by_field = {claim["field_path"]: claim for claim in claims}
+    assert not by_field["current_assets_yuan"].get("validation_error")
+    assert "2025-09-30" in by_field["current_revenue_yuan"]["validation_error"]
+    assert "2025-09-30" in by_field["current_net_profit_yuan"]["validation_error"]
 
 
 def test_a_period_that_cannot_be_derived_is_still_rejected() -> None:

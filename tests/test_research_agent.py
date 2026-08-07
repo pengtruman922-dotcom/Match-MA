@@ -152,6 +152,8 @@ def test_financial_guard_blocks_older_and_mixed_period_claims() -> None:
     )
     assert "早于当前期间" in older[0]["validation_error"]
 
+    # 混期不再整批作废：一行只能挂一个财务期间，所以收敛到最新的那一期，
+    # 落选的单独拒绝。判据见 平台优化方案/标的调研Agent优化施工单0806.md §1.3b。
     mixed = _prepare_research_claims(
         _CurrentFactsDb({**current, "financial_period_end_date": date(2024, 12, 31)}),
         target_id=UUID("11111111-1111-1111-1111-111111111111"),
@@ -160,7 +162,9 @@ def test_financial_guard_blocks_older_and_mixed_period_claims() -> None:
             _finance_claim("current_net_profit_yuan", 12, "2025-09-30"),
         ],
     )
-    assert all("期间不一致" in claim["validation_error"] for claim in mixed)
+    by_field = {claim["field_path"]: claim for claim in mixed}
+    assert not by_field["current_revenue_yuan"].get("validation_error")
+    assert "2025-12-31" in by_field["current_net_profit_yuan"]["validation_error"]
 
 
 def test_financial_guard_uses_legacy_display_period_until_machine_date_exists() -> None:
