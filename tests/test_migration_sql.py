@@ -211,3 +211,59 @@ def test_splitter_handles_anonymous_and_nested_looking_dollar_tags() -> None:
     assert len(statements) == 2
     assert statements[0] == "do $$ begin perform 1; end $$"
     assert statements[1] == "select $tag$ ; not a split $tag$"
+
+
+def _accepted_before(column: str, migration: Path) -> set[str] | None:
+    """在 `migration` 之前，DB 对该列的 check 约束接受哪些取值。
+
+    None 表示这一列在此之前没有取值型约束（只有 jsonb_typeof 之类的形状约束）。
+    """
+    latest: set[str] | None = None
+    for path in sorted(MIGRATIONS_DIR.glob("0*.sql")):
+        if path.name >= migration.name:
+            break
+        found = re.findall(
+            r"check\s*\([^;]*?(?<![a-z_])" + re.escape(column)
+            + r"\s*(?:=\s*any\s*\(array\[(.*?)\]\)|in\s*\((.*?)\))",
+            path.read_text(encoding="utf-8"),
+            re.S | re.I,
+        )
+        if found:
+            latest = {value for a, b in found for value in re.findall(r"'([a-z_]+)'", a or b)}
+    return latest
+
+
+def test_data_written_before_a_constraint_rebuild_fits_the_old_constraint() -> None:
+    """改数据排在 drop constraint 之前时，写的值必须是旧约束还认的。
+
+    否则 UPDATE 会撞上尚未删除的旧约束，迁移中止 —— Railway 的
+    preDeployCommand 因此阻断整次部署。016 就是这么挂过一次：它先把
+    002273.SZ 那一行的 listing_market_region 改成 'szse'，而表上还挂着
+    只认 domestic / overseas / unknown 的旧约束。
+
+    只看顺序会误报：011 在 drop 之前把 preferred_listed_status 改成
+    'pre_ipo'，那是旧约束本来就接受的值，安全。所以判据是取值不是顺序。
+
+    这类错误本地跑不出来（没有 Postgres），只能靠静态检查挡住。
+    """
+    constraint_pattern = re.compile(r"add constraint (\w+)\s+check \((.*?)\n\s*\)\s*[;,]", re.S)
+    update_pattern = re.compile(r"\bset\s+([a-z_][a-z_0-9]*)\s*=(.*?);", re.S)
+    for path in sorted(MIGRATIONS_DIR.glob("0*.sql")):
+        sql = path.read_text(encoding="utf-8")
+        for added in constraint_pattern.finditer(sql):
+            name, body = added.group(1), added.group(2)
+            dropped = re.search(r"drop constraint if exists " + name + r"\b", sql)
+            if dropped is None:
+                continue
+            for update in update_pattern.finditer(sql):
+                column = update.group(1)
+                if column not in body or update.start() > dropped.start():
+                    continue
+                accepted = _accepted_before(column, path)
+                if accepted is None:
+                    continue
+                written = set(re.findall(r"'([a-z_]+)'", update.group(2)))
+                assert written <= accepted, (
+                    f"{path.name}：{column} 在 drop constraint {name} 之前就被写成 "
+                    f"{sorted(written - accepted)}，旧约束不接受这些值"
+                )

@@ -10,6 +10,15 @@
 -- 维度从未触发过），标的侧 70 个里 16 个有值且全部是 domestic、0 个 overseas。
 -- 这一对指标在生产里完全空转，换枚举零数据损失。
 --
+-- 顺序：先删旧约束，再改数据，最后加新约束。
+-- 反过来写会直接炸：旧约束只认 domestic/overseas/unknown，UPDATE 刚写下
+-- 'szse' 就撞上它（002273.SZ 那一行），整次 preDeploy 迁移中止、部署阻断。
+alter table seller_target
+  drop constraint if exists chk_seller_target_listing_market_region;
+
+alter table buyer_intent
+  drop constraint if exists chk_buyer_intent_listing_market_region;
+
 -- domestic 反推不出具体交易所，只能置空；但股票代码后缀能直接判定，
 -- 能推的先推 —— 可推导的数据不该因为一次枚举变更就丢掉。
 update seller_target
@@ -28,9 +37,6 @@ set listing_market_region = null
 where listing_market_region is not null;
 
 alter table seller_target
-  drop constraint if exists chk_seller_target_listing_market_region;
-
-alter table seller_target
   add constraint chk_seller_target_listing_market_region
   check (
     listing_market_region is null
@@ -38,9 +44,6 @@ alter table seller_target
       'sse', 'szse', 'bse', 'hkex', 'nyse', 'nasdaq', 'other', 'unknown'
     )
   );
-
-alter table buyer_intent
-  drop constraint if exists chk_buyer_intent_listing_market_region;
 
 alter table buyer_intent
   add constraint chk_buyer_intent_listing_market_region
