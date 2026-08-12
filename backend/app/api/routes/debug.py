@@ -539,7 +539,7 @@ BUSINESS_OBJECT_SELECTS = {
           valuation_yuan, asking_price_yuan, pe_ratio, is_for_sale,
           can_control, can_consolidate, accepts_minority_investment,
           transfer_ratio_min, transfer_ratio_max, transfer_ratio_text,
-          transfer_flexibility_type, business_summary, transaction_summary,
+          business_summary, transaction_summary,
           risk_summary, gap_summary, created_at::text as created_at,
           updated_at::text as updated_at, metadata_json
         from seller_target

@@ -10,8 +10,24 @@ from backend.app.db import get_db
 from backend.app.registry.indicators import groups_for, indicators_for
 from backend.app.registry.nodes import must_configure_node_names, retired_node_names
 from backend.app.services.ocr_provider import ocr_provider_status
+from backend.app.services.profile_sections import PROFILE_SECTION_HINTS, PROFILE_SECTION_LABELS
 
 router = APIRouter(prefix="/meta", tags=["meta"])
+
+
+def _section_label(section_code: str | None, group_label: str) -> str | None:
+    """补充栏的标题：栏名自带信息时用栏名，只是组名的复述时退回「其他」。
+
+    「产业优势」栏在「业务与产品」组下，栏名说清了该写什么，直接当标题。
+    「身份与地区」栏、买家侧的「行业与地区·其他」栏都是组名的复述，
+    在组里再显示一遍等于没说。
+    """
+    if section_code is None:
+        return None
+    label = PROFILE_SECTION_LABELS.get(section_code)
+    if not label or label.startswith(group_label):
+        return "其他"
+    return label
 
 
 @router.get("/indicators")
@@ -25,7 +41,16 @@ def list_indicators(entity: str = "seller_target") -> dict[str, Any]:
     indicators = indicators_for(entity)
     return {
         "groups": [
-            {"key": group.key, "label": group.label, "section_code": group.section_code}
+            {
+                "key": group.key,
+                "label": group.label,
+                "section_code": group.section_code,
+                # 补充栏的标题。默认「其他」，但栏目有专名时用专名 ——
+                # 「产业优势」这种有明确对象的栏目，叫「其他」等于没告诉顾问该写什么，
+                # 内容就会随机落到别的栏里去（实测水晶光电的产业地位落在了技术与团队栏）。
+                "section_label": _section_label(group.section_code, group.label),
+                "section_hint": PROFILE_SECTION_HINTS.get(group.section_code or ""),
+            }
             for group in groups_for(entity)
         ],
         "indicators": [

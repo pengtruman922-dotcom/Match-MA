@@ -46,14 +46,14 @@ def test_claims_without_a_source_url_are_dropped() -> None:
         {
             "profile_sections": [
                 _profile_claim(),
-                _profile_claim(section_code="tech_team", content_text="行业第一", sources=[]),
+                _profile_claim(section_code="ops_quality", content_text="行业第一", sources=[]),
             ]
         }
     )
 
     assert [claim["section_code"] for claim in claims] == ["business_product"]
     assert claims[0]["sources"] == ["https://www.szse.cn/disclosure/a"]
-    assert any("tech_team:missing_sources" in note for note in notes)
+    assert any("ops_quality:missing_sources" in note for note in notes)
 
 
 def test_field_level_excerpt_survives_normalization() -> None:
@@ -248,7 +248,7 @@ def test_relation_is_decided_by_code_against_the_current_revision() -> None:
     """画像文本只认空值补充与文字完全一致，日期不改变冲突结论。"""
     current = {
         "business_product": {"content_text": "旧的业务描述", "as_of_date": "2024-12-31"},
-        "tech_team": {"content_text": "团队自研", "as_of_date": None},
+        "identity": {"content_text": "实控人为创始人", "as_of_date": None},
         "ops_quality": {"content_text": "旧的经营描述", "as_of_date": "2024-12-31"},
     }
     claims, _ = normalize_research_output(
@@ -257,7 +257,7 @@ def test_relation_is_decided_by_code_against_the_current_revision() -> None:
                 # 即使日期更新，文字不同仍由顾问确认
                 _profile_claim(content_text="新的业务描述", as_of_date="2025-12-31"),
                 # 内容与在档的一字不差 → 一致
-                _profile_claim(section_code="tech_team", content_text="团队自研"),
+                _profile_claim(section_code="identity", content_text="实控人为创始人"),
                 # 同一期却说得不一样 → 冲突，需要人看一眼
                 _profile_claim(section_code="ops_quality", content_text="客户集中", as_of_date="2024-12-31"),
                 # 在档没有内容 → 补充
@@ -269,7 +269,7 @@ def test_relation_is_decided_by_code_against_the_current_revision() -> None:
 
     assert [(claim["section_code"], claim["relation"]) for claim in claims] == [
         ("business_product", "same_period_conflict"),
-        ("tech_team", "consistent"),
+        ("identity", "consistent"),
         ("ops_quality", "same_period_conflict"),
         ("deal_terms", "supplement"),
     ]

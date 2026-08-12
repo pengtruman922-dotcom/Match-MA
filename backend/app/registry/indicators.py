@@ -41,10 +41,13 @@ class Indicator:
     editor: str | None = None
 
 
+# 「技术与团队」解散于 2026-08-07：全库 70 个标的里团队可留任 3 个、管理团队 0 个，
+# 而它的两个字段说的其实是「交易能力」不是「技术」—— 团队可留任的买家对手方
+# requires_team_retention 就在买家的「交易与能力要求」模块里。字段归位到 deal_terms，
+# 该栏的画像内容（产能、资质、技术路线）并入产业优势。
 GROUPS: tuple[IndicatorGroup, ...] = (
     IndicatorGroup("identity", "身份与地区", "identity"),
     IndicatorGroup("business_product", "业务与产品", "business_product"),
-    IndicatorGroup("tech_team", "技术与团队", "tech_team"),
     IndicatorGroup("ops_quality", "经营质量", "ops_quality"),
     IndicatorGroup("deal_terms", "交易属性与出售诉求", "deal_terms"),
 )
@@ -98,14 +101,21 @@ _TRANSACTION_STRUCTURES = (
     ("merger", "吸收合并"),
     ("other", "其他"),
 )
-_TRANSFER_FLEXIBILITY = (
-    ("control_available", "可控股"), ("consolidation_available", "可并表"),
-    ("minority_available", "可少数股权"), ("full_sale_available", "可整体出售"),
-    ("flexible", "可协商"), ("specific_range", "有明确范围"), ("unknown", "未知"),
-)
 _PE_SOURCE = (("user_input", "人工录入"), ("document", "文件"), ("calculated", "计算"), ("research", "调研"), ("unknown", "未知"))
-_EARNOUT = (("none", "无"), ("low", "低"), ("medium", "中"), ("high", "高"), ("unknown", "未知"))
-_MARKET_REGION = (("domestic", "境内"), ("overseas", "境外"), ("unknown", "未知"))
+# 上市地：2026-08-07 从「境内/境外」换成具体交易所。旧枚举在生产里完全空转 ——
+# 买家侧 44 个需求全是 NULL，标的侧 16 个有值且全部 domestic，只有一个取值在用。
+# 列名仍叫 listing_market_region（改名要动 25 处，而列名不出现在界面上）。
+# `unknown` 与 NULL 不同：前者是「查过但不确定在哪上市」，后者是「没查过」。
+_LISTING_EXCHANGE = (
+    ("sse", "上交所"),
+    ("szse", "深交所"),
+    ("bse", "北交所"),
+    ("hkex", "港交所"),
+    ("nyse", "纽交所"),
+    ("nasdaq", "纳斯达克"),
+    ("other", "其他"),
+    ("unknown", "未知"),
+)
 _REQUIREMENT_STRENGTH = (
     ("required", "必须满足"),
     ("preferred", "优先满足"),
@@ -130,9 +140,6 @@ SELLER_TARGET_INDICATORS: tuple[Indicator, ...] = (
     # 文本 + 深评。买家侧对手方是已存在的 industry_focus_tags_json（语义配对）。
     # 不塞进 business_summary：后者有 300 字上限，塞进去会被截断。
     Indicator("main_products_text", "主要产品", "business_product", "text", writable_by=_BOTH_MANUAL),
-    # 技术与团队
-    Indicator("management_retention_possible", "团队可留任", "tech_team", "enum", screening=True, writable_by=_PARSE_MANUAL, enum_options=_YES_NO_LIKE),
-    Indicator("management_team_summary", "管理团队", "tech_team", "text", writable_by=_MANUAL),
     # 经营质量
     Indicator("current_revenue_yuan", "营收", "ops_quality", "yuan", screening=True, writable_by=_ALL),
     Indicator("current_net_profit_yuan", "净利润", "ops_quality", "yuan", screening=True, writable_by=_ALL),
@@ -153,7 +160,7 @@ SELLER_TARGET_INDICATORS: tuple[Indicator, ...] = (
     # 交易属性
     Indicator("listed_status", "上市状态", "deal_terms", "enum", screening=True, writable_by=_BOTH_MANUAL, enum_options=_LISTED_STATUS),
     Indicator("stock_code", "股票代码", "deal_terms", "text", writable_by=_BOTH_MANUAL),
-    Indicator("listing_market_region", "上市地", "deal_terms", "enum", screening=True, writable_by=_MANUAL | _RESEARCH, enum_options=_MARKET_REGION),
+    Indicator("listing_market_region", "上市地", "deal_terms", "enum", screening=True, writable_by=_MANUAL | _RESEARCH, enum_options=_LISTING_EXCHANGE),
     Indicator("market_cap_yuan", "市值", "deal_terms", "yuan", screening=True, writable_by=_ALL),
     Indicator("valuation_yuan", "估值", "deal_terms", "yuan", screening=True, writable_by=_ALL),
     Indicator("valuation_date", "估值时间", "deal_terms", "date", writable_by=_ALL),
@@ -165,14 +172,14 @@ SELLER_TARGET_INDICATORS: tuple[Indicator, ...] = (
     Indicator("transfer_ratio_min", "出售比例", "deal_terms", "ratio", screening=True, writable_by=_PARSE_MANUAL),
     Indicator("transfer_ratio_max", "出售比例上限", "deal_terms", "ratio", writable_by=_PARSE_MANUAL, fold_into="transfer_ratio_min"),
     Indicator("transfer_ratio_text", "出售比例说明", "deal_terms", "text", writable_by=_PARSE_MANUAL, fold_into="transfer_ratio_min"),
-    Indicator("transfer_flexibility_type", "转让灵活度", "deal_terms", "enum", writable_by=_PARSE_MANUAL, enum_options=_TRANSFER_FLEXIBILITY),
     Indicator("can_control", "可控股", "deal_terms", "enum", screening=True, writable_by=_PARSE_MANUAL, enum_options=_YES_NO_LIKE),
     Indicator("can_consolidate", "可并表", "deal_terms", "enum", screening=True, writable_by=_PARSE_MANUAL, enum_options=_YES_NO_LIKE),
     Indicator("accepts_minority_investment", "接受少数股权", "deal_terms", "enum", writable_by=_PARSE_MANUAL, enum_options=_YES_NO_LIKE),
-    Indicator("consolidation_path_summary", "并表路径", "deal_terms", "text", writable_by=_MANUAL),
     Indicator("accepts_relocation", "接受迁址", "deal_terms", "enum", screening=True, writable_by=_PARSE_MANUAL, enum_options=_YES_NO_LIKE),
     Indicator("accepts_return_investment", "接受返投", "deal_terms", "enum", screening=True, writable_by=_PARSE_MANUAL, enum_options=_YES_NO_LIKE),
-    Indicator("earnout_dependency_status", "对赌依赖", "deal_terms", "enum", writable_by=_PARSE_MANUAL, enum_options=_EARNOUT),
+    # 团队可留任说的是「交易能力」不是「技术」：它的对手方 requires_team_retention
+    # 就在买家的「交易与能力要求」模块里，两侧模块必须对齐。
+    Indicator("management_retention_possible", "团队可留任", "deal_terms", "enum", screening=True, writable_by=_PARSE_MANUAL, enum_options=_YES_NO_LIKE),
     # screening=False 是本轮的事实陈述而不是判断：买家侧对手方
     # （transaction_types_json 改闭集）与打分维度都在下一轮。标成 True 会让信息页
     # 的「筛」角标撒谎——顾问补了这个字段，筛选与打分其实都不看。下一轮接线时改。
@@ -233,7 +240,9 @@ BUYER_INTENT_INDICATORS: tuple[Indicator, ...] = (
     Indicator("equity_ratio_summary", "股权比例说明", "intent_deal", "text", writable_by=_BI_WRITE, scenario_allowed=True),
     Indicator("acceptable_listed_status_json", "可接受上市状态", "intent_deal", "json", screening=True, writable_by=_BI_WRITE, target_column="listed_status", operator="in", default_effect="preferred", effect_editable=True, scenario_allowed=True, multi_value=True, deterministic_rank=True, editor="multi_enum", enum_options=_BI_LISTED_ACCEPTABLE),
     Indicator("preferred_listed_status", "上市要求（兼容字段）", None, "enum", writable_by=_BI_PARSE, enum_options=_BI_LISTED),
-    Indicator("listing_market_region", "上市地要求", "intent_deal", "enum", screening=True, writable_by=_BI_WRITE, target_column="listing_market_region", operator="eq", default_effect="required", effect_editable=True, scenario_allowed=True, deterministic_rank=True, enum_options=_MARKET_REGION),
+    # 单值 eq，与标的侧同一个闭集。「A股都行」这种说法要多值 overlap，
+    # 但改 operator 就是改筛选契约，跟接线那一轮一起做。
+    Indicator("listing_market_region", "上市地要求", "intent_deal", "enum", screening=True, writable_by=_BI_WRITE, target_column="listing_market_region", operator="eq", default_effect="required", effect_editable=True, scenario_allowed=True, deterministic_rank=True, enum_options=_LISTING_EXCHANGE),
     Indicator("requires_relocation", "迁址要求", "intent_deal", "enum", screening=True, writable_by=_BI_WRITE, target_column="accepts_relocation", operator="requirement_capability", default_effect="preferred", scenario_allowed=True, deterministic_rank=True, enum_options=_REQUIREMENT_STRENGTH),
     Indicator("requires_return_investment", "返投要求", "intent_deal", "enum", screening=True, writable_by=_BI_WRITE, target_column="accepts_return_investment", operator="requirement_capability", default_effect="preferred", scenario_allowed=True, deterministic_rank=True, enum_options=_REQUIREMENT_STRENGTH),
     Indicator("requires_team_retention", "团队留任要求", "intent_deal", "enum", screening=True, writable_by=_BI_WRITE, target_column="management_retention_possible", operator="requirement_capability", default_effect="preferred", scenario_allowed=True, deterministic_rank=True, enum_options=_REQUIREMENT_STRENGTH),

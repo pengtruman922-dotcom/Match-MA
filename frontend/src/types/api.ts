@@ -55,13 +55,9 @@ export interface SellerTarget {
   transfer_ratio_min: string | null;
   transfer_ratio_max: string | null;
   transfer_ratio_text: string | null;
-  transfer_flexibility_type: string | null;
-  consolidation_path_summary: string | null;
   accepts_relocation: string | null;
   accepts_return_investment: string | null;
-  management_team_summary: string | null;
   management_retention_possible: string | null;
-  earnout_dependency_status: string | null;
   acceptable_transaction_structures_json: string[];
   business_summary: string | null;
   transaction_summary: string | null;
@@ -1204,6 +1200,10 @@ export interface IndicatorGroupMeta {
   key: string;
   label: string;
   section_code: string | null;
+  /** 补充栏的标题。栏名自带信息时是栏名（如「产业优势」），否则是「其他」。 */
+  section_label: string | null;
+  /** 该栏该装什么。与解析/调研提示词的栏目说明同一份真源。 */
+  section_hint: string | null;
 }
 
 export interface IndicatorMeta {

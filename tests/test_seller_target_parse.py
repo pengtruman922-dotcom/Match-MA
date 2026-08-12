@@ -36,7 +36,7 @@ def test_seller_target_parse_changes_normalize_enums_and_numbers() -> None:
                 "listed_status": "unlisted",
                 "is_for_sale": "yes",
                 "can_consolidate": "unknown",
-                "transfer_flexibility_type": "flexible",
+                "management_retention_possible": "likely",
                 "risk_summary": "",
                 "unsupported_field": "ignored",
             }
@@ -51,7 +51,7 @@ def test_seller_target_parse_changes_normalize_enums_and_numbers() -> None:
     assert changes["listed_status"] == "unlisted"
     assert changes["is_for_sale"] == "yes"
     assert changes["can_consolidate"] == "unknown"
-    assert changes["transfer_flexibility_type"] == "flexible"
+    assert changes["management_retention_possible"] == "likely"
     assert "risk_summary" not in changes
     assert notes == ["ignored_unsupported_field:unsupported_field"]
 

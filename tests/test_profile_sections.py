@@ -15,12 +15,13 @@ def _section(code: str, content: str, status: str = "filled") -> dict:
 
 
 def test_every_section_has_a_budget_and_a_label() -> None:
-    assert len(PROFILE_SECTIONS) == 5
-    assert PROFILE_TOTAL_BUDGET == 1600
+    # 2026-08-07：tech_team 并入 business_product，后者改名「产业优势」并拿走
+    # 两栏预算之和（400 + 300 → 600）。见 标的指标体系二轮施工单0807.md。
+    assert len(PROFILE_SECTIONS) == 4
+    assert PROFILE_TOTAL_BUDGET == 1500
     assert set(PROFILE_SECTION_CODES) == {
         "identity",
         "business_product",
-        "tech_team",
         "ops_quality",
         "deal_terms",
     }
@@ -35,11 +36,11 @@ def test_render_budgets_each_section_instead_of_cutting_one_long_document() -> N
 
     rendered = render_profile_text(sections)
 
-    assert "【业务与产品】" in rendered
+    assert "【产业优势】" in rendered
     # 靠后的栏目仍然出现，不会因为前一栏超长被截断掉
     assert "【交易属性与出售诉求】原股东拟出让 60%，接受产业买家" in rendered
-    assert "业" * 400 in rendered
-    assert "业" * 401 not in rendered
+    assert "业" * 600 in rendered
+    assert "业" * 601 not in rendered
     assert "…" in rendered
 
 
@@ -54,13 +55,13 @@ def test_render_keeps_section_order_stable() -> None:
 def test_no_information_is_explicit_rather_than_an_empty_string() -> None:
     """深评必须分得清'没查到'和'不适用'——空字符串两者都表达不了。"""
     sections = {
-        "tech_team": _section("tech_team", "", status="not_found"),
+        "business_product": _section("business_product", "", status="not_found"),
         "deal_terms": _section("deal_terms", "", status="not_applicable"),
     }
 
     rendered = render_profile_text(sections)
 
-    assert "【技术与团队】（暂无信息）" in rendered
+    assert "【产业优势】（暂无信息）" in rendered
     assert "【交易属性与出售诉求】（不适用）" in rendered
 
 
@@ -119,11 +120,11 @@ def test_profile_parser_rejects_unknown_duplicate_and_invalid_date_rows() -> Non
             },
             {"section_code": "business_product", "content_text": "重复内容"},
             {"section_code": "unknown", "content_text": "不应保留"},
-            {"section_code": "tech_team", "content_text": "技术自研", "as_of_date": "2026年"},
+            {"section_code": "ops_quality", "content_text": "客户集中度偏高", "as_of_date": "2026年"},
         ]
     )
 
-    assert [item["section_code"] for item in sections] == ["business_product", "tech_team"]
+    assert [item["section_code"] for item in sections] == ["business_product", "ops_quality"]
     assert "confidence" not in sections[0]
     assert sections[1]["as_of_date"] is None
     assert any("duplicate_section" in note for note in notes)
@@ -131,12 +132,27 @@ def test_profile_parser_rejects_unknown_duplicate_and_invalid_date_rows() -> Non
     assert any("invalid_as_of_date" in note for note in notes)
 
 
+def test_a_retired_section_code_lands_in_its_successor() -> None:
+    """老提示词还会发 tech_team —— 别名把它接到产业优势，而不是当成未知栏目丢掉。
+
+    提示词是在设置页手工发布的，代码发版与提示词发布之间必然有一段错位期，
+    这段时间里模型仍然按旧栏目输出。
+    """
+    sections, notes = normalize_profile_section_items(
+        [{"section_code": "tech_team", "content_text": "光学镀膜年产能 1440 万套"}]
+    )
+
+    assert [item["section_code"] for item in sections] == ["business_product"]
+    assert sections[0]["content_text"] == "光学镀膜年产能 1440 万套"
+    assert not [note for note in notes if "unknown_section" in note]
+
+
 class _RecordingDb:
     """Records statements instead of running them."""
 
     def __init__(self, returning: dict | None = None) -> None:
         self.statements: list[tuple[str, dict]] = []
-        self._returning = returning or {"id": "row-1", "section_code": "tech_team"}
+        self._returning = returning or {"id": "row-1", "section_code": "business_product"}
 
     def execute(self, statement, params=None):
         self.statements.append((str(statement), dict(params or {})))
@@ -164,7 +180,7 @@ def test_accepting_a_section_supersedes_the_current_revision() -> None:
         db,
         entity_type="seller_target",
         entity_id="11111111-1111-1111-1111-111111111111",
-        section_code="tech_team",
+        section_code="business_product",
         info_status="filled",
         content_text="核心团队来自某上市公司研发中心",
         review_status="accepted",
@@ -173,7 +189,7 @@ def test_accepting_a_section_supersedes_the_current_revision() -> None:
     supersede = [item for item in db.statements if "deleted_at = now()" in item[0]]
     assert len(supersede) == 1
     assert "review_status in ('accepted', 'auto_accepted')" in supersede[0][0]
-    assert supersede[0][1]["section_code"] == "tech_team"
+    assert supersede[0][1]["section_code"] == "business_product"
     assert any("insert into entity_profile_section" in item[0] for item in db.statements)
 
 
@@ -211,7 +227,7 @@ def test_profile_parser_removes_cross_layer_deal_and_team_noise() -> None:
                 "content_text": "融资阶段为A++轮，融资规模5000万，产能落地可谈，接受迁址",
             },
             {
-                "section_code": "tech_team",
+                "section_code": "business_product",
                 "content_text": "移液技术100%自研；团队来自中航；股东包括某投资机构",
             },
         ]

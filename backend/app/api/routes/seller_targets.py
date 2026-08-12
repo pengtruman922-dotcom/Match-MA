@@ -133,13 +133,9 @@ class SellerTargetOut(BaseModel):
     transfer_ratio_min: Decimal | None
     transfer_ratio_max: Decimal | None
     transfer_ratio_text: str | None
-    transfer_flexibility_type: str | None
-    consolidation_path_summary: str | None
     accepts_relocation: str
     accepts_return_investment: str
-    management_team_summary: str | None
     management_retention_possible: str
-    earnout_dependency_status: str | None
     acceptable_transaction_structures_json: list[str] = Field(default_factory=list)
     business_summary: str | None
     transaction_summary: str | None
@@ -201,13 +197,9 @@ class SellerTargetUpdate(BaseModel):
     transfer_ratio_min: Decimal | None = None
     transfer_ratio_max: Decimal | None = None
     transfer_ratio_text: str | None = None
-    transfer_flexibility_type: str | None = None
-    consolidation_path_summary: str | None = None
     accepts_relocation: str | None = None
     accepts_return_investment: str | None = None
-    management_team_summary: str | None = None
     management_retention_possible: str | None = None
-    earnout_dependency_status: str | None = None
     acceptable_transaction_structures_json: list[str] | None = None
     lifecycle_status: Literal["active", "sold", "off_market"] | None = None
     business_summary: str | None = None

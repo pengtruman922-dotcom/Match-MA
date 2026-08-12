@@ -81,7 +81,7 @@ def test_writing_a_section_lands_in_the_update_timeline() -> None:
         db,
         entity_type="seller_target",
         entity_id=ENTITY_ID,
-        section_code="tech_team",
+        section_code="ops_quality",
         info_status="filled",
         content_text="新版画像",
         review_status="auto_accepted",
@@ -92,7 +92,7 @@ def test_writing_a_section_lands_in_the_update_timeline() -> None:
     logs = db.find("insert into action_application_log")
     assert len(logs) == 1
     params = logs[0][1]
-    assert params["field_path"] == f"{PROFILE_SECTION_FIELD_PREFIX}tech_team"
+    assert params["field_path"] == f"{PROFILE_SECTION_FIELD_PREFIX}ops_quality"
     assert params["old_value_json"] == {"info_status": "filled", "content_text": "旧版画像"}
     assert params["new_value_json"] == {"info_status": "filled", "content_text": "新版画像"}
     assert params["source_type"] == "research_proposal"
@@ -100,7 +100,7 @@ def test_writing_a_section_lands_in_the_update_timeline() -> None:
     metadata = params["metadata_json"]
     assert metadata["profile_section_id"] == str(NEW_SECTION_ID)
     assert metadata["superseded_profile_section_id"] == str(OLD_SECTION_ID)
-    assert metadata["section_label"] == "技术与团队"
+    assert metadata["section_label"] == "经营质量"
 
 
 def test_first_write_records_no_previous_value() -> None:
@@ -122,7 +122,7 @@ def test_first_write_records_no_previous_value() -> None:
 
 
 def test_profile_field_paths_are_recognized_and_bounded() -> None:
-    assert _profile_section_code("profile_section.tech_team") == "tech_team"
+    assert _profile_section_code("profile_section.ops_quality") == "ops_quality"
     assert _profile_section_code("profile_section.not_a_section") is None
     assert _profile_section_code("current_revenue_yuan") is None
     assert _profile_section_code(None) is None
@@ -132,7 +132,7 @@ def test_profile_logs_are_rollbackable_without_being_entity_columns() -> None:
     """画像不在 ROLLBACK_FIELDS_BY_ENTITY 里，需要单独放行。"""
     log = {
         "entity_type": "seller_target",
-        "field_path": "profile_section.tech_team",
+        "field_path": "profile_section.ops_quality",
         "can_rollback": True,
         "rollback_at": None,
         "source_type": "research_proposal",
@@ -149,7 +149,7 @@ def test_rollback_retires_the_new_revision_and_revives_the_old_one() -> None:
     log = {
         "entity_type": "seller_target",
         "entity_id": ENTITY_ID,
-        "field_path": "profile_section.tech_team",
+        "field_path": "profile_section.ops_quality",
         "metadata_json": {
             "profile_section_id": str(NEW_SECTION_ID),
             "superseded_profile_section_id": str(OLD_SECTION_ID),
@@ -186,7 +186,7 @@ def test_rollback_refuses_logs_written_before_this_chain_existed() -> None:
     log = {
         "entity_type": "seller_target",
         "entity_id": ENTITY_ID,
-        "field_path": "profile_section.tech_team",
+        "field_path": "profile_section.ops_quality",
         "metadata_json": {},
     }
 
@@ -204,7 +204,7 @@ def test_current_value_check_reads_the_section_row() -> None:
         {
             "entity_type": "seller_target",
             "entity_id": ENTITY_ID,
-            "field_path": "profile_section.tech_team",
+            "field_path": "profile_section.ops_quality",
             "metadata_json": {"profile_section_id": str(NEW_SECTION_ID)},
         },
     )

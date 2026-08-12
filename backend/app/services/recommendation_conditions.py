@@ -74,7 +74,10 @@ FIELD_LABELS: dict[str, str] = {
 
 _LISTED_STATUS_VALUES = {"listed", "unlisted", "pre_ipo", "any", "unknown"}
 _YES_NO_VALUES = {"yes", "no", "unknown"}
-_LISTING_MARKET_REGION_VALUES = {"domestic", "overseas", "unknown"}
+# 从注册表取，不再手抄：上市地 2026-08-07 换成交易所闭集，手抄一份就会漂。
+_LISTING_MARKET_REGION_VALUES = {
+    value for value, _ in (indicator_by_column("buyer_intent", "listing_market_region").enum_options or ())
+}
 _REQUIREMENT_STRENGTH_VALUES = {"required", "preferred", "not_required", "unknown"}
 
 

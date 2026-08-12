@@ -711,8 +711,8 @@ def test_business_update_extracts_profile_sections_outside_seller_columns() -> N
                                 "confidence": 0.94,
                             },
                             {
-                                "section_code": "tech_team",
-                                "content_text": "移液技术全部自研，团队来自产业公司",
+                                "section_code": "ops_quality",
+                                "content_text": "客户集中度偏高，前五大客户占比过半",
                             },
                         ],
                     },
@@ -733,7 +733,7 @@ def test_business_update_extracts_profile_sections_outside_seller_columns() -> N
     }
     assert [item["section_code"] for item in actions[0]["profile_sections"]] == [
         "business_product",
-        "tech_team",
+        "ops_quality",
     ]
 
 

@@ -916,12 +916,35 @@ def _normalize_closed_list_values(field: str, value: Any) -> list[str]:
     return normalized
 
 
+_LISTING_EXCHANGE_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("sse", ("sse", "上交所", "上海证券交易所", "上海交易所", "沪市", "科创板", ".sh")),
+    ("szse", ("szse", "深交所", "深圳证券交易所", "深圳交易所", "深市", "创业板", ".sz")),
+    ("bse", ("bse", "北交所", "北京证券交易所", "北京交易所", "新三板", ".bj")),
+    ("hkex", ("hkex", "hk", "港交所", "香港交易所", "香港联交所", "联交所", "港股", "h股", ".hk")),
+    ("nyse", ("nyse", "纽交所", "纽约证券交易所", "纽约交易所")),
+    ("nasdaq", ("nasdaq", "纳斯达克", "那斯达克")),
+    # 兜底放最后：「其他交易所」是一个明确答案（在某个没列出的市场上市），
+    # 与 unknown（不知道在哪上市）不同。
+    ("other", ("other", "其他", "其它")),
+)
+
+
 def _normalize_listing_market_region(value: Any) -> str:
+    """上市地：具体交易所，不是「境内还是境外」。
+
+    2026-08-07 换枚举。旧版把「港股/美股」压成 overseas、「A股」压成 domestic ——
+    那个粒度在生产里判别力为零（标的侧 16 个有值的全是 domestic）。
+
+    刻意不认的说法：「A股」「主板」跨多个交易所，「境内」「境外」是旧枚举的残留，
+    它们都推不出唯一答案，一律落 unknown 而不是猜一个 —— 猜错会让买家的
+    上市地要求把对的标的筛掉，比不知道更糟。
+    """
     text_value = str(value or "").strip().lower()
-    if text_value in {"domestic", "境内", "a股", "境内上市", "cn"}:
-        return "domestic"
-    if text_value in {"overseas", "境外", "海外", "港股", "美股", "境外上市"}:
-        return "overseas"
+    if not text_value:
+        return "unknown"
+    for code, aliases in _LISTING_EXCHANGE_ALIASES:
+        if any(alias in text_value for alias in aliases):
+            return code
     return "unknown"
 
 

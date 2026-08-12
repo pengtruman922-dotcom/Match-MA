@@ -30,8 +30,12 @@ PROFILE_SECTION_FIELD_PREFIX = "profile_section."
 PROFILE_SECTIONS: tuple[tuple[str, str, int], ...] = (
     # (section_code, 中文栏目名, 送深评时的字符预算)
     ("identity", "身份与地区", 200),
-    ("business_product", "业务与产品", 400),
-    ("tech_team", "技术与团队", 300),
+    # 2026-08-07 改名：原「业务与产品」那一栏实测被写成了 business_summary 的
+    # 另一种说法（23 个样本里高度重复 2 个，字面不同的抽样看也是同一件事换个
+    # 说法），存量整体作废。改叫「产业优势」之后它有了明确对象 ——
+    # 这家公司凭什么比同行强 —— 并接管了原「技术与团队」栏的产能、资质、
+    # 技术路线与核心团队，预算按两栏之和给。
+    ("business_product", "产业优势", 600),
     ("ops_quality", "经营质量", 300),
     ("deal_terms", "交易属性与出售诉求", 400),
 )
@@ -44,14 +48,34 @@ BUYER_PROFILE_SECTIONS: tuple[tuple[str, str, int], ...] = (
     ("intent_deal", "交易与能力要求·其他", 400),
 )
 
+# 每一栏该装什么。原来五栏共用一句「只写结构化字段装不下的定性判断」，
+# 于是「产业优势」这类内容随机落位 —— 实测水晶光电的产业地位描述落进了技术与团队栏。
+# 这段文案同时喂给信息页的输入框和解析/调研提示词的栏目说明，是同一份真源。
+PROFILE_SECTION_HINTS: dict[str, str] = {
+    "identity": "主体层面的补充：曾用名、实际控制人、股权结构、注册地与办公地不一致等。",
+    "business_product": (
+        "这家公司凭什么比同行强：产业链位置、市场地位与排名、技术与研发能力、"
+        "专利与资质、关键产能与资产、核心团队、主要客户与合作关系。"
+        "不要复述业务摘要 —— 做什么生意是「业务摘要」字段的事。"
+    ),
+    "ops_quality": "经营质量的定性判断：增长与波动、盈利质量、客户集中度、周期性。财务数字留在字段里。",
+    "deal_terms": "交易配合度与出售诉求里字段装不下的部分：卖方动机、时间要求、交割条件、已知风险的进展。",
+    "intent_scope": "行业与地区上标准化不了、也不适合拿去初筛的说法。",
+    "intent_financial": "经营与财务上标准化不了、也不适合拿去初筛的说法。",
+    "intent_deal": "交易与能力要求上标准化不了、也不适合拿去初筛的说法。",
+}
+
 _SECTIONS_BY_ENTITY: dict[str, tuple[tuple[str, str, int], ...]] = {
     "seller_target": PROFILE_SECTIONS,
     "buyer_intent": BUYER_PROFILE_SECTIONS,
 }
 
 PROFILE_SECTION_CODES = tuple(code for code, _, _ in PROFILE_SECTIONS)
+# 退役栏目码的落点。chain_position（产业链位置）在栏目改名成「产业优势」之后
+# 反而名副其实了；tech_team 是 2026-08-07 并进来的。
 PROFILE_SECTION_ALIASES = {
     "chain_position": "business_product",
+    "tech_team": "business_product",
     "sell_intent_risk": "deal_terms",
 }
 
@@ -152,8 +176,11 @@ def _clean_profile_content(section_code: str, content_text: str) -> str:
     treats financial investors as members of the operating team. Those facts
     remain in the canonical/document layer and should not pollute semantic
     matching dimensions.
+
+    团队那条规则随栏目合并搬到了 business_product：财务股东不是管理或研发团队，
+    这一点在「产业优势」这个语义下同样成立 —— 一家公司的优势不是它的出资人名单。
     """
-    if section_code not in {"deal_terms", "tech_team"}:
+    if section_code not in {"deal_terms", "business_product"}:
         return content_text
     kept: list[str] = []
     for clause in PROFILE_CLAUSE_SPLIT_PATTERN.split(content_text):
@@ -162,7 +189,7 @@ def _clean_profile_content(section_code: str, content_text: str) -> str:
             continue
         if section_code == "deal_terms" and any(term in clause for term in DEAL_TERMS_NOISE_TERMS):
             continue
-        if section_code == "tech_team" and "股东" in clause and not any(
+        if section_code == "business_product" and "股东" in clause and not any(
             term in clause for term in ("团队", "创始人", "高管", "管理层")
         ):
             continue

@@ -45,7 +45,11 @@ EquityRequirementType = Literal[
     "unknown",
 ]
 ListedStatusRequirement = Literal["listed", "unlisted", "pre_ipo", "preparing_listing", "any", "unknown"]
-ListingMarketRegion = Literal["domestic", "overseas", "unknown"]
+# 上市地：2026-08-07 从境内/境外换成具体交易所，取值与注册表的
+# _LISTING_EXCHANGE 同源（列名沿用 listing_market_region，见注册表注释）。
+ListingMarketRegion = Literal[
+    "sse", "szse", "bse", "hkex", "nyse", "nasdaq", "other", "unknown"
+]
 
 
 class BuyerIntentCreate(BaseModel):

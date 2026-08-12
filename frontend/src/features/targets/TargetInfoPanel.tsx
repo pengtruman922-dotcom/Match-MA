@@ -379,7 +379,7 @@ export default function TargetInfoPanel({
               </span>
               <span className="text-xs text-gray-400">
                 {group.fields.length > 0 && `${filled}/${group.fields.length} 字段`}
-                {group.sectionCode && ' · 含其他补充栏'}
+                {group.sectionCode && ` · 含${group.sectionLabel || '其他'}栏`}
                 {pendingCount > 0 && <span className="ml-1 text-amber-700">· {pendingCount}项待确认</span>}
               </span>
             </button>
@@ -428,6 +428,8 @@ export default function TargetInfoPanel({
                 {group.sectionCode && (
                   <ProfileBlock
                     code={group.sectionCode}
+                    title={group.sectionLabel}
+                    hint={group.sectionHint}
                     section={section}
                     hasFields={group.fields.length > 0}
                     editing={editing === group.sectionCode}
@@ -634,6 +636,8 @@ function LocationField({ field, editing, saving, source, proposalCards, onStart,
 
 function ProfileBlock({
   code,
+  title,
+  hint,
   section,
   hasFields,
   editing,
@@ -646,6 +650,10 @@ function ProfileBlock({
   proposalCards,
 }: {
   code: string;
+  /** 栏名自带信息时是栏名（如「产业优势」），否则是「其他」。来自注册表。 */
+  title: string | null;
+  /** 该栏该装什么。原来五栏共用一句泛泛的提示语，内容因此随机落位。 */
+  hint: string | null;
   section: ProfileSection | undefined;
   hasFields: boolean;
   editing: boolean;
@@ -660,7 +668,7 @@ function ProfileBlock({
   return (
     <div className={hasFields ? 'mt-3 border-t border-dashed border-gray-100 pt-3' : ''}>
       <div className="flex items-center justify-between gap-2">
-        <span className="text-xs font-medium text-gray-500">其他</span>
+        <span className="text-xs font-medium text-gray-500">{title || '其他'}</span>
         {!editing && (
           <button
             type="button"
@@ -679,7 +687,7 @@ function ProfileBlock({
             onChange={(event) => onDraft(event.target.value)}
             rows={3}
             className="w-full border border-gray-200 px-2 py-1.5 text-xs outline-none focus:border-brand-600"
-            placeholder="只写结构化字段装不下的定性判断，财务数字留在字段里"
+            placeholder={hint || '只写结构化字段装不下的定性判断，财务数字留在字段里'}
           />
           <div className="flex items-center gap-2">
             <button

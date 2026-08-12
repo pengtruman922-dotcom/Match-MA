@@ -26,6 +26,9 @@ export type InfoGroup = {
   key: string;
   label: string;
   sectionCode: string | null;
+  /** 补充栏的标题与提示语，来自注册表；栏名只是组名复述时标题退回「其他」。 */
+  sectionLabel: string | null;
+  sectionHint: string | null;
   fields: InfoField[];
 };
 
@@ -99,6 +102,8 @@ export function buildInfoGroups(
     key: group.key,
     label: group.label,
     sectionCode: group.section_code,
+    sectionLabel: group.section_label,
+    sectionHint: group.section_hint,
     fields: registry.indicators
       .filter((indicator) => indicator.group === group.key && indicator.fold_into === null)
       .map((indicator) => ({

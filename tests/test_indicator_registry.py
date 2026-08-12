@@ -29,10 +29,13 @@ from backend.app.registry.indicators import (
     writable_columns,
     writable_enum_values,
 )
+from backend.app.api.routes.meta import _section_label
+from backend.app.services.profile_sections import PROFILE_SECTION_HINTS
 from backend.app.services.research_apply import RESEARCH_STRUCTURED_FIELDS
 
 REPO = Path(__file__).resolve().parents[1]
 RECOMMENDATION_FLOW = REPO / "backend/app/services/recommendation_flow.py"
+MIGRATIONS = REPO / "database/migrations"
 BASELINE = REPO / "database/migrations/001_baseline.sql"
 R4A_MIGRATION = REPO / "database/migrations/002_target_information_model.sql"
 R5_MIGRATION = REPO / "database/migrations/004_information_refinement.sql"
@@ -65,28 +68,69 @@ def test_buyer_intent_indicators_are_real_columns() -> None:
     assert indicators_for("buyer_intent") is BUYER_INTENT_INDICATORS
 
 
-def _db_accepts(sql: str, column: str, values: set[str]) -> bool | None:
-    """Whether some `column = ANY (ARRAY[...])` check constraint accepts `values`.
+def _constraint_value_sets(sql: str, column: str) -> list[set[str]]:
+    """这一份 SQL 里，该列的 check 约束分别接受哪些取值。
 
-    Returns None when the column has no such constraint. The column name can
-    appear in several tables (status especially), so this accepts the values if
-    *any* constraint for that name is a superset — the relevant table's is.
+    两种写法都认：baseline 的 `col = ANY (ARRAY['a'::text, …])`，
+    以及后续迁移手写的 `col in ('a', …)`。
+
+    必须锚在 `check (` 上、且中间不跨语句（`[^;]`）：光看 `col in (…)` 会把
+    数据迁移里的 `where listed_status in (…)` 当成约束，于是「最后提到这一列的
+    文件」指向一个根本没定义约束的迁移，守卫误报。
+
+    列名前的 `(?<![a-z_])` 同样是必须的：没有它，`status` 会匹配上
+    `listed_status` / `review_status` / `information_status` 的约束。
     """
-    arrays = re.findall(column + r" = ANY \(ARRAY\[(.*?)\]\)", sql, re.S)
-    if not arrays:
+    pattern = re.compile(
+        r"check\s*\([^;]*?(?<![a-z_])" + re.escape(column) + r"\s*(?:=\s*ANY\s*\(ARRAY\[(.*?)\]\)|in\s*\((.*?)\))",
+        re.S | re.I,
+    )
+    return [
+        set(re.findall(r"'([a-z_]+)'", any_body or in_body))
+        for any_body, in_body in pattern.findall(sql)
+    ]
+
+
+def _db_accepts(column: str, values: set[str]) -> bool | None:
+    """DB 最终是否接受这些取值。
+
+    只看 baseline 会漏判：约束被后续迁移重建过的列（上市地在 016 换成了交易所
+    闭集），拿 baseline 的旧取值去比必然对不上。所以按迁移编号顺序扫，
+    **最后提到这一列的那份文件说了算** —— 那就是线上的实际约束。
+
+    同名列可能出现在多张表（status 尤其），所以在选中的那份文件里，
+    只要有一个约束是超集就算通过。
+
+    Returns None when no migration constrains the column at all.
+    """
+    latest: list[set[str]] | None = None
+    for path in [BASELINE, *sorted(MIGRATIONS.glob("0*.sql"))]:
+        sets = _constraint_value_sets(path.read_text(encoding="utf-8"), column)
+        if sets:
+            latest = sets
+    if latest is None:
         return None
-    return any(values <= set(re.findall(r"'([a-z_]+)'", body)) for body in arrays)
+    return any(values <= accepted for accepted in latest)
 
 
 def test_registry_enum_values_valid_for_both_entities() -> None:
     # 注册表声明的枚举取值必须能被对应 DB check 约束接受，否则写入会被 DB 拒。
-    sql = BASELINE.read_text(encoding="utf-8")
     for entity in ("seller_target", "buyer_intent"):
         for column, values in writable_enum_values(entity).items():
-            accepted = _db_accepts(sql, column, values)
+            accepted = _db_accepts(column, values)
             if accepted is None:
                 continue  # 无 DB check 约束的列
             assert accepted, f"{entity}.{column} 注册表枚举含 DB 不接受的值"
+
+
+def test_the_enum_guard_reads_past_the_baseline() -> None:
+    """守卫本身的回归：上市地的约束在 016 被重建过，baseline 里是旧取值。
+
+    如果 _db_accepts 退回只读 baseline，这条会挂 —— 而真正的漂移
+    （注册表加了 DB 不认的取值）会变成静默通过。
+    """
+    assert _db_accepts("listing_market_region", {"sse", "hkex"}) is True
+    assert _db_accepts("listing_market_region", {"domestic"}) is False
 
 
 def test_closed_list_columns_match_their_db_check() -> None:
@@ -198,3 +242,20 @@ def test_every_indicator_group_key_is_declared() -> None:
     group_keys = {group.key for group in GROUPS}
     used = {ind.group for ind in SELLER_TARGET_INDICATORS if ind.group is not None}
     assert used <= group_keys, f"指标引用了未声明的分组：{sorted(used - group_keys)}"
+
+
+def test_supplement_block_is_titled_by_what_belongs_in_it() -> None:
+    """补充栏的标题与提示语跟着栏目走，不是五栏共用一句「其他」。
+
+    共用一句的后果实测过：产业优势这类内容没有明确落点，会随机掉进别的栏
+    （水晶光电的产业地位描述落进了当时的「技术与团队·其他」）。
+    """
+    labels = {group.key: _section_label(group.section_code, group.label) for group in GROUPS}
+    assert labels["business_product"] == "产业优势"
+    # 栏名只是组名的复述时退回「其他」，否则页面上是组名套组名。
+    assert labels["identity"] == "其他"
+    assert labels["deal_terms"] == "其他"
+
+    hint = PROFILE_SECTION_HINTS["business_product"]
+    assert "产业链位置" in hint and "业务摘要" in hint, "产业优势栏没说清该写什么、不该写什么"
+    assert set(PROFILE_SECTION_HINTS) >= {group.section_code for group in GROUPS}

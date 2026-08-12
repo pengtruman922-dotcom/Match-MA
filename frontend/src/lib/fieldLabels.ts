@@ -41,13 +41,9 @@ const SELLER_TARGET_FIELD_LABELS: Record<string, string> = {
   transfer_ratio_min: '出售比例下限',
   transfer_ratio_max: '出售比例上限',
   transfer_ratio_text: '出售比例说明',
-  transfer_flexibility_type: '交易灵活性',
-  consolidation_path_summary: '并表路径说明',
   accepts_relocation: '接受迁址',
   accepts_return_investment: '接受返投',
-  management_team_summary: '管理团队',
   management_retention_possible: '管理层可留任',
-  earnout_dependency_status: '业绩对赌依赖',
   business_summary: '业务摘要',
   transaction_summary: '交易摘要',
   risk_summary: '风险摘要',
@@ -229,8 +225,10 @@ const FIELD_LABELS_BY_ENTITY: Record<string, Record<string, string>> = {
 // 匹配画像不是实体的列，在更新记录里以 profile_section.<code> 的形式出现。
 const PROFILE_SECTION_FIELD_PREFIX = 'profile_section.';
 
+// 退役栏目码（chain_position / tech_team / sell_intent_risk）保留在表里：
+// 更新记录会翻出改栏之前的历史条目，那时它们就叫这个名字。
 const PROFILE_SECTION_LABELS: Record<string, string> = {
-  business_product: '业务与产品',
+  business_product: '产业优势',
   chain_position: '产业链位置与行业地位',
   tech_team: '技术与团队',
   ops_quality: '经营质量',
@@ -274,9 +272,16 @@ const VALUE_LABELS: Record<string, Record<string, string>> = {
   requires_return_investment: REQUIREMENT_STRENGTH_LABELS,
   requires_team_retention: REQUIREMENT_STRENGTH_LABELS,
   earnout_requirement: REQUIREMENT_STRENGTH_LABELS,
+  // 上市地：2026-08-07 从境内/境外换成具体交易所，与后端 _LISTING_EXCHANGE 同源。
+  // 标的信息页走注册表的 enum_options 自动出中文，这张表只服务买家侧。
   listing_market_region: {
-    domestic: '境内上市',
-    overseas: '境外上市',
+    sse: '上交所',
+    szse: '深交所',
+    bse: '北交所',
+    hkex: '港交所',
+    nyse: '纽交所',
+    nasdaq: '纳斯达克',
+    other: '其他',
     unknown: '未知',
   },
   target_type: {
@@ -312,15 +317,6 @@ const VALUE_LABELS: Record<string, Record<string, string>> = {
     no: '否',
     unknown: '未知',
   },
-  transfer_flexibility_type: {
-    control_available: '可控股',
-    consolidation_available: '可并表',
-    minority_available: '可少数股权',
-    full_sale_available: '可整体出售',
-    flexible: '灵活可谈',
-    specific_range: '指定比例',
-    unknown: '未知',
-  },
   profitability_status: {
     profitable: '盈利',
     loss_making: '亏损',
@@ -347,13 +343,6 @@ const VALUE_LABELS: Record<string, Record<string, string>> = {
     asset_purchase: '资产收购',
     merger: '吸收合并',
     other: '其他',
-  },
-  earnout_dependency_status: {
-    none: '无',
-    low: '低',
-    medium: '中',
-    high: '高',
-    unknown: '未知',
   },
 };
 
