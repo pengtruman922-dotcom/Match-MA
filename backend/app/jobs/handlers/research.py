@@ -39,6 +39,7 @@ from backend.app.jobs.retry_policy import is_transient_research_error, research_
 from backend.app.registry.indicators import seller_target_fact_columns
 from backend.app.services.profile_sections import (
     PROFILE_SECTION_CODES,
+    PROFILE_SECTION_HINTS,
     load_profile_sections,
     normalize_profile_section_items,
     profile_sections_for,
@@ -94,7 +95,7 @@ class ResearchContentInspectionError(LlmCallError):
 # normalize_profile_section_items 丢掉（实测 14 次）。它还会让
 # _current_profiles_for_prompt 多列 3 个永远「missing」的栏目，反过来诱导模型去填。
 PROFILE_SECTION_CATALOG: list[dict[str, str]] = [
-    {"code": code, "label": label}
+    {"code": code, "label": label, "hint": PROFILE_SECTION_HINTS.get(code, "")}
     for code, label, _ in profile_sections_for("seller_target")
 ]
 

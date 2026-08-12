@@ -26,7 +26,7 @@ from backend.app.jobs.handlers.research import (
 )
 from backend.app.jobs.handlers.research_map import _mapping_context
 from backend.app.registry.indicators import seller_target_fact_columns
-from backend.app.services.profile_sections import profile_sections_for
+from backend.app.services.profile_sections import PROFILE_SECTION_HINTS, profile_sections_for
 from backend.app.services.research_apply import (
     RESEARCH_AGENT_STRUCTURED_FIELDS,
     RESEARCH_STRUCTURED_FIELDS,
@@ -92,6 +92,24 @@ def test_mapping_field_catalog_covers_everything_the_agent_may_emit() -> None:
 
 
 # --- agent 自己的目录（缺陷的源头，不只是映射节点）-----------------------
+
+
+def test_both_catalogs_tell_the_model_what_each_section_is_for() -> None:
+    """栏目改名对模型必须是有声的。
+
+    只给 code + label 时，「业务与产品 → 产业优势」这种改名模型看不出差别，
+    会继续按旧语义写业务描述，直到有人手工改提示词正文。hint 与信息页输入框
+    的提示语同源，所以改一处两边一起生效，不需要重发提示词。
+    """
+    mapping = _mapping_context(_RecordingDb(), report={"report_text": "x"})
+    for catalog in (PROFILE_SECTION_CATALOG, mapping["profile_section_catalog"]):
+        by_code = {item["code"]: item for item in catalog}
+        assert by_code.keys() == {code for code, _, _ in profile_sections_for("seller_target")}
+        for code, entry in by_code.items():
+            assert entry["hint"] == PROFILE_SECTION_HINTS[code], f"{code} 的栏目说明没进上下文"
+    advantage = {item["code"]: item for item in PROFILE_SECTION_CATALOG}["business_product"]
+    assert advantage["label"] == "产业优势"
+    assert "不要复述业务摘要" in advantage["hint"]
 
 
 def test_agent_section_catalog_is_target_side_only() -> None:

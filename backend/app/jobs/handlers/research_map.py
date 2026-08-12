@@ -42,7 +42,11 @@ from backend.app.jobs.handlers.research import (
 from backend.app.jobs.queue import JobClaim
 from backend.app.registry.indicators import Indicator, indicators_for
 from backend.app.services.industry_taxonomy import list_l1_terms
-from backend.app.services.profile_sections import load_profile_sections, profile_sections_for
+from backend.app.services.profile_sections import (
+    PROFILE_SECTION_HINTS,
+    load_profile_sections,
+    profile_sections_for,
+)
 from backend.app.services.research_apply import MONEY_UNIT_MULTIPLIERS, RESEARCH_AGENT_STRUCTURED_FIELDS
 
 # 报告全文进上下文，但不是无限：一份九模块报告正常在几千字，
@@ -267,8 +271,11 @@ def _mapping_context(db: Session, *, report: dict[str, Any]) -> dict[str, Any]:
         # 按实体取，不能用 PROFILE_SECTION_LABELS —— 那是买卖两侧合成的展示表，
         # 喂给标的的映射节点会带上 intent_scope / intent_financial / intent_deal，
         # 模型照做，下游再按实体把它们当 unknown_section 丢掉（实测 14 次）。
+        # hint 是「这一栏该装什么」，与信息页输入框的提示语同一份真源。
+        # 只给 code + label 时，栏目改名（业务与产品 → 产业优势）对模型是无声的：
+        # 它会继续按旧语义写业务描述，直到有人手工改提示词正文为止。
         "profile_section_catalog": [
-            {"code": code, "label": label}
+            {"code": code, "label": label, "hint": PROFILE_SECTION_HINTS.get(code, "")}
             for code, label, _ in profile_sections_for("seller_target")
         ],
         "writable_fields": fields,
