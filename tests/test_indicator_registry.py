@@ -16,7 +16,6 @@ from backend.app.jobs.handlers.common import (
     BUYER_INTENT_ENUM_FIELDS,
     SELLER_TARGET_CHANGE_FIELDS,
     SELLER_TARGET_ENUM_FIELDS,
-    SELLER_TARGET_SYSTEM_FACT_FIELDS,
 )
 from backend.app.registry.indicators import (
     BUYER_INTENT_INDICATORS,
@@ -42,11 +41,12 @@ R5_MIGRATION = REPO / "database/migrations/004_information_refinement.sql"
 RESEARCH_PERIOD_MIGRATION = REPO / "database/migrations/009_research_financial_period_guard.sql"
 BUYER_CONTRACT_MIGRATION = REPO / "database/migrations/011_buyer_intent_condition_contract.sql"
 TARGET_FACTS_MIGRATION = REPO / "database/migrations/015_target_risk_and_structure_facts.sql"
+GRADE_MIGRATION = REPO / "database/migrations/017_entity_grade.sql"
 
 
 def test_consumers_derive_from_the_registry() -> None:
     # 白名单已改为派生，这里确认「派生」这条线没被谁悄悄改回硬列表。
-    assert SELLER_TARGET_CHANGE_FIELDS == writable_columns("parse") | SELLER_TARGET_SYSTEM_FACT_FIELDS
+    assert SELLER_TARGET_CHANGE_FIELDS == writable_columns("parse")
     assert set(RESEARCH_STRUCTURED_FIELDS) == writable_columns("research")
     assert SELLER_TARGET_ENUM_FIELDS == writable_enum_values()
     assert BUYER_INTENT_CHANGE_FIELDS == writable_columns("parse", "buyer_intent")
@@ -59,12 +59,15 @@ def test_buyer_intent_indicators_are_real_columns() -> None:
     assert body, "baseline 未找到 buyer_intent 建表块"
     columns = set(re.findall(r"^\s+([a-z_0-9]+)\s", body.group(1), re.M))
     missing = {ind.column for ind in BUYER_INTENT_INDICATORS} - columns
-    assert missing <= {"acceptable_listed_status_json", "condition_effects_json"}, (
+    assert missing <= {"acceptable_listed_status_json", "condition_effects_json", "intent_grade"}, (
         f"注册表引用了 buyer_intent 不存在的列：{sorted(missing)}"
     )
     migration_sql = BUYER_CONTRACT_MIGRATION.read_text(encoding="utf-8")
-    for column in missing:
+    for column in missing - {"intent_grade"}:
         assert f"add column if not exists {column} jsonb" in migration_sql
+    assert "add column if not exists intent_grade text not null default 'C'" in (
+        GRADE_MIGRATION.read_text(encoding="utf-8")
+    )
     assert indicators_for("buyer_intent") is BUYER_INTENT_INDICATORS
 
 
@@ -80,13 +83,16 @@ def _constraint_value_sets(sql: str, column: str) -> list[set[str]]:
 
     列名前的 `(?<![a-z_])` 同样是必须的：没有它，`status` 会匹配上
     `listed_status` / `review_status` / `information_status` 的约束。
+
+    取值要认大写：级别（target_grade / intent_grade）是 A-E，只认小写会让 017
+    的约束读成空集，守卫误报「注册表枚举 DB 不接受」。
     """
     pattern = re.compile(
         r"check\s*\([^;]*?(?<![a-z_])" + re.escape(column) + r"\s*(?:=\s*ANY\s*\(ARRAY\[(.*?)\]\)|in\s*\((.*?)\))",
         re.S | re.I,
     )
     return [
-        set(re.findall(r"'([a-z_]+)'", any_body or in_body))
+        set(re.findall(r"'([A-Za-z_]+)'", any_body or in_body))
         for any_body, in_body in pattern.findall(sql)
     ]
 
@@ -202,6 +208,10 @@ def test_every_indicator_is_a_real_seller_target_column() -> None:
         ),
         "main_products_text": (target_facts_sql, "add column if not exists main_products_text text"),
         "stock_code": (target_facts_sql, "add column if not exists stock_code text"),
+        "target_grade": (
+            GRADE_MIGRATION.read_text(encoding="utf-8"),
+            "add column if not exists target_grade text not null default 'C'",
+        ),
     }
     assert missing <= set(post_baseline_columns), (
         f"注册表引用了 seller_target 不存在的列：{sorted(missing - set(post_baseline_columns))}"

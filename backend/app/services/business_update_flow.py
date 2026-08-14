@@ -1166,7 +1166,7 @@ def _buyer_intents_by_ids(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
         text(
             """
             select
-              bi.id, bi.buyer_party_id, bp.buyer_name, bi.intent_name, bi.status,
+              bi.id, bi.buyer_party_id, bp.buyer_name, bi.intent_name, bi.intent_grade, bi.status,
               bi.pause_reason, bi.contact_name, bi.raw_requirement_text,
               bi.intent_summary, bi.industry_primary, bi.industry_secondary,
               bi.industries_json, bi.industry_l2_json, bi.excluded_industries_json,

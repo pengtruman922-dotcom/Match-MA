@@ -94,17 +94,22 @@ def test_direct_follow_up_rejects_content_that_cannot_be_stored_losslessly() -> 
 
 
 def test_deal_closed_marks_the_target_sold() -> None:
-    """成交后标的退出候选池，靠的是 lifecycle_status 本身就是初筛闸门。"""
+    """成交后标的退出候选池，靠的是级别置 E —— 它才是初筛闸门。
+
+    lifecycle_status 同时置 sold 是 E 的细分原因，两者由 DB check 绑定，
+    这里少写任何一个都会在写入时炸约束。
+    """
     changes = _seller_target_deal_closed_changes(
-        {"lifecycle_status": "active", "is_for_sale": "yes"}
+        {"target_grade": "B", "lifecycle_status": "active", "is_for_sale": "yes"}
     )
 
     assert changes == {
+        "target_grade": "E",
         "lifecycle_status": "sold",
         "is_for_sale": "no",
     }
     assert _seller_target_deal_closed_changes(
-        {"lifecycle_status": "sold", "is_for_sale": "no"}
+        {"target_grade": "E", "lifecycle_status": "sold", "is_for_sale": "no"}
     ) == {}
 
 

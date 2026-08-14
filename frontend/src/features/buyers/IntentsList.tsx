@@ -260,7 +260,7 @@ export default function IntentsList({
         filters={[
           { label: '行业', value: filters.industry, options: filterOptions.industries, onChange: (value) => updateFilters({ industry: value, page: 1 }) },
           { label: '地区', value: filters.region, options: filterOptions.regions, onChange: (value) => updateFilters({ region: value, page: 1 }) },
-          { label: '状态', value: filters.status, options: filterOptions.statuses, onChange: (value) => updateFilters({ status: value, page: 1 }) },
+          { label: '级别', value: filters.status, options: filterOptions.statuses, onChange: (value) => updateFilters({ status: value, page: 1 }) },
           { label: '上市要求', value: filters.listedStatus, options: filterOptions.listed_statuses, onChange: (value) => updateFilters({ listedStatus: value, page: 1 }) },
           { label: '并表要求', value: filters.requiresConsolidation, options: filterOptions.consolidation_requirements, onChange: (value) => updateFilters({ requiresConsolidation: value, page: 1 }) },
           ...(admin ? [{ label: '负责人', value: filters.owner, options: filterOptions.owners || [], onChange: (value: string) => updateFilters({ owner: value, page: 1 }) }] : []),
@@ -321,7 +321,7 @@ export default function IntentsList({
               <th className="sticky left-[240px] top-0 z-40 bg-gray-50 px-4 py-3 text-left font-medium text-gray-600">买家名称</th>
               <th className="text-left px-4 py-3 font-medium text-gray-600">关键需求</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">解析状态</th>
-              <th className="text-center px-4 py-3 font-medium text-gray-600">推荐状态</th>
+              <th className="text-center px-4 py-3 font-medium text-gray-600">级别</th>
               <th className="text-left px-4 py-3 font-medium text-gray-600">负责人</th>
               <th className="text-left px-4 py-3 font-medium text-gray-600">更新时间</th>
               <th className="sticky right-0 top-0 z-40 bg-gray-50 px-2 py-3 text-center font-medium text-gray-600">操作</th>
@@ -398,7 +398,7 @@ function IntentRow({
       <td className={`sticky left-[240px] z-20 px-4 py-3 align-middle text-gray-700 ${frozen}`}><p className="line-clamp-2 leading-5" title={item.buyer_name || '未关联买家'}>{item.buyer_name || <span className="text-amber-600">未关联买家</span>}</p></td>
       <td className="px-4 py-3 align-middle text-gray-600"><RequirementCell item={item} /></td>
       <td className="px-4 py-3 text-center align-middle"><ParseStatusBadge item={item} /></td>
-      <td className="px-4 py-3 text-center align-middle"><IntentStatusBadge status={item.status} /></td>
+      <td className="px-4 py-3 text-center align-middle"><IntentStatusBadge item={item} /></td>
       <td className="px-4 py-3 align-middle text-gray-600"><p className="line-clamp-2" title={item.owner_name || '未指派'}>{item.owner_name || <span className="text-gray-300">未指派</span>}</p></td>
       <td className="whitespace-nowrap px-4 py-3 align-middle text-gray-500">{formatMonthDayTime(item.updated_at)}</td>
       <td className={`sticky right-0 z-20 px-2 py-3 align-middle ${frozen}`}>

@@ -23,6 +23,7 @@ from backend.app.services.attachment_storage import (
     read_attachment_bytes,
     read_local_text_content,
 )
+from backend.app.services.entity_grade import normalize_grade, normalize_lifecycle_status
 from backend.app.services.json_values import json_safe_dict, json_safe_value
 
 ALLOWED_ACTION_TYPES = {
@@ -75,10 +76,9 @@ MONEY_UNIT_PATTERN = re.compile(
 )
 
 # 派生自指标注册表（唯一事实源）：哪些 seller_target 列允许解析写入。
-# lifecycle_status is a named system-fact exception: it is not an information
-# page indicator, but explicit sold/off-market evidence may safely stop a deal.
-SELLER_TARGET_SYSTEM_FACT_FIELDS = {"lifecycle_status"}
-SELLER_TARGET_CHANGE_FIELDS = writable_columns("parse") | SELLER_TARGET_SYSTEM_FACT_FIELDS
+# 0814 起 lifecycle_status 自己就是注册表指标（级别 E 的细分原因），不再需要
+# 「系统列特例」这个白名单开口子。
+SELLER_TARGET_CHANGE_FIELDS = writable_columns("parse")
 
 SELLER_TARGET_FIELD_ALIASES = {
     "summary": "business_summary",
@@ -646,6 +646,10 @@ _SELLER_CONTEXT_EXCLUDED_COLUMNS = frozenset(
         "information_status",
     }
 )
+# 级别与它的 E 细分原因**在**词汇表里：0814 起材料明确说了级别或已售出/已停售
+# 时要提取出来。提示词里绝不能写「未提及则默认 C」—— 模型看得见当前值，那句话
+# 会让它每次解析都主动吐一个 C，把顾问设的 A/B/D 当场覆盖掉。默认 C 只在实体
+# 创建时由建表默认值生效。
 
 
 def seller_target_context_columns() -> list[str]:
@@ -708,10 +712,13 @@ _BUYER_INTENT_CONTEXT_READ_ONLY_COLUMNS = (
     "raw_requirement_text",
 )
 # parse 可写但**故意**不给模型看的列，每条都要有理由。
+# 0814：status 从这里放行了。它原来的理由是「需求的启停由人操作，不是从材料里
+# 读出来的」，本轮级别改造推翻了这条决策 —— 材料明说「暂停推荐 / 结束推荐」时
+# 要提取出来，并同步 intent_grade。别照着旧注释改回去。
 _BUYER_INTENT_CONTEXT_EXCLUDED_COLUMNS = frozenset(
     {
-        # 需求的启停由人操作，不是从材料里读出来的。
-        "status",
+        # 暂停原因是自由文本，模型看不看当前值都不影响它提取新的，
+        # 但把它塞进上下文只会让模型倾向于原样回吐。
         "pause_reason",
     }
 )
@@ -1106,6 +1113,13 @@ def _normalize_field_value(
         normalized = _normalize_seller_listed_status(value)
     elif field == "preferred_listed_status":
         normalized = _normalize_listed_status(value)
+    elif field in {"target_grade", "intent_grade"}:
+        # 级别是大写字母，通用归一化会把 "A" 小写成 "a" 再判定成非法枚举。
+        normalized = normalize_grade(value) or ""
+    elif field == "lifecycle_status":
+        # 「已成交」在关系状态里是 deal_closed、在标的这里是 sold，通用的
+        # ENUM_VALUE_ALIASES 装不下这种同词异义，所以走专表。
+        normalized = normalize_lifecycle_status(value) or ""
     else:
         normalized = _normalize_enum_value(value)
     allowed_values = enum_fields[field]

@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.api.routes.utils import write_action_log
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+from backend.app.services.entity_grade import BLOCKED_GRADE
 
 # Mirrors the buyer_seller_relation.status check constraint.
 RELATION_STATUSES: tuple[str, ...] = (
@@ -749,12 +750,14 @@ def _seller_target_deal_closed_changes(target: dict[str, Any]) -> dict[str, Any]
 
     A relation reaching ``deal_closed`` is an explicit transaction fact, not a
     tentative follow-up.  Keep the target list, recommendation pool, and
-    information page coherent by making the target sold: ``lifecycle_status``
-    is itself the screening gate, so no separate recommendation flag is needed.
+    information page coherent by making the target sold.  Since 0814 the
+    screening gate is ``target_grade``; ``lifecycle_status`` is the E-reason and
+    the two are bound by a DB check, so both have to move together here.
     Returning only actual differences keeps the linkage idempotent and makes
     its audit concise.
     """
     desired = {
+        "target_grade": BLOCKED_GRADE,
         "lifecycle_status": "sold",
         "is_for_sale": "no",
     }
@@ -771,7 +774,7 @@ def mark_seller_target_sold_for_deal_closed(
     target_row = db.execute(
         text(
             """
-            select lifecycle_status, is_for_sale
+            select target_grade, lifecycle_status, is_for_sale
             from seller_target
             where id = :seller_target_id
               and team_id = :team_id
@@ -798,7 +801,8 @@ def mark_seller_target_sold_for_deal_closed(
         text(
             """
             update seller_target
-            set lifecycle_status = :lifecycle_status,
+            set target_grade = :target_grade,
+                lifecycle_status = :lifecycle_status,
                 is_for_sale = :is_for_sale,
                 updated_at = now(),
                 updated_by = :updated_by
@@ -809,6 +813,7 @@ def mark_seller_target_sold_for_deal_closed(
             """
         ),
         {
+            "target_grade": changes.get("target_grade", original["target_grade"]),
             "lifecycle_status": changes.get("lifecycle_status", original["lifecycle_status"]),
             "is_for_sale": changes.get("is_for_sale", original["is_for_sale"]),
             "updated_by": actor_user_id,

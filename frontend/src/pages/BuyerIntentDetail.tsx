@@ -15,6 +15,7 @@ import type {
   BusinessUpdateProcessingScope,
 } from '../types/api';
 import { ParseStatusBadge } from '../features/buyers/presentation';
+import { INTENT_GRADE_OPTIONS, gradeOptionPatch, gradeOptionValue, intentGrade } from '../lib/entityGrade';
 
 export default function BuyerIntentDetail() {
   const { id } = useParams<{ id: string }>();
@@ -68,14 +69,16 @@ export default function BuyerIntentDetail() {
     users.options().then(setOwnerOptions).catch(() => {});
   }, [admin]);
 
-  const changeStatus = async (status: string) => {
-    if (!intent || status === intent.status) return;
+  const changeGrade = async (value: string) => {
+    if (!intent || value === gradeOptionValue(intentGrade(intent), intent.status)) return;
     setStatusSaving(true);
     try {
-      setIntent(await buyerIntents.update(intent.id, { status }));
+      // 级别与它的 E 细分原因一起发：裸 E 会被后端落成默认的「暂停推荐」，
+      // 而这里用户已经明确选了是哪一种。
+      setIntent(await buyerIntents.update(intent.id, gradeOptionPatch(value, 'intent_grade', 'status')));
       setHistoryRefreshKey((current) => current + 1);
     } catch (error) {
-      alert(error instanceof Error ? error.message : '更新推荐状态失败');
+      alert(error instanceof Error ? error.message : '更新需求级别失败');
     } finally {
       setStatusSaving(false);
     }
@@ -122,7 +125,7 @@ export default function BuyerIntentDetail() {
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
               <h1 className="truncate text-lg font-semibold text-gray-900">{intent.intent_name}</h1>
-              <IntentStatusBadge status={intent.status} />
+              <IntentStatusBadge item={intent} />
               <ParseStatusBadge item={intent} parseStatus={parseStatus || undefined} />
             </div>
             <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-500">
@@ -136,7 +139,7 @@ export default function BuyerIntentDetail() {
         <div className="flex flex-wrap items-center justify-end gap-2">
           {parseStatus?.processing_state.recoverable ? <button type="button" onClick={() => setActiveTab('attachments')} className="inline-flex items-center gap-1.5 border border-red-200 px-3 py-1.5 text-sm text-red-700 hover:bg-red-50"><RefreshCw className="h-3.5 w-3.5" />使用原附件重新处理</button> : null}
           {admin ? <label className="flex items-center gap-1 text-xs text-gray-500">负责人<select value={intent.owner_user_id || ''} onChange={(event) => void changeOwner(event.target.value)} disabled={ownerSaving} className="border border-gray-200 bg-white px-2 py-1.5 text-sm text-gray-700 disabled:opacity-50"><option value="">未指派</option>{ownerOptions.filter((option) => option.status === 'active').map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}</select></label> : null}
-          <select value={intent.status} onChange={(event) => void changeStatus(event.target.value)} disabled={statusSaving} className="border border-gray-200 bg-white px-2 py-1.5 text-sm text-gray-700 disabled:opacity-50"><option value="active">持续推荐</option><option value="paused">暂停推荐</option><option value="closed">已结束</option></select>
+          <select value={gradeOptionValue(intentGrade(intent), intent.status)} onChange={(event) => void changeGrade(event.target.value)} disabled={statusSaving} title="需求级别：E 的需求会自动退出推荐，A-D 都参与推荐" className="border border-gray-200 bg-white px-2 py-1.5 text-sm text-gray-700 disabled:opacity-50">{INTENT_GRADE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>
           <UpdateEntryMenu primaryScope={activeTab === 'progress' ? 'follow_up' : 'basic_info'} onSelect={(scope) => setUpdateDrawer({ open: true, scope })} />
           <Link to={`/recommendations?mode=buyer-to-target&intentId=${intent.id}`} className="inline-flex items-center gap-1.5 bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"><Sparkles className="h-3.5 w-3.5" />推荐标的</Link>
         </div>

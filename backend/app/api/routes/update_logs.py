@@ -1028,9 +1028,9 @@ def _batch_rollback_block_reason(
 
 
 MANAGEMENT_FIELDS_BY_ENTITY = {
-    "seller_target": {"owner_user_id", "lifecycle_status"},
+    "seller_target": {"owner_user_id", "target_grade", "lifecycle_status"},
     "buyer_party": {"owner_user_id", "status"},
-    "buyer_intent": {"owner_user_id", "status", "pause_reason"},
+    "buyer_intent": {"owner_user_id", "intent_grade", "status", "pause_reason"},
 }
 
 
@@ -1087,6 +1087,7 @@ ROLLBACK_FIELDS_BY_ENTITY = {
     "seller_target": set(seller_target_fact_columns()),
     "buyer_intent": {
         "intent_name",
+        "intent_grade",
         "status",
         "pause_reason",
         "contact_name",

@@ -594,7 +594,7 @@ def list_buyer_party_intents(
         text(
             f"""
             select
-              bi.id, bi.buyer_party_id, bi.intent_name, bi.status, bi.contact_name,
+              bi.id, bi.buyer_party_id, bi.intent_name, bi.intent_grade, bi.status, bi.contact_name,
               bi.raw_requirement_text, bi.intent_summary, bi.industry_primary, bi.industry_secondary,
               bi.region_scope_summary, bi.min_revenue_yuan, bi.min_net_profit_yuan, bi.max_pe,
               bi.max_valuation_yuan, bi.min_market_cap_yuan, bi.max_market_cap_yuan,

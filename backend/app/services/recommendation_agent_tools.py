@@ -371,7 +371,8 @@ class RecommendationAgentTools:
                 where st.team_id = :team_id
                   and st.workspace_id = :workspace_id
                   and st.deleted_at is null
-                  and st.lifecycle_status = 'active'
+                  -- 与 recommendation_flow 是两条独立召回路径，闸门口径必须一致。
+                  and st.target_grade <> 'E'
                   and st.id = any(:ids)
                 """
             ),

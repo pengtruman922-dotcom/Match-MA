@@ -26,6 +26,7 @@ from backend.app.api.routes.utils import (
 )
 from backend.app.db import get_db
 from backend.app.registry.nodes import buyer_parse_node_names
+from backend.app.services.entity_grade import BUYER_GRADE, resolve_grade_pair
 from backend.app.services.listed_status import legacy_listed_status
 from backend.app.services.recommendation_conditions import normalize_condition_effects, normalize_scenario_fields
 from backend.app.services.search_docs import create_search_doc_rebuild_job
@@ -50,6 +51,11 @@ ListedStatusRequirement = Literal["listed", "unlisted", "pre_ipo", "preparing_li
 ListingMarketRegion = Literal[
     "sse", "szse", "bse", "hkex", "nyse", "nasdaq", "other", "unknown"
 ]
+# 需求级别：E 不进推荐，A-D 进。IntentStatus 从「需求状态」降级成 E 的细分原因，
+# 两者由 entity_grade.resolve_grade_pair 收敛、由 DB check 兜底，客户端可以只发
+# 其中一个。
+Grade = Literal["A", "B", "C", "D", "E"]
+IntentStatus = Literal["active", "paused", "closed"]
 
 
 class BuyerIntentCreate(BaseModel):
@@ -128,6 +134,7 @@ class BuyerIntentOut(BaseModel):
     buyer_party_id: UUID | None
     buyer_name: str | None = None
     intent_name: str
+    intent_grade: str
     status: str
     contact_name: str | None
     contact_info_json: dict[str, Any] = Field(default_factory=dict)
@@ -206,7 +213,8 @@ class BuyerIntentListOut(BaseModel):
 
 class BuyerIntentUpdate(BaseModel):
     intent_name: str | None = Field(default=None, min_length=1, max_length=300)
-    status: Literal["active", "paused", "closed"] | None = None
+    intent_grade: Grade | None = None
+    status: IntentStatus | None = None
     pause_reason: str | None = None
     contact_name: str | None = None
     contact_info_json: dict[str, Any] | None = None
@@ -346,7 +354,8 @@ _JSONB_ARRAY = "case when jsonb_typeof({column}) = 'array' then {column} else '[
 
 
 BUYER_INTENT_OUT_COLUMNS = """
-              bi.id, bi.buyer_party_id, bp.buyer_name as buyer_name, bi.intent_name, bi.status,
+              bi.id, bi.buyer_party_id, bp.buyer_name as buyer_name, bi.intent_name,
+              bi.intent_grade, bi.status,
               bi.contact_name, bi.contact_info_json,
               bi.raw_requirement_text, bi.intent_summary, bi.parsed_requirement_json,
               bi.industry_primary, bi.industry_secondary,
@@ -503,7 +512,8 @@ def list_buyer_intents(
     buyer_party_id: UUID | None = None,
     industry: str | None = Query(default=None, max_length=200),
     region: str | None = Query(default=None, max_length=200),
-    status: Literal["active", "paused", "closed"] | None = Query(default=None),
+    # 参数名沿用 status（旧书签与既有链接不破），值域换成级别 A-E。
+    status: Grade | None = Query(default=None),
     # 保持宽松：过期书签里的旧值（如 any/unknown）自然匹配 0 行，好过 422 被前端吞掉。
     listed_status: str | None = Query(default=None, max_length=80),
     requires_consolidation: Literal["yes", "no", "likely", "unknown"] | None = Query(default=None),
@@ -556,7 +566,7 @@ def list_buyer_intents(
         )
         params["region"] = region
     if status:
-        where.append("bi.status = :status")
+        where.append("bi.intent_grade = :status")
         params["status"] = status
     if listed_status:
         where.append("bi.acceptable_listed_status_json ? :listed_status")
@@ -648,20 +658,21 @@ def buyer_intent_filter_options(current_user: CurrentUser, db: Session = Depends
         """,
         params,
     )
+    # 按级别分桶，不按 E 的细分原因再拆：筛选的单位是级别，一条需求为什么退出
+    # 推荐是行内徽标和详情页的事。E 的两个原因合成一个桶。
     statuses = _filter_options(
         db,
         f"""
-        select status as value, count(*) as count
+        select intent_grade as value, count(*) as count
         from buyer_intent
         where team_id = :team_id
           and workspace_id = :workspace_id
           and deleted_at is null
           {scope_clause}
-        group by status
-        order by count desc, status asc
+        group by intent_grade
+        order by intent_grade asc
         """,
         params,
-        labels={"active": "持续推荐", "paused": "暂停推荐", "closed": "已结束"},
     )
     listed_statuses = _filter_options(
         db,
@@ -1044,6 +1055,13 @@ def update_buyer_intent(
 
     if "intent_name" in changes and changes["intent_name"] is not None:
         changes["intent_name"] = changes["intent_name"].strip()
+
+    # 级别与推荐状态成对落地。人工路径 allow_reactivation=True：顾问可以把 E 改回
+    # A-D，AI 不行（entity_grade 的注释说明了为什么恢复只能由人做）。
+    resolved_grade = resolve_grade_pair(BUYER_GRADE, changes, original, allow_reactivation=True)
+    changes.pop(BUYER_GRADE.grade_column, None)
+    changes.pop(BUYER_GRADE.reason_column, None)
+    changes.update(resolved_grade)
 
     # Editing a field is the human resolution of a parser question about that
     # field. Keep unrelated questions, but do not leave the edited condition in

@@ -25,10 +25,13 @@ import UpdateHistory from '../components/UpdateHistory';
 import TargetInfoPanel from '../features/targets/TargetInfoPanel';
 import ProgressPanel from '../features/relations/ProgressPanel';
 import {
-  sellerTargetDisplayStatus,
-  sellerTargetDisplayStatusClass,
-  sellerTargetDisplayStatusLabel,
-} from '../lib/sellerTargetStatus';
+  TARGET_GRADE_OPTIONS,
+  gradeClass,
+  gradeOptionPatch,
+  gradeOptionValue,
+  targetGrade,
+  targetGradeLabel,
+} from '../lib/entityGrade';
 import { TargetAiProcessingBadge } from '../features/targets/presentation';
 
 type Tab = 'info' | 'progress' | 'attachments' | 'history';
@@ -41,7 +44,7 @@ export default function TargetDetail() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<Tab>(() => (['history', 'attachments', 'progress'] as const).find((tab) => tab === searchParams.get('tab')) || 'info');
   const [updateDrawer, setUpdateDrawer] = useState<{ open: boolean; scope: BusinessUpdateProcessingScope }>({ open: false, scope: 'basic_info' });
-  const [lifecycleSaving, setLifecycleSaving] = useState(false);
+  const [gradeSaving, setGradeSaving] = useState(false);
   const admin = isAdmin();
   const [ownerOptions, setOwnerOptions] = useState<AppUserOption[]>([]);
   const [ownerSaving, setOwnerSaving] = useState(false);
@@ -102,16 +105,21 @@ export default function TargetDetail() {
     }
   };
 
-  const handleLifecycleChange = async (value: string) => {
-    if (!target || value === target.lifecycle_status) return;
-    setLifecycleSaving(true);
+  const handleGradeChange = async (value: string) => {
+    if (!target || value === gradeOptionValue(targetGrade(target), target.lifecycle_status)) return;
+    setGradeSaving(true);
     try {
-      const updated = await sellerTargets.update(target.id, { lifecycle_status: value });
+      // 级别与它的 E 细分原因一起发：裸 E 会被后端落成默认的「已停售」，
+      // 而这里用户已经明确选了是哪一种。
+      const updated = await sellerTargets.update(
+        target.id,
+        gradeOptionPatch(value, 'target_grade', 'lifecycle_status'),
+      );
       setTarget(updated);
     } catch (err) {
-      alert(err instanceof Error ? err.message : '更新交易状态失败');
+      alert(err instanceof Error ? err.message : '更新标的级别失败');
     } finally {
-      setLifecycleSaving(false);
+      setGradeSaving(false);
     }
   };
 
@@ -176,15 +184,15 @@ export default function TargetDetail() {
             </select>
           )}
           <select
-            value={target.lifecycle_status}
-            onChange={(event) => handleLifecycleChange(event.target.value)}
-            disabled={lifecycleSaving}
-            title="交易状态：已售出/已停售的标的会自动退出推荐候选池"
+            value={gradeOptionValue(targetGrade(target), target.lifecycle_status)}
+            onChange={(event) => handleGradeChange(event.target.value)}
+            disabled={gradeSaving}
+            title="标的级别：E 的标的会自动退出推荐候选池，A-D 都参与推荐"
             className="px-2 py-1.5 text-sm border border-gray-200 text-gray-700 bg-white outline-none hover:border-brand-500 focus:border-brand-600 disabled:opacity-50"
           >
-            <option value="active">在售中</option>
-            <option value="sold">已售出</option>
-            <option value="off_market">已停售</option>
+            {TARGET_GRADE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
           </select>
           <UpdateEntryMenu
             primaryScope={activeTab === 'progress' ? 'follow_up' : 'basic_info'}
@@ -534,10 +542,9 @@ function firstString(value: unknown): string {
 }
 
 function DisplayStatusBadge({ target }: { target: SellerTarget }) {
-  const displayStatus = sellerTargetDisplayStatus(target);
   return (
-    <span className={`text-xs px-1.5 py-0.5 font-medium ${sellerTargetDisplayStatusClass(displayStatus)}`}>
-      {sellerTargetDisplayStatusLabel(displayStatus)}
+    <span className={`text-xs px-1.5 py-0.5 font-medium ${gradeClass(targetGrade(target))}`}>
+      {targetGradeLabel(target)}
     </span>
   );
 }

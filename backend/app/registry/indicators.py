@@ -122,6 +122,14 @@ _REQUIREMENT_STRENGTH = (
     ("not_required", "不作要求"),
     ("unknown", "需要确认"),
 )
+# 级别是推荐初筛的唯一闸门：E 不进推荐，A-D 进。A-D 之间**不影响**召回与排序
+# （所以不设 screening / deterministic_rank），只服务筛选与人工优先级。
+# 字母没有中文别名，两列共用同一个闭集。
+_GRADE = (("A", "A"), ("B", "B"), ("C", "C"), ("D", "D"), ("E", "E"))
+# E 的细分原因。级别与原因严格双向绑定，由 services/entity_grade.py 单点派生，
+# DB 的 chk_*_grade_* 约束兜底。
+_LIFECYCLE_STATUS = (("active", "在售中"), ("sold", "已售出"), ("off_market", "已停售"))
+_INTENT_STATUS = (("active", "持续推荐"), ("paused", "暂停推荐"), ("closed", "结束推荐"))
 
 
 SELLER_TARGET_INDICATORS: tuple[Indicator, ...] = (
@@ -193,8 +201,14 @@ SELLER_TARGET_INDICATORS: tuple[Indicator, ...] = (
     # 只能靠它回填。screening 同上，下一轮接线时改。
     Indicator("major_risk_flags_json", "重大风险", "deal_terms", "json", writable_by=_ALL, enum_options=_MAJOR_RISK_FLAGS, multi_value=True),
     Indicator("risk_summary", "风险摘要", "deal_terms", "text", writable_by=_ALL),
-    # 系统状态不是信息页业务事实，不允许手动编辑。交易状态（lifecycle_status）
-    # 由详情页下拉维护，走专用流程，不进注册表。
+    # 标的级别与它的 E 细分原因。0814 起两者都进注册表：以前 lifecycle_status 是
+    # 「系统列特例」，在 handlers/common.py 开白名单、在 extracted_action_apply.py
+    # 自己拼 UPDATE 和审计日志，绕过 field_writer 的校验与来源记录。进来之后校验、
+    # 审计、模型词汇表、回滚清单全部自动覆盖。group=None 所以不进信息页模块
+    # （meta.py 只渲染 group is not None 的指标）。
+    Indicator("target_grade", "标的级别", None, "enum", writable_by=_PARSE_MANUAL, enum_options=_GRADE),
+    Indicator("lifecycle_status", "交易状态", None, "enum", writable_by=_PARSE_MANUAL, enum_options=_LIFECYCLE_STATUS),
+    # 系统状态不是信息页业务事实，不允许手动编辑。
     # pending_review 仅在数据库 check 中兼容历史行，不再向任何写入方暴露。
     Indicator("information_status", "信息状态", None, "enum", writable_by=_PARSE, enum_options=(("normal", "正常"), ("insufficient", "信息不足"), ("parsing", "解析中"), ("researching", "调研中"), ("parse_failed", "解析失败"))),
 )
@@ -258,7 +272,10 @@ BUYER_INTENT_INDICATORS: tuple[Indicator, ...] = (
     Indicator("major_risk_tolerance_summary", "风险容忍", "intent_financial", "text", writable_by=_BI_WRITE, scenario_allowed=True),
     Indicator("buyer_industry_advantage_summary", "产业优势", "intent_scope", "text", writable_by=_BI_WRITE, scenario_allowed=True),
     Indicator("condition_effects_json", "条件作用", None, "json", writable_by=_BI_WRITE),
-    Indicator("status", "状态", None, "enum", writable_by=_BI_PARSE, enum_options=(("active", "进行中"), ("paused", "暂停"), ("closed", "已结束"))),
+    # 需求级别与它的 E 细分原因，与标的侧同一套语义。status 从「需求状态」降级成
+    # 「E 的细分原因」，取值不变，只是不再单独作为闸门。
+    Indicator("intent_grade", "需求级别", None, "enum", writable_by=_BI_WRITE, enum_options=_GRADE),
+    Indicator("status", "推荐状态", None, "enum", writable_by=_BI_PARSE, enum_options=_INTENT_STATUS),
     Indicator("pause_reason", "暂停原因", None, "text", writable_by=_BI_PARSE),
 )
 
@@ -337,8 +354,9 @@ def seller_target_fact_columns() -> list[str]:
     的表现都是「字段存进去了但某个页面/某条链路看不见」，最难查。列名来自注册表
     不是外部输入，可以安全拼接（同 handlers/common.py 的 _fetch_seller_targets）。
 
-    只含事实列。id、时间戳、owner、lifecycle_status 这类系统列由调用方自己加，
-    因为每处要的不一样。
+    只含注册表声明的列。id、时间戳、owner 这类系统列由调用方自己加，因为每处要的
+    不一样；级别与交易状态 0814 起在注册表里，**不要再在调用处手工拼一份**，否则
+    是重复列名、SQL 直接报错。
     """
     return [indicator.column for indicator in SELLER_TARGET_INDICATORS] + list(
         _SELLER_TARGET_EXTRA_FACT_COLUMNS

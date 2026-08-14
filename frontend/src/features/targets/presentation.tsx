@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 import type { SellerTarget } from '../../types/api';
+import { gradeClass, targetGrade, targetGradeLabel } from '../../lib/entityGrade';
 import {
   AI_PROCESSING_CLASSES,
   AI_PROCESSING_LABELS,
@@ -9,28 +10,11 @@ import {
   isAiProcessingActive,
 } from './aiProcessing';
 
-const TRADE_STATUS_LABELS: Record<string, string> = {
-  active: '在售中',
-  sold: '已售出',
-  off_market: '已停售',
-};
-
-const TRADE_STATUS_CLASSES: Record<string, string> = {
-  active: 'bg-emerald-50 text-emerald-700',
-  sold: 'bg-violet-50 text-violet-700',
-  off_market: 'bg-amber-50 text-amber-700',
-};
-
-/** 交易状态，也是推荐初筛的唯一闸门：只有「在售中」参与筛选。 */
+/** 标的级别，也是推荐初筛的唯一闸门：E 不参与筛选，A-D 都参与。 */
 export function TargetStatusBadge({ item }: { item: SellerTarget }) {
-  const status = item.lifecycle_status || 'active';
   return (
-    <span
-      className={`inline-flex items-center px-2 py-0.5 text-xs font-medium ${
-        TRADE_STATUS_CLASSES[status] || 'bg-gray-100 text-gray-600'
-      }`}
-    >
-      {TRADE_STATUS_LABELS[status] || status}
+    <span className={`inline-flex items-center px-2 py-0.5 text-xs font-medium ${gradeClass(targetGrade(item))}`}>
+      {targetGradeLabel(item)}
     </span>
   );
 }

@@ -23,6 +23,7 @@ import ProgressPanel from '../features/relations/ProgressPanel';
 import BuyerIntentRequirements from './BuyerIntentRequirements';
 import AdministrativeAreaPicker, { type AdministrativeAreaValue } from './AdministrativeAreaPicker';
 import IndustryPairsEditor, { type IndustryPairValue } from './IndustryPairsEditor';
+import { gradeClass, intentGrade, intentGradeLabel } from '../lib/entityGrade';
 
 export type BuyerWorkspaceTab = 'intent' | 'buyer' | 'progress' | 'attachments' | 'history';
 
@@ -112,14 +113,12 @@ export default function BuyerIntentWorkspace({
   );
 }
 
-export function IntentStatusBadge({ status }: { status: string }) {
-  const labels: Record<string, string> = {
-    active: '持续推荐',
-    paused: '暂停推荐',
-    closed: '已结束',
-  };
-  const className = status === 'active' ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-600';
-  return <span className={`px-2 py-0.5 text-xs font-medium ${className}`}>{labels[status] || status}</span>;
+export function IntentStatusBadge({ item }: { item: BuyerIntent }) {
+  return (
+    <span className={`px-2 py-0.5 text-xs font-medium ${gradeClass(intentGrade(item))}`}>
+      {intentGradeLabel(item)}
+    </span>
+  );
 }
 
 type BuyerInfoField = 'buyer_name' | 'location' | 'industry' | 'contact_name' | 'contact_info' | 'notes';

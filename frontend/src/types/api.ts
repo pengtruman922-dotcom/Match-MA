@@ -13,6 +13,8 @@ export interface SellerTarget {
   target_name: string;
   target_type: string | null;
   target_subject_name: string | null;
+  // 级别是推荐初筛的唯一闸门（E 不进）；lifecycle_status 降级成 E 的细分原因。
+  target_grade: string;
   lifecycle_status: string;
   information_status: string;
   ai_processing_state: 'parsing' | 'research_queued' | 'researching' | 'research_mapping' | 'parse_failed' | 'research_failed' | 'completed' | 'never';
@@ -132,7 +134,8 @@ export interface SellerTargetCreate {
   target_name: string;
   target_type?: string;
   target_subject_name?: string;
-  lifecycle_status?: string;
+  // 创建只收 A-D，默认 C；刚建的标的就已售出/已停售没有意义。
+  target_grade?: string;
   information_status?: string;
   industry_l1?: string;
   industry_l2?: string;
@@ -158,6 +161,7 @@ export interface SellerTargetUpdate {
   target_name?: string;
   target_type?: string;
   target_subject_name?: string;
+  target_grade?: string;
   lifecycle_status?: string;
   industry_l1?: string;
   industry_l2?: string;
@@ -318,6 +322,8 @@ export interface BuyerIntent {
   buyer_party_id: string | null;
   buyer_name?: string | null;
   intent_name: string;
+  // 与标的侧同一套语义：级别是闸门，status 是 E 的细分原因。
+  intent_grade: string;
   status: string;
   contact_name: string | null;
   contact_info_json: Record<string, unknown>;
@@ -742,6 +748,7 @@ export interface BuyerIntentParseStatus {
 
 export interface BuyerIntentUpdate {
   intent_name?: string;
+  intent_grade?: string;
   status?: string;
   contact_name?: string | null;
   contact_info_json?: Record<string, unknown>;

@@ -1,10 +1,11 @@
-"""Guards for the consolidated seller_target status model (施工单 0727 · T1).
+"""Guards for the seller_target status model (施工单 0727 · T1，0814 换级别).
 
-``recommendation_status`` is retired at runtime. A target now has exactly two orthogonal
-statuses: ``lifecycle_status`` (交易状态, human-owned) and ``information_status``
-(AI 处理进度, system-owned). These tests pin the removal so the coupling that
+``recommendation_status`` is retired at runtime. A target now has exactly two
+orthogonal axes: 级别 ``target_grade``（A-E，人工拥有，推荐初筛的唯一闸门，
+``lifecycle_status`` 降级成 E 的细分原因）与 ``information_status``
+(AI 处理进度, system-owned). These tests pin the separation so the coupling that
 silently kept 8 production targets out of the recommendation pool cannot come
-back through any of the paths that used to write the column.
+back through any of the paths that used to write the retired column.
 """
 
 import re
@@ -20,6 +21,7 @@ REPO = Path(__file__).resolve().parents[1]
 RECOMMENDATION_FLOW = REPO / "backend/app/services/recommendation_flow.py"
 SELLER_TARGETS_ROUTE = REPO / "backend/app/api/routes/seller_targets.py"
 SEARCH_DOCS_ROUTE = REPO / "backend/app/api/routes/search_docs.py"
+AGENT_TOOLS = REPO / "backend/app/services/recommendation_agent_tools.py"
 PARSE_HANDLER = REPO / "backend/app/jobs/handlers/seller_target_parse.py"
 ACTION_APPLY = REPO / "backend/app/services/extracted_action_apply.py"
 STATUS_MIGRATION = REPO / "database/migrations/005_target_status_consolidation.sql"
@@ -35,18 +37,19 @@ def test_public_models_do_not_expose_retired_information_status_writes() -> None
     assert "information_status" not in SellerTargetUpdate.model_fields
 
 
-def test_deal_closed_changes_only_lifecycle_and_for_sale() -> None:
+def test_deal_closed_changes_only_grade_pair_and_for_sale() -> None:
     changes = _seller_target_deal_closed_changes(
-        {"lifecycle_status": "active", "is_for_sale": "yes"}
+        {"target_grade": "C", "lifecycle_status": "active", "is_for_sale": "yes"}
     )
-    assert set(changes) == {"lifecycle_status", "is_for_sale"}
+    assert set(changes) == {"target_grade", "lifecycle_status", "is_for_sale"}
+    assert changes["target_grade"] == "E"
     assert changes["lifecycle_status"] == "sold"
     assert changes["is_for_sale"] == "no"
 
 
 def test_deal_closed_changes_are_idempotent() -> None:
     assert _seller_target_deal_closed_changes(
-        {"lifecycle_status": "sold", "is_for_sale": "no"}
+        {"target_grade": "E", "lifecycle_status": "sold", "is_for_sale": "no"}
     ) == {}
 
 
@@ -56,30 +59,37 @@ def test_registry_no_longer_declares_recommendation_status() -> None:
     assert "recommendation_status" not in {ind.column for ind in SELLER_TARGET_INDICATORS}
 
 
-def test_recommendation_screening_uses_lifecycle_only() -> None:
+def test_recommendation_screening_uses_grade_only() -> None:
     source = RECOMMENDATION_FLOW.read_text(encoding="utf-8")
-    assert "st.lifecycle_status = 'active'" in source
+    assert "st.target_grade <> 'E'" in source
+    assert "bi.intent_grade <> 'E'" in source
+    # 闸门只认级别：任何一处退回读交易状态，E 之外的语义就又分叉了。
+    assert "lifecycle_status" not in source
     assert "recommendation_status" not in source
 
 
-def test_search_doc_backfill_scopes_by_lifecycle() -> None:
+def test_search_doc_backfill_scopes_by_grade() -> None:
     source = SEARCH_DOCS_ROUTE.read_text(encoding="utf-8")
-    assert "st.lifecycle_status = 'active'" in source
+    assert "st.target_grade <> 'E'" in source
+    assert "bi.intent_grade <> 'E'" in source
     assert "recommendation_status" not in source
 
 
-def test_display_status_is_pure_trade_lifecycle() -> None:
-    """列表「状态」列只表达交易状态，不再混入解析进度或推荐闸门。"""
+def test_agent_tool_recall_shares_the_same_gate() -> None:
+    """Agent 工具与 recommendation_flow 是两条独立召回路径，漏改一处不会报错。"""
+    source = AGENT_TOOLS.read_text(encoding="utf-8")
+    assert "st.target_grade <> 'E'" in source
+    assert "lifecycle_status" not in source
+
+
+def test_list_filter_and_facets_are_pure_grade() -> None:
+    """列表筛选与分桶只认级别，不混入解析进度，也不按 E 的细分原因再拆桶。"""
     source = SELLER_TARGETS_ROUTE.read_text(encoding="utf-8")
-    block = re.search(
-        r"SELLER_TARGET_DISPLAY_STATUS_SQL = \"\"\"(.*?)\"\"\"", source, re.S
-    )
-    assert block, "未找到 SELLER_TARGET_DISPLAY_STATUS_SQL"
-    body = block.group(1)
-    assert "recommendation_status" not in body
-    assert "information_status" not in body
-    for value in ("sold", "off_market", "active"):
-        assert value in body
+    assert 'where.append("target_grade = :status")' in source
+    facet = re.search(r"select target_grade as value.*?order by target_grade asc", source, re.S)
+    assert facet, "筛选项未按 target_grade 分桶"
+    assert "information_status" not in facet.group(0)
+    assert "lifecycle_status" not in facet.group(0)
 
 
 def test_post_parse_status_promotion_is_gone() -> None:

@@ -59,6 +59,10 @@ _BUYER_PARTY_COLUMNS = (
 _REPORT_FIELD_EXCLUSIONS = frozenset(
     {
         "information_status",
+        # 级别与它的 E 细分原因是管理字段，不是推荐报告要讲的业务事实。
+        "target_grade",
+        "lifecycle_status",
+        "intent_grade",
         "status",
         "pause_reason",
         "condition_effects_json",

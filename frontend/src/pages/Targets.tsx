@@ -405,7 +405,7 @@ export default function Targets() {
           }
         />
         <FilterSelect
-          label="状态"
+          label="级别"
           value={filters.status}
           options={filterOptions.statuses || []}
           onChange={(value) => updateFilters({ status: value, page: 1 })}
@@ -499,7 +499,7 @@ export default function Targets() {
                 </th>
                 <th className="sticky left-12 top-0 z-40 w-[220px] bg-gray-50 text-left px-4 py-3 font-medium text-gray-600">标的名称</th>
                 <th className="w-20 max-w-20 text-left px-3 py-3 font-medium text-gray-600">标的主体</th>
-                <th className="w-[100px] text-center px-4 py-3 font-medium text-gray-600">状态</th>
+                <th className="w-[100px] text-center px-4 py-3 font-medium text-gray-600">级别</th>
                 <th className="w-[100px] text-center px-4 py-3 font-medium text-gray-600">AI 处理</th>
                 <th className="w-[92px] text-left px-4 py-3 font-medium text-gray-600">类型</th>
                 <th className="w-[96px] text-left px-4 py-3 font-medium text-gray-600">上市状态</th>

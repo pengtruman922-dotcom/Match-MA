@@ -42,6 +42,7 @@ from backend.app.jobs.queue import JobClaim
 from backend.app.registry.indicators import indicator_by_column, indicators_for
 from backend.app.registry.nodes import buyer_intent_legacy_node_name, buyer_intent_two_stage_node_names
 from backend.app.services.buyer_intent_industry import normalize_buyer_intent_industry_changes
+from backend.app.services.entity_grade import BUYER_GRADE, resolve_grade_pair
 from backend.app.services.listed_status import legacy_listed_status
 from backend.app.services.profile_sections import apply_profile_section, normalize_profile_section_items
 from backend.app.services.industry_taxonomy import (
@@ -951,7 +952,7 @@ def _get_buyer_intent_for_parse(db: Session, buyer_intent_id: UUID) -> dict[str,
         text(
             """
             select
-              id, buyer_party_id, intent_name, status, pause_reason, contact_name,
+              id, buyer_party_id, intent_name, intent_grade, status, pause_reason, contact_name,
               contact_info_json, raw_requirement_text, intent_summary, parsed_requirement_json,
               industry_primary, industry_secondary, industries_json,
               excluded_industries_json, industry_l2_json, industry_focus_tags_json,
@@ -1327,6 +1328,17 @@ def _apply_buyer_intent_parse_changes(
     normalization_notes: list[str],
     source_context: dict[str, Any],
 ) -> list[str]:
+    # 级别与推荐状态必须成对落地。买家侧没有统一的写入咽喉，三条路各自派生一次。
+    resolved_grade = resolve_grade_pair(
+        BUYER_GRADE,
+        changes,
+        buyer_intent,
+        allow_reactivation=False,
+    )
+    changes.pop(BUYER_GRADE.grade_column, None)
+    changes.pop(BUYER_GRADE.reason_column, None)
+    changes.update(resolved_grade)
+
     diff = _diff_json_safe(buyer_intent, changes)
     if not diff:
         return []

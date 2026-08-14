@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { BuyerInfo } from '../components/BuyerIntentWorkspace';
 import { buyerIntents, buyerParties } from '../lib/api';
 import type { BuyerIntent, BuyerParty } from '../types/api';
+import { BLOCKED_GRADE, intentGrade } from '../lib/entityGrade';
 
 export default function BuyerDetail() {
   const { id } = useParams<{ id: string }>();
@@ -21,7 +22,8 @@ export default function BuyerDetail() {
         const requestedId = searchParams.get('intentId');
         const destination =
           intents.find((intent) => intent.id === requestedId) ||
-          intents.find((intent) => intent.status === 'active') ||
+          // 默认落到还在推荐的需求（级别非 E），而不是任意一条。
+          intents.find((intent) => intentGrade(intent) !== BLOCKED_GRADE) ||
           intents[0];
         if (destination) {
           navigate(`/buyer-intents/${destination.id}`, { replace: true });

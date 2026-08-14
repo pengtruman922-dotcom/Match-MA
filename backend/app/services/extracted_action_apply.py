@@ -16,6 +16,7 @@ from backend.app.api.routes.utils import (
     write_field_value_sources_for_diff,
 )
 from backend.app.services.buyer_intent_industry import normalize_buyer_intent_industry_changes
+from backend.app.services.entity_grade import BUYER_GRADE, normalize_lifecycle_status, resolve_grade_pair
 from backend.app.services.field_writer import WriteProvenance, write_seller_target_fields
 from backend.app.services.relation_flow import mark_seller_target_sold_for_deal_closed
 from backend.app.services.search_docs import create_search_doc_rebuild_job
@@ -47,10 +48,15 @@ def apply_seller_fact_update_action(
     original = _get_seller_target_snapshot_or_404(db, seller_target_id)
     changes = _allowed_seller_target_changes(action["proposed_changes_json"])
     lifecycle_status = _lifecycle_status_from_changes(action["proposed_changes_json"])
+    if lifecycle_status is not None:
+        # 运行时提示词可编辑，模型可能给中文也可能给枚举码，映射在这里做完再交给
+        # field_writer —— 它按注册表做严格枚举校验，"已售出" 会被当成非法值。
+        # 级别（target_grade）由 field_writer 内部按这一对派生，这里不碰。
+        changes["lifecycle_status"] = lifecycle_status
     if lifecycle_status in {"sold", "off_market"}:
         # Terminal market evidence is a safe one-way sync. A later in-sale
-        # signal never reactivates a sold or off-market target automatically.
-        # lifecycle_status itself is written below and is the screening gate.
+        # signal never reactivates a sold or off-market target automatically
+        # (entity_grade.resolve_grade_pair 的 allow_reactivation=False 保证).
         changes["is_for_sale"] = "no"
     if not changes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No supported changes to apply.")
@@ -88,39 +94,6 @@ def apply_seller_fact_update_action(
         seller_target_id=seller_target_id,
         actor_user_id=actor_user_id,
     )
-    if lifecycle_status is not None and lifecycle_status != original.get("lifecycle_status"):
-        db.execute(
-            text(
-                """
-                update seller_target
-                set lifecycle_status = :lifecycle_status,
-                    updated_at = now(), updated_by = :updated_by
-                where id = :seller_target_id and team_id = :team_id
-                  and workspace_id = :workspace_id and deleted_at is null
-                """
-            ),
-            {
-                "lifecycle_status": lifecycle_status,
-                "updated_by": actor_user_id,
-                "seller_target_id": seller_target_id,
-                "team_id": DEFAULT_TEAM_ID,
-                "workspace_id": DEFAULT_WORKSPACE_ID,
-            },
-        )
-        write_action_logs_for_diff(
-            db,
-            entity_type="seller_target",
-            entity_id=seller_target_id,
-            diff={"lifecycle_status": (original.get("lifecycle_status"), lifecycle_status)},
-            source_type="extracted_action",
-            source_id=action["id"],
-            evidence_id=source_context["evidence_id"],
-            business_update_id=action["business_update_id"],
-            extracted_action_id=action["id"],
-            metadata_json={"source": "seller_fact_update_lifecycle_sync"},
-            applied_by=actor_user_id,
-        )
-        applied_fields.append("lifecycle_status")
     if rejected_fields:
         _record_rejected_fields(db, action["id"], rejected_fields)
     if not applied_fields:
@@ -243,6 +216,7 @@ def apply_buyer_intent_update_action(
 
     buyer_intent_id = action["target_entity_id"]
     original = _get_buyer_intent_snapshot_or_404(db, buyer_intent_id)
+    _apply_grade_pair(changes, original, allow_reactivation=False)
     diff = diff_payload(original, changes)
     if not diff:
         _mark_action_applied(db, action["id"], review_status="auto_accepted" if not require_accepted else None)
@@ -602,7 +576,7 @@ def _get_seller_target_snapshot_or_404(db: Session, seller_target_id: UUID) -> d
         text(
             f"""
             select
-              lifecycle_status, {", ".join(seller_target_fact_columns())}
+              {", ".join(seller_target_fact_columns())}
             from seller_target
             where id = :seller_target_id
               and team_id = :team_id
@@ -627,7 +601,7 @@ def _get_buyer_intent_snapshot_or_404(db: Session, buyer_intent_id: UUID) -> dic
         text(
             """
             select
-              intent_name, status, pause_reason, contact_name, contact_info_json,
+              intent_name, intent_grade, status, pause_reason, contact_name, contact_info_json,
               raw_requirement_text, intent_summary, parsed_requirement_json,
               industry_primary, industry_secondary, industries_json,
               excluded_industries_json, industry_focus_tags_json, region_scope_summary,
@@ -767,31 +741,21 @@ def _lifecycle_status_from_changes(changes: dict[str, Any]) -> str | None:
     """Derive the market lifecycle from explicit parser facts.
 
     Runtime prompt versions are editable, so newer versions may emit either a
-    lifecycle code or a direct transaction-status field.  Keeping the mapping
+    lifecycle code or a direct transaction-status field.  Resolving the aliases
     here makes an unequivocal “已售出/已停售” update close both the lifecycle
     and the user-facing “是否还卖” fact, without treating an ordinary follow-up
     as a fact update (that routing remains deliberately deferred).
+
+    级别（target_grade）由 field_writer 内部按这一对派生，这里只负责把非规范的
+    字段名与中文说法收敛成 lifecycle_status 的枚举码。
     """
-    raw = str(
+    return normalize_lifecycle_status(
         changes.get("lifecycle_status")
         or changes.get("sale_status")
         or changes.get("market_status")
         or changes.get("is_for_sale")
         or ""
-    ).strip().lower()
-    return {
-        "sold": "sold",
-        "已售出": "sold",
-        "已成交": "sold",
-        "off_market": "off_market",
-        "已停售": "off_market",
-        "停售": "off_market",
-        "暂停出售": "off_market",
-        "不再出售": "off_market",
-        "no": "off_market",
-        "active": "active",
-        "在售": "active",
-    }.get(raw)
+    )
 
 
 def _seller_target_changes_with_parse_completion(
@@ -810,9 +774,33 @@ def _seller_target_changes_with_parse_completion(
 _POST_PARSE_INFORMATION_STATUSES = {"parsing", "pending_review", "insufficient", "parse_failed"}
 
 
+def _apply_grade_pair(
+    changes: dict[str, Any],
+    original: dict[str, Any],
+    *,
+    allow_reactivation: bool,
+) -> None:
+    """就地把买家需求的级别与推荐状态收敛成自洽的一对。
+
+    买家侧没有 field_writer 那样的统一写入咽喉（三条路各自拼 UPDATE），所以派生
+    只能在每个调用点显式做一次。空结果意味着这批变更没有级别主张，或者 AI 想把
+    E 拉回在售 —— 两种都把这两列从变更里摘掉，其余字段照写。
+    """
+    resolved = resolve_grade_pair(
+        BUYER_GRADE,
+        changes,
+        original,
+        allow_reactivation=allow_reactivation,
+    )
+    changes.pop(BUYER_GRADE.grade_column, None)
+    changes.pop(BUYER_GRADE.reason_column, None)
+    changes.update(resolved)
+
+
 def _allowed_buyer_intent_changes(changes: dict[str, Any]) -> dict[str, Any]:
     allowed_fields = {
         "intent_name",
+        "intent_grade",
         "status",
         "pause_reason",
         "contact_name",

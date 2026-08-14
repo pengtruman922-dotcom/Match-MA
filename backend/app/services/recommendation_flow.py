@@ -1251,7 +1251,8 @@ def _candidate_targets_for_intent(
             where st.team_id = :team_id
               and st.workspace_id = :workspace_id
               and st.deleted_at is null
-              and st.lifecycle_status = 'active'
+              -- 推荐初筛的唯一闸门：E 不进，A-D 进。A-D 之间不影响召回与排序。
+              and st.target_grade <> 'E'
             order by st.updated_at desc
             """
         ),
@@ -1363,7 +1364,8 @@ def _candidate_intents_for_target(
         "bi.team_id = :team_id",
         "bi.workspace_id = :workspace_id",
         "bi.deleted_at is null",
-        "bi.status = 'active'",
+        # 与标的侧同一个闸门口径：E 不进推荐。
+        "bi.intent_grade <> 'E'",
     ]
     scenario_exists = """
         exists(

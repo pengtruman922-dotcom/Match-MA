@@ -1,6 +1,7 @@
 import { Loader2 } from 'lucide-react';
 import type { BuyerIntent, BuyerIntentParseStatus, ConditionEffect } from '../../types/api';
 import { valueLabel } from '../../lib/fieldLabels';
+import { gradeClass, intentGrade, intentGradeLabel } from '../../lib/entityGrade';
 import { formatCompactMoney } from '../../lib/format';
 
 export function ParseStatusBadge({ item, parseStatus }: { item: BuyerIntent; parseStatus?: BuyerIntentParseStatus }) {
@@ -68,13 +69,13 @@ export function RequirementCell({ item }: { item: BuyerIntent }) {
   );
 }
 
-export function IntentStatusBadge({ status }: { status: string }) {
-  const color = status === 'active'
-    ? 'bg-emerald-50 text-emerald-700'
-    : status === 'paused'
-      ? 'bg-amber-50 text-amber-700'
-      : 'bg-gray-100 text-gray-600';
-  return <span className={`text-xs px-2 py-0.5 font-medium ${color}`}>{valueLabel('buyer_intent_status', status)}</span>;
+/** 需求级别，也是推荐初筛的唯一闸门：E 不参与筛选，A-D 都参与。 */
+export function IntentStatusBadge({ item }: { item: BuyerIntent }) {
+  return (
+    <span className={`text-xs px-2 py-0.5 font-medium ${gradeClass(intentGrade(item))}`}>
+      {intentGradeLabel(item)}
+    </span>
+  );
 }
 
 export function PartyStatusBadge({ status }: { status: string }) {

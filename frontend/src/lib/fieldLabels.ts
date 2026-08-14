@@ -4,7 +4,8 @@ const SELLER_TARGET_FIELD_LABELS: Record<string, string> = {
   target_name: '标的名称',
   target_type: '标的类型',
   target_subject_name: '标的主体',
-  lifecycle_status: '状态',
+  target_grade: '标的级别',
+  lifecycle_status: '交易状态',
   information_status: '信息状态',
   industry_l1: '行业大类',
   industry_l2: '细分赛道',
@@ -67,7 +68,8 @@ const BUYER_PARTY_FIELD_LABELS: Record<string, string> = {
 
 const BUYER_INTENT_FIELD_LABELS: Record<string, string> = {
   intent_name: '意向名称',
-  status: '状态',
+  intent_grade: '需求级别',
+  status: '推荐状态',
   pause_reason: '暂停原因',
   contact_name: '联系人',
   contact_info_json: '联系方式',
@@ -155,7 +157,8 @@ Object.assign(BUYER_PARTY_FIELD_LABELS, {
 Object.assign(BUYER_INTENT_FIELD_LABELS, {
   buyer_party_id: '关联买家',
   intent_name: '意向名称',
-  status: '状态',
+  intent_grade: '需求级别',
+  status: '推荐状态',
   pause_reason: '暂停原因',
   contact_name: '联系人',
   contact_info_json: '联系方式',
@@ -298,6 +301,8 @@ const VALUE_LABELS: Record<string, Record<string, string>> = {
     pre_ipo: '拟上市',
     unknown: '未知',
   },
+  // 级别 A-E 没有中文别名，值就是标签，所以 target_grade / intent_grade 不进这张表。
+  // 这两组是 E 的细分原因，更新记录里仍要显示中文。
   lifecycle_status: {
     active: '在售中',
     sold: '已售出',
@@ -375,7 +380,7 @@ Object.assign(VALUE_LABELS, {
   buyer_intent_status: {
     active: '持续推荐',
     paused: '暂停推荐',
-    closed: '已结束',
+    closed: '结束推荐',
   },
   preferred_listed_status: {
     listed: '已上市',

@@ -59,7 +59,9 @@ class SellerTargetCreate(BaseModel):
     target_type: str = "company"
     target_subject_name: str | None = Field(default=None, max_length=300)
     owner_user_id: UUID | None = None
-    lifecycle_status: Literal["active", "sold", "off_market"] = "active"
+    # 新录入的标的没有明确级别时统一 C。创建接口不收 E：刚建的标的就已售出/已停售
+    # 没有意义，真要这样由详情页改。lifecycle_status 因此固定 active，不再接受入参。
+    target_grade: Literal["A", "B", "C", "D"] = "C"
     information_status: Literal[
         "normal",
         "insufficient",
@@ -92,6 +94,7 @@ class SellerTargetOut(BaseModel):
     target_name: str
     target_type: str
     target_subject_name: str | None
+    target_grade: str
     lifecycle_status: str
     information_status: str
     ai_processing_state: str
@@ -201,6 +204,9 @@ class SellerTargetUpdate(BaseModel):
     accepts_return_investment: str | None = None
     management_retention_possible: str | None = None
     acceptable_transaction_structures_json: list[str] | None = None
+    # 级别与它的 E 细分原因。客户端可以只发其中一个，缺的那个由
+    # entity_grade.resolve_grade_pair 补齐（DB check 兜底）。
+    target_grade: Literal["A", "B", "C", "D", "E"] | None = None
     lifecycle_status: Literal["active", "sold", "off_market"] | None = None
     business_summary: str | None = None
     transaction_summary: str | None = None
@@ -323,7 +329,7 @@ class SellerTargetAttachmentListOut(BaseModel):
 # 与另外三处手写投影各自漂移；加一列漏改一处的表现是「字段存进去了但某个页面
 # 看不见」。列名不是外部输入，可以安全拼接。
 SELLER_TARGET_OUT_COLUMNS = f"""
-              id, lifecycle_status,
+              id,
               {", ".join(seller_target_fact_columns())},
               owner_user_id,
               (select au.name from app_user au where au.id = seller_target.owner_user_id) as owner_name,
@@ -356,22 +362,9 @@ ACTIVE_RESEARCH_JOB_LATERAL_SQL = """
             ) active_research_job on true
 """
 
-# The列表「状态」列 is the trade lifecycle and nothing else. AI progress lives in
-# its own column (services/seller_target_status.py) because mixing the two is
-# what let a parsed target read as "未解析" while being excluded from screening.
-SELLER_TARGET_DISPLAY_STATUS_SQL = """
-              case
-                when lifecycle_status = 'sold' then 'sold'
-                when lifecycle_status = 'off_market' then 'off_market'
-                else 'active'
-              end
-"""
-
-SELLER_TARGET_DISPLAY_STATUS_LABELS = {
-    "active": "在售中",
-    "sold": "已售出",
-    "off_market": "已停售",
-}
+# 列表「级别」列就是 target_grade 本身，不再需要一段 case 把三个 lifecycle 值
+# 压成展示值。AI 进度在自己那列（services/seller_target_status.py）——两者混成
+# 一列正是当年让「解析完的标的显示未解析、同时被推荐排除」的根因，别再合回去。
 
 
 def _seller_target_out(row: Any) -> dict[str, Any]:
@@ -398,7 +391,7 @@ def create_seller_target(
             f"""
             insert into seller_target (
               team_id, workspace_id, target_name, target_type, target_subject_name, owner_user_id,
-              lifecycle_status, information_status,
+              target_grade, information_status,
               industry_l1, industry_l2, industry_pairs_json, location_province, location_city, location_district,
               listed_status, current_revenue_yuan, current_net_profit_yuan,
               valuation_yuan, valuation_date, asking_price_yuan, asking_price_date, pe_ratio,
@@ -408,7 +401,7 @@ def create_seller_target(
             )
             values (
               :team_id, :workspace_id, :target_name, :target_type, :target_subject_name, :owner_user_id,
-              :lifecycle_status, :information_status,
+              :target_grade, :information_status,
               :industry_l1, :industry_l2, :industry_pairs_json, :location_province, :location_city, :location_district,
               :listed_status, :current_revenue_yuan, :current_net_profit_yuan,
               :valuation_yuan, :valuation_date, :asking_price_yuan, :asking_price_date, :pe_ratio,
@@ -551,7 +544,7 @@ def list_seller_targets(
     province: str | None = Query(default=None, max_length=60),
     city: str | None = Query(default=None, max_length=60),
     district: str | None = Query(default=None, max_length=60),
-    status: Literal["active", "sold", "off_market"] | None = Query(default=None),
+    status: Literal["A", "B", "C", "D", "E"] | None = Query(default=None),
     owner: str | None = Query(default=None, max_length=50),
 ) -> dict[str, Any]:
     where = ["team_id = :team_id", "workspace_id = :workspace_id", "deleted_at is null"]
@@ -575,7 +568,8 @@ def list_seller_targets(
     _industry_filter(where, params, industry_l1=industry_l1, industry_l2=industry_l2)
     _location_filter(where, params, province=province, city=city, district=district)
     if status:
-        where.append("lifecycle_status = :status")
+        # 参数名沿用 status（旧书签与既有链接不破），值域换成级别 A-E。
+        where.append("target_grade = :status")
         params["status"] = status
 
     where_sql = " and ".join(where)
@@ -671,20 +665,21 @@ def seller_target_filter_options(current_user: CurrentUser, db: Session = Depend
         ),
         params,
     ).mappings().all()
+    # 按级别分桶，不按 E 的细分原因再拆：筛选的单位是级别，一个标的为什么退出
+    # 推荐（已售出/已停售）是行内徽标和详情页的事。
     statuses = _filter_options(
         db,
         f"""
-        select ({SELLER_TARGET_DISPLAY_STATUS_SQL}) as value, count(*) as count
+        select target_grade as value, count(*) as count
         from seller_target
         where team_id = :team_id
           and workspace_id = :workspace_id
           and deleted_at is null
           {scope_clause}
-        group by value
-        order by count desc, value asc
+        group by target_grade
+        order by target_grade asc
         """,
         params,
-        labels=SELLER_TARGET_DISPLAY_STATUS_LABELS,
     )
     owners = [] if owner_scope_required(current_user) else owner_filter_options(db, "seller_target", params)
     return {
@@ -1691,7 +1686,7 @@ def _seller_target_params(payload: SellerTargetCreate, current_user: AuthContext
         "target_type": target_type,
         "target_subject_name": target_subject_name,
         "owner_user_id": owner_user_id,
-        "lifecycle_status": payload.lifecycle_status,
+        "target_grade": payload.target_grade,
         "information_status": payload.information_status,
         "industry_l1": _normalize_optional_text(payload.industry_l1),
         "industry_l2": _normalize_optional_text(payload.industry_l2),

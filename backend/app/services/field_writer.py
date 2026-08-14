@@ -10,8 +10,10 @@ regardless of who wrote it.
 
 The column set is validated against the indicator registry: only declared
 seller_target indicators can be written here. The human edit path
-(PATCH /seller-targets) stays separate for now — it writes non-indicator fields
-(owner, lifecycle) and does not record a field-value source.
+(PATCH /seller-targets) stays separate for now — it writes the remaining
+non-indicator fields (owner) and does not record a field-value source. Since
+0814 the trade lifecycle is an indicator too, so a consultant changing 级别 or
+交易状态 comes through here and gets the same audit and source trail as a parse.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ from backend.app.api.routes.utils import (
 )
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.registry.indicators import Indicator, indicator_by_column, indicators_for
+from backend.app.services.entity_grade import SELLER_GRADE, resolve_grade_pair
 from backend.app.services.industry_taxonomy import normalize_industry_pairs, normalize_l2_values, resolve_l1
 from backend.app.services.region_dictionary import NORMALIZERS as REGION_NORMALIZERS
 from backend.app.services.search_docs import create_search_doc_rebuild_job
@@ -236,6 +239,20 @@ def write_seller_target_fields(
             normalized_changes[column] = _normalize_value(db, indicator, value)
         except FieldWriteError as exc:
             _reject(column, str(exc))
+
+    # 级别与它的 E 细分原因必须成对落地，而 parse / research / 人工信息页编辑三条
+    # 路都汇到这里，所以派生放在这个咽喉上，一处覆盖三条路。空结果就是「这批材料
+    # 没有级别主张」或「AI 想把 E 拉回在售」，两种都不写。
+    if normalized_changes.keys() & {SELLER_GRADE.grade_column, SELLER_GRADE.reason_column}:
+        resolved = resolve_grade_pair(
+            SELLER_GRADE,
+            normalized_changes,
+            _load_current(db, seller_target_id, [SELLER_GRADE.grade_column, SELLER_GRADE.reason_column]),
+            allow_reactivation=writer == "manual",
+        )
+        normalized_changes.pop(SELLER_GRADE.grade_column, None)
+        normalized_changes.pop(SELLER_GRADE.reason_column, None)
+        normalized_changes.update(resolved)
 
     if not normalized_changes:
         return []

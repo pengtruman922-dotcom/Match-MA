@@ -200,7 +200,7 @@ def create_seller_target_search_doc_jobs(
             where st.team_id = :team_id
               and st.workspace_id = :workspace_id
               and st.deleted_at is null
-              and st.lifecycle_status = 'active'
+              and st.target_grade <> 'E'
               {'and (sd.id is null or sd.embedding is null)' if not include_embedded else ''}
             order by st.updated_at desc
             limit :limit
@@ -248,7 +248,7 @@ def create_buyer_intent_search_doc_jobs(
             where bi.team_id = :team_id
               and bi.workspace_id = :workspace_id
               and bi.deleted_at is null
-              and bi.status = 'active'
+              and bi.intent_grade <> 'E'
               {'and (bd.id is null or bd.embedding is null)' if not include_embedded else ''}
             order by bi.updated_at desc
             limit :limit
