@@ -894,3 +894,20 @@ npm run lint
   顺序并降级收尾；不得把状态改成 ok。没有真实候选时深评工具返回结构化拒绝且不消耗唯一一次深评。
 - 中止语义：深评前中止不调用深评；深评进行中或完成后中止可以在 trace 留下已发生工作，但绝不生成
   `agent_brief`，因此 SSE/Writer 没有后续正文或芯片可生成。`agent_aborted` 继续拥有最高优先级。
+
+#### 用户授权后的 4B 生产发布补记（2026-08-18 03:15 -07:00）
+
+- 用户在 4B 完工交接后明确授权推送与更新生产 Prompt。4B 代码提交
+  `7b08467b641fe459ada5c8456286647855a3c471` 已推送 `origin/main`；Railway 生产
+  `/api/v1/health` 已返回该完整 `git_commit_sha` 后才开始应用 Prompt。
+- 已执行 `python scripts/publish_deep_eval_v031_prompt.py --apply`：创建并启用默认
+  `recommendation_deep_eval_to_target v0.3.1`，Prompt id
+  `44bfd504-f7ae-4ad2-b63b-00a4a75767a9`。
+- 已执行 `python scripts/publish_recommendation_agent_v020_prompt.py --apply`：创建并启用默认
+  `recommendation_agent_to_target v0.2.0`，Prompt id
+  `55e23371-2a37-4e45-823d-95f4c6085ed1`。
+- 应用后重新执行两份脚本的 `--dry-run`：均返回 `exists-identical`，确认服务端正文、schema、
+  变量集合与仓库脚本一致；重新执行 `--render-preview`：deep eval 4/4、main Agent 2/2
+  变量全部替换，无双花括号残留。
+- 只读查询 `/model-config/prompts` 确认 v0.3.1 与 v0.2.0 均为各自节点
+  `is_default=true` 且 `is_active=true` 的 Prompt。没有部署自建环境；本次推送只触发 Railway。
