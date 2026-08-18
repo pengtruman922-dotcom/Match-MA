@@ -273,15 +273,29 @@ NODES: tuple[NodeSpec, ...] = (
     ),
     NodeSpec(
         node_name="recommendation_query_parser",
-        label="推荐对话条件解析",
+        label="推荐对话需求解析",
         domain="recommendation",
         node_type="parser",
         description=(
-            "把推荐对话里的自然语言消息解析成条件覆盖。"
-            "只负责抽取，重筛 / 重评 / 展示过滤 / 提问的路由由代码判定。"
+            "把推荐对话里的一句话解析成一份完整的需求快照："
+            "结构化筛选条件（可多组，组间 OR）、定性诉求、排除项、未结构化残留。"
+            "只负责理解，不负责筛选 —— 快照是主 Agent 的基线，它只能消费不能创造。"
         ),
-        runtime_inputs=("推荐方向", "当前生效条件", "用户消息", "一级行业字典（自动注入）"),
-        prompt_variables=("mode", "current_conditions_json", "industry_l1_list", "user_message"),
+        runtime_inputs=(
+            "推荐方向",
+            "用户消息",
+            "最近 6 轮对话原文",
+            "可筛字段清单（由指标注册表生成，自动注入）",
+            "一级 / 二级行业字典（自动注入）",
+        ),
+        prompt_variables=(
+            "mode",
+            "user_message",
+            "history_context",
+            "screening_fields_json",
+            "industry_l1_list",
+            "industry_l2_list",
+        ),
         default_timeout_seconds=30,
         sort_order=120,
     ),
@@ -442,6 +456,7 @@ PROMPT_VARIABLE_LABELS: dict[str, str] = {
     "semantic_parse_json": "语义解析阶段输出 JSON",
     "field_contract_json": "买家需求统一字段契约 JSON",
     "enum_contract_json": "结构化字段候选值规则 JSON",
+    "screening_fields_json": "可筛字段清单 JSON（由指标注册表生成，渲染时自动注入）",
     "industry_l1_list": "一级行业字典（渲染时自动注入当前启用清单）",
     "industry_l2_list": "二级行业字典（渲染时自动注入当前启用清单）",
     "province_list": "标准省级行政区划清单",

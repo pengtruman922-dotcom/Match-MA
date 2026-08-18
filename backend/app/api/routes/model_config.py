@@ -32,6 +32,7 @@ from backend.app.services.model_secrets import (
     model_secret_encryption_configured,
 )
 from backend.app.services.ocr_provider import OCR_ADAPTERS
+from backend.app.services.recommendation_conditions import screening_fields_prompt_json
 from backend.app.services.region_dictionary import PROVINCES
 from backend.app.services.search_providers import available_adapters
 
@@ -1021,6 +1022,7 @@ def deactivate_node(node_id: UUID, db: Session = Depends(get_db)) -> dict[str, A
 # 「从清单里逐字挑」时看到的是占位符，无从判断清单里到底有没有那个词。
 _PREVIEW_DICTIONARY_LOADERS: dict[str, Callable[[Session], str]] = {
     # 用 lambda 而不是直接引函数：晚绑定，测试替换模块级名字时才拦得住。
+    "screening_fields_json": lambda _db: screening_fields_prompt_json(),
     "industry_l1_list": lambda db: industry_l1_prompt_list(db),
     "industry_l2_list": lambda db: industry_l2_prompt_list(db),
     "province_list": lambda _db: "、".join(PROVINCES),

@@ -46,6 +46,10 @@ from backend.app.services.recommendation_agent_tools import (
     RecommendationAgentTools,
     build_agent_tools,
 )
+from backend.app.services.recommendation_conditions import (
+    describe_intent_snapshot,
+    parse_recommendation_intent,
+)
 from backend.app.services.recommendation_flow import (
     agent_turn_aborted,
     target_facts_for_agent,
@@ -339,6 +343,34 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
 
     node_name = RECOMMENDATION_AGENT_NODE_BY_MODE[mode]
     node_config = _get_default_node_config(db, node_name)
+    history_context = str(payload.get("history_context") or "")
+
+    # ① 先把这句话解析成一份需求快照，再让主 Agent 动手。多花 3-8 秒换来的是
+    # 一条可比对的基线：用户说了什么与 agent 筛了什么从此是两份可以并排看的
+    # 东西，「agent 自己编条件」不再是一件查不出来的事。
+    # 解析失败不中断本轮 —— 退化成「没有结构化条件的一轮」比直接报错有用得多，
+    # 但状态会如实写进消息与 trace，不会假装成功（见 parser_status）。
+    if agent_turn_aborted(db, session_id, turn_id):
+        # 排队期间就被停掉了：一次模型调用都不该花。
+        return _aborted_agent_turn_result(job, session_id=session_id, turn_id=turn_id)
+    intent_snapshot = parse_recommendation_intent(
+        db,
+        mode=mode,
+        user_message=user_message,
+        history_context=history_context,
+    )
+    _insert_agent_understanding_message(
+        db,
+        session_id=session_id,
+        turn_id=turn_id,
+        job_id=job.id,
+        snapshot=intent_snapshot,
+    )
+    # 立刻提交，与 agent_step 同样的理由：前端轮询要在 agent 还在跑的时候
+    # 就能看到「已读懂需求」。
+    db.commit()
+    if agent_turn_aborted(db, session_id, turn_id):
+        return _aborted_agent_turn_result(job, session_id=session_id, turn_id=turn_id)
 
     agent_context = {
         "user_message": user_message,
@@ -361,7 +393,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
         node_config,
         {
             "recommendation_context_json": agent_context,
-            "history_context": str(payload.get("history_context") or ""),
+            "history_context": history_context,
         },
     )
     if images:
@@ -415,6 +447,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             loop=None,
             latency_ms=int((time.perf_counter() - started) * 1000),
             tools=tools,
+            intent_snapshot=intent_snapshot,
             error_message="用户中止了本轮编排。",
         )
         db.commit()
@@ -440,6 +473,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             loop=None,
             latency_ms=int((time.perf_counter() - started) * 1000),
             tools=tools,
+            intent_snapshot=intent_snapshot,
             error_message=str(exc),
         )
         db.commit()
@@ -459,6 +493,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             loop=loop,
             latency_ms=loop.usage.latency_ms,
             tools=tools,
+            intent_snapshot=intent_snapshot,
             error_message="用户中止了本轮编排。",
         )
         db.commit()
@@ -505,6 +540,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
         loop=loop,
         latency_ms=loop.usage.latency_ms,
         tools=tools,
+        intent_snapshot=intent_snapshot,
     )
     db.commit()
     return {
@@ -1572,6 +1608,67 @@ def _insert_agent_question_message(
     )
 
 
+def _insert_agent_understanding_message(
+    db: Session,
+    *,
+    session_id: UUID,
+    turn_id: str,
+    job_id: UUID,
+    snapshot: dict[str, Any],
+) -> None:
+    """这一轮读懂了什么，原样落库。
+
+    本阶段前端还不渲染这条消息（无 UI 变更），但它必须先存在：解析结果是这一轮
+    唯一可审计的需求基线，而「解析器返回的结构对不上代码」这种失配只有落进
+    对话记录才有人看得见 —— 上一轮正是因为没有任何地方标注它，全链路零报错地
+    错了一整轮。
+    """
+    _insert_agent_message(
+        db,
+        session_id=session_id,
+        turn_id=turn_id,
+        job_id=job_id,
+        message_type="agent_understanding",
+        content={
+            "understanding": _json_safe_dict(snapshot),
+            "summary": describe_intent_snapshot(snapshot),
+        },
+    )
+
+
+def _intent_trace_summary(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    """trace 里只留摘要：完整快照在 agent_understanding 消息里，不存两份。"""
+    if not isinstance(snapshot, dict):
+        return {"parser_status": "not_run"}
+    return {
+        "parser_status": snapshot.get("parser_status"),
+        "prompt_version": snapshot.get("prompt_version") or None,
+        "condition_groups": len(snapshot.get("condition_groups") or []),
+        "qualitative_requirements": len(snapshot.get("qualitative_requirements") or []),
+        "unstructured_notes": len(snapshot.get("unstructured_notes") or []),
+        "parser_notes": list(snapshot.get("parser_notes") or []),
+    }
+
+
+def _aborted_agent_turn_result(
+    job: JobClaim,
+    *,
+    session_id: UUID,
+    turn_id: str,
+) -> dict[str, object]:
+    """本轮在动手之前就被停掉了。中止标记由取消接口写，这里只管退出。"""
+    return {
+        "handled": True,
+        "job_type": job.job_type,
+        "session_id": str(session_id),
+        "turn_id": turn_id,
+        "outcome": "aborted",
+        "search_calls": 0,
+        "detail_targets": 0,
+        "recommended_count": 0,
+    }
+
+
 def _insert_agent_brief_message(
     db: Session,
     *,
@@ -1602,6 +1699,7 @@ def _insert_recommendation_agent_trace(
     loop: Any | None,
     latency_ms: int,
     tools: RecommendationAgentTools,
+    intent_snapshot: dict[str, Any] | None = None,
     error_message: str | None = None,
 ) -> None:
     """One row per agent turn, not per LLM call — same rule as research."""
@@ -1673,6 +1771,7 @@ def _insert_recommendation_agent_trace(
             "metadata_json": {
                 "llm_calls": usage.llm_calls if usage else 0,
                 "tool_calls_by_name": usage.tool_calls_by_name if usage else {},
+                "intent_parser": _intent_trace_summary(intent_snapshot),
                 **tools.as_trace_payload(),
             },
         },
