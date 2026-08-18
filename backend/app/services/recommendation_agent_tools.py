@@ -204,6 +204,11 @@ class RecommendationAgentTools:
         self.ask_user_payload: dict[str, Any] | None = None
         self.last_candidates: list[dict[str, Any]] = []
         self.candidates_by_id: dict[str, dict[str, Any]] = {}
+        # 同一个标的被几组条件命中。与 candidates_by_id 并行维护，不合并进去：
+        # 去重要的是「候选只出现一次」，而「它又被另一组条件命中了一次」是另一件事 ——
+        # 同时满足「机器行业」和「机器行业 + 杭州 + 上市」的标的比只满足前者的强得多，
+        # 这个信号深评要用（见 services/recommendation_deep_eval.py）。
+        self.candidate_hit_counts: dict[str, int] = {}
         # 一旦某次调用带过排除条件，后面每次都自动带上（见 STICKY_CONDITIONS）。
         self.sticky_conditions: dict[str, Any] = {}
 
@@ -305,8 +310,11 @@ class RecommendationAgentTools:
                 "seller_target_has_other_deep_progress": key in deep_progress_ids,
             }
             candidates.append(candidate)
-            # 已经取过详情的标的不要被摘要覆盖回去。
+            # 已经取过详情的标的不要被摘要覆盖回去。首见为准是对的，候选内容在多次
+            # 查询之间没有差异，改成后见覆盖只会让结果不可复现 —— 所以命中次数另记
+            # 一份，而不是把这里改成覆盖。
             self.candidates_by_id.setdefault(key, candidate)
+            self.candidate_hit_counts[key] = self.candidate_hit_counts.get(key, 0) + 1
         self.last_candidates = candidates
 
     def _get_target_detail(self, arguments: dict[str, Any]) -> Any:
@@ -464,6 +472,7 @@ class RecommendationAgentTools:
         return {
             "search_calls": self.search_calls,
             "detail_target_ids": self.detail_target_ids,
+            "candidate_hit_counts": self.candidate_hit_counts,
             "asked_user": self.ask_user_payload is not None,
         }
 

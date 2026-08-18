@@ -197,6 +197,54 @@ def test_screened_rows_become_candidates_with_code_held_facts() -> None:
     assert candidate["facts"]["net_profit_text"] == "2800万"
 
 
+# -- 命中组数（用例 10）---------------------------------------------------
+
+
+def test_a_target_hit_by_two_searches_is_one_candidate_but_two_hits() -> None:
+    """去重保留一条，但「又被另一组条件命中了一次」本身是信号。
+
+    同时满足「机器行业」和「机器行业 + 杭州 + 上市」两组条件的标的，比只满足前者的
+    强得多。深评拿这个数当强候选的依据；漏了不会报错，只会让它永远看不见。
+    """
+    tools = _tools()
+
+    tools.execute(_call("search_targets", {"conditions": {"industries_json": ["制造与工业"]}}))
+    tools.execute(_call("search_targets", {"conditions": {"industries_json": ["信息技术与通信"]}}))
+
+    key = "00000000-0000-0000-0000-000000000000"
+    assert len(tools.candidates_by_id) == 3
+    assert tools.candidate_hit_counts[key] == 2
+    assert set(tools.candidate_hit_counts) == set(tools.candidates_by_id)
+
+
+def test_hit_counts_do_not_change_the_first_seen_candidate_payload() -> None:
+    """首见为准是对的 —— 候选内容在多次查询之间没有差异，后见覆盖只会让结果不可复现。"""
+    tools = _tools()
+    tools.execute(_call("search_targets", {"conditions": {}}))
+    first = tools.candidates_by_id["00000000-0000-0000-0000-000000000000"]
+
+    tools.execute(_call("search_targets", {"conditions": {}}))
+
+    assert tools.candidates_by_id["00000000-0000-0000-0000-000000000000"] is first
+    assert tools.candidate_hit_counts["00000000-0000-0000-0000-000000000000"] == 2
+
+
+def test_count_only_searches_do_not_inflate_hit_counts() -> None:
+    """count_only 不返回候选明细，也就没有「命中了谁」这回事。"""
+    tools = _tools()
+
+    tools.execute(_call("search_targets", {"conditions": {}, "count_only": True}))
+
+    assert tools.candidate_hit_counts == {}
+
+
+def test_trace_payload_carries_the_hit_counts() -> None:
+    tools = _tools()
+    tools.execute(_call("search_targets", {"conditions": {}}))
+
+    assert tools.as_trace_payload()["candidate_hit_counts"] == tools.candidate_hit_counts
+
+
 # -- tool schemas --------------------------------------------------------
 
 
@@ -316,6 +364,16 @@ def test_detail_still_carries_the_other_buyer_warning(monkeypatch) -> None:
     tools.execute(_call("get_target_detail", {"target_ids": ["t-9"]}))
 
     assert tools.candidates_by_id["t-9"]["seller_target_has_other_deep_progress"] is True
+
+
+def test_a_target_pulled_by_id_alone_has_no_screening_hits(monkeypatch) -> None:
+    """按 id 取详情带进来的标的不是筛出来的，命中组数是 0 而不是 1。"""
+    tools = _detail_tools(monkeypatch, [_DETAIL_ROW])
+
+    tools.execute(_call("get_target_detail", {"target_ids": ["t-9"]}))
+
+    assert "t-9" in tools.candidates_by_id
+    assert tools.candidate_hit_counts.get("t-9", 0) == 0
 
 
 def test_detail_does_not_overwrite_a_screened_candidate(monkeypatch) -> None:

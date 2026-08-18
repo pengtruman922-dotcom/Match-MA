@@ -206,14 +206,19 @@ NODES: tuple[NodeSpec, ...] = (
         label="推荐深评·为买家找标的",
         domain="recommendation",
         node_type="llm",
-        description="固定买家需求，深度评价候选标的。",
-        runtime_inputs=("推荐方向", "买家需求条件与画像", "候选标的清单分片"),
-        prompt_variables=("mode", "anchor_context", "candidates_json"),
+        # 0818 起这个节点服务对话链路的新形态深评：逐条判定定性诉求、整体提交、
+        # 只排序不评级（见 services/recommendation_deep_eval.py）。旧的 /candidates
+        # 链路仍走共用节点的旧形态提示词，两边的提示词不能互抄。
+        description="固定买家需求，逐条判定定性诉求并对候选标的重排序。",
+        runtime_inputs=("推荐方向", "买家需求条件与画像", "定性诉求清单", "候选标的清单（整体提交，不分片）"),
+        prompt_variables=("mode", "anchor_context", "candidates_json", "qualitative_requirements_json"),
         understudy="recommendation_deep_eval",
         understudy_kind="solo",
         recommendation_mode="buyer_to_target",
         default_temperature=0.2,
-        default_timeout_seconds=180,
+        # 不分片之后单次调用要读完全部候选，180 秒不够。注意这只是**新建配置时**
+        # 的默认值：已经建过号的生产节点不会跟着变，得去设置页手工改。
+        default_timeout_seconds=300,
         sort_order=100,
     ),
     NodeSpec(
@@ -463,6 +468,7 @@ PROMPT_VARIABLE_LABELS: dict[str, str] = {
     "mode": "推荐方向（buyer_to_target / target_to_buyer）",
     "anchor_context": "推荐对象条件与画像文本",
     "candidates_json": "候选清单 JSON",
+    "qualitative_requirements_json": "定性诉求清单 JSON（翻不成 SQL 条件、只能由深评逐条判定的那些要求）",
     "current_conditions_json": "当前生效的推荐条件 JSON",
     "user_message": "用户在推荐对话中输入的消息",
     "history_context": "最近 6 轮已完成对话的原文（<history_context> 标签包裹，中止的轮次不带）",

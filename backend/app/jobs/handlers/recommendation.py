@@ -50,6 +50,10 @@ from backend.app.services.recommendation_conditions import (
     describe_intent_snapshot,
     parse_recommendation_intent,
 )
+from backend.app.services.recommendation_deep_eval import (
+    describe_deep_eval_result,
+    run_recommendation_deep_eval,
+)
 from backend.app.services.recommendation_flow import (
     agent_turn_aborted,
     target_facts_for_agent,
@@ -508,6 +512,36 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             "recommended_count": 0,
         }
 
+    # ② 定性诉求的消费者。agent loop 跑完之后、写作素材包之前，把全部候选连同这一轮
+    # 的定性诉求交给一次干净上下文的调用，逐条判定再重排序。
+    #
+    # **本阶段只产出、不改最终答案**：结果写成一条 agent_deep_eval 消息落库，
+    # 素材包保持原样，写作节点看不到它。接进最终名单是阶段四。这样切是有意的 ——
+    # 深评的质量要在真实数据上看了才知道，而在它稳定之前就让它决定用户看到的名单，
+    # 出了问题连对照组都没有。阶段二的需求快照就是这么先落库再接线的。
+    #
+    # 两种情况不跑：本轮一个候选都没有（没东西可评），以及本轮的输出是一个问题而不是
+    # 一份名单（ask_user 结束的轮次没有名单可排，白花一次调用）。除此之外无条件跑 ——
+    # 尤其是快照降级（parser_status 非 ok）和定性诉求为空这两种，照跑。
+    deep_eval: dict[str, Any] | None = None
+    if tools.candidates_by_id and tools.ask_user_payload is None:
+        deep_eval = run_recommendation_deep_eval(
+            db,
+            mode=mode,
+            intent_snapshot=intent_snapshot,
+            candidates_by_id=tools.candidates_by_id,
+            hit_counts=tools.candidate_hit_counts,
+        )
+        _insert_agent_deep_eval_message(
+            db,
+            session_id=session_id,
+            turn_id=turn_id,
+            job_id=job.id,
+            result=deep_eval,
+        )
+        # 与 agent_step / agent_understanding 同样的理由：即时提交，前端轮询看得到。
+        db.commit()
+
     if tools.ask_user_payload is not None:
         _insert_agent_question_message(
             db,
@@ -541,6 +575,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
         latency_ms=loop.usage.latency_ms,
         tools=tools,
         intent_snapshot=intent_snapshot,
+        deep_eval=deep_eval,
     )
     db.commit()
     return {
@@ -552,6 +587,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
         "search_calls": len(tools.search_calls),
         "detail_targets": len(tools.detail_target_ids),
         "recommended_count": len((brief or {}).get("recommended") or []),
+        "deep_eval_status": (deep_eval or {}).get("deep_eval_status", "not_run"),
     }
 
 
@@ -1636,6 +1672,50 @@ def _insert_agent_understanding_message(
     )
 
 
+def _insert_agent_deep_eval_message(
+    db: Session,
+    *,
+    session_id: UUID,
+    turn_id: str,
+    job_id: UUID,
+    result: dict[str, Any],
+) -> None:
+    """这一轮深评判了什么、怎么排的，原样落库。
+
+    本阶段前端还不渲染这条消息（无 UI 变更），素材包也拿不到它 —— 它先存在，是为了
+    能在真实数据上对着看：排序合不合理、定性判定准不准。接进最终名单是阶段四，
+    在那之前这条消息就是对照组。
+    """
+    _insert_agent_message(
+        db,
+        session_id=session_id,
+        turn_id=turn_id,
+        job_id=job_id,
+        message_type="agent_deep_eval",
+        content={
+            "deep_eval": _json_safe_dict(result),
+            "summary": describe_deep_eval_result(result),
+        },
+    )
+
+
+def _deep_eval_trace_summary(result: dict[str, Any] | None) -> dict[str, Any]:
+    """trace 里只留摘要：完整结果在 agent_deep_eval 消息里，不存两份。"""
+    if not isinstance(result, dict):
+        return {"deep_eval_status": "not_run"}
+    return {
+        "deep_eval_status": result.get("deep_eval_status"),
+        "prompt_version": result.get("prompt_version") or None,
+        "model_name": result.get("model_name") or None,
+        "candidate_count": result.get("candidate_count"),
+        "ranked": len(result.get("ranked") or []),
+        "dropped": len(result.get("dropped") or []),
+        "uncovered": len(result.get("uncovered") or []),
+        "fallback_reason": result.get("fallback_reason"),
+        "notes": list(result.get("notes") or []),
+    }
+
+
 def _intent_trace_summary(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     """trace 里只留摘要：完整快照在 agent_understanding 消息里，不存两份。"""
     if not isinstance(snapshot, dict):
@@ -1700,6 +1780,7 @@ def _insert_recommendation_agent_trace(
     latency_ms: int,
     tools: RecommendationAgentTools,
     intent_snapshot: dict[str, Any] | None = None,
+    deep_eval: dict[str, Any] | None = None,
     error_message: str | None = None,
 ) -> None:
     """One row per agent turn, not per LLM call — same rule as research."""
@@ -1772,6 +1853,7 @@ def _insert_recommendation_agent_trace(
                 "llm_calls": usage.llm_calls if usage else 0,
                 "tool_calls_by_name": usage.tool_calls_by_name if usage else {},
                 "intent_parser": _intent_trace_summary(intent_snapshot),
+                "deep_eval": _deep_eval_trace_summary(deep_eval),
                 **tools.as_trace_payload(),
             },
         },
