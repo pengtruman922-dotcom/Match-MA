@@ -7,9 +7,8 @@
 
 import pytest
 
-from backend.app.registry.indicators import indicators_for
+from backend.app.registry.indicators import indicator_by_column, indicators_for
 from backend.app.services.screening_schema import (
-    EXCLUDED_SCREENING_COLUMNS,
     SCREENING_FIELDS,
     SCREENING_FIELDS_BY_COLUMN,
     build_conditions_properties,
@@ -35,19 +34,21 @@ def _screening_columns() -> set[str]:
 # -- 字段清单来自注册表 ---------------------------------------------------
 
 
-def test_schema_covers_every_screening_field_except_the_two_that_were_dropped() -> None:
-    assert set(SCREENING_FIELDS_BY_COLUMN) == _screening_columns() - EXCLUDED_SCREENING_COLUMNS
+def test_schema_covers_exactly_what_the_registry_marks_screening() -> None:
+    """一个字段进不进初筛，只有注册表说了算 —— 这里不留第二处判断。"""
+    assert set(SCREENING_FIELDS_BY_COLUMN) == _screening_columns()
     assert len(SCREENING_FIELDS) == 24
 
 
-def test_the_broken_condition_stays_out() -> None:
-    """净利率两侧口径不同（买家百分数、标的现算是分数），不 ×100 就恒为空集。
+def test_the_two_broken_conditions_stay_out() -> None:
+    """净利率两侧口径不同（买家百分数、标的现算是分数），不 ×100 就恒为空集；
+    PS 的分子是市值，非上市标的没有，一带上就把候选池打空。
 
-    max_ps 不在这里：0817 起注册表自己 screening=False，判断只留一处。
+    两个都由注册表 screening=False 表达，理由写在注册表那两行的注释里。
     """
-    assert EXCLUDED_SCREENING_COLUMNS == {"min_net_margin"}
-    assert "min_net_margin" not in _properties()
-    assert "max_ps" not in _properties()
+    for column in ("min_net_margin", "max_ps"):
+        assert column not in _properties()
+        assert not indicator_by_column("buyer_intent", column).screening
 
 
 def test_every_property_declares_a_type_and_a_description() -> None:

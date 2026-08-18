@@ -253,10 +253,14 @@ BUYER_INTENT_INDICATORS: tuple[Indicator, ...] = (
     Indicator("min_revenue_yuan", "最低营收", "intent_financial", "yuan", screening=True, writable_by=_BI_WRITE, target_column="current_revenue_yuan", operator="gte", default_effect="required", effect_editable=True, scenario_allowed=True, sql_recall=True, deterministic_rank=True),
     Indicator("min_net_profit_yuan", "最低净利润", "intent_financial", "yuan", screening=True, writable_by=_BI_WRITE, target_column="current_net_profit_yuan", operator="gte", default_effect="required", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
     Indicator("min_total_profit_yuan", "最低利润总额", "intent_financial", "yuan", screening=True, writable_by=_BI_WRITE, target_column="current_total_profit_yuan", operator="gte", default_effect="preferred", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
-    # **口径警告**：本列存百分数（实测 8.0 / 1.0），而 target_column 现算出来是
-    # 分数（0.1692）。SQL 模板必须把标的侧 ×100 再比，否则这个条件筛出来
-    # 恒为空集且不报错。注册表这一层表达不了单位，所以写在这里。
-    Indicator("min_net_margin", "最低净利率", "intent_financial", "ratio", screening=True, writable_by=_BI_WRITE, target_column="current_net_profit_yuan/current_revenue_yuan", operator="gte", default_effect="preferred", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
+    # 不进初筛（0817）：**两侧口径不同**。本列存百分数（实测 8.0 / 1.0），而
+    # target_column 现算出来是分数（0.1692），比之前必须 ×100 归一 —— 少了这一步
+    # 条件恒为空集且不报错，而注册表这一层表达不了「现算 + 单位换算」。
+    # 需求单打分器另有一套自带 ×100 的手写口径（recommendation_flow.py:2533），
+    # 那条路继续有效，所以 default_effect 保留。想让它进初筛，先扩算子语法。
+    # 初筛 schema 完全由 screening 决定，**不要再在 screening_schema.py 里另开
+    # 一份排除名单** —— 两处判断早晚会漂。
+    Indicator("min_net_margin", "最低净利率", "intent_financial", "ratio", writable_by=_BI_WRITE, target_column="current_net_profit_yuan/current_revenue_yuan", operator="gte", default_effect="preferred", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
     # 不进初筛（0817）：标的侧没有毛利率列，也没有营业成本可推算，而买家侧只有
     # 1/44 填了 —— 缺失即出局下，这一条会把那个需求的候选池直接打成 0。
     # default_effect 保留：它表达的是**需求单链路的规则打分强度**，与「进不进

@@ -22,17 +22,11 @@ from backend.app.services.region_dictionary import (
     normalize_province,
 )
 
-# 注册表里 screening=True、但本轮不下发给模型的字段。
-#
-# 只留 min_net_margin 一个：它的对手方是 `净利/营收` 现算，除零要兜、而且两侧
-# 口径不同 —— 买家侧存百分数（实测 8.0 / 1.0），现算出来是分数（0.1692），
-# 比之前必须 ×100 归一（方案 0817 §3.3a，那一层本轮没动）。少了这一步条件
-# 恒为空集且不报错，所以宁可先不给模型。
-#
-# max_ps 曾经也在这里，0817 起由注册表自己 screening=False（非上市标的没有
-# 市值，声明的 target_column 表达不了 coalesce 退回估值）。**判断只留一处**：
-# 在这儿再挡一道，等注册表哪天修好了放它进来，这份硬编码会静默把它挡在门外。
-EXCLUDED_SCREENING_COLUMNS: frozenset[str] = frozenset({"min_net_margin"})
+# 「哪些条件进初筛」**只由注册表的 screening 决定**，这里不另开排除名单。
+# 曾经有过一份（min_net_margin / max_ps 两个口径坏掉的条件写死在这儿），结果是
+# 同一个判断落在两处：注册表哪天把 max_ps 修好并置 screening=True，这份硬编码
+# 会静默把它继续挡在门外，而没有任何东西会报错。0817 起两个都由注册表自己
+# screening=False，理由写在注册表那两行的注释里。
 
 # 「缺失即出局」是初筛的地基，所以 unknown 不能作为可接受取值下发：买家勾了
 # 「可接受未知」等于把缺失又放回来，与 excluded_by_condition 的缺失统计直接打架。
@@ -107,7 +101,7 @@ def _value_type(column: str, kind: str, operator: str) -> str:
 def _build_fields() -> tuple[ScreeningField, ...]:
     fields: list[ScreeningField] = []
     for indicator in indicators_for("buyer_intent"):
-        if not indicator.screening or indicator.column in EXCLUDED_SCREENING_COLUMNS:
+        if not indicator.screening:
             continue
         if not indicator.operator or not indicator.target_column:
             # screening=True 却没声明比较契约的字段进不来：没有对手方就生成不出 SQL。
