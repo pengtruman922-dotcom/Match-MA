@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 from typing import Any, Literal
 from urllib.parse import quote
@@ -123,7 +124,15 @@ class SellerTargetOut(BaseModel):
     # 写得进却看不见的列（0817 补）：解析与调研都在写它，它也进了
     # seller_target_fact_columns() 的 SELECT，但一直没出参 —— 而推荐侧打算
     # 拿它做「财务数据新鲜度」过滤，顾问看不到也就改不了那个日期。
-    financial_period_end_date: str | None
+    #
+    # **类型是 date 不是 str**：它是本表唯一一个真正的 date 列（valuation_date /
+    # asking_price_date 在 DDL 里是 text）。声明成 str 时，只要这一页里有任何一条
+    # 填了这个日期，响应校验就整页失败 —— 表现是列表全空、分桶却有数（那是另一个
+    # 接口），而日志之外没有任何提示。0818 生产上真炸过一次。
+    # 别的 date 列都在各自的 SELECT 里 `::text` 掉了，这一列不行：它经由共享的
+    # seller_target_fact_columns() 出来，解析/采纳/调研那几条读路径要的是 date
+    # 本身（同期覆盖判定在比日期）。序列化出去仍然是 "YYYY-MM-DD"，前端不受影响。
+    financial_period_end_date: date | None
     profitability_status: str | None
     cash_flow_status: str | None
     valuation_yuan: Decimal | None

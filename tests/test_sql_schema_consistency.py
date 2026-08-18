@@ -99,6 +99,62 @@ def test_every_screening_condition_has_a_real_target_column() -> None:
     assert not missing, f"screening 对手方列不存在于 seller_target：{missing}"
 
 
+def _seller_target_column_types() -> dict[str, str]:
+    """seller_target 每一列的 DDL 类型（baseline + 后续迁移的 add column）。"""
+    types: dict[str, str] = {}
+    baseline = _strip_sql_comments((MIGRATIONS_DIR / "001_baseline.sql").read_text(encoding="utf-8"))
+    pattern = r"create table (?:if not exists )?seller_target \((.*?)\n\);"
+    body = re.search(pattern, baseline, re.S | re.I)
+    assert body is not None
+    for line in body.group(1).splitlines():
+        line = line.strip().rstrip(",")
+        if not line or DDL_LEAD_RE.match(line):
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            types[parts[0]] = " ".join(parts[1:3]).lower()
+    for path in sorted(MIGRATIONS_DIR.glob("*.sql"))[1:]:
+        sql = _strip_sql_comments(path.read_text(encoding="utf-8"))
+        for match in re.finditer(r"alter table seller_target([^;]*)", sql, re.I | re.S):
+            for added in re.finditer(r"add column (?:if not exists )?(\w+)\s+([a-z ]+)", match.group(1), re.I):
+                types[added.group(1)] = added.group(2).strip().lower()
+            for dropped in re.finditer(r"drop column (?:if exists )?(\w+)", match.group(1), re.I):
+                types.pop(dropped.group(1), None)
+    return types
+
+
+def test_date_columns_are_not_declared_as_strings_in_the_response_model() -> None:
+    """出参模型的类型要容得下列的真实类型，否则整页响应校验失败。
+
+    2026-08-18 的生产事故：`financial_period_end_date` 是本表唯一一个真 date 列
+    （valuation_date / asking_price_date 在 DDL 里是 text），被声明成 `str | None`
+    出参。psycopg 返回的是 `datetime.date`，于是**只要这一页里有任何一条填了这个
+    日期，整页 500** —— 标的列表全空，而分桶接口照常有数，日志之外没有任何提示。
+
+    这一类错误 SQL 不报、类型检查不报、CI 也不报（测试库里那一列全空），所以在
+    这里钉住：DDL 里是 date 的列，出参模型必须接受 date。
+    """
+    from datetime import date
+    from typing import Union, get_args, get_origin
+
+    from backend.app.api.routes.seller_targets import SellerTargetOut
+
+    def accepts_date(annotation: object) -> bool:
+        if annotation is date:
+            return True
+        if get_origin(annotation) in (Union, __import__("types").UnionType):
+            return any(arg is date for arg in get_args(annotation))
+        return False
+
+    types = _seller_target_column_types()
+    offenders = [
+        column
+        for column, field in SellerTargetOut.model_fields.items()
+        if types.get(column, "").startswith("date") and not accepts_date(field.annotation)
+    ]
+    assert not offenders, f"这些列在库里是 date，出参却没声明成 date：{offenders}"
+
+
 def test_buyer_intent_json_columns_are_bound_as_jsonb() -> None:
     """A list bound without type_=JSONB fails at write time, not at import."""
     from backend.app.jobs.handlers.buyer_intent_parse import (
