@@ -19,6 +19,7 @@ from backend.app.services.recommendation_answer import (
     backfill_target_links,
     build_answer_prompt_variables,
     fallback_answer_markdown,
+    sanitize_writer_output,
     target_link_map,
 )
 from backend.app.api.routes.utils import (
@@ -1373,8 +1374,21 @@ def stream_recommendation_answer(
 
         # 回填放在落库这一步：流式增量里做替换要处理跨 chunk 的半个名字，
         # 而前端在 done 事件里拿到的就是最终带链接的正文。
-        markdown = backfill_target_links("".join(chunks).strip(), link_map)
-        yield _sse("done", {"markdown": markdown, "message_id": persist(markdown, mode="llm")})
+        markdown = sanitize_writer_output(
+            "".join(chunks),
+            forbidden_ids=list(link_map.values()),
+            forbidden_phrases=[str(value) for value in brief.get("follow_up_suggestions") or []],
+        )
+        if not markdown:
+            markdown = fallback_answer_markdown(brief)
+            generation_mode = "fallback"
+        else:
+            generation_mode = "llm"
+        markdown = backfill_target_links(markdown, link_map)
+        yield _sse(
+            "done",
+            {"markdown": markdown, "message_id": persist(markdown, mode=generation_mode)},
+        )
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers=_SSE_HEADERS)
 

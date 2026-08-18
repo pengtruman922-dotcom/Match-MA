@@ -38,9 +38,44 @@ def _agent_prompt_module():
     return loaded
 
 
-def _tools_with(candidates: dict[str, dict[str, Any]]) -> RecommendationAgentTools:
+def _tools_with(
+    candidates: dict[str, dict[str, Any]],
+    *,
+    ranked_ids: list[str] | None = None,
+    dropped_ids: list[str] | None = None,
+    deep_status: str = "ok",
+) -> RecommendationAgentTools:
     tools = RecommendationAgentTools(db=None, target_facts_fn=dict, screen_targets_fn=lambda *_, **__: None)
     tools.candidates_by_id = candidates
+    candidate_ids = list(candidates)
+    tools.search_calls = [{
+        "call_index": 1,
+        "valid": True,
+        "group_id": "fallback-0",
+        "filters": {},
+        "count_only": False,
+        "eligible_count": len(candidate_ids),
+        "returned_count": len(candidate_ids),
+        "full_conditions": True,
+        "relaxed_fields": [],
+        "candidate_ids": candidate_ids,
+    }]
+    ranked = ranked_ids if ranked_ids is not None else candidate_ids
+    tools.deep_eval_result = {
+        "deep_eval_status": deep_status,
+        "ranked": [
+            {
+                "id": candidate_id,
+                "rank": index,
+                "qualitative_verdicts": {},
+                "fit_points": [],
+                "risks": None,
+                "info_gaps": None,
+            }
+            for index, candidate_id in enumerate(ranked, start=1)
+        ] if deep_status == "ok" else [],
+        "dropped": [{"id": candidate_id, "reason": "不满足"} for candidate_id in (dropped_ids or [])],
+    }
     return tools
 
 
@@ -51,7 +86,7 @@ _CANDIDATE = {
 }
 
 
-# -- the hallucinated-id guard -------------------------------------------
+# -- 4C final-output and brief-v2 contract -------------------------------
 
 
 def test_brief_drops_candidates_the_agent_invented() -> None:
@@ -60,23 +95,27 @@ def test_brief_drops_candidates_the_agent_invented() -> None:
     brief = _build_answer_brief(
         {
             "understanding": "华东精密制造",
-            "recommended": [
-                {"id": "t-1", "reason_points": ["产线互补"]},
-                {"id": "t-does-not-exist", "reason_points": ["凭空捏造"]},
-            ],
+            "recommended_ids": ["t-1", "t-does-not-exist"],
+            "selection_notes": {"t-1": "产线互补"},
         },
         tools=tools,
         mode="buyer_to_target",
     )
 
     assert [item["id"] for item in brief["recommended"]] == ["t-1"]
+    assert any("候选池外" in note for note in tools.final_output_normalization_notes)
 
 
 def test_brief_takes_numbers_from_code_not_from_the_model() -> None:
     tools = _tools_with({"t-1": _CANDIDATE})
 
     brief = _build_answer_brief(
-        {"recommended": [{"id": "t-1", "facts": {"net_profit_text": "9999万"}, "name": "假名字"}]},
+        {
+            "recommended": [
+                {"id": "t-1", "facts": {"net_profit_text": "9999万"}, "name": "假名字"}
+            ],
+            "selection_notes": {"t-1": "假名字净利9999万"},
+        },
         tools=tools,
         mode="buyer_to_target",
     )
@@ -84,14 +123,17 @@ def test_brief_takes_numbers_from_code_not_from_the_model() -> None:
     item = brief["recommended"][0]
     assert item["facts"]["net_profit_text"] == "2800万"
     assert item["name"] == "杭州XX精密制造"
+    assert "selection_note" not in item
+    assert tools.final_output_contract["selection_notes"] == {"t-1": "假名字净利9999万"}
 
 
 def test_brief_survives_a_non_json_agent_answer() -> None:
     brief = _build_answer_brief(None, tools=_tools_with({}), mode="buyer_to_target")
 
     assert brief["recommended"] == []
-    assert brief["understanding"] is None
+    assert brief["intent_summary"] == "本轮按用户当前表达进行候选筛选"
     assert brief["mode"] == "buyer_to_target"
+    assert brief["brief_version"] == 2
 
 
 def test_brief_carries_progress_flags_without_naming_the_other_side() -> None:
@@ -121,31 +163,149 @@ def test_brief_caps_list_sizes() -> None:
             "recommended": [
                 {"id": f"t-{index}", "reason_points": ["点"] * 9} for index in range(20)
             ],
-            "runner_ups": [{"name": f"备选{index}"} for index in range(9)],
+            "runner_ups": [{"id": f"t-{index}"} for index in range(6, 15)],
             "follow_up_suggestions": [f"建议{index}" for index in range(9)],
         },
         tools=tools,
         mode="buyer_to_target",
     )
 
-    assert len(brief["recommended"]) == 10
-    assert len(brief["recommended"][0]["reason_points"]) == 5
+    assert len(brief["recommended"]) == 6
     assert len(brief["runner_ups"]) == 5
     assert len(brief["follow_up_suggestions"]) == 4
+    assert any("超过 6 家" in note for note in tools.final_output_normalization_notes)
+    assert any("超过 5 家" in note for note in tools.final_output_normalization_notes)
 
 
-def test_brief_reports_the_last_eligible_count_the_agent_actually_saw() -> None:
-    tools = _tools_with({})
+def test_brief_uses_candidate_pool_count_not_the_last_matched_count() -> None:
+    tools = _tools_with({"t-1": _CANDIDATE})
     tools.search_calls = [
-        {"eligible_count": 1200},
-        {"eligible_count": 47},
-        {"count_only": True, "eligible_count": 56},
+        {"call_index": 1, "valid": True, "group_id": "fallback-0", "eligible_count": 1200,
+         "returned_count": 1, "candidate_ids": ["t-1"], "filters": {}, "full_conditions": True},
+        {"call_index": 2, "valid": True, "group_id": "fallback-0", "eligible_count": 47,
+         "returned_count": 1, "candidate_ids": ["t-1"], "filters": {}, "full_conditions": True},
+        {"call_index": 3, "valid": True, "group_id": "fallback-0", "count_only": True,
+         "eligible_count": 56, "candidate_ids": []},
     ]
 
-    brief = _build_answer_brief({}, tools=tools, mode="buyer_to_target")
+    brief = _build_answer_brief({"recommended_ids": ["t-1"]}, tools=tools, mode="buyer_to_target")
 
-    assert brief["total_eligible"] == 56
-    assert len(brief["search_story"]) == 3
+    assert "total_eligible" not in brief
+    assert brief["candidate_pool_count"] == 1
+    assert [run["matched_count"] for run in brief["screening_runs"]] == [1200, 47, 56]
+
+
+def test_deep_eval_30_candidates_agent_selects_exactly_four() -> None:
+    candidates = {
+        f"t-{index}": {**_CANDIDATE, "seller_target_id": f"t-{index}", "seller_target_name": f"标的{index}"}
+        for index in range(30)
+    }
+    tools = _tools_with(candidates)
+
+    brief = _build_answer_brief(
+        {"recommended_ids": ["t-8", "t-3", "t-20", "t-1"]},
+        tools=tools,
+        mode="buyer_to_target",
+    )
+
+    assert brief["candidate_pool_count"] == 30
+    assert [item["id"] for item in brief["recommended"]] == ["t-8", "t-3", "t-20", "t-1"]
+
+
+def test_dropped_duplicate_and_pool_outside_ids_are_rejected_with_trace_notes() -> None:
+    candidates = {f"t-{index}": {**_CANDIDATE, "seller_target_id": f"t-{index}"} for index in range(4)}
+    tools = _tools_with(candidates, ranked_ids=["t-0", "t-1", "t-2"], dropped_ids=["t-3"])
+
+    brief = _build_answer_brief(
+        {"recommended_ids": ["t-0", "t-0", "t-3", "invented"]},
+        tools=tools,
+        mode="buyer_to_target",
+    )
+
+    assert [item["id"] for item in brief["recommended"]] == ["t-0", "t-1", "t-2"]
+    joined = " | ".join(tools.final_output_normalization_notes)
+    assert "重复 id" in joined
+    assert "dropped id" in joined
+    assert "候选池外" in joined
+
+
+def test_required_relaxation_is_enriched_from_snapshot_and_source() -> None:
+    tools = _tools_with({"t-1": _CANDIDATE})
+    tools.intent_snapshot = {
+        "condition_groups": [{
+            "label": "主方案",
+            "conditions": {"min_net_profit_yuan": 10_000_000},
+            "strength": {"min_net_profit_yuan": "required"},
+        }],
+        "qualitative_requirements": ["有海外仓"],
+        "exclusions": {},
+        "parser_status": "ok",
+    }
+    tools.search_calls[0].update({
+        "group_id": "group-1",
+        "filters": {},
+        "full_conditions": False,
+        "relaxed_fields": ["min_net_profit_yuan"],
+        "relaxation_reason": "完整条件只命中 1 家",
+        "based_on_call_index": 1,
+    })
+    tools.deep_eval_result["ranked"][0].update({
+        "qualitative_verdicts": {"有海外仓": "无法判断"},
+        "fit_points": ["业务方向相近"],
+        "risks": "客户集中度待核实",
+        "info_gaps": "缺少海外仓材料",
+    })
+
+    item = _build_answer_brief(
+        {"recommended_ids": ["t-1"]}, tools=tools, mode="buyer_to_target"
+    )["recommended"][0]
+
+    assert item["required_relaxation"] is True
+    assert item["relaxed_fields"] == [{
+        "field": "min_net_profit_yuan",
+        "label": "最低净利润",
+        "strength": "required",
+    }]
+    assert item["risks"] == "客户集中度待核实"
+    assert item["info_gaps"] == "缺少海外仓材料"
+
+
+@pytest.mark.parametrize("deep_status", ["unavailable", "schema_mismatch"])
+def test_deep_eval_degradation_is_explicit_agent_fallback(deep_status: str) -> None:
+    tools = _tools_with({"t-1": _CANDIDATE}, deep_status=deep_status)
+
+    brief = _build_answer_brief(
+        {"recommended_ids": ["t-1"]}, tools=tools, mode="buyer_to_target"
+    )
+
+    assert brief["deep_eval_status"] == deep_status
+    assert brief["selection_source"] == "agent_fallback"
+
+
+def test_follow_up_suggestions_are_short_deduplicated_and_budget_safe() -> None:
+    tools = _tools_with({"t-1": _CANDIDATE})
+    long = "请继续收窄行业和地区" * 20
+    brief = _build_answer_brief(
+        {
+            "recommended_ids": ["t-1"],
+            "follow_up_suggestions": [
+                "细看杭州XX精密制造",
+                "细看杭州XX精密制造",
+                "列出全部56家候选",
+                "打开 /targets/t-1",
+                long,
+                "再看下一批候选",
+            ],
+        },
+        tools=tools,
+        mode="buyer_to_target",
+    )
+
+    suggestions = brief["follow_up_suggestions"]
+    assert suggestions[0] == "细看杭州XX精密制造"
+    assert "再看下一批候选" in suggestions
+    assert all(len(value) <= 80 for value in suggestions)
+    assert not any("全部56家" in value or "/targets/" in value for value in suggestions)
 
 
 # -- 4A intent snapshot wiring -----------------------------------------

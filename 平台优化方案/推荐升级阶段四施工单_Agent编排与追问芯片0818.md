@@ -911,3 +911,103 @@ npm run lint
   变量全部替换，无双花括号残留。
 - 只读查询 `/model-config/prompts` 确认 v0.3.1 与 v0.2.0 均为各自节点
   `is_default=true` 且 `is_active=true` 的 Prompt。没有部署自建环境；本次推送只触发 Railway。
+
+### 4C 施工记录（2026-08-18）
+
+#### 基线、4B 验收与工作树
+
+- 开工分支 `main`，HEAD `4b4d2203817ff62d423947e9ae5b0e28c728b627`
+  （`4b4d220 docs: 记录4B生产发布`）。先按顺序完整阅读 `AGENTS.md`、系统总纲、本施工单、
+  4A/4B 施工记录与实际源码、测试、Prompt 脚本，再核对当前 `Recommend.tsx`、
+  `AgentTurnView.tsx` 和 API 类型；没有 pull / reset / checkout / stash / clean。
+- 开工前 4B 闸门：
+  `python -m pytest -q tests/test_recommendation_agent_policy.py
+  tests/test_recommendation_agent_tools.py tests/test_recommendation_deep_eval_node.py
+  tests/test_recommendation_agent_turn.py tests/test_intent_parse_result.py
+  tests/test_recommendation_agent_history.py`
+  → `159 passed in 2.84s`。源码同时确认各批 SQL 独立、真实批次求并集、>40 跨组公平收口、
+  深评最多一次且冻结筛选、忘调时自动补跑并用同一 Agent 无工具收尾；未重写 4B 算法。
+- 工作树原有用户资产保持不动：阶段二施工单的既有修改以及 `.claude/`、UAT 表、其他未跟踪
+  施工文档均未清理或覆盖。本包只会显式提交下列 4C 文件和本施工记录。
+
+#### 最终输出归一与 answer brief v2
+
+- `backend/app/services/recommendation_answer.py`
+  - 成为唯一答案契约边界：把当前已部署的 4B Agent 旧形态与 4C
+    `understanding / recommended_ids / runner_up_ids / selection_notes / follow_up_suggestions`
+    归一到同一执行形态；正常深评的可执行 id 集严格等于 `ranked`，`dropped`、池外、重复 id
+    全部丢弃并留 trace notes。
+  - 重点名单最多 6、备选最多 5；候选不少于 3 而 Agent 有效重点不足 3 时，先从 Agent 备选
+    补足，再按深评可执行排序只补到最低 3 家，不固定取前 5，也不把全部候选写成重点。
+  - 深评 `unavailable/schema_mismatch` 时只允许从 4B 公平候选池收尾，并明确区分
+    `selection_source=agent_fallback | screening_fallback`；不伪装成 deep eval。
+  - `selection_notes` 只进入 trace 中的归一 Agent 契约，不进入 Writer brief；名称、facts、
+    推进状态均从 `candidates_by_id` 回填，逐条判定、理由、风险和缺口只从归一深评结果回填。
+  - brief v2 最终字段：`brief_version / mode / intent_summary / parser_status /
+    selection_source / deep_eval_status / candidate_pool_count / candidate_pool_capped /
+    screening_runs / recommended / runner_ups / follow_up_suggestions`。候选项含数据库
+    `name/facts`、`qualitative_verdicts/reason_points/risks/info_gaps`、完整筛选来源、
+    `matched_full_conditions`、带中文名和 required/preferred 强度的 `relaxed_fields`、推进提示。
+  - 新 brief 与规则兜底完全删除 `total_eligible`。`screening_runs[].matched_count` 只表示单次
+    查询，本轮总体只用 `candidate_pool_count`，文案只说“本轮汇总了 N 家去重候选”。
+  - 规则兜底同步展示代码 facts、深评理由/风险/缺口、完整命中/放宽项；required 放宽明确
+    “仅供参考、需核实”；没有重点时输出诚实空结果；追问句不进入正文。
+  - Writer 最终正文落库前剥除模型自带链接、URL、候选 id 与逐字重复的追问句，再由代码按
+    最终重点/备选真实名称回填站内链接；复制纯文本逻辑保持不变。
+- `backend/app/jobs/handlers/recommendation.py`、
+  `backend/app/services/recommendation_agent_tools.py`
+  - handler 只调用统一 brief v2 builder；原始模型 JSON 继续留在
+    `ai_trace.parsed_output_json`，可执行归一契约和全部拒绝/截断 notes 写入 trace metadata。
+  - 4B 的深评、中止和工具预算流程未改；中止轮仍不生成 `agent_brief`。
+- `backend/app/api/routes/recommendations.py`、`backend/app/registry/nodes.py`
+  - Writer SSE 使用 brief v2；空输出和流式异常都回到同一规则兜底，最终正文统一安全清洗和链接回填；
+    NodeSpec 仍复用 `recommendation_answer_writer_to_target`，没有新增节点或变量。
+
+#### Writer Prompt v0.2.0（施工时未 apply）
+
+- 新增 `scripts/publish_recommendation_writer_v020_prompt.py`，目标
+  `recommendation_answer_writer_to_target v0.2.0`，变量仍只有 `answer_brief_json`。
+  正文写死 brief v2、`candidate_pool_count` 口径、完整命中与放宽补充、required 放宽核实、
+  facts/深评字段来源、不显示等级或分数、不输出 id/URL/Markdown、不泄露其他买家、追问不进正文、
+  少候选不灌水。
+- `--check`：变量集合与 NodeSpec 一致，1/1。
+- `--dry-run`：只读确认生产尚无 v0.2.0，显示“将创建并设为默认”；未写入。
+- `--render-preview`：生产渲染端点成功，1/1 变量已替换，无双花括号残留；未写入。
+- 脚本复用 `prompt_publish_utils`：同版本正文/schema/变量任一不同都会以退出码 2 失败，
+  不覆盖、不无声 skip。施工测试阶段未执行 `--apply`；用户授权后的实际发布另在本节补记。
+
+#### 前端芯片收口与恢复/中止边界
+
+- 沿用 `AgentTurnView` 唯一芯片组件和 `onSendSuggestion(suggestion)` 点击即发送链路，没有新建
+  第二套组件或改视觉。`Recommend.tsx` 在实时 brief 与历史恢复两条路径共用归一：去空、去重、
+  单条最多 80 字、最多 4 条；后端仍允许可靠建议少于 2 条或为空。
+- 芯片只在非中止、非失败、非澄清且最终正文已经完成时显示。停止本轮会立即清空页面上的
+  部分正文与芯片；历史中即便竞态落过 brief/answer，只要有 `agent_aborted` 标记仍不显示、
+  不续接。Writer 降级到规则兜底并完成 `done` 时不视为失败，芯片可正常显示。
+- 恢复历史继续从已落库 `agent_brief.follow_up_suggestions` 重建相同芯片；有 brief 无正文的轮次
+  仍自动补连 SSE，正文完成前不提前显示芯片。最近 5 轮问答上下文机制未改。
+- `frontend/src/types/api.ts` 已切到 brief v2，并补齐筛选运行、放宽来源与候选定性字段类型。
+
+#### 测试结果（真实结果）
+
+- 4A–4C 相关回归最终一轮：`192 passed in 2.57s`，覆盖 4C.6 十三类验收点，包括
+  30 家选 4 家、编造/dropped/重复 id、3–6/最多 5、代码 facts 权威、required 放宽、
+  `total_eligible` 消失、追问不进正文、芯片点击/恢复/显示边界、Writer 两种降级、链接/复制与中止。
+- 全量后端：`python -m pytest -q`
+  → 最终 `1151 passed, 36 skipped, 5 warnings in 12.85s`；5 条均为既有 Starlette
+  `HTTP_422_UNPROCESSABLE_ENTITY` 弃用警告，无失败。
+- 前端：`npm run typecheck` → 通过；`npm run build` → 通过（Vite 既有 Browserslist 过期与
+  主 chunk >500 kB 提示）；`npm run lint` → 退出码 0，`0 errors / 17 warnings`。
+  17 条均位于未被本包修改的 `CascadeFilter.tsx`、buyers/targets `presentation.tsx`、
+  `PromptDrawer.tsx`、settings `shared.tsx`、`DebugEntity.tsx`，属于既有 Fast Refresh / hook 警告。
+- `git diff --check` 无空白错误，仅 Windows 工作树既有 LF→CRLF 提示。
+
+#### 留给 4D 的 UAT 与风险清单
+
+- 本包不扩大到阶段四真实 UAT；4D 仍需按 §4D.2 跑 8 组真实对话，并逐轮核对
+  understanding/step/deep-eval/brief/trace/页面正文，尤其多组条件、required 放宽和点击“再看下一批”。
+- 4D 需验证真实 Writer 模型遵守“不把追问改写进正文”。代码会移除与芯片逐字相同的句子并清洗
+  最终 id/URL/链接，但语义改写仍以 Prompt 和 UAT 验收为主。
+- 主 Agent v0.2.0 是 4B 已发布的旧原始 JSON 形态；4C 在代码边界兼容旧形态并落统一归一契约，
+  以避免部署切换期间的在途轮次失配。4D 应从 trace 抽查两种输入形态得到相同 brief v2。
+- 自建环境未部署；推 Railway 不会更新自建。系统总纲最终链路与阶段四结论仍按边界留给 4D 回填。

@@ -264,6 +264,8 @@ class RecommendationAgentTools:
         self.deep_eval_called = False
         self.screening_frozen = False
         self.deep_eval_result: dict[str, Any] | None = None
+        self.final_output_contract: dict[str, Any] | None = None
+        self.final_output_normalization_notes: list[str] = []
 
     def _emit_step(self, step: dict[str, Any]) -> None:
         if self._step_sink is None:
@@ -669,6 +671,8 @@ class RecommendationAgentTools:
             "screening_frozen": self.screening_frozen,
             "deep_eval_called": self.deep_eval_called,
             "asked_user": self.ask_user_payload is not None,
+            "final_output_contract": self.final_output_contract,
+            "final_output_normalization_notes": self.final_output_normalization_notes,
         }
 
 

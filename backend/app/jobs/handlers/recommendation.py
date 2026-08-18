@@ -47,6 +47,7 @@ from backend.app.services.recommendation_agent_tools import (
     build_agent_tools,
 )
 from backend.app.services.recommendation_agent_policy import compile_condition_groups
+from backend.app.services.recommendation_answer import build_answer_brief_v2
 from backend.app.services.recommendation_conditions import (
     describe_intent_snapshot,
     parse_recommendation_intent,
@@ -896,64 +897,22 @@ def _build_answer_brief(
     tools: RecommendationAgentTools,
     mode: str,
 ) -> dict[str, Any]:
-    """Merge the agent's picks with code-held facts.
-
-    The numbers in the final answer come from `facts` here, not from whatever
-    the model retyped — a model that paraphrases 2800万 as 2800万元 is fine, one
-    that invents 3200万 is not, and this is the join that removes the chance.
-    """
-    data = raw_output if isinstance(raw_output, dict) else {}
-    recommended: list[dict[str, Any]] = []
-    for item in (data.get("recommended") or [])[:10]:
-        if not isinstance(item, dict):
-            continue
-        target_id = str(item.get("id") or "").strip()
-        candidate = tools.candidates_by_id.get(target_id)
-        if candidate is None:
-            # 模型报了一个不在候选里的 id：丢掉而不是照抄，宁可少推荐一家。
-            continue
-        recommended.append(
-            {
-                "id": target_id,
-                "name": candidate.get("seller_target_name"),
-                "facts": candidate.get("facts") or {},
-                "reason_points": [str(point) for point in (item.get("reason_points") or [])][:5],
-                "watch_out": str(item.get("watch_out") or "").strip() or None,
-                "already_in_progress": candidate.get("relation_status"),
-                "other_buyer_in_deep_progress": bool(
-                    candidate.get("seller_target_has_other_deep_progress")
-                ),
-            }
-        )
-    runner_ups = [
-        {
-            "name": str(item.get("name") or "").strip(),
-            "note": str(item.get("note") or "").strip() or None,
-        }
-        for item in (data.get("runner_ups") or [])[:5]
-        if isinstance(item, dict) and str(item.get("name") or "").strip()
-    ]
-    last_eligible = next(
-        (
-            call.get("eligible_count")
-            for call in reversed(tools.search_calls)
-            if call.get("eligible_count") is not None
-        ),
-        None,
+    """Build the one v2 brief shared by Writer, fallback and the front end."""
+    brief, final_output, notes = build_answer_brief_v2(
+        raw_output,
+        mode=mode,
+        intent_snapshot=tools.intent_snapshot,
+        candidates_by_id=tools.candidates_by_id,
+        candidate_pool=tools.candidate_pool(),
+        deep_eval=tools.deep_eval_result,
+        screening_runs=tools.process_steps(),
     )
-    return {
-        "mode": mode,
-        "understanding": str(data.get("understanding") or "").strip() or None,
-        "search_story": tools.process_steps(),
-        "total_eligible": last_eligible,
-        "recommended": recommended,
-        "runner_ups": runner_ups,
-        "follow_up_suggestions": [
-            str(item).strip()
-            for item in (data.get("follow_up_suggestions") or [])[:4]
-            if str(item or "").strip()
-        ],
-    }
+    # The raw model JSON remains in ai_trace.parsed_output_json. These fields
+    # add the executable, code-normalised contract and every rejection/truncate
+    # decision to trace metadata instead of silently hiding model mistakes.
+    tools.final_output_contract = final_output
+    tools.final_output_normalization_notes = notes
+    return brief
 
 
 def _get_deep_eval_node_config(db: Session, mode: str) -> dict[str, Any]:

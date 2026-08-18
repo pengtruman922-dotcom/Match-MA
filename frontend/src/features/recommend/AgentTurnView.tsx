@@ -62,7 +62,7 @@ export default function AgentTurnView({
         </div>
       )}
 
-      {(turn.answer || turn.streaming) && (
+      {!turn.aborted && !turn.failed && !turn.question && (turn.answer || turn.streaming) && (
         <div className="space-y-2" data-testid="agent-answer">
           <TinyMarkdown text={turn.answer} />
           {turn.streaming && !turn.answer && (
@@ -75,8 +75,9 @@ export default function AgentTurnView({
         </div>
       )}
 
-      {turn.answerDone && turn.followUps.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
+      {turn.answerDone && Boolean(turn.answer.trim()) && !turn.aborted && !turn.failed && !turn.question
+        && turn.followUps.length > 0 && (
+        <div className="flex flex-wrap gap-1.5" data-testid="agent-follow-ups">
           {turn.followUps.map((suggestion) => (
             <button
               key={suggestion}

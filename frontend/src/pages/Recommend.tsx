@@ -104,6 +104,7 @@ export default function Recommend() {
             answer: String(event.data.markdown || accumulated),
             answerDone: true,
             streaming: false,
+            failed: null,
           });
           return;
         } else if (event.event === 'error') {
@@ -193,7 +194,7 @@ export default function Recommend() {
         }
         if (brief) {
           stopPolling();
-          patchTurn(turnId, { followUps: brief.follow_up_suggestions || [] });
+          patchTurn(turnId, { followUps: normalizeBriefFollowUps(brief.follow_up_suggestions) });
           void streamAnswer(activeSessionId, turnId);
         }
       } catch {
@@ -254,7 +255,14 @@ export default function Recommend() {
       await recommendations.abortTurn(sessionId, activeTurn.turnId);
       stopPolling();
       streamAbortRef.current?.abort();
-      patchTurn(activeTurn.turnId, { aborted: true, answerDone: true, streaming: false });
+      patchTurn(activeTurn.turnId, {
+        aborted: true,
+        answer: '',
+        followUps: [],
+        failed: null,
+        answerDone: true,
+        streaming: false,
+      });
     } catch (abortError) {
       setError(abortError instanceof Error ? abortError.message : '停止失败，请重试');
     } finally {
@@ -605,7 +613,9 @@ function rebuildTurns(messages: RecommendationMessage[]): RebuiltConversation {
     } else if (messageType === 'agent_question' && payload.question) {
       turn.question = payload.question as RecommendationAgentQuestion;
     } else if (messageType === 'agent_brief' && payload.brief) {
-      turn.followUps = (payload.brief as RecommendationAgentBrief).follow_up_suggestions || [];
+      turn.followUps = normalizeBriefFollowUps(
+        (payload.brief as RecommendationAgentBrief).follow_up_suggestions,
+      );
       landed.get(turnId)!.brief = true;
     } else if (messageType === 'agent_answer') {
       turn.answer = String(payload.markdown || '');
@@ -637,4 +647,16 @@ function rebuildTurns(messages: RecommendationMessage[]): RebuiltConversation {
     turn.failed = '这一轮没有跑完。';
   }
   return { turns, resumeTurnIds };
+}
+
+/** The backend is authoritative; this is the display boundary for old stored briefs. */
+function normalizeBriefFollowUps(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const values: string[] = [];
+  for (const item of raw) {
+    const suggestion = String(item || '').trim().slice(0, 80);
+    if (suggestion && !values.includes(suggestion)) values.push(suggestion);
+    if (values.length >= 4) break;
+  }
+  return values;
 }

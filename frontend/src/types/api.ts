@@ -2000,10 +2000,18 @@ export interface RecommendationAgentTurnStatus {
 export interface RecommendationAgentSearchStep {
   kind?: string;
   call_index?: number;
+  valid?: boolean;
+  group_id?: string | null;
   note?: string | null;
   filters?: Record<string, unknown>;
+  applied_conditions?: Record<string, unknown>;
   count_only?: boolean;
   eligible_count?: number | null;
+  matched_count?: number | null;
+  full_conditions?: boolean;
+  relaxed_fields?: { field: string; label: string; strength: 'required' | 'preferred' }[];
+  relaxation_reason?: string | null;
+  based_on_call_index?: number | null;
   scan_count?: number | null;
   conflict_count?: number | null;
   returned_count?: number;
@@ -2017,15 +2025,28 @@ export interface RecommendationAgentQuestion {
 }
 
 export interface RecommendationAgentBrief {
+  brief_version: 2;
   mode: string;
-  understanding?: string | null;
-  total_eligible?: number | null;
-  search_story?: RecommendationAgentSearchStep[];
+  intent_summary: string;
+  parser_status: string;
+  selection_source: 'deep_eval' | 'agent_fallback' | 'screening_fallback';
+  deep_eval_status: string;
+  candidate_pool_count: number;
+  candidate_pool_capped: boolean;
+  screening_runs?: RecommendationAgentSearchStep[];
   recommended?: {
     id: string;
     name?: string | null;
     facts?: Record<string, unknown>;
+    qualitative_verdicts?: Record<string, string>;
+    reason_points?: string[];
+    risks?: string | null;
+    info_gaps?: string | null;
+    matched_full_conditions?: boolean;
+    relaxed_fields?: { field: string; label: string; strength: 'required' | 'preferred' }[];
+    required_relaxation?: boolean;
   }[];
+  runner_ups?: RecommendationAgentBrief['recommended'];
   follow_up_suggestions?: string[];
 }
 

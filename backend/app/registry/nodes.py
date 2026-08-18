@@ -270,10 +270,11 @@ NODES: tuple[NodeSpec, ...] = (
         domain="recommendation",
         node_type="llm",
         description=(
-            "拿 Agent 产出的素材包写成可直接复制给客户的一段话。"
+            "只读 answer brief v2（当前需求、候选池、筛选来源、深评判断与代码事实），"
+            "写成可直接复制给客户的一段话。"
             "单次调用、不带工具，因此可以在 API 侧流式输出。"
         ),
-        runtime_inputs=("写作素材包（需求理解、筛选过程、候选详情）",),
+        runtime_inputs=("answer brief v2（代码归一后的需求、筛选、选择、事实、风险与缺口）",),
         prompt_variables=("answer_brief_json",),
         answer_writer_mode="buyer_to_target",
         # 产物是给人看的正文，不是 JSON。
