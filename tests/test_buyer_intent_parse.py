@@ -283,7 +283,11 @@ def test_buyer_intent_parse_changes_normalize_common_enums_and_numbers() -> None
                 "financing_stage_requirement_summary": "pre-IPO",
                 "min_market_cap_yuan": "500000000",
                 "max_market_cap_yuan": "3000000000",
-                "transaction_types_json": ["control", "minority"],
+                # 0817 起这一列是闭集，只认枚举码：结构码留下，另外两个轴
+                # （支付方式「全现金收购」、控制权诉求「控股收购」）一律丢弃 ——
+                # 它们在标的侧没有对手方列，留着只会筛出错误结果。
+                "transaction_types_json": ["equity_transfer", "全现金收购", "控股收购"],
+                "unacceptable_risk_flags_json": "不接受任何重大风险",
                 "max_debt_ratio": "65",
                 "major_risk_tolerance_summary": "不接受重大诉讼、冻结、执行",
                 "buyer_industry_advantage_summary": "浙江本地国资有医药产业资源",
@@ -302,7 +306,11 @@ def test_buyer_intent_parse_changes_normalize_common_enums_and_numbers() -> None
     assert changes["financing_stage_requirement_summary"] == "pre-IPO"
     assert changes["min_market_cap_yuan"] == 500000000
     assert changes["max_market_cap_yuan"] == 3000000000
-    assert changes["transaction_types_json"] == ["control", "minority"]
+    assert changes["transaction_types_json"] == ["equity_transfer"]
+    # 「不接受全部」在写入侧就展开成全集，SQL 那边只剩一条 not_overlap 路径。
+    assert changes["unacceptable_risk_flags_json"] == [
+        "litigation", "equity_frozen", "enforcement", "violation",
+    ]
     assert changes["max_debt_ratio"] == 65
     assert changes["major_risk_tolerance_summary"] == "不接受重大诉讼、冻结、执行"
     assert changes["buyer_industry_advantage_summary"] == "浙江本地国资有医药产业资源"

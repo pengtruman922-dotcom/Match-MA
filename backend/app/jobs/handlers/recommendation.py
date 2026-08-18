@@ -43,12 +43,11 @@ from backend.app.registry.nodes import (
 from backend.app.services.recommendation_agent_tools import (
     MAX_DETAIL_TARGETS_TOTAL,
     MAX_SEARCH_CALLS,
-    RECOMMENDATION_AGENT_TOOLS,
     RecommendationAgentTools,
+    build_agent_tools,
 )
 from backend.app.services.recommendation_flow import (
     agent_turn_aborted,
-    search_targets_for_agent,
     target_facts_for_agent,
 )
 from backend.app.services.profile_sections import (
@@ -388,7 +387,6 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
 
     tools = RecommendationAgentTools(
         db,
-        search_targets_fn=search_targets_for_agent,
         target_facts_fn=target_facts_for_agent,
         step_sink=step_sink,
     )
@@ -397,7 +395,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
         loop = run_tool_loop(
             chat=_agent_chat_caller(node_config),
             messages=messages,
-            tools=RECOMMENDATION_AGENT_TOOLS,
+            tools=build_agent_tools(db),
             execute_tool=tools.execute,
             max_iterations=AGENT_MAX_ITERATIONS,
             tool_result_limit=AGENT_TOOL_RESULT_LIMIT,

@@ -2,27 +2,59 @@ import { useState } from 'react';
 import { ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
 import type { RecommendationAgentSearchStep } from '../../types/api';
 import { formatCompactMoney } from '../../lib/format';
+import { valueLabel } from '../../lib/fieldLabels';
 
+// 初筛 skill 支持的全部条件。少一个的后果不是报错，是那一条在过程行里**消失**——
+// Agent 自己加的地区条件用户看不见，结果的来路就断了。
 const FILTER_LABELS: Record<string, string> = {
   industries_json: '行业',
+  industry_l2_json: '二级行业',
   excluded_industries_json: '排除',
+  region_constraints_json: '地区',
   region_scope_summary: '地区',
-  min_net_profit_yuan: '净利≥',
   min_revenue_yuan: '营收≥',
+  min_net_profit_yuan: '净利≥',
+  min_total_profit_yuan: '利润总额≥',
   max_pe: 'PE≤',
   min_valuation_yuan: '估值≥',
   max_valuation_yuan: '估值≤',
+  min_market_cap_yuan: '市值≥',
+  max_market_cap_yuan: '市值≤',
   max_debt_ratio: '负债率≤',
+  acceptable_cash_flow_status_json: '现金流',
+  acceptable_profitability_status_json: '盈利',
+  acceptable_listed_status_json: '上市状态',
+  listing_market_region: '上市地',
+  transaction_types_json: '交易结构',
+  unacceptable_risk_flags_json: '不接受风险',
+  accepts_minority_investment: '少数股权',
   requires_control: '控股',
   requires_consolidation: '并表',
+  requires_relocation: '迁址',
+  requires_return_investment: '返投',
+  requires_team_retention: '团队留任',
+  desired_equity_ratio_min: '股比≥',
+  desired_equity_ratio_max: '股比≤',
   preferred_listed_status: '上市',
+};
+
+// 买家侧的「可接受 X」与标的侧的 X 是同一个闭集，中文名复用后者那张表。
+const VALUE_LABEL_FIELDS: Record<string, string> = {
+  acceptable_listed_status_json: 'listed_status',
+  acceptable_profitability_status_json: 'profitability_status',
+  acceptable_cash_flow_status_json: 'cash_flow_status',
+  transaction_types_json: 'acceptable_transaction_structures_json',
+  unacceptable_risk_flags_json: 'major_risk_flags_json',
 };
 
 const MONEY_FILTERS = new Set([
   'min_net_profit_yuan',
   'min_revenue_yuan',
+  'min_total_profit_yuan',
   'min_valuation_yuan',
   'max_valuation_yuan',
+  'min_market_cap_yuan',
+  'max_market_cap_yuan',
 ]);
 
 /**
@@ -105,11 +137,18 @@ function describeFilters(filters: Record<string, unknown> | undefined): string {
 }
 
 function formatFilterValue(field: string, value: unknown): string {
-  if (Array.isArray(value)) return value.map(String).join('、');
+  if (Array.isArray(value)) return value.map((item) => formatFilterValue(field, item)).join('、');
+  // 地区条件是 {province, city, district}，只填到用户说到的层级。
+  if (value && typeof value === 'object') {
+    const region = value as Record<string, unknown>;
+    return ['province', 'city', 'district'].map((level) => region[level] || '').join('');
+  }
   if (MONEY_FILTERS.has(field) && typeof value === 'number') return formatCompactMoney(value);
+  // 能力要求在 skill 里是布尔：带上这个条件本身就等于「要求」。
+  if (typeof value === 'boolean') return value ? '需要' : '不需要';
   if (value === 'yes') return '需要';
   if (value === 'no') return '不需要';
-  return String(value);
+  return valueLabel(VALUE_LABEL_FIELDS[field] || field, value);
 }
 
 function formatElapsed(seconds: number): string {

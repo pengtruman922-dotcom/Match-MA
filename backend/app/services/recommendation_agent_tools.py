@@ -1,10 +1,12 @@
 """Tools the recommendation agent drives, and the budgets that keep it honest.
 
-The agent orchestrates; it never sees the library. Screening stays in SQL and
-in the scoring code (`_candidate_targets_for_intent`) exactly as before — the
-agent only chooses the filter arguments, reads back a compact digest, and
-decides whether to search again. That boundary is the hard rule from
-`AGENTS.md`: 初筛与打分必须代码化，禁止全库打包给 LLM.
+The agent orchestrates; it never sees the library. 初筛是 `screening_sql` 那段
+纯 SQL —— agent 只决定这次带哪些条件、读回一份极简摘要与逐条件淘汰拆分，再决定
+要不要换一组条件重来。That boundary is the hard rule from `AGENTS.md`:
+初筛与打分必须代码化，禁止全库打包给 LLM.
+
+工具的 schema 从指标注册表生成（`screening_schema`），行业闭集运行时从字典注入，
+所以模型填不出不存在的字段、也填不出字典外的行业名。
 """
 
 from __future__ import annotations
@@ -17,94 +19,85 @@ from sqlalchemy.orm import Session
 
 from backend.app.ai.llm_client import ToolCall
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+from backend.app.services.industry_taxonomy import list_l1_terms, list_l2_terms
 from backend.app.services.profile_sections import load_profile_sections, render_profile_text
-from backend.app.services.recommendation_conditions import coerce_condition_value
 from backend.app.services.relation_flow import DEEP_PROGRESS_STATUSES
+from backend.app.services.screening_schema import build_conditions_properties
+from backend.app.services.screening_sql import (
+    DEFAULT_SCREENING_LIMIT,
+    MAX_SCREENING_LIMIT,
+    screen_targets,
+)
 
 # 预算。超了不是抛异常终止运行，而是把「你已经用完」作为工具结果回给模型，
 # 让它用手上的信息收尾 —— 跟 tool_loop 处理工具报错的策略一致。
 MAX_SEARCH_CALLS = 6
-MAX_SEARCH_RESULTS_PER_CALL = 30
-DEFAULT_SEARCH_RESULTS_PER_CALL = 20
+MAX_SEARCH_RESULTS_PER_CALL = MAX_SCREENING_LIMIT
+DEFAULT_SEARCH_RESULTS_PER_CALL = DEFAULT_SCREENING_LIMIT
 MAX_DETAIL_TARGETS_TOTAL = 12
 MAX_ASK_USER_CALLS = 1
 MAX_ASK_USER_QUESTIONS = 3
 
-# 这一份是暴露给模型的过滤器白名单。键必须是 buyer_intent 的列名，
-# 因为它们会被直接放进打分用的 anchor；实际取值仍由
-# `coerce_condition_value` 按条件契约校验，模型写错类型就被丢掉。
-_FILTER_PROPERTIES: dict[str, dict[str, Any]] = {
-    "industries_json": {
-        "type": "array",
-        "items": {"type": "string"},
-        "description": "目标行业，用一级行业名。留空表示不限行业。",
-    },
-    "excluded_industries_json": {
-        "type": "array",
-        "items": {"type": "string"},
-        "description": "明确排除的行业或关键词。",
-    },
-    "region_scope_summary": {
-        "type": "string",
-        "description": "地区范围，例如「华东」「浙江、江苏」「杭州」。",
-    },
-    "min_net_profit_yuan": {"type": "number", "description": "净利润下限，单位元。2000 万写 20000000。"},
-    "min_revenue_yuan": {"type": "number", "description": "营业收入下限，单位元。"},
-    "max_pe": {"type": "number", "description": "PE 倍数上限。"},
-    "min_valuation_yuan": {"type": "number", "description": "估值下限，单位元。"},
-    "max_valuation_yuan": {"type": "number", "description": "估值上限（预算上限），单位元。"},
-    "max_debt_ratio": {"type": "number", "description": "资产负债率上限，0-1 之间的小数。"},
-    "requires_control": {
-        "type": "string",
-        "enum": ["yes", "no", "unknown"],
-        "description": "是否要求取得控股权。",
-    },
-    "requires_consolidation": {
-        "type": "string",
-        "enum": ["yes", "no", "unknown"],
-        "description": "是否要求能并表。",
-    },
-    "preferred_listed_status": {
-        "type": "string",
-        "enum": ["listed", "unlisted", "pre_ipo", "any", "unknown"],
-        "description": "对标的上市状态的偏好。",
-    },
-}
+# 每次调用都必须带上的粘性条件：用户说不要的东西，放宽多少次都还是不要。
+# 在工具层强制，不依赖模型自觉。
+#
+# **只有行业排除进得来。** unacceptable_risk_flags_json 语义上也是「排除」，但它
+# 的 SQL 还要求标的已核查过风险（空数组 = 未核查 = 出局），而标的侧现在 69/71
+# 都没核查 —— 一旦粘住，后面每一次放宽都只剩 2 家可选，agent 再也退不出来。
+# 等调研把 major_risk_flags_json 回填起来再谈。
+STICKY_CONDITIONS: tuple[str, ...] = ("excluded_industries_json",)
 
-SEARCH_TARGETS_TOOL: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "search_targets",
-        "description": (
-            "按结构化条件在标的库里初筛，返回候选摘要与漏斗计数。"
-            "可以多次调用来试不同条件组合（例如先严格筛，命中太少就放宽某一项）。"
-            "只想知道某个条件下有多少家时，用 count_only=true，成本低很多。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "filters": {
-                    "type": "object",
-                    "description": "筛选条件。只填用户明确表达或可合理推断的项，不要凭空补。",
-                    "properties": _FILTER_PROPERTIES,
+_SEARCH_TARGETS_DESCRIPTION = (
+    "按结构化条件在标的库里硬筛，返回命中数、逐条件淘汰拆分与候选摘要。"
+    "一次调用是一组 AND 条件，全部满足才算命中；**条件涉及的字段为空的标的一律出局**，"
+    "所以只填用户真正表达过的条件，不要凭空补。"
+    "需要「A 或 B」两套方案时，拆成两次调用，不要指望一次调用做 OR。"
+    "召回不足时看 excluded_by_condition：某一条的「字段为空」占多数说明是数据没录，"
+    "该去掉它；「确实不达标」占多数说明那是真门槛，应该保留。"
+    "只想知道有多少家时用 count_only=true。"
+)
+
+
+def build_search_targets_tool(db: Session) -> dict[str, Any]:
+    """初筛工具的定义。行业闭集运行时注入，模型写不出字典外的行业名。"""
+    return {
+        "type": "function",
+        "function": {
+            "name": "search_targets",
+            "description": _SEARCH_TARGETS_DESCRIPTION,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "conditions": {
+                        "type": "object",
+                        "description": "本次的一组 AND 条件。留空表示不限，会返回全库 A-D 级标的。",
+                        "properties": build_conditions_properties(
+                            industry_l1_terms=list_l1_terms(db),
+                            industry_l2_terms=list_l2_terms(db),
+                        ),
+                        "additionalProperties": False,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": f"返回条数，默认 {DEFAULT_SEARCH_RESULTS_PER_CALL}，上限 {MAX_SEARCH_RESULTS_PER_CALL}。",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "同一组条件下翻页，取更后面的结果。",
+                    },
+                    "count_only": {
+                        "type": "boolean",
+                        "description": "只返回命中数量与淘汰拆分，不返回候选明细。用来低成本试探条件宽窄。",
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": "这次筛选想验证什么，一句话。会展示给用户看，让他知道你做了什么。",
+                    },
                 },
-                "limit": {
-                    "type": "integer",
-                    "description": f"返回条数，默认 {DEFAULT_SEARCH_RESULTS_PER_CALL}，上限 {MAX_SEARCH_RESULTS_PER_CALL}。",
-                },
-                "count_only": {
-                    "type": "boolean",
-                    "description": "只返回命中数量，不返回候选明细。用来低成本试探条件宽窄。",
-                },
-                "note": {
-                    "type": "string",
-                    "description": "这次筛选想验证什么，一句话。会展示给用户看，让他知道你做了什么。",
-                },
+                "required": ["conditions"],
             },
-            "required": ["filters"],
         },
-    },
-}
+    }
 
 GET_TARGET_DETAIL_TOOL: dict[str, Any] = {
     "type": "function",
@@ -163,67 +156,23 @@ ASK_USER_TOOL: dict[str, Any] = {
     },
 }
 
-RECOMMENDATION_AGENT_TOOLS: list[dict[str, Any]] = [
-    SEARCH_TARGETS_TOOL,
-    GET_TARGET_DETAIL_TOOL,
-    ASK_USER_TOOL,
-]
+def _int_argument(raw: Any, default: int) -> int:
+    """模型给整数参数时经常写成字符串或小数，读不出来就退回默认值。"""
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
 
 
-def anchor_from_filters(filters: Any) -> dict[str, Any]:
-    """Turn the agent's filter arguments into a scoring anchor.
-
-    The anchor deliberately has no id: that is what stops a tool-driven search
-    from ever being mistaken for a persisted buyer intent, and it also makes
-    `_effective_scenarios` fall back to the single implicit scenario.
-    """
-    anchor: dict[str, Any] = {
-        "id": None,
-        "buyer_party_id": None,
-        "buyer_name": None,
-        "intent_name": "本次需求",
-        "industries_json": [],
-        "excluded_industries_json": [],
-    }
-    if not isinstance(filters, dict):
-        return anchor
-    for field, raw in filters.items():
-        if field not in _FILTER_PROPERTIES:
-            continue
-        value = coerce_condition_value(field, raw)
-        if value is None:
-            continue
-        anchor[field] = value
-    return anchor
-
-
-def _candidate_digest(candidate: dict[str, Any]) -> dict[str, Any]:
-    """One candidate, small enough that 30 of them still fit in a tool result."""
-    facts = candidate.get("facts") or {}
-    evidence = candidate.get("evidence_json") or {}
-    digest: dict[str, Any] = {
-        "id": str(candidate.get("seller_target_id") or ""),
-        "name": candidate.get("seller_target_name"),
-        "level": candidate.get("recommendation_level"),
-    }
-    for key in ("industry", "region", "net_profit_text", "revenue_text", "valuation_text",
-                "asking_price_text", "pe_ratio", "can_control", "can_consolidate", "listed_status"):
-        if facts.get(key) is not None:
-            digest[key] = facts[key]
-    matches = [str(item) for item in (evidence.get("matches") or [])][:6]
-    gaps = [str(item) for item in (evidence.get("gaps") or [])][:4]
-    unknown = [str(item) for item in (candidate.get("missing_dimensions") or [])][:5]
-    if matches:
-        digest["matches"] = matches
-    if gaps:
-        digest["gaps"] = gaps
-    if unknown:
-        digest["unknown"] = unknown
-    if candidate.get("relation_status"):
-        digest["already_in_progress"] = candidate["relation_status"]
-    if candidate.get("seller_target_has_other_deep_progress"):
-        digest["other_buyer_in_deep_progress"] = True
-    return digest
+def build_agent_tools(db: Session) -> list[dict[str, Any]]:
+    """本轮下发给模型的工具集。search_targets 的 schema 依赖运行时的行业字典。"""
+    return [
+        build_search_targets_tool(db),
+        GET_TARGET_DETAIL_TOOL,
+        ASK_USER_TOOL,
+    ]
 
 
 class RecommendationAgentTools:
@@ -238,14 +187,15 @@ class RecommendationAgentTools:
         self,
         db: Session,
         *,
-        search_targets_fn: Any,
         target_facts_fn: Any,
         step_sink: Any = None,
+        screen_targets_fn: Any = screen_targets,
     ) -> None:
         self._db = db
-        # 注入而不是直接 import，避免 recommendation_flow <-> 本模块的循环依赖。
-        self._search_targets_fn = search_targets_fn
+        # facts 的格式化注入而不是直接 import，避免 recommendation_flow <-> 本模块
+        # 的循环依赖；初筛本身是 screening_sql 那个无依赖的叶子模块，直接调。
         self._target_facts_fn = target_facts_fn
+        self._screen_targets_fn = screen_targets_fn
         # 每记录一步就回调一次。handler 用它把过程写进消息表并提交，
         # 前端轮询才能在 agent 还在跑的时候看到「已筛选 2 次」。
         self._step_sink = step_sink
@@ -254,6 +204,8 @@ class RecommendationAgentTools:
         self.ask_user_payload: dict[str, Any] | None = None
         self.last_candidates: list[dict[str, Any]] = []
         self.candidates_by_id: dict[str, dict[str, Any]] = {}
+        # 一旦某次调用带过排除条件，后面每次都自动带上（见 STICKY_CONDITIONS）。
+        self.sticky_conditions: dict[str, Any] = {}
 
     def _emit_step(self, step: dict[str, Any]) -> None:
         if self._step_sink is None:
@@ -285,53 +237,77 @@ class RecommendationAgentTools:
                 "error": f"已达到本次会话的筛选次数上限（{MAX_SEARCH_CALLS} 次）。"
                          "请基于已有结果给出推荐，不要再调用 search_targets。"
             }
-        raw_limit = arguments.get("limit")
-        try:
-            limit = int(raw_limit) if raw_limit is not None else DEFAULT_SEARCH_RESULTS_PER_CALL
-        except (TypeError, ValueError):
-            limit = DEFAULT_SEARCH_RESULTS_PER_CALL
+        limit = _int_argument(arguments.get("limit"), DEFAULT_SEARCH_RESULTS_PER_CALL)
         limit = max(1, min(limit, MAX_SEARCH_RESULTS_PER_CALL))
+        offset = max(0, _int_argument(arguments.get("offset"), 0))
         count_only = bool(arguments.get("count_only"))
-        filters = arguments.get("filters")
-        anchor = anchor_from_filters(filters)
+        # `filters` 是改造前的键名，旧提示词还在用；两个都收，语义完全一样。
+        raw_conditions = arguments.get("conditions")
+        if not isinstance(raw_conditions, dict):
+            raw_conditions = arguments.get("filters")
+        conditions = self._with_sticky(raw_conditions)
 
-        result = self._search_targets_fn(self._db, anchor, limit)
-        candidates = result.get("candidates") or []
-        funnel = result.get("funnel") or {}
+        result = self._screen_targets_fn(
+            self._db, conditions, limit=limit, offset=offset, count_only=count_only
+        )
+        self._remember_sticky(result.conditions)
 
-        applied = {key: value for key, value in anchor.items()
-                   if key not in {"id", "buyer_party_id", "buyer_name", "intent_name"} and value not in (None, [], "")}
         record = {
             "call_index": len(self.search_calls) + 1,
             "note": str(arguments.get("note") or "").strip() or None,
-            "filters": applied,
+            "filters": result.conditions,
             "count_only": count_only,
-            "eligible_count": funnel.get("eligible_count"),
-            "scan_count": funnel.get("scan_count"),
-            "conflict_count": funnel.get("conflict_count"),
-            "returned_count": 0 if count_only else len(candidates),
+            "eligible_count": result.matched,
+            "returned_count": result.returned_count,
         }
         self.search_calls.append(record)
         self._emit_step({"kind": "search", **record})
 
-        if count_only:
-            return {
-                "matched_count": funnel.get("eligible_count"),
-                "scanned": funnel.get("scan_count"),
-                "excluded_by_conflict": funnel.get("conflict_count"),
-            }
+        if not count_only:
+            self._register_candidates(result.rows)
+        return result.as_tool_result()
 
+    def _with_sticky(self, raw_conditions: Any) -> dict[str, Any]:
+        """把粘性条件补回去。
+
+        用户说「不要房地产」之后，agent 在第三次放宽时把排除项一起丢掉是实测见过
+        的行为 —— 那时它已经只盯着命中数了。所以这一条在工具层强制，不写进提示词
+        指望模型自觉。
+        """
+        conditions = dict(raw_conditions) if isinstance(raw_conditions, dict) else {}
+        for column, value in self.sticky_conditions.items():
+            conditions.setdefault(column, value)
+        return conditions
+
+    def _remember_sticky(self, conditions: dict[str, Any]) -> None:
+        for column in STICKY_CONDITIONS:
+            if conditions.get(column):
+                self.sticky_conditions[column] = conditions[column]
+
+    def _register_candidates(self, rows: list[dict[str, Any]]) -> None:
+        """登记候选，附上代码算出的 facts 与「别的买家在深入推进」警示。
+
+        摘要给模型看，facts 给写作环节回填数字用 —— 正文里的数字永远来自这里，
+        不来自模型重打的那一遍。
+        """
+        candidates: list[dict[str, Any]] = []
+        ids = [str(row.get("id") or "") for row in rows if row.get("id")]
+        deep_progress_ids = self._targets_in_deep_progress(ids) if ids else set()
+        for row in rows:
+            key = str(row.get("id") or "")
+            if not key:
+                continue
+            candidate = {
+                "seller_target_id": key,
+                "seller_target_name": row.get("target_name"),
+                "facts": self._target_facts_fn(dict(row)),
+                "relation_status": None,
+                "seller_target_has_other_deep_progress": key in deep_progress_ids,
+            }
+            candidates.append(candidate)
+            # 已经取过详情的标的不要被摘要覆盖回去。
+            self.candidates_by_id.setdefault(key, candidate)
         self.last_candidates = candidates
-        for candidate in candidates:
-            key = str(candidate.get("seller_target_id") or "")
-            if key:
-                self.candidates_by_id[key] = candidate
-        return {
-            "matched_count": funnel.get("eligible_count"),
-            "scanned": funnel.get("scan_count"),
-            "excluded_by_conflict": funnel.get("conflict_count"),
-            "returned": [_candidate_digest(item) for item in candidates],
-        }
 
     def _get_target_detail(self, arguments: dict[str, Any]) -> Any:
         raw_ids = arguments.get("target_ids")

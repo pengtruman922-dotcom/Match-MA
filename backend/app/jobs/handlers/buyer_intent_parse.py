@@ -42,6 +42,7 @@ from backend.app.jobs.queue import JobClaim
 from backend.app.registry.indicators import indicator_by_column, indicators_for
 from backend.app.registry.nodes import buyer_intent_legacy_node_name, buyer_intent_two_stage_node_names
 from backend.app.services.buyer_intent_industry import normalize_buyer_intent_industry_changes
+from backend.app.services.buyer_risk_tolerance import normalize_unacceptable_risk_flags
 from backend.app.services.entity_grade import BUYER_GRADE, resolve_grade_pair
 from backend.app.services.listed_status import legacy_listed_status
 from backend.app.services.profile_sections import apply_profile_section, normalize_profile_section_items
@@ -460,6 +461,12 @@ def _buyer_intent_field_contract() -> list[dict[str, Any]]:
     筛选条件按 default_effect 过滤过一次，于是描述字段（溢价要求、风险容忍这些）
     整组对模型不可见，它们也就永远写不进来。现在按「可写」筛，
     ``is_condition`` 告诉模型这一条是参与初筛的门槛还是只供深评阅读的描述。
+
+    ``is_condition`` 读 ``screening`` 而不是 ``default_effect``（0817 改）：
+    两个标志承的是两件事 —— ``screening`` 是「这一条进不进初筛 schema」，
+    ``default_effect`` 是「它在需求单链路的规则打分里算硬还是软」。
+    毛利率、PS、溢价上限、迁址/返投/留任这六项现在只有后者，用 default_effect
+    判就会告诉模型「这是个初筛门槛」，而 SQL 那边根本没有它们。
     """
     return [
         {
@@ -469,7 +476,7 @@ def _buyer_intent_field_contract() -> list[dict[str, Any]]:
             "value_kind": indicator.kind,
             "target_field": indicator.target_column,
             "operator": indicator.operator,
-            "is_condition": indicator.default_effect is not None,
+            "is_condition": indicator.screening,
             "default_effect": indicator.default_effect,
             "scenario_allowed": indicator.scenario_allowed,
             "multi_value": indicator.multi_value,
@@ -1084,6 +1091,7 @@ BUYER_INTENT_PARSE_FIELDS = {
     "max_debt_ratio",
     "debt_ratio_requirement_summary",
     "major_risk_tolerance_summary",
+    "unacceptable_risk_flags_json",
     "buyer_industry_advantage_summary",
     "needs_confirmation_json",
 }
@@ -1102,6 +1110,7 @@ BUYER_INTENT_PARSE_JSON_FIELDS = {
     "relocation_target_regions_json",
     "needs_confirmation_json",
     "acceptable_listed_status_json",
+    "unacceptable_risk_flags_json",
     "condition_effects_json",
 }
 
@@ -1198,8 +1207,15 @@ def _normalize_buyer_intent_parse_changes(
         if key in REQUIREMENT_STRENGTH_FIELDS:
             changes[key] = _normalize_requirement_strength(value)
             continue
-        if key == "listing_market_region":
-            changes[key] = _normalize_listing_market_region(value)
+        if key == "unacceptable_risk_flags_json":
+            # 必须排在 CLOSED_LIST 分支**之前**：三态里的「不接受全部」可以是
+            # "all" / "全部" / true，那些值不在闭集里，走通用分支会被整条丢掉，
+            # 于是「全都不接受」静默变成「未提及」——方向恰好是错的那一边。
+            normalized_flags = normalize_unacceptable_risk_flags(value)
+            if normalized_flags is None:
+                notes.append(f"dropped_{key}:no_recognised_values")
+            else:
+                changes[key] = normalized_flags
             continue
         if key in CLOSED_LIST_FIELD_VALUES:
             normalized_values = _normalize_closed_list_values(key, value)

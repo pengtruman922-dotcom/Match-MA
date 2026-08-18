@@ -18,7 +18,7 @@ from backend.app.services.recommendation_agent_tools import RecommendationAgentT
 
 
 def _tools_with(candidates: dict[str, dict[str, Any]]) -> RecommendationAgentTools:
-    tools = RecommendationAgentTools(db=None, target_facts_fn=dict, search_targets_fn=lambda *_: {})
+    tools = RecommendationAgentTools(db=None, target_facts_fn=dict, screen_targets_fn=lambda *_, **__: None)
     tools.candidates_by_id = candidates
     return tools
 

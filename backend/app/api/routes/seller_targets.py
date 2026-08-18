@@ -120,6 +120,10 @@ class SellerTargetOut(BaseModel):
     current_debt_ratio: Decimal | None
     current_operating_cash_flow_yuan: Decimal | None
     financial_period_label: str | None
+    # 写得进却看不见的列（0817 补）：解析与调研都在写它，它也进了
+    # seller_target_fact_columns() 的 SELECT，但一直没出参 —— 而推荐侧打算
+    # 拿它做「财务数据新鲜度」过滤，顾问看不到也就改不了那个日期。
+    financial_period_end_date: str | None
     profitability_status: str | None
     cash_flow_status: str | None
     valuation_yuan: Decimal | None

@@ -41,6 +41,7 @@ export interface SellerTarget {
   current_debt_ratio: string | null;
   current_operating_cash_flow_yuan: string | null;
   financial_period_label: string | null;
+  financial_period_end_date: string | null;
   profitability_status: string | null;
   cash_flow_status: string | null;
   valuation_yuan: string | null;
@@ -374,12 +375,13 @@ export interface BuyerIntent {
   earnout_requirement: string | null;
   listing_market_region: string | null;
   transaction_type: string | null;
-  transaction_types_json: string[] | Record<string, unknown> | null;
+  transaction_types_json: string[] | null;
   premium_tolerance_summary: string | null;
   max_premium_rate: string | null;
   max_debt_ratio: string | null;
   debt_ratio_requirement_summary: string | null;
   major_risk_tolerance_summary: string | null;
+  unacceptable_risk_flags_json: string[];
   buyer_industry_advantage_summary: string | null;
   needs_confirmation_json?: BuyerIntentConfirmationItem[];
   reviewed_at?: string | null;
@@ -706,6 +708,7 @@ export interface BuyerIntentCreate {
   max_debt_ratio?: number;
   debt_ratio_requirement_summary?: string;
   major_risk_tolerance_summary?: string;
+  unacceptable_risk_flags_json?: string[];
   buyer_industry_advantage_summary?: string;
   needs_confirmation_json?: BuyerIntentConfirmationItem[];
 }
@@ -803,6 +806,7 @@ export interface BuyerIntentUpdate {
   max_debt_ratio?: number | null;
   debt_ratio_requirement_summary?: string | null;
   major_risk_tolerance_summary?: string | null;
+  unacceptable_risk_flags_json?: string[] | null;
   buyer_industry_advantage_summary?: string | null;
   needs_confirmation_json?: BuyerIntentConfirmationItem[];
   pause_reason?: string;

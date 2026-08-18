@@ -1144,6 +1144,7 @@ ROLLBACK_FIELDS_BY_ENTITY = {
         "max_debt_ratio",
         "debt_ratio_requirement_summary",
         "major_risk_tolerance_summary",
+        "unacceptable_risk_flags_json",
         "buyer_industry_advantage_summary",
     },
     "buyer_party": {

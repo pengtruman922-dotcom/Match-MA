@@ -1,5 +1,6 @@
-"""Agent tool contract: budgets hold, filters are whitelisted, digests stay small."""
+"""Agent tool contract: budgets hold, exclusions stick, digests stay small."""
 
+from decimal import Decimal
 from typing import Any
 
 from backend.app.ai.llm_client import ToolCall
@@ -7,109 +8,135 @@ from backend.app.services.recommendation_agent_tools import (
     MAX_DETAIL_TARGETS_TOTAL,
     MAX_SEARCH_CALLS,
     MAX_SEARCH_RESULTS_PER_CALL,
-    RECOMMENDATION_AGENT_TOOLS,
     RecommendationAgentTools,
-    _candidate_digest,
-    anchor_from_filters,
+    build_agent_tools,
 )
 from backend.app.services.recommendation_flow import _enum_label, _money_text, _target_facts
+from backend.app.services.screening_sql import ScreeningResult
 
 
 def _call(name: str, arguments: dict[str, Any]) -> ToolCall:
     return ToolCall(id="call_1", name=name, arguments=arguments, raw_arguments="{}")
 
 
-def _fake_search(count: int = 3, eligible: int = 47):
-    def run(_db: Any, anchor: dict[str, Any], limit: int) -> dict[str, Any]:
-        candidates = [
-            {
-                "seller_target_id": f"00000000-0000-0000-0000-00000000000{index}",
-                "seller_target_name": f"标的{index}",
-                "recommendation_level": "strong",
-                "facts": {"net_profit_text": "2800万", "region": "浙江杭州", "pe_ratio": 8.5},
-                "evidence_json": {"matches": ["行业匹配", "净利达标"], "gaps": []},
-                "missing_dimensions": ["负债率"],
-            }
-            for index in range(min(count, limit))
-        ]
-        return {
-            "candidates": candidates,
-            "funnel": {"eligible_count": eligible, "scan_count": 1200, "conflict_count": 5},
-        }
+class _EmptyResult:
+    def mappings(self) -> "_EmptyResult":
+        return self
+
+    def all(self) -> list[dict]:
+        return []
+
+    def scalars(self) -> "_EmptyResult":
+        return self
+
+
+class _QuietDb:
+    """Answers every query with nothing — enough for the relation annotation."""
+
+    def execute(self, *_args, **_kwargs) -> _EmptyResult:
+        return _EmptyResult()
+
+
+def _row(index: int) -> dict[str, Any]:
+    return {
+        "id": f"00000000-0000-0000-0000-00000000000{index}",
+        "target_name": f"标的{index}",
+        "target_grade": "B",
+        "industry_pairs_json": [{"l1": "制造与工业", "l2": "专用设备"}],
+        "location_province": "浙江省",
+        "location_city": "杭州市",
+        "current_net_profit_yuan": Decimal("28000000"),
+    }
+
+
+def _fake_screen(count: int = 3, matched: int = 47):
+    def run(
+        _db: Any,
+        conditions: Any,
+        *,
+        limit: int,
+        offset: int = 0,
+        count_only: bool = False,
+    ) -> ScreeningResult:
+        rows = [] if count_only else [_row(index) for index in range(min(count, limit))]
+        return ScreeningResult(
+            conditions=dict(conditions or {}),
+            matched=matched,
+            excluded_by_condition={},
+            rows=rows,
+            ignored=[],
+            limit=limit,
+            offset=offset,
+            count_only=count_only,
+        )
 
     return run
 
 
-# -- filter whitelist ----------------------------------------------------
-
-
-def test_anchor_from_filters_keeps_only_known_condition_fields() -> None:
-    anchor = anchor_from_filters(
-        {
-            "industries_json": ["制造业"],
-            "min_net_profit_yuan": 20000000,
-            "requires_control": "yes",
-            "drop_table": "seller_target",  # 不在白名单
-            "max_pe": "not-a-number",  # 类型错，被 coerce 丢掉
-        }
-    )
-
-    assert anchor["industries_json"] == ["制造业"]
-    assert anchor["min_net_profit_yuan"] == 20000000
-    assert anchor["requires_control"] == "yes"
-    assert "drop_table" not in anchor
-    assert "max_pe" not in anchor
-
-
-def test_anchor_has_no_id_so_it_can_never_become_a_persisted_intent() -> None:
-    anchor = anchor_from_filters({"industries_json": ["制造业"]})
-
-    assert anchor["id"] is None
-    assert anchor["buyer_party_id"] is None
-
-
-def test_anchor_survives_garbage_filters() -> None:
-    assert anchor_from_filters(None)["id"] is None
-    assert anchor_from_filters("industries")["industries_json"] == []
+def _tools(**kwargs) -> RecommendationAgentTools:
+    kwargs.setdefault("screen_targets_fn", _fake_screen())
+    return RecommendationAgentTools(db=_QuietDb(), target_facts_fn=dict, **kwargs)
 
 
 # -- budgets -------------------------------------------------------------
 
 
 def test_search_budget_returns_an_error_the_model_can_read() -> None:
-    tools = RecommendationAgentTools(db=None, target_facts_fn=dict, search_targets_fn=_fake_search())
+    tools = _tools()
 
     for _ in range(MAX_SEARCH_CALLS):
-        result = tools.execute(_call("search_targets", {"filters": {"industries_json": ["制造业"]}}))
+        result = tools.execute(_call("search_targets", {"conditions": {"industries_json": ["制造与工业"]}}))
         assert "error" not in result
 
-    exhausted = tools.execute(_call("search_targets", {"filters": {"industries_json": ["制造业"]}}))
+    exhausted = tools.execute(_call("search_targets", {"conditions": {"industries_json": ["制造与工业"]}}))
     assert "error" in exhausted
     assert len(tools.search_calls) == MAX_SEARCH_CALLS
 
 
 def test_search_limit_is_clamped() -> None:
-    tools = RecommendationAgentTools(db=None, target_facts_fn=dict, search_targets_fn=_fake_search(count=99))
+    tools = _tools(screen_targets_fn=_fake_screen(count=99))
 
-    result = tools.execute(
-        _call("search_targets", {"filters": {}, "limit": 500})
-    )
+    result = tools.execute(_call("search_targets", {"conditions": {}, "limit": 500}))
 
     assert len(result["returned"]) == MAX_SEARCH_RESULTS_PER_CALL
 
 
 def test_count_only_skips_candidate_payload() -> None:
-    tools = RecommendationAgentTools(db=None, target_facts_fn=dict, search_targets_fn=_fake_search())
+    tools = _tools()
 
-    result = tools.execute(_call("search_targets", {"filters": {}, "count_only": True}))
+    result = tools.execute(_call("search_targets", {"conditions": {}, "count_only": True}))
 
-    assert result["matched_count"] == 47
+    assert result["matched"] == 47
     assert "returned" not in result
     assert tools.search_calls[0]["returned_count"] == 0
 
 
+def test_legacy_filters_key_is_still_accepted() -> None:
+    """改造前的参数名叫 filters，线上提示词还在用它，不能因为改名就筛空。"""
+    tools = _tools()
+
+    result = tools.execute(_call("search_targets", {"filters": {"industries_json": ["制造与工业"]}}))
+
+    assert result["conditions"] == {"industries_json": ["制造与工业"]}
+
+
+def test_exclusions_stick_to_every_later_call() -> None:
+    """用户说不要的东西，agent 放宽多少次都还是不要 —— 工具层强制，不靠自觉。"""
+    tools = _tools()
+
+    tools.execute(
+        _call(
+            "search_targets",
+            {"conditions": {"industries_json": ["制造与工业"], "excluded_industries_json": ["房地产与建筑"]}},
+        )
+    )
+    relaxed = tools.execute(_call("search_targets", {"conditions": {}}))
+
+    assert relaxed["conditions"]["excluded_industries_json"] == ["房地产与建筑"]
+
+
 def test_ask_user_is_capped_at_one_turn_and_stops_the_loop() -> None:
-    tools = RecommendationAgentTools(db=None, target_facts_fn=dict, search_targets_fn=_fake_search())
+    tools = _tools()
 
     first = tools.execute(
         _call("ask_user", {"questions": [{"question": "哪个方向？", "options": ["精密制造", "都可以"]}]})
@@ -124,7 +151,7 @@ def test_ask_user_is_capped_at_one_turn_and_stops_the_loop() -> None:
 
 
 def test_ask_user_truncates_to_three_questions() -> None:
-    tools = RecommendationAgentTools(db=None, target_facts_fn=dict, search_targets_fn=_fake_search())
+    tools = _tools()
 
     tools.execute(
         _call(
@@ -137,10 +164,9 @@ def test_ask_user_truncates_to_three_questions() -> None:
 
 
 def test_detail_budget_counts_across_calls() -> None:
-    tools = RecommendationAgentTools(db=None, target_facts_fn=dict, search_targets_fn=_fake_search())
+    tools = _tools()
     ids = [f"id-{index}" for index in range(MAX_DETAIL_TARGETS_TOTAL + 4)]
 
-    # db 为 None，取详情会在 SQL 那步炸；这里只验预算记账，所以先塞满配额。
     tools.detail_target_ids.extend(ids[:MAX_DETAIL_TARGETS_TOTAL])
     result = tools.execute(_call("get_target_detail", {"target_ids": ids[MAX_DETAIL_TARGETS_TOTAL:]}))
 
@@ -148,44 +174,27 @@ def test_detail_budget_counts_across_calls() -> None:
 
 
 def test_unknown_tool_reports_instead_of_raising() -> None:
-    tools = RecommendationAgentTools(db=None, target_facts_fn=dict, search_targets_fn=_fake_search())
+    tools = _tools()
 
     assert "error" in tools.execute(_call("rm_rf", {}))
 
 
-# -- digest --------------------------------------------------------------
+# -- screened candidates are registered for the writer --------------------
 
 
-def test_candidate_digest_carries_hard_numbers_and_stays_small() -> None:
-    digest = _candidate_digest(
-        {
-            "seller_target_id": "abc",
-            "seller_target_name": "杭州XX精密制造",
-            "recommendation_level": "strong",
-            "facts": {"net_profit_text": "2800万", "region": "浙江杭州", "pe_ratio": 8.5},
-            "evidence_json": {"matches": ["行业匹配"] * 20, "gaps": ["估值偏高"] * 9},
-            "missing_dimensions": ["负债率"] * 9,
-        }
+def test_screened_rows_become_candidates_with_code_held_facts() -> None:
+    """正文里的数字来自这份 facts，不来自模型重打的那一遍。"""
+    tools = RecommendationAgentTools(
+        db=_QuietDb(),
+        target_facts_fn=_target_facts,
+        screen_targets_fn=_fake_screen(count=1),
     )
 
-    assert digest["net_profit_text"] == "2800万"
-    assert digest["pe_ratio"] == 8.5
-    assert len(digest["matches"]) == 6
-    assert len(digest["gaps"]) == 4
-    assert len(digest["unknown"]) == 5
+    tools.execute(_call("search_targets", {"conditions": {}}))
 
-
-def test_digest_flags_progress_state_without_naming_the_other_side() -> None:
-    digest = _candidate_digest(
-        {
-            "seller_target_id": "abc",
-            "seller_target_name": "标的",
-            "seller_target_has_other_deep_progress": True,
-        }
-    )
-
-    assert digest["other_buyer_in_deep_progress"] is True
-    assert "buyer" not in {key.replace("other_buyer_in_deep_progress", "") for key in digest}
+    candidate = tools.candidates_by_id["00000000-0000-0000-0000-000000000000"]
+    assert candidate["seller_target_name"] == "标的0"
+    assert candidate["facts"]["net_profit_text"] == "2800万"
 
 
 # -- tool schemas --------------------------------------------------------
@@ -193,7 +202,7 @@ def test_digest_flags_progress_state_without_naming_the_other_side() -> None:
 
 def test_every_tool_declares_a_json_schema() -> None:
     names = set()
-    for tool in RECOMMENDATION_AGENT_TOOLS:
+    for tool in build_agent_tools(_QuietDb()):
         function = tool["function"]
         names.add(function["name"])
         assert function["description"]
@@ -275,7 +284,7 @@ def _detail_tools(monkeypatch, target_rows, deep_rows=()):
     return RecommendationAgentTools(
         db=_FakeDb(list(target_rows), list(deep_rows)),
         target_facts_fn=lambda row: {"net_profit_text": "2800万", "region": row["location_city"]},
-        search_targets_fn=_fake_search(),
+        screen_targets_fn=_fake_screen(),
     )
 
 

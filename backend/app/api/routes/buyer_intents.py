@@ -31,6 +31,7 @@ from backend.app.services.listed_status import legacy_listed_status
 from backend.app.services.recommendation_conditions import normalize_condition_effects, normalize_scenario_fields
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 from backend.app.services.buyer_intent_processing_state import buyer_intent_processing_states
+from backend.app.services.buyer_risk_tolerance import normalize_unacceptable_risk_flags
 
 router = APIRouter(prefix="/buyer-intents", tags=["buyer-intents"])
 
@@ -107,6 +108,7 @@ class BuyerIntentCreate(BaseModel):
     max_debt_ratio: Decimal | None = None
     debt_ratio_requirement_summary: str | None = None
     major_risk_tolerance_summary: str | None = None
+    unacceptable_risk_flags_json: list[Any] | None = None
     buyer_industry_advantage_summary: str | None = None
     acceptable_cash_flow_status_json: list[Any] | None = None
     acceptable_profitability_status_json: list[Any] | None = None
@@ -181,6 +183,7 @@ class BuyerIntentOut(BaseModel):
     max_debt_ratio: Decimal | None
     debt_ratio_requirement_summary: str | None
     major_risk_tolerance_summary: str | None
+    unacceptable_risk_flags_json: list[Any] = []
     buyer_industry_advantage_summary: str | None
     acceptable_cash_flow_status_json: list[Any] = []
     acceptable_profitability_status_json: list[Any] = []
@@ -261,6 +264,7 @@ class BuyerIntentUpdate(BaseModel):
     max_debt_ratio: Decimal | None = None
     debt_ratio_requirement_summary: str | None = None
     major_risk_tolerance_summary: str | None = None
+    unacceptable_risk_flags_json: list[Any] | None = None
     buyer_industry_advantage_summary: str | None = None
     acceptable_cash_flow_status_json: list[Any] | None = None
     acceptable_profitability_status_json: list[Any] | None = None
@@ -375,7 +379,8 @@ BUYER_INTENT_OUT_COLUMNS = """
               bi.listing_board_requirement_summary, bi.financing_stage_requirement_summary,
               bi.transaction_type, bi.transaction_types_json, bi.premium_tolerance_summary,
               bi.max_premium_rate, bi.max_debt_ratio, bi.debt_ratio_requirement_summary,
-              bi.major_risk_tolerance_summary, bi.buyer_industry_advantage_summary,
+              bi.major_risk_tolerance_summary, bi.unacceptable_risk_flags_json,
+              bi.buyer_industry_advantage_summary,
               bi.acceptable_cash_flow_status_json, bi.acceptable_profitability_status_json,
               bi.requires_relocation, bi.relocation_target_regions_json,
               bi.requires_return_investment, bi.return_investment_multiple,
@@ -432,6 +437,7 @@ def create_buyer_intent(
               financing_stage_requirement_summary, transaction_type, transaction_types_json,
               premium_tolerance_summary, max_premium_rate, max_debt_ratio,
               debt_ratio_requirement_summary, major_risk_tolerance_summary,
+              unacceptable_risk_flags_json,
               buyer_industry_advantage_summary,
               acceptable_cash_flow_status_json, acceptable_profitability_status_json,
               requires_relocation, relocation_target_regions_json,
@@ -458,6 +464,7 @@ def create_buyer_intent(
               :financing_stage_requirement_summary, :transaction_type, :transaction_types_json,
               :premium_tolerance_summary, :max_premium_rate, :max_debt_ratio,
               :debt_ratio_requirement_summary, :major_risk_tolerance_summary,
+              :unacceptable_risk_flags_json,
               :buyer_industry_advantage_summary,
               :acceptable_cash_flow_status_json, :acceptable_profitability_status_json,
               :requires_relocation, :relocation_target_regions_json,
@@ -1047,6 +1054,14 @@ def update_buyer_intent(
         )
     if "condition_effects_json" in changes:
         changes["condition_effects_json"] = normalize_condition_effects(changes["condition_effects_json"])
+    if "unacceptable_risk_flags_json" in changes:
+        # 归一化返回 None = 「给了内容但一条也没落进闭集」。那不是「未提及」，
+        # 所以不能落成空数组，直接把这一列从本次变更里摘掉。
+        normalized_flags = normalize_unacceptable_risk_flags(changes["unacceptable_risk_flags_json"])
+        if normalized_flags is None:
+            changes.pop("unacceptable_risk_flags_json")
+        else:
+            changes["unacceptable_risk_flags_json"] = normalized_flags
 
     if "owner_user_id" in changes:
         require_admin(current_user)
@@ -1438,6 +1453,11 @@ def _buyer_intent_params(payload: BuyerIntentCreate, current_user: AuthContext, 
         "max_debt_ratio": payload.max_debt_ratio,
         "debt_ratio_requirement_summary": payload.debt_ratio_requirement_summary,
         "major_risk_tolerance_summary": payload.major_risk_tolerance_summary,
+        # 三态展开单点：人工创建这条路也要走它，否则「不接受全部」在这里
+        # 会被原样存成一个我们没定义过的取值，DB 的 check 直接打回整条创建。
+        "unacceptable_risk_flags_json": normalize_unacceptable_risk_flags(
+            payload.unacceptable_risk_flags_json
+        ) or [],
         "buyer_industry_advantage_summary": payload.buyer_industry_advantage_summary,
         "acceptable_cash_flow_status_json": payload.acceptable_cash_flow_status_json or [],
         "acceptable_profitability_status_json": payload.acceptable_profitability_status_json or [],

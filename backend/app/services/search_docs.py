@@ -149,13 +149,14 @@ def rebuild_buyer_intent_search_doc(db: Session, buyer_intent_id: UUID) -> dict[
             _kv("条件作用", intent.get("condition_effects_json")),
             _kv("上市板块要求", intent.get("listing_board_requirement_summary")),
             _kv("融资/上市阶段", intent.get("financing_stage_requirement_summary")),
-            _kv("交易类型", intent.get("transaction_type")),
-            _kv("交易类型多选", _json_text(intent.get("transaction_types_json"))),
+            _kv("交易方式原文", intent.get("transaction_type")),
+            _kv("可接受交易结构", _json_text(intent.get("transaction_types_json"))),
             _kv("溢价要求", intent.get("premium_tolerance_summary")),
             _kv("溢价上限", _decimal_text(intent.get("max_premium_rate"))),
             _kv("负债率上限", _decimal_text(intent.get("max_debt_ratio"))),
             _kv("负债率要求", intent.get("debt_ratio_requirement_summary")),
             _kv("重大风险容忍", intent.get("major_risk_tolerance_summary")),
+            _kv("不接受的重大风险", _json_text(intent.get("unacceptable_risk_flags_json"))),
             _kv("收购方产业优势", intent.get("buyer_industry_advantage_summary")),
         ]
     )
@@ -430,6 +431,7 @@ def _get_buyer_intent(db: Session, buyer_intent_id: UUID) -> dict[str, Any]:
               financing_stage_requirement_summary, transaction_type, transaction_types_json,
               premium_tolerance_summary, max_premium_rate, max_debt_ratio,
               debt_ratio_requirement_summary, major_risk_tolerance_summary,
+              unacceptable_risk_flags_json,
               buyer_industry_advantage_summary
             from buyer_intent
             where id = :buyer_intent_id

@@ -60,6 +60,10 @@ jobs:
       # 任何任务失败都会带走 worker 进程。
       - name: Exercise the job-queue SQL against the fresh database
         run: python -m pytest tests/test_job_queue_sql.py -q
+      # 初筛的硬筛 SQL 同理：三值逻辑、count(*) filter 的淘汰拆分、jsonb 展开
+      # 都只有真库能验。用例把 71 条生产标的快照灌进这个空库后逐条断言命中数。
+      - name: Exercise the screening SQL against the fresh database
+        run: python -m pytest tests/test_screening_sql.py -q
 
   frontend:
     name: Frontend typecheck + build

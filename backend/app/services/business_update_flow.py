@@ -1183,7 +1183,8 @@ def _buyer_intents_by_ids(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
               bi.financing_stage_requirement_summary, bi.transaction_type,
               bi.transaction_types_json, bi.premium_tolerance_summary, bi.max_premium_rate,
               bi.max_debt_ratio, bi.debt_ratio_requirement_summary,
-              bi.major_risk_tolerance_summary, bi.buyer_industry_advantage_summary,
+              bi.major_risk_tolerance_summary, bi.unacceptable_risk_flags_json,
+              bi.buyer_industry_advantage_summary,
               bi.updated_at::text as updated_at
             from buyer_intent bi
             left join buyer_party bp on bp.id = bi.buyer_party_id

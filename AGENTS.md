@@ -3,15 +3,19 @@
 > **本文件是跨工具的单一真源。** Claude Code 经 `CLAUDE.md` 导入本文件，Codex / Cursor 等直接读本文件。
 > 规则只维护在这里，不要在别处复制一份，否则必然漂移。
 
-技术栈：FastAPI + PostgreSQL（raw SQL）+ React/TS + Vite。两套部署并存，见下方「部署拓扑」。
+技术栈：FastAPI + PostgreSQL（raw SQL）+ React/TS + Vite。两套部署并存，见下方「部署与运维」。
 
 **先读图纸**：`docs/系统总纲.md` 是系统的权威描述（业务流程、领域模型、技术决策、死表判决、待办）。做任何跨模块改动前先读它；大改落地后把结论合并回它。`平台优化方案/*.md` 是施工单（进行中与历史），与图纸冲突时以图纸为准。
 
-## 部署拓扑
+## 部署与运维
 
 两套部署**并存且互不影响**，共享同一份代码；差异只在「谁注入环境变量、谁启动进程」。
+**根本区别：Railway 是推送式（推 `main` 即自动部署），自建是拉取式（人上服务器手动拉）。**
+因此推代码不会动自建环境，在自建环境折腾也影响不到 Railway。
 
-**Railway（生产，推送自动部署）** —— 生产 API：`https://match-ma-production.up.railway.app/api/v1`
+### 一、Railway（生产，推送即部署）
+
+生产 API：`https://match-ma-production.up.railway.app/api/v1`
 
 | 服务 | 配置文件 | 说明 |
 | --- | --- | --- |
@@ -23,18 +27,60 @@
 
 服务角色由 `scripts/railway_start.py` 按 `RAILWAY_SERVICE_NAME` / `MATCH_MA_SERVICE_ROLE` 推断。
 
-**自建 Docker Compose（手动部署）** —— 全部产物在 `deploy/`
+发布：
 
-`deploy/docker-compose.yml` 起 9 个服务：`db`(pgvector/pg17) / `minio` / `minio-init` / `migrate`(一次性 alembic) / `api` / `worker-llm` / `worker-ocr` / `worker-research` / `web`(Caddy，前端 + `/api` 反代做成同源)。启动命令在 compose 里**显式写死**，不经过 `scripts/railway_*.py`。操作手册见 `deploy/README.md`，方案背景见 `平台优化方案/自建部署实施方案0729.md`。
+```bash
+git push origin main          # 唯一动作；Railway 自动构建并部署全部 5 个服务
+```
 
-**边界铁律**：`deploy/**` 只服务自建；`railway*.toml` 与 `scripts/railway_*.py` 只服务 Railway。改一侧时不要顺手动另一侧。Railway 的 `builder = "NIXPACKS"` 已锁死，不会误用 `deploy/` 下的 Dockerfile。
+验证（**必做**）：轮询 `/api/v1/health`，确认返回的 `git_commit_sha` 已切到新提交，再验证业务行为。hash 长时间不变 = 部署失败，通常是 preDeploy 迁移挂了，去查迁移而不是继续等。
 
-## Git 规则
+> **未经用户明确要求，不要 commit、不要 push** —— 推 `main` 等于直接改生产。
 
-- **推送 `main` 会自动部署 Railway 生产环境**（CI 也在 push main / PR 时跑）。**未经用户明确要求，不要 commit、不要 push。**
-- 自建环境是**拉取式**：在服务器上手动 `git pull && docker compose build && docker compose up -d`。推代码不会影响自建环境，直到有人上服务器拉取。
-- 服务器上**只 pull，不 commit、不 push**；也不要在服务器上直接改文件（下次 pull 会冲突）。服务器用匿名 HTTPS 克隆公开仓库，不配任何 git 凭证。
-- `deploy/.env`、`frontend/.env`、`.match-ma-local-auth.json` 已被 `.gitignore` 排除，含密钥，**绝不提交**（仓库是公开可读的）。
+### 二、自建（阿里云 ECS，拉取式手动部署）
+
+全部产物在 `deploy/`。`docker-compose.yml` 起 9 个服务：`db`(pgvector/pg17) / `minio` / `minio-init` / `migrate`(一次性 alembic) / `api` / `worker-llm` / `worker-ocr` / `worker-research` / `web`(Caddy，前端 + `/api` 反代做成同源，免 CORS)。启动命令在 compose 里**显式写死**，不经过 `scripts/railway_*.py`。详细手册见 `deploy/README.md`，方案背景见 `平台优化方案/自建部署实施方案0729.md`。
+
+**访问**：开发机已配 ED25519 密钥与 SSH 别名，免密直连。
+
+```bash
+ssh match-ma-aliyun
+```
+
+仓库公开，**服务器 IP、密钥、密码一律不写进仓库**；实际值只存在于本机 `~/.ssh/config` 和服务器上的 `deploy/.env`。
+
+**部署路径** `/opt/match-ma`，跟踪 `main` 分支。**发布**（一条命令走完拉取、构建、重启）：
+
+```bash
+ssh match-ma-aliyun 'cd /opt/match-ma && git pull && cd deploy && docker compose build && docker compose up -d'
+```
+
+有新迁移时 `migrate` 会自动应用；有新环境变量时需手动补 `deploy/.env`（对照 `deploy/.env.example` 的差异）。
+
+**验证**：
+
+```bash
+ssh match-ma-aliyun 'cd /opt/match-ma/deploy && docker compose ps -a --format "table {{.Service}}\t{{.Status}}" && curl -s localhost/api/v1/health && echo && curl -s localhost/api/v1/health/db'
+```
+
+期望 `migrate` 与 `minio-init` 为 `Exited (0)`、`api` 为 `Up (healthy)`、`/health/db` 返回 `reachable`。
+
+服务器上**只 pull，不 commit、不 push**，也不要直接改文件（下次 pull 会冲突）。常驻服务都是 `restart: unless-stopped`，**服务器重启后自动拉起，无需人工启动**。
+
+### 边界铁律
+
+`deploy/**` 只服务自建；`railway*.toml` 与 `scripts/railway_*.py` 只服务 Railway。改一侧时不要顺手动另一侧。Railway 的 `builder = "NIXPACKS"` 已锁死，不会误用 `deploy/` 下的 Dockerfile。
+
+`deploy/.env`、`frontend/.env`、`.match-ma-local-auth.json` 已被 `.gitignore` 排除，含密钥，**绝不提交**（仓库公开可读）。
+
+### 自建环境踩过的坑（动这块前必读）
+
+- **浅克隆只跟踪一个分支**：`git clone --depth 1 -b X` 隐含 `--single-branch`，之后 `git fetch origin main` 不会创建 `origin/main`，`checkout` 静默失败、代码根本没更新。修复：`git remote set-branches origin '*'` 后再 fetch。
+- **构建秒完成 = 代码没更新**：正常构建要几十秒（pip + vite）。若 `docker compose build` 只花 2~3 秒就"成功"，说明构建上下文没变化，八成是上一条的分支问题，别往下走。
+- **pip / npm 必须走国内源**：直连 pypi.org 会间歇性抓不到索引页，报成假性缺包（`from versions: none`）。已在两个 Dockerfile 里用 ARG 默认指向阿里云 PyPI 与 npmmirror，海外构建可 `--build-arg` 覆盖。
+- **镜像只由 `migrate` 构建一次**：`x-backend` 锚点**不带 `build`**。若给每个后端服务都加 `build`，compose 会并发跑 6 份 `pip install`，小内存机器会被直接挤爆（表现为 SSH 被服务器断开）。因此必须先 `build` 再 `up`。
+- **web 容器跑在 UTC**：`Dockerfile.frontend` 的 caddy 阶段未设 `TZ`，其日志与文件时间戳比其他容器早 8 小时，排查时先换算。
+- **性能瓶颈在公网带宽，不在服务端**：实测服务端全部接口 < 13 毫秒、gzip 压缩率 88%~91%，页面慢是 ECS 公网带宽所致（1 Mbps ≈ 130 KB/s，首屏 230 KB 即需 2.5 秒）。遇到"系统慢"先量带宽，不要去优化后端。
 
 ## 测试与验证
 

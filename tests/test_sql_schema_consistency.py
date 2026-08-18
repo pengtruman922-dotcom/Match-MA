@@ -27,6 +27,7 @@ CHECKED_SOURCES = (
     "backend/app/services/recommendation_flow.py",
     "backend/app/services/search_docs.py",
     "backend/app/jobs/handlers/recommendation.py",
+    "backend/app/services/screening_sql.py",
 )
 
 # 词边界匹配：`excluded_industries_json` 这类列名以 exclude 开头，
@@ -78,6 +79,24 @@ def test_aliased_columns_exist_in_the_schema(source_path: str) -> None:
             if column not in columns:
                 missing.append(f"{source_path}: {alias}.{column} is not a column of {table}")
     assert not missing, "\n".join(missing)
+
+
+def test_every_screening_condition_has_a_real_target_column() -> None:
+    """初筛 SQL 的列名是从注册表的 target_column 拼出来的，不是字面量。
+
+    上面那条按 `st.<列名>` 正则扫源码的用例扫不到它们，而拼错一个列名的表现是
+    「这个条件一用整次筛选就 500」——只有真库或这条用例能拦住。
+    """
+    from backend.app.services.screening_schema import SCREENING_FIELDS
+
+    columns = SCHEMA["seller_target"]
+    missing = [
+        f"{field.column} -> {part}"
+        for field in SCREENING_FIELDS
+        for part in (piece.split(".")[0] for piece in field.target_column.split(","))
+        if part not in columns
+    ]
+    assert not missing, f"screening 对手方列不存在于 seller_target：{missing}"
 
 
 def test_buyer_intent_json_columns_are_bound_as_jsonb() -> None:

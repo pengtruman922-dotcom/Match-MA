@@ -22,6 +22,7 @@ RECOMMENDATION_FLOW = REPO / "backend/app/services/recommendation_flow.py"
 SELLER_TARGETS_ROUTE = REPO / "backend/app/api/routes/seller_targets.py"
 SEARCH_DOCS_ROUTE = REPO / "backend/app/api/routes/search_docs.py"
 AGENT_TOOLS = REPO / "backend/app/services/recommendation_agent_tools.py"
+SCREENING_SQL = REPO / "backend/app/services/screening_sql.py"
 PARSE_HANDLER = REPO / "backend/app/jobs/handlers/seller_target_parse.py"
 ACTION_APPLY = REPO / "backend/app/services/extracted_action_apply.py"
 STATUS_MIGRATION = REPO / "database/migrations/005_target_status_consolidation.sql"
@@ -77,9 +78,10 @@ def test_search_doc_backfill_scopes_by_grade() -> None:
 
 def test_agent_tool_recall_shares_the_same_gate() -> None:
     """Agent 工具与 recommendation_flow 是两条独立召回路径，漏改一处不会报错。"""
-    source = AGENT_TOOLS.read_text(encoding="utf-8")
-    assert "st.target_grade <> 'E'" in source
-    assert "lifecycle_status" not in source
+    for path in (AGENT_TOOLS, SCREENING_SQL):
+        source = path.read_text(encoding="utf-8")
+        assert "st.target_grade <> 'E'" in source, path.name
+        assert "lifecycle_status" not in source, path.name
 
 
 def test_list_filter_and_facets_are_pure_grade() -> None:

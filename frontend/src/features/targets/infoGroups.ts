@@ -57,6 +57,15 @@ function formatValue(indicator: IndicatorMeta, target: SellerTarget, helpers: In
       return text(target.transfer_ratio_text) || helpers.formatTransferRatio(target);
     case 'pe_ratio':
       return target.pe_ratio ? Number(target.pe_ratio).toFixed(1) : null;
+    case 'financial_period_label': {
+      // 截止日折叠进期间：期间是原话（「2024年度」），截止日是它换算出来的
+      // 比较键，推荐侧的「财务数据新鲜度」过滤读的就是后者。只显示原话的话，
+      // 顾问看不出这份数字被系统认成了哪一天。
+      const label = text(target.financial_period_label);
+      const endDate = text(target.financial_period_end_date);
+      if (label && endDate) return `${label}（截至 ${endDate}）`;
+      return label || endDate;
+    }
     case 'location_province':
       return [target.location_province, target.location_city, target.location_district].filter(Boolean).join(' / ') || null;
     case 'industry_pairs_json': {

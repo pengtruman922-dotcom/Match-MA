@@ -256,6 +256,7 @@ def apply_buyer_intent_update_action(
         "acceptable_cash_flow_status_json",
         "acceptable_profitability_status_json",
         "acceptable_listed_status_json",
+        "unacceptable_risk_flags_json",
         "condition_effects_json",
         "relocation_target_regions_json",
         "needs_confirmation_json",
@@ -859,6 +860,7 @@ def _allowed_buyer_intent_changes(changes: dict[str, Any]) -> dict[str, Any]:
         "max_debt_ratio",
         "debt_ratio_requirement_summary",
         "major_risk_tolerance_summary",
+        "unacceptable_risk_flags_json",
         "buyer_industry_advantage_summary",
     }
     return {key: value for key, value in changes.items() if key in allowed_fields}

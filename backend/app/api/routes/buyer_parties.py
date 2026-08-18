@@ -603,7 +603,8 @@ def list_buyer_party_intents(
               bi.listing_board_requirement_summary, bi.financing_stage_requirement_summary,
               bi.transaction_type, bi.transaction_types_json, bi.premium_tolerance_summary,
               bi.max_premium_rate, bi.max_debt_ratio, bi.debt_ratio_requirement_summary,
-              bi.major_risk_tolerance_summary, bi.buyer_industry_advantage_summary,
+              bi.major_risk_tolerance_summary, bi.unacceptable_risk_flags_json,
+              bi.buyer_industry_advantage_summary,
               bi.owner_user_id,
               (select au.name from app_user au where au.id = bi.owner_user_id) as owner_name,
               bi.created_at::text as created_at, bi.updated_at::text as updated_at

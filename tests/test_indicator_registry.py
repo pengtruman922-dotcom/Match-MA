@@ -42,6 +42,7 @@ RESEARCH_PERIOD_MIGRATION = REPO / "database/migrations/009_research_financial_p
 BUYER_CONTRACT_MIGRATION = REPO / "database/migrations/011_buyer_intent_condition_contract.sql"
 TARGET_FACTS_MIGRATION = REPO / "database/migrations/015_target_risk_and_structure_facts.sql"
 GRADE_MIGRATION = REPO / "database/migrations/017_entity_grade.sql"
+BUYER_CLOSED_SETS_MIGRATION = REPO / "database/migrations/018_buyer_condition_closed_sets.sql"
 
 
 def test_consumers_derive_from_the_registry() -> None:
@@ -59,11 +60,17 @@ def test_buyer_intent_indicators_are_real_columns() -> None:
     assert body, "baseline 未找到 buyer_intent 建表块"
     columns = set(re.findall(r"^\s+([a-z_0-9]+)\s", body.group(1), re.M))
     missing = {ind.column for ind in BUYER_INTENT_INDICATORS} - columns
-    assert missing <= {"acceptable_listed_status_json", "condition_effects_json", "intent_grade"}, (
-        f"注册表引用了 buyer_intent 不存在的列：{sorted(missing)}"
+    post_baseline = {
+        "acceptable_listed_status_json": BUYER_CONTRACT_MIGRATION,
+        "condition_effects_json": BUYER_CONTRACT_MIGRATION,
+        "unacceptable_risk_flags_json": BUYER_CLOSED_SETS_MIGRATION,
+        "intent_grade": GRADE_MIGRATION,
+    }
+    assert missing <= set(post_baseline), (
+        f"注册表引用了 buyer_intent 不存在的列：{sorted(missing - set(post_baseline))}"
     )
-    migration_sql = BUYER_CONTRACT_MIGRATION.read_text(encoding="utf-8")
     for column in missing - {"intent_grade"}:
+        migration_sql = post_baseline[column].read_text(encoding="utf-8")
         assert f"add column if not exists {column} jsonb" in migration_sql
     assert "add column if not exists intent_grade text not null default 'C'" in (
         GRADE_MIGRATION.read_text(encoding="utf-8")
@@ -145,13 +152,23 @@ def test_closed_list_columns_match_their_db_check() -> None:
     这类列的漂移方式很隐蔽：注册表加一个取值、忘了改迁移，结果是解析归一化放行、
     DB 在写入的最后一刻整条打回。所以单独比对一次。
     """
+    # 两侧都查：买家侧 0817 起也有闭集多值列（不接受的重大风险、可接受交易结构），
+    # 只查标的侧的话，买家侧加取值忘改迁移一样会在写入的最后一刻被 DB 打回。
+    sources = {
+        "seller_target": (TARGET_FACTS_MIGRATION, multi_value_enum_values()),
+        "buyer_intent": (BUYER_CLOSED_SETS_MIGRATION, multi_value_enum_values("buyer_intent")),
+    }
+    for entity, (path, columns) in sources.items():
+        entity_sql = path.read_text(encoding="utf-8")
+        for column, values in columns.items():
+            block = re.search(
+                rf"constraint chk_{entity}_{column}\b.*?<@ '\[(.*?)\]'::jsonb", entity_sql, re.S
+            )
+            assert block, f"{column} 在迁移里没有元素级 check 约束"
+            assert values == set(re.findall(r'"([a-z_]+)"', block.group(1))), (
+                f"{column} 注册表枚举与 DB check 约束不一致"
+            )
     sql = TARGET_FACTS_MIGRATION.read_text(encoding="utf-8")
-    for column, values in multi_value_enum_values().items():
-        block = re.search(rf"constraint chk_seller_target_{column}\b.*?<@ '\[(.*?)\]'::jsonb", sql, re.S)
-        assert block, f"{column} 在迁移里没有元素级 check 约束"
-        assert values == set(re.findall(r'"([a-z_]+)"', block.group(1))), (
-            f"{column} 注册表枚举与 DB check 约束不一致"
-        )
     # check 约束里不能有子查询（0A000），写了会在 preDeploy 阶段炸掉整次部署。
     for statement in re.findall(r"check \((.*?)\n  \)", sql, re.S):
         assert "select" not in statement.lower(), "check 约束里出现了子查询"
@@ -269,3 +286,156 @@ def test_supplement_block_is_titled_by_what_belongs_in_it() -> None:
     hint = PROFILE_SECTION_HINTS["business_product"]
     assert "产业链位置" in hint and "业务摘要" in hint, "产业优势栏没说清该写什么、不该写什么"
     assert set(PROFILE_SECTION_HINTS) >= {group.section_code for group in GROUPS}
+
+
+# -- 0817：四项声明的自洽性。schema 生成器读这四项，任何一处不自洽落到推荐上
+#    都是「条件静默消失」或「筛出来恒为空」，而且都不报错。
+
+
+def test_buyer_conditions_have_all_four_declarations() -> None:
+    """进初筛的买家条件，四项声明必须齐备。
+
+    少一个 operator，那个条件在推荐里完全不存在；少一个 target_column，
+    SQL 生成器不知道拿它比标的哪一列。两种都不会报错。
+    """
+    broken = [
+        indicator.column
+        for indicator in indicators_for("buyer_intent")
+        if indicator.screening and not (indicator.operator and indicator.target_column)
+    ]
+    assert not broken, f"screening=True 却缺 operator/target_column：{broken}"
+
+    seller_columns = {indicator.column for indicator in SELLER_TARGET_INDICATORS}
+    dangling = [
+        (indicator.column, base)
+        for indicator in indicators_for("buyer_intent")
+        if indicator.target_column
+        for base in _target_bases(indicator.target_column)
+        if base not in seller_columns
+    ]
+    assert not dangling, f"target_column 指向不存在的标的列：{dangling}"
+
+
+def _target_bases(spec: str) -> list[str]:
+    """target_column 有四种写法：col、col.key、a/b（现算）、a,b,c（多列）。"""
+    return [
+        part.strip().split(".")[0]
+        for chunk in spec.split(",")
+        for part in chunk.split("/")
+    ]
+
+
+def test_seller_screening_matches_who_points_at_it() -> None:
+    """标的侧的 screening 只喂信息页那个「筛」角标，所以它撒谎的代价是人的时间：
+    顾问按角标决定先补哪个字段，角标错了就补错方向。
+
+    两个方向都要守：标成会筛却没人比对，和有人比对却没标。
+    """
+    pointed: set[str] = set()
+    for indicator in indicators_for("buyer_intent"):
+        if indicator.target_column:
+            pointed.update(_target_bases(indicator.target_column))
+
+    scorer_reads = _scorer_reads() & {ind.column for ind in SELLER_TARGET_INDICATORS}
+    screening = screening_columns()
+    folded = {
+        ind.column: ind.fold_into for ind in SELLER_TARGET_INDICATORS if ind.fold_into
+    }
+
+    unbacked = {
+        column
+        for column in screening
+        if column not in pointed and column not in scorer_reads
+    }
+    assert not unbacked, f"标为 screening 却没有任何买家条件或打分维度读它：{sorted(unbacked)}"
+
+    unmarked = {
+        column
+        for column in pointed
+        if column not in screening and folded.get(column) not in screening
+    }
+    assert not unmarked, f"有买家条件指向却没标 screening：{sorted(unmarked)}"
+
+
+# 「要求」与「能力」本来就不同轴：买家说 required/preferred，标的答 yes/no/likely，
+# requirement_capability 这个算子负责跨轴。加一对必须在这里显式登记 ——
+# 这份白名单要挡的正是「随手让两侧枚举漂开」。
+CROSS_AXIS_PAIRS = {
+    ("requires_relocation", "accepts_relocation"),
+    ("requires_return_investment", "accepts_return_investment"),
+    ("requires_team_retention", "management_retention_possible"),
+}
+# 子集差集里允许出现的取值：unknown 是「查过但不确定」，none 是「已核查无风险」，
+# 两者都是**状态**不是业务取值 —— 买家没有理由去选它们。
+SUBSET_ONLY_CODES = {"unknown", "none"}
+
+
+def test_paired_enums_are_equal_subset_or_declared_cross_axis() -> None:
+    """闭集配对的规则是三档，不是等号。
+
+    写成等号会在有意为之的地方全红（上市状态少一个 unknown、重大风险少一个
+    none、三对要求↔能力整个不同轴），然后被人关掉 —— 一个被关掉的守卫
+    比没有守卫更糟，因为它看起来还在。
+    """
+    sellers = {ind.column: ind for ind in SELLER_TARGET_INDICATORS}
+    problems: list[str] = []
+    for buyer in indicators_for("buyer_intent"):
+        if not (buyer.target_column and buyer.enum_options):
+            continue
+        for base in _target_bases(buyer.target_column):
+            seller = sellers.get(base)
+            if seller is None or not seller.enum_options:
+                problems.append(f"{buyer.column} → {base}：买家有闭集，标的侧没有")
+                continue
+            if (buyer.column, base) in CROSS_AXIS_PAIRS:
+                continue
+            buyer_codes = {code for code, _ in buyer.enum_options}
+            seller_codes = {code for code, _ in seller.enum_options}
+            extra = buyer_codes - seller_codes
+            if extra:
+                problems.append(f"{buyer.column} → {base}：买家多出标的没有的取值 {sorted(extra)}")
+            dropped = seller_codes - buyer_codes
+            if dropped - SUBSET_ONLY_CODES:
+                problems.append(
+                    f"{buyer.column} → {base}：买家漏掉了业务取值 {sorted(dropped - SUBSET_ONLY_CODES)}"
+                )
+    assert not problems, "闭集配对不合三档规则：\n" + "\n".join(problems)
+
+
+def test_buyer_field_lists_cover_every_writable_indicator() -> None:
+    """买家侧的字段清单有四份，其中三份是手写的。
+
+    加一列漏掉任何一份，表现都不是报错而是「存进去了但某条链路看不见」：
+    漏解析白名单 → 模型产出被当成 unsupported_field 丢掉；
+    漏采纳白名单 → 业务更新采纳时静默不写；
+    漏 JSONB 绑定 → jsonb 列被当字符串写进去。
+    这条守卫要的不是「三份清单等于注册表」（它们各自还装着系统列），
+    而是「注册表里可写的每一列，三份都覆盖到了」。
+    """
+    from backend.app.jobs.handlers.buyer_intent_parse import (
+        BUYER_INTENT_PARSE_FIELDS,
+        BUYER_INTENT_PARSE_JSON_FIELDS,
+    )
+    from backend.app.services.extracted_action_apply import _allowed_buyer_intent_changes
+
+    writable = writable_columns("parse", "buyer_intent")
+    # 解析派生的列不由模型产出，所以不进解析白名单：
+    #   preferred_listed_status 由 acceptable_listed_status_json 单向计算
+    #   intent_grade / status 走 resolve_grade_pair，不许各写入方自己拼
+    derived = {"preferred_listed_status", "intent_grade", "status", "pause_reason"}
+
+    missing_parse = writable - derived - BUYER_INTENT_PARSE_FIELDS
+    assert not missing_parse, f"解析白名单漏了：{sorted(missing_parse)}"
+
+    json_columns = {
+        ind.column
+        for ind in indicators_for("buyer_intent")
+        if ind.kind == "json" and "parse" in ind.writable_by
+    }
+    missing_json = json_columns - BUYER_INTENT_PARSE_JSON_FIELDS
+    assert not missing_json, f"JSONB 绑定清单漏了：{sorted(missing_json)}"
+
+    # 采纳白名单是业务更新那条路，它不写摘要以外的系统列，但业务事实列必须全覆盖。
+    adopted = set(_allowed_buyer_intent_changes({column: None for column in writable}))
+    missing_adopt = writable - derived - adopted - {"raw_requirement_text", "parsed_requirement_json"}
+    assert not missing_adopt, f"业务更新采纳白名单漏了：{sorted(missing_adopt)}"
