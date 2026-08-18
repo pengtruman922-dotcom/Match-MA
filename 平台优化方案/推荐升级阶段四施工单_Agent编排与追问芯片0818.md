@@ -776,3 +776,20 @@ npm run lint
   `schema_mismatch`。这是未授权发布导致的预期遗留，不是本地代码阻塞。
 - v0.3.0 同版本若已被其他人以不同内容创建，脚本会明确报出差异并以退出码 2 结束，
   不覆盖、不 skip；需要人工核查并改用新版本号。
+
+#### 用户授权后的生产发布补记（2026-08-18 02:29 -07:00）
+
+- 用户在 4A 完工交接后明确授权推送与配置最新 Prompt。代码提交
+  `88d4366ae230a73b8a937b1a91a59fe69961bed7` 已推送 `origin/main`；Railway 生产
+  `/api/v1/health` 已返回该完整 `git_commit_sha` 后才开始应用 Prompt。
+- 已执行 `python scripts/publish_query_parser_v030_prompt.py --apply`：创建并启用默认
+  `recommendation_query_parser v0.3.0`，Prompt id
+  `e342602b-0c02-40af-b8f5-dd63942ef39f`。
+- 已执行 `python scripts/publish_deep_eval_v030_prompt.py --apply`：创建并启用默认
+  `recommendation_deep_eval_to_target v0.3.0`，Prompt id
+  `a22f34a1-48a8-4a5c-976d-17d55ed01efc`。
+- 应用后重新执行两份脚本的 `--dry-run`：均返回 `exists-identical`，确认服务端正文、schema、
+  变量集合与仓库脚本一致；重新执行 `--render-preview`：query parser 6/6、deep eval 4/4
+  变量全部替换，无双花括号残留。
+- 只读查询 `/model-config/prompts` 确认两个 v0.3.0 均为各自节点唯一
+  `is_default=true` 且 `is_active=true` 的 Prompt。没有部署自建环境；本次推送只触发 Railway。
