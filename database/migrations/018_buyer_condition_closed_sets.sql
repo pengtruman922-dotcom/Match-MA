@@ -132,15 +132,23 @@ alter table buyer_intent
 --
 -- 阈值取 1：股比小于 1% 的收购诉求在业务上不存在，所以「小于 1」等价于
 -- 「这一行存的是分数」。0 排除在外（0 是「没有下限」不是分数）。
+--
+-- **两列必须在同一条 UPDATE 里改完，不能拆成两条。** 表上有既有约束
+-- `buyer_intent_check`（min <= max）：生产里有一行是 0.5100 / 0.7000 两列都存
+-- 分数，先单独把 min 归一成 51 的那一瞬间 51 > 0.7，约束当场炸，整个 preDeploy
+-- 迁移回滚、部署阻断（2026-08-18 实际发生过一次）。CI 的空库跑不出这个错，
+-- 因为没有数据。
 
 update buyer_intent
-set desired_equity_ratio_min = desired_equity_ratio_min * 100
-where desired_equity_ratio_min is not null
-  and desired_equity_ratio_min > 0
-  and desired_equity_ratio_min < 1;
-
-update buyer_intent
-set desired_equity_ratio_max = desired_equity_ratio_max * 100
-where desired_equity_ratio_max is not null
-  and desired_equity_ratio_max > 0
-  and desired_equity_ratio_max < 1;
+set desired_equity_ratio_min = case
+      when desired_equity_ratio_min > 0 and desired_equity_ratio_min < 1
+        then desired_equity_ratio_min * 100
+      else desired_equity_ratio_min
+    end,
+    desired_equity_ratio_max = case
+      when desired_equity_ratio_max > 0 and desired_equity_ratio_max < 1
+        then desired_equity_ratio_max * 100
+      else desired_equity_ratio_max
+    end
+where (desired_equity_ratio_min > 0 and desired_equity_ratio_min < 1)
+   or (desired_equity_ratio_max > 0 and desired_equity_ratio_max < 1);

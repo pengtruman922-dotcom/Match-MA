@@ -28,6 +28,7 @@ from backend.app.services.screening_schema import (
     UNKNOWN_CODE,
 )
 from backend.app.services.screening_sql import (
+    ROW_COLUMNS,
     _count_sql,
     _rows_sql,
     build_clause,
@@ -280,6 +281,26 @@ def snapshot_db():
         session.close()
 
 
+def _fixture_columns() -> set[str]:
+    """快照要灌哪些列——只灌初筛真正读的那些，从代码派生而不是手写清单。
+
+    起因是一次实际事故：快照是生产导出的，`owner_user_id` 指向真实顾问，而空库里
+    只有 baseline 种的两个用户，整批 insert 撞外键，32 个用例全部错在建 fixture
+    这一步（2026-08-18 CI）。那一列筛选根本不读——本轮不做 owner 过滤。
+    照搬整行生产数据，等于让每一个筛选不关心的列都有机会把用例炸掉；只灌读得到
+    的列，这类事故就不会再有第二次。
+    """
+    columns = set(ROW_COLUMNS)
+    # 级别与交易状态由 CHECK 双向绑定，灌了 target_grade 就必须一起灌它。
+    columns.add("lifecycle_status")
+    # 行业/风险/交易结构这类数组对手方不在 ROW_COLUMNS 里（摘要不展示它们），
+    # 但 SQL 要读，所以从字段声明里补出来。
+    for field in SCREENING_FIELDS:
+        for chunk in field.target_column.split(","):
+            columns.add(chunk.split(".")[0].strip())
+    return columns
+
+
 def _load_snapshot(session) -> None:
     rows = json.loads(FIXTURE.read_text(encoding="utf-8"))
     types = {
@@ -291,8 +312,9 @@ def _load_snapshot(session) -> None:
             )
         ).mappings()
     }
-    # 快照是接口出参，带了几个派生字段（ai_processing_state 等）；只灌真列。
-    columns = [column for column in rows[0] if column in types]
+    wanted = _fixture_columns()
+    # 只灌「真列」且「初筛读得到」的那些，其余让 DDL 默认值兜住。
+    columns = [column for column in rows[0] if column in types and column in wanted]
     jsonb_columns = [column for column in columns if types[column] == "jsonb"]
     statement = text(
         "insert into seller_target (team_id, workspace_id, "
