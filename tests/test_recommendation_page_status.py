@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from backend.app.api.authn import AuthContext
 from backend.app.api.routes.recommendations import (
     RecommendationSelectedItemCreate,
+    _build_recommendation_agent_status,
     _build_recommendation_report_status,
     _build_recommendation_selected_status,
     _ensure_selected_item_allowed_from_session_candidates,
@@ -110,6 +111,31 @@ def test_processing_and_page_overview_counts() -> None:
     assert overview["failed_session_count"] == 1
     assert overview["generated_report_count"] == 1
     assert overview["active_selected_item_count"] == 3
+
+
+def test_agent_brief_without_answer_keeps_session_processing_until_writer_lands() -> None:
+    messages = [
+        {"role": "user", "metadata_json": {"turn_id": "turn-1", "message_type": "agent_user_message"}},
+        {"role": "tool", "metadata_json": {"turn_id": "turn-1", "message_type": "agent_brief"}},
+    ]
+    status = _build_recommendation_agent_status(None, session_id=SESSION_ID, messages=messages)
+    summary = {
+        "agent_status": status,
+        "rerank_status": {"status": "succeeded"},
+        "report_status": {"status": "not_requested"},
+    }
+
+    assert status == {"status": "writing", "turn_id": "turn-1", "writer_pending": True}
+    assert _recommendation_session_is_processing(summary) is True
+
+    messages.append(
+        {"role": "assistant", "metadata_json": {"turn_id": "turn-1", "message_type": "agent_answer"}}
+    )
+    completed = _build_recommendation_agent_status(None, session_id=SESSION_ID, messages=messages)
+    summary["agent_status"] = completed
+
+    assert completed["status"] == "completed"
+    assert _recommendation_session_is_processing(summary) is False
 
 
 def test_recommendation_session_filter_and_polling_hint() -> None:

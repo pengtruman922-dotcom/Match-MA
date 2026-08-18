@@ -537,7 +537,7 @@ Writer 不得拿它写“总共符合 N 家”。
 |---|---|---|
 | `recommendation_query_parser` | **v0.3.0** | 最近 5 轮驱动的完整当前需求快照 |
 | `recommendation_deep_eval_to_target` | **v0.3.1** | 新 schema + 筛选来源/放宽信息；v0.3.0 是4A过渡收口 |
-| `recommendation_agent_to_target` | **v0.2.0** | 只编排，不重新解析；深评后选最终重点名单与芯片 |
+| `recommendation_agent_to_target` | **v0.2.1** | 只编排，不重新解析；深评后选最终重点名单与芯片。v0.2.1 相对 v0.2.0 只改追问芯片语态段落，见 4D.5 追加项二 |
 | `recommendation_answer_writer_to_target` | **v0.2.0** | brief v2；放宽说明；追问不进正文 |
 
 全部通过 API 发布，不写迁移。每一份必须先：
@@ -547,6 +547,8 @@ Writer 不得拿它写“总共符合 N 家”。
 3. 确认双花括号全部替换；
 4. 确认版本不存在；若存在但内容不同必须报错；
 5. 得到用户明确许可后才 `--apply`。
+
+**4D.5 是本包的追加验收范围（用户生产实测反馈五项），与 4D.1–4D.4 同等必做。**
 
 ### 4D.2 真实 UAT 用例
 
@@ -608,6 +610,103 @@ npm run lint
 4. 跑 4D.2 UAT；
 5. 自建环境只有用户要求时才执行拉取部署；推 Railway 不会自动更新自建；
 6. 把结论合并回 `docs/系统总纲.md` §3.3。
+
+---
+
+### 4D.5 验收范围追加：用户实测反馈五项（2026-08-18）
+
+> 4A–4C 发布后用户在生产实测提出。**这五项纳入 4D，不另开施工包**——
+> 4D 已经在读同一批代码，另起一包等于让第二个对话冷启动重读 1000 行工单去改五个小东西。
+> 其中 3、5 是 4A–4C 的实现缺陷，1、2、4 是本单原先没写到的要求，属于范围追加而非口径变更。
+
+#### 追加项一：分节点计时，且完成后与恢复历史时都要保留
+
+**现状（已核实）**：
+
+- 整轮只有一个 `elapsedSeconds`，由 `Recommend.tsx` 的轮询 interval 计算；
+- `AgentTurnView` 传的是 `running={running && !turn.streaming}`，**流式一开始 `running` 就变 false**，
+  轮询也已停止，所以「正在整理推荐…」整段没有任何计时；
+- 恢复历史会话时 `elapsedSeconds` 置 0，而 `formatElapsed` 对 `<=0` 返回空串，
+  **完成后的耗时直接消失**；
+- 后端其实有数据：解析、深评、Writer 的 `latency_ms` 都在 `ai_trace` 里，只是没进消息。
+
+**要求**：
+
+1. 耗时**从落库消息读，不从前端计时器读**。前端计时器只负责「进行中」的秒表；
+   一旦该节点结束，显示值换成后端给的真实耗时。这是「完成后仍能看到」的唯一可靠做法——
+   前端计时器天然活不过刷新和换页签。
+2. `agent_understanding` / `agent_step` / `agent_deep_eval` / `agent_brief` 各自带 `duration_ms`。
+3. Writer 阶段的耗时由 SSE `done` 事件带 `duration_ms`；流式期间前端自己走秒表，
+   收到 `done` 后换成真实值。计到开始吐字还是吐完由实现方便决定，**但要在文案里说清楚是哪一种**。
+4. 过程行展开时每行右侧显示该节点耗时；收起时显示本轮总耗时。
+5. `formatElapsed` 的 `<=0 返回空串` 要改——`0.4s` 的节点现在显示空白，看起来像没跑。
+
+**验收**：一轮完整推荐结束后刷新页面，展开过程行，每个节点仍有耗时；
+「正在整理推荐…」期间秒表在走。
+
+#### 追加项二：追问芯片必须是「用户要说的话」，不是「给用户的建议」
+
+**现状**：契约是对的（4C.5 已经写明点击即作为下一轮用户消息发送，前端也是这么接的），
+**错的是文案语态**。实测出现 `明确是否要求控股…`——这是对用户的建议，不是用户会说的话。
+原因是本单只写了「短句、可直接发送」，没有约束**人称与语气**，也没有给例子。
+只写规则不给例子，模型稳定地会写成顾问口吻。
+
+**要求**：
+
+1. 主 Agent Prompt 加硬规则：**芯片是用户下一句要说的话本身**，第一人称、祈使或陈述，
+   原样发出去就是一条合理的用户消息。**不是对用户的建议，不是待确认事项，不是问句选项。**
+2. 正文里给足正反例，至少这五对：
+
+   | ✗ 建议口吻 | ✓ 用户口吻 |
+   |---|---|
+   | 明确是否要求控股 | 只看能控股的 |
+   | 考虑是否放宽净利要求 | 净利放宽到 500 万 |
+   | 建议补充地区限制 | 只要江苏的 |
+   | 可以进一步了解 XX 公司 | 详细说说 XX |
+   | 确认是否接受对赌 | 排除掉要对赌的 |
+
+3. 代码侧加**兜底守卫**（不是主手段）：以「建议」「可以考虑」「明确是否」「确认一下」
+   「需要进一步」开头的芯片丢弃并记 trace notes。清单保守一点——
+   `是否可以只看上市的` 是合法的用户口吻，不要连它一起杀掉。
+4. 主 Agent Prompt 因此要发 **v0.2.1**，4D.1 的版本表同步更新。
+
+**验收**：8 组 UAT 里每一组的芯片逐条念一遍——念出来像用户在说话才算过。
+
+#### 追加项三：会话列表在正文吐完之前必须是黄点
+
+**现状（已核实）**：`SessionPicker` 的 `running` 取自 `recommendations.page()` 的
+`running_sessions`，后端按 background job 状态判定。而 **Writer 是 SSE 流式、不占 job**——
+agent job 一 `succeeded`，会话就不在 `running_sessions` 里了，此时正文还在吐字，
+列表已经是绿点。
+
+**要求**：会话级「进行中」的判据要包含 Writer 阶段。建议用消息表判：
+最后一轮**已有 `agent_brief` 但最终正文尚未落库**，且未 aborted / failed → 仍算进行中。
+不要用前端本地状态打补丁——另一个页签打开列表时看到的必须也是黄点。
+
+**验收**：A 页签正在吐字，B 页签打开最近推荐列表 → 黄点；`done` 之后刷新 → 绿点。
+
+#### 追加项四：正文里的标的必须可点击（4C 引入的回归）
+
+**现状**：4C 改成「先 `sanitize_writer_output` 剥掉模型自带链接，再
+`backfill_target_links` 按数据库全名精确匹配回填」。实测标的全部不可点。
+
+**三个可能原因，先定位再改，不要猜着改**——从落库的 `agent_answer` 正文与同轮
+`agent_brief` 取一个真实样本比对即可分辨：
+
+| 假设 | 判据 | 修法 |
+|---|---|---|
+| (a) Writer v0.2.0 写得更自然，用了简称或省掉「有限公司」，精确匹配落空 | 正文里的名字与 brief 的 `name` 不完全相同 | 回填改两级：全名优先，再试去掉常见后缀的简称；简称须 ≥4 字且在本轮 brief 内唯一，避免误链 |
+| (b) `sanitize_writer_output` 里 `/targets/\S+` 的 `\S+` 在中文正文中不遇空格，会吃掉后面一整段（连标的名一起） | 正文有整段缺失 | `\S+` 改 `[A-Za-z0-9-]+`。**无论是不是本次现象的原因，这一条都该修**——中文正文里用 `\S+` 截 URL 必然误伤 |
+| (c) 规则兜底、历史恢复这两条路径没走回填 | 只有 Writer 正常路径有链接 | 三条路径共用同一个回填函数 |
+
+**验收**：一轮真实推荐里，正文出现的每个重点/备选标的名**至少有一处可点**，
+点击进标的详情页；复制出来的纯文本仍是裸名字（`plain_text_for_copy` 不回归）。
+
+#### 与已拍板口径的关系
+
+以上五项**不改变**已经拍板的任何口径：5 轮历史、40 家候选池、3–6 家重点名单、
+required 单向放宽、去重只在汇总环节、追问只在芯片。
+唯一的版本变化是主 Agent Prompt v0.2.0 → **v0.2.1**（仅改追问芯片语态段落）。
 
 ---
 
@@ -1025,3 +1124,123 @@ npm run lint
   变量集合一致且已经 `is_active=true / is_default=true`。
 - 没有部署自建环境；本次代码推送只触发 Railway。4D 的真实对话 UAT、语义改写风险抽查和
   系统总纲最终回填仍按上一小节清单执行。
+
+### 4D 施工记录（2026-08-18）
+
+#### 基线、前置闸门与工作树
+
+- 开工分支 `main`，HEAD `ddf1815`（`ddf1815 docs: 记录4C生产发布`）。按要求先执行
+  `git status --short` 与 `git log -5 --oneline`，再完整阅读 `AGENTS.md`、系统总纲、本单
+  §七/九/十/十一、4A–4C 全部施工记录、实际代码/测试/Prompt 脚本、当前 diff 和背景设计框架；
+  没有 pull / reset / checkout / stash / clean。
+- 4A–4C 前置判定为已完成：生产 HEAD 与三包记录一致，parser v0.3.0、deep eval v0.3.1、
+  Agent v0.2.0、Writer v0.2.0 均已存在；4A–4C 的接口、brief v2 和真实测试记录能够互相对齐。
+- 用户原有工作树保持不动：阶段二施工单的既有修改、`.claude/`、UAT 表、历史施工文档及
+  `阶段四4D验收范围追加_发给4D对话0818.md` 均未清理、覆盖或纳入本包提交。该追加文件对应
+  本单 §4D.5，故本包最终 Agent Prompt 目标按较新的拍板口径使用 **v0.2.1**，不是旧表里的 v0.2.0。
+- 本包实际代码文件：
+  - 后端：`backend/app/api/routes/debug.py`、`recommendations.py`、
+    `jobs/handlers/recommendation.py`、`services/recommendation_agent_tools.py`、
+    `recommendation_answer.py`、`recommendation_flow.py`；
+  - 前端：`AgentProcessLine.tsx`、`AgentTurnView.tsx`、`Recommend.tsx`、`types/api.ts`；
+  - Prompt：新增 `scripts/publish_recommendation_agent_v021_prompt.py`；
+  - 测试：`test_recommendation_agent_turn.py`、`test_recommendation_answer_stream.py`、
+    `test_recommendation_follow_up_contract.py`、`test_recommendation_page_status.py`，新增
+    `test_recommendation_agent_prompt_v021.py`、`test_recommendation_debug_trace.py`；
+  - 图纸/记录：`docs/系统总纲.md` §3.3 与本节。
+
+#### 4D 修复与最终接线
+
+- 分阶段耗时：理解、每次工具步骤、深评、主 Agent 收口、Writer 均将 `duration_ms` 写进同轮消息；
+  Writer `done` 和答案重放都带落库耗时，口径是 SSE 开始至末字完成。前端仅对正在运行的节点使用
+  墙钟，完成与历史恢复一律读取消息；展开逐节点显示，收起显示总耗时，亚秒值显示为 `0.4s`。
+- Writer 间隙：会话 summary 新增 `agent_status`。最新轮已有 brief、无 answer/aborted/failed 时为
+  `writing`，进入 `running_sessions`，所有页签保持黄点直到答案落库。
+- 中止竞态：abort marker 与 Writer answer 终态写共享 PostgreSQL transaction advisory lock；SSE
+  每个模型增量、降级和最终落库前都重新检查中止，收到中止后发 `aborted` 事件，不写答案；前端立即
+  清掉部分正文/芯片。生产抽查 session `fc2256ff-ad90-49a0-b414-e37de0152995`、turn
+  `f19e5623fc2d4ef59f6feb4b1a1c9654` 只落 `agent_user_message + agent_aborted`。
+- 链接：内部路径清洗从 `/targets/\S+` 收窄为 `/targets/[A-Za-z0-9-]+`，避免吞掉后续中文；
+  全名优先，其次只接受本轮唯一且不少于 4 字的去法律后缀简称；同一 target id 全名与简称共享“一处
+  链接”预算。正常 Writer、规则兜底和答案重放共用相同回填，复制仍输出裸名字。
+- 追问：v0.2.1 Prompt 写入 §4D.5 的五对正反例；代码保守丢弃以“建议/可补充/可以考虑/
+  考虑是否/明确是否/确认一下/需要进一步/可以进一步”开头的顾问口吻，并把丢弃原因写入归一 notes。
+- debug：recommendation-session trace 查询补上 `entity_type='recommendation_session' + entity_id`，
+  修复 Agent trace 已按实体直连却在 session debug 中查不到的问题。
+- 生产 UAT 首轮 deep eval 因节点 `timeout_seconds=180` 在约 181.6 秒超时；已通过现有配置 API 将
+  `recommendation_deep_eval_to_target` 超时调整为 300 秒并确认生效。未改 schema、未写迁移、未新建节点。
+
+#### 自动化测试（最终真实结果）
+
+- `python -m pytest -q` → **1161 passed, 36 skipped, 5 warnings in 12.76s**，0 failed。
+  5 条均为既有 Starlette `HTTP_422_UNPROCESSABLE_ENTITY` 弃用警告。
+- `cd frontend && npm run typecheck` → 退出码 0。
+- `cd frontend && npm run build` → 退出码 0，1570 modules，约 7.09s；保留既有 Browserslist
+  过期和主 chunk 662.58 kB（>500 kB）提示。
+- `cd frontend && npm run lint` → 退出码 0，**0 errors / 17 warnings**；均为既有 Fast Refresh /
+  hook 警告，位于未被本包修改的 `CascadeFilter.tsx`、buyers/targets `presentation.tsx`、
+  `PromptDrawer.tsx`、settings `shared.tsx`、`DebugEntity.tsx`。
+- 过程中曾误在仓库根目录执行一次 `npm run build`，因根目录没有 `package.json` 返回 ENOENT；
+  随后在要求的 `frontend/` 目录执行并通过。该误操作没有改文件，仍在此如实记录。
+- 最终 `git diff --check` 无空白错误；Windows 工作树仅有 Git 的 LF→CRLF 提示。
+
+#### 八组真实生产 UAT（逐轮消息与数据证据）
+
+| # | session / turn | 真实证据与结论 |
+|---:|---|---|
+| 1 | `31d5a08a…` / `f017475a…` | parser v0.3.0 得到江苏+制造业+净利≥1000万完整快照；一次完整 SQL 召回 6，6/6 进入 deep eval v0.3.1；brief v2 为 3 重点+1备选，正文 4 个站内链接且无芯片原句。通过。 |
+| 2 | 同 session / `81a8abee…` | 最近完整问答保留江苏/制造业/净利1000万，只新增 listed；独立完整筛 3 家，深评 3 家，brief 选 3 家。通过。 |
+| 3 | 同 session / `b759cc43…` | 仅把净利替换为 500 万，江苏/制造业/listed 均保留；3 家进入一次深评。通过。 |
+| 4 | 同 session / `25a6ba76…` | 仅删除地区；制造业/净利500万/listed 保留；真实召回与深评均为 5，brief 3重点+2备选，正文 5 个链接。通过。 |
+| 5 | `7e434bfe…` / `1facf14d…`；复测 `217c7a9f…` / `577411f8…` | 首轮 parser 非确定性地只给 1 组，把上市/非上市口径放入定性诉求；复测同一原话正确拆成上市与非上市 2 组，分别独立筛 0/2 家，2 家并集进入一次深评并按非上市营收选择。保留首轮偏差，不伪装稳定；复测达到用例口径。通过并留模型稳定性观察项。 |
+| 6 | 首轮 `b55d6453…` / `914305af…`；完整补跑 `39548266…` / `a656633c…` | 首轮证明无依据放宽会以 `relaxation_field_not_tested` 拒绝，但始终 0 家；补跑“江苏制造业、净利1000万、上市、PE≤1”完整筛 0 家，marginal 显示 `max_pe` 单项使 3 家因字段为空出局；call 2 引用 call 1 放宽 PE 后真实召回 3，3 家全部深评。brief 三家均标 required 放宽，正文明确“仅供参考、需核实 PE”。通过。 |
+| 7 | `28249a65…` / `1aa18830…` | parser 保留浙江/制造业/净利500万，并将海外仓、业务协同作为两条定性诉求；4 家真实池一次深评逐条判定，主 Agent 选 3重点+1备选，正文 3 个链接且芯片未混入正文。通过。 |
+| 8 | 同 session / `c6cf73b1…` | 点击第 7 组首个芯片原样成为下一轮 user message；parser 结合最近完整问答保留原条件与两条定性诉求，重新独立筛 4、深评 4、brief 3+1、正文 4 链接。证明芯片可执行和历史语义恢复。通过。 |
+
+- 每轮均核对 `agent_understanding / agent_step / agent_deep_eval / agent_brief / agent_answer`；
+  Agent trace 另从真实调用返回核对 parser/deep-eval Prompt 版本、工具预算、`search_calls`、
+  `candidate_pool`、`policy_errors`、最终归一契约。4D 的 debug 查询修复部署后再从 session debug 复核直连 trace。
+- 生产当时仍运行 Agent v0.2.0，UAT 1/6/7 可见“可补充/建议”等顾问口吻芯片；这不是被掩盖的
+  通过项，而是本包 v0.2.1 Prompt + 代码守卫的发布前基线。v0.2.1 apply 后必须再抽一轮确认。
+
+#### 页面行为验收
+
+- 使用本包真实前端和本地受控 API 夹具（不传生产凭据）复核同一数据契约：最近会话中
+  `writing` 为 `bg-amber-500`、完成为 `bg-emerald-500`；恢复完成会话显示总耗时 `5.1s`，展开仍有
+  理解 `0.4s`、筛选 `0.7s`、深评 `1.3s`、主 Agent `0.9s`、Writer `1.8s`。
+- brief-only 会话恢复后自动补连 SSE；流式中可见“正在整理推荐…”且秒表从 `4.8s` 继续走，done 后
+  换为落库总耗时 `13s` 并恢复芯片。
+- 正文标的锚点为 `/targets/t-1`；复制按钮变为“已复制”，剪贴板是
+  `重点推荐 杭州星辰科技，净利润 1800 万元。`，不含 Markdown 路径；点击
+  `详细说说杭州星辰科技` 后页面出现同文下一轮用户气泡。生产 UAT 的实际答案另证明每个最终名单均有
+  `/targets/<uuid>`，数字来自 brief facts，芯片原句不在正文。
+
+#### 失败与中止矩阵
+
+| 故障点 | 实际证据 | 结论 |
+|---|---|---|
+| parser unavailable / schema_mismatch | `test_fallback_keeps_the_sentence_and_says_so`、`test_parser_degradation_clears_structured_conditions_before_the_agent` | 空结构化组+原话定性兜底，状态分别保留，不编条件。通过。 |
+| 非法筛选/放宽 | `test_invalid_search_is_structured_traced_and_spends_budget`、required relaxation policy tests；UAT 6 首轮两条 `policy_errors` | 工具拒绝、占预算、trace 留痕，可在预算内纠正。通过。 |
+| deep eval unavailable / schema_mismatch | `test_deep_eval_schema_mismatch_is_returned_without_being_disguised`、`test_deep_eval_degradation_is_explicit_agent_fallback` | 不伪造排序，brief/正文保留真实 SQL 池并显式 agent/screening fallback。通过。 |
+| Agent 忘调深评 | `test_agent_forgets_deep_eval_code_runs_it_and_turn_still_finishes`、`test_auto_deep_eval_result_is_given_back_to_the_same_agent_without_tools` | 代码只补跑一次，再把结果交回同一 Agent 无工具收尾。通过。 |
+| Writer 未配置 / 超时或流异常 | `test_unconfigured_writer_streams_and_persists_the_rule_fallback`、`test_writer_stream_failure_still_finishes_with_the_same_fallback` | 同一 brief v2 规则兜底，generation mode 如实为 fallback。通过。 |
+| 各阶段中止 | parser 后、deep eval 前/后参数化中止测试，生产 abort 抽查 | `agent_aborted` 优先，无后续 brief/answer/chips，不续接。通过。 |
+| Writer SSE 中途停止 | `test_abort_that_lands_after_stream_connect_prevents_answer_and_persistence` + advisory-lock 终态守卫 | SSE 发 aborted，不落答案。通过。 |
+| SSE 关页恢复 | brief-only 页面恢复实测 + `test_history_restore_uses_persisted_agent_brief_and_does_not_regenerate_chips` | 自动补连，答案落库/重放，芯片仍取 brief。通过。 |
+| 60 次命中/30 家唯一池 | `test_recommendation_agent_policy.py` 的 60 raw occurrences / 30 unique 用例，另有 30 候选选 4 家测试 | 30 家全部进入深评，不因前批 ID 排除或固定前 5。通过。 |
+
+#### Prompt、图纸与发布闸门
+
+- 四份脚本最终 `--check`：parser v0.3.0 为 6/6、deep eval v0.3.1 为 4/4、Agent v0.2.1
+  为 2/2、Writer v0.2.0 为 1/1，变量集合与 NodeSpec 一致；对应冲突测试确认同版本正文/schema/
+  变量漂移会退出非零，不覆盖。
+- 四份 `--render-preview` 均返回成功，全部双花括号变量替换，无残留；`--dry-run` 显示 parser、
+  deep eval、Writer 均为 `exists-identical`，Agent v0.2.1 将新建并设默认。记录本段时尚未 apply。
+- `docs/系统总纲.md` §3.3 已回填最终 5 轮→完整快照→多组独立前20→≤40公平并集→单次深评
+  回灌→3–6/最多5→brief v2→Writer+芯片链路；补齐落库字段、耗时、Writer 黄点、链接、芯片语态、
+  parser/deep-eval/Writer 降级、中止竞态与阶段五待拆旧项，使图纸成为权威描述。
+- 发布前结论：自动化、真实 UAT、失败矩阵、Prompt 只读收口与图纸均满足，允许进入用户已授权的
+  commit/push 闸门。此刻 Railway 仍是 `ddf1815`，Agent v0.2.1 未 apply，自建未部署。
+- 阶段五开始拆旧前仍需：先完成下方 4D 生产发布补记并验证新 hash、v0.2.1 芯片、持久耗时/
+  Writer 黄点/session debug/链接与中止；之后才可逐一确认旧 `/candidates`、旧增量条件操作、旧深评分片/
+  rerank、旧推荐消息和兼容分支无调用方再删除。反向推荐仍未实现，不属于拆旧完成条件。

@@ -1688,6 +1688,10 @@ def _recommendation_traces(db: Session, session_id: UUID) -> list[dict[str, Any]
               and workspace_id = :workspace_id
               and (
                 input_json ->> 'session_id' = :session_id_text
+                or (
+                  entity_type = 'recommendation_session'
+                  and entity_id = :session_id
+                )
                 or entity_id in (
                   select id
                   from recommendation_report

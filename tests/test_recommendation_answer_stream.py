@@ -116,6 +116,39 @@ def test_writer_output_drops_model_links_ids_and_chip_text_before_safe_backfill(
     assert linked.count("](/targets/t-1)") == 1
 
 
+def test_writer_url_sanitizer_does_not_eat_following_chinese_prose() -> None:
+    cleaned = sanitize_writer_output("旧链接 /targets/t-1，杭州XX精密制造仍值得看。")
+
+    assert "杭州XX精密制造仍值得看" in cleaned
+    assert "/targets/" not in cleaned
+
+
+def test_unique_legal_name_abbreviation_is_backfilled_but_collision_is_not() -> None:
+    unique = backfill_target_links(
+        "重点看杭州星辰科技。",
+        {"杭州星辰科技有限公司": "t-1"},
+    )
+    collided = backfill_target_links(
+        "重点看星辰科技。",
+        {
+            "星辰科技有限公司": "t-1",
+            "星辰科技股份有限公司": "t-2",
+        },
+    )
+
+    assert unique == "重点看[杭州星辰科技](/targets/t-1)。"
+    assert "](/targets/" not in collided
+
+
+def test_full_name_and_alias_share_the_same_one_link_budget() -> None:
+    linked = backfill_target_links(
+        "杭州星辰科技有限公司值得看，杭州星辰科技的团队也不错。",
+        {"杭州星辰科技有限公司": "t-1"},
+    )
+
+    assert linked.count("](/targets/t-1)") == 1
+
+
 # -- fallback ------------------------------------------------------------
 
 
@@ -220,6 +253,7 @@ def test_unconfigured_writer_streams_and_persists_the_rule_fallback(monkeypatch)
     assert "event: done" in body
     assert "30 家去重候选" in body
     assert "](/targets/t-1)" in body
+    assert '"duration_ms":' in body
 
 
 def test_writer_stream_failure_still_finishes_with_the_same_fallback(monkeypatch) -> None:
@@ -228,6 +262,63 @@ def test_writer_stream_failure_still_finishes_with_the_same_fallback(monkeypatch
     assert "event: error" in body
     assert "event: done" in body
     assert "30 家去重候选" in body
+
+
+def test_abort_that_lands_after_stream_connect_prevents_answer_and_persistence(monkeypatch) -> None:
+    """The abort marker wins even when another tab already opened the SSE."""
+    from backend.app.api.routes import recommendations as route
+
+    checks = iter([False, True])
+    persisted: list[str] = []
+    monkeypatch.setattr(route, "ensure_recommendation_session_visible", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(route, "_get_recommendation_session_or_404", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(route, "agent_turn_aborted", lambda *_args, **_kwargs: next(checks, True))
+    monkeypatch.setattr(route, "find_agent_turn_answer", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(route, "find_agent_turn_brief", lambda *_args, **_kwargs: _BRIEF)
+    monkeypatch.setattr(route, "_touch_recommendation_session", lambda *_args, **_kwargs: None)
+
+    def persist(*_args, **_kwargs):
+        persisted.append("answer")
+        return uuid4()
+
+    monkeypatch.setattr(route, "insert_agent_answer_message", persist)
+
+    @contextmanager
+    def fake_scope():
+        yield object()
+
+    monkeypatch.setattr(route, "session_scope", fake_scope)
+    monkeypatch.setattr(route, "_get_default_node_config", lambda *_args, **_kwargs: {
+        "base_url": "https://example.invalid",
+        "api_key_secret_ref": "x",
+        "model_name": "writer",
+        "temperature": 0.4,
+        "top_p": 1,
+        "max_tokens": 1000,
+        "timeout_seconds": 30,
+    })
+    monkeypatch.setattr(route, "_render_prompt_messages", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(route, "stream_openai_compatible_chat", lambda *_args, **_kwargs: iter(["不应落库"]))
+
+    response = route.stream_recommendation_answer(
+        uuid4(),
+        "turn-1",
+        current_user=object(),
+        db=object(),
+    )
+
+    async def collect() -> str:
+        chunks: list[str] = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk.decode() if isinstance(chunk, bytes) else str(chunk))
+        return "".join(chunks)
+
+    body = asyncio.run(collect())
+
+    assert "event: aborted" in body
+    assert "event: delta" not in body
+    assert "event: done" not in body
+    assert persisted == []
 
 
 # -- SSE parsing ---------------------------------------------------------

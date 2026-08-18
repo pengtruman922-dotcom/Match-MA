@@ -297,6 +297,11 @@ def _build_recommendation_session_summary(
     report_jobs = _get_recommendation_report_jobs(db, session_id=session_id)
     report_status = _build_recommendation_report_status(reports=reports, jobs=report_jobs)
     selected_status = _build_recommendation_selected_status(selected_items)
+    agent_status = _build_recommendation_agent_status(
+        db,
+        session_id=session_id,
+        messages=messages,
+    )
     activity = _build_recommendation_activity(
         session=session,
         messages=messages,
@@ -317,6 +322,7 @@ def _build_recommendation_session_summary(
         "rerank_status": rerank_status,
         "report_status": report_status,
         "selected_status": selected_status,
+        "agent_status": agent_status,
         "activity": activity,
         "debug_ref": {
             "entity_type": "recommendation_session",
@@ -415,9 +421,56 @@ def _recommendation_session_display(
 
 def _recommendation_session_is_processing(summary: dict[str, Any]) -> bool:
     return (
-        summary["rerank_status"].get("status") in {"queued", "running", "retry_waiting"}
+        (summary.get("agent_status") or {}).get("status") in {"queued", "running", "retry_waiting", "writing"}
+        or summary["rerank_status"].get("status") in {"queued", "running", "retry_waiting"}
         or summary["report_status"].get("status") in {"queued", "running", "retry_waiting", "generating"}
     )
+
+
+def _build_recommendation_agent_status(
+    db: Session,
+    *,
+    session_id: UUID,
+    messages: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Terminal state for the latest Agent turn, including the Writer gap.
+
+    Writer runs in the SSE request rather than a background job.  A brief with
+    no answer/abort therefore remains ``writing`` even after the Agent job has
+    succeeded; this is the server-side signal used by every tab's yellow dot.
+    """
+    latest_turn_id = ""
+    for message in messages:
+        metadata = message.get("metadata_json") if isinstance(message.get("metadata_json"), dict) else {}
+        turn_id = str(metadata.get("turn_id") or "")
+        if turn_id and str(message.get("role") or "") == "user":
+            latest_turn_id = turn_id
+    if not latest_turn_id:
+        return {"status": "not_started", "turn_id": None, "writer_pending": False}
+
+    message_types = {
+        str((message.get("metadata_json") or {}).get("message_type") or "")
+        for message in messages
+        if isinstance(message.get("metadata_json"), dict)
+        and str((message.get("metadata_json") or {}).get("turn_id") or "") == latest_turn_id
+    }
+    if "agent_aborted" in message_types:
+        status = "aborted"
+    elif "agent_answer" in message_types:
+        status = "completed"
+    elif "agent_question" in message_types:
+        status = "waiting_user"
+    elif "agent_brief" in message_types:
+        status = "writing"
+    else:
+        job = find_agent_turn_job(db, session_id, latest_turn_id)
+        job_status = str((job or {}).get("status") or "missing")
+        status = "failed" if job_status in {"failed", "cancelled"} else job_status
+    return {
+        "status": status,
+        "turn_id": latest_turn_id,
+        "writer_pending": status == "writing",
+    }
 
 
 def _filter_recommendation_session_summaries(
@@ -3099,6 +3152,7 @@ def find_agent_turn_answer(db: Session, session_id: UUID, turn_id: str) -> dict[
             return {
                 "id": message.get("id"),
                 "markdown": message["decoded_content"].get("markdown") or "",
+                "duration_ms": int(message["decoded_content"].get("duration_ms") or 0),
             }
     return None
 
@@ -3161,15 +3215,32 @@ def agent_turn_aborted(db: Session, session_id: UUID, turn_id: str) -> bool:
     return row is not None
 
 
+def _lock_agent_turn_terminal_write(db: Session, session_id: UUID, turn_id: str) -> None:
+    """Serialise the competing terminal writes for one Agent turn.
+
+    The abort endpoint and the Writer SSE run in different requests. A plain
+    ``if not aborted: insert answer`` check still has a race between the SELECT
+    and INSERT. The transaction-scoped advisory lock makes the marker check and
+    terminal write one ordered decision without adding a schema object.
+    """
+    db.execute(
+        text("select pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+        {"lock_key": f"recommendation-agent-turn:{session_id}:{turn_id}"},
+    )
+
+
 def insert_agent_aborted_message(
     db: Session,
     *,
     session_id: UUID,
     turn_id: str,
     created_by: UUID = DEFAULT_ADMIN_USER_ID,
-) -> None:
+) -> bool:
     """Mark a turn stopped, written the moment the user asks rather than when
     the worker notices — otherwise a closed tab would leave no record at all."""
+    _lock_agent_turn_terminal_write(db, session_id, turn_id)
+    if agent_turn_aborted(db, session_id, turn_id):
+        return False
     _insert_recommendation_message(
         db,
         session_id=session_id,
@@ -3179,6 +3250,7 @@ def insert_agent_aborted_message(
         metadata_json={"message_type": "agent_aborted", "turn_id": turn_id},
         created_by=created_by,
     )
+    return True
 
 
 def insert_agent_answer_message(
@@ -3189,7 +3261,17 @@ def insert_agent_answer_message(
     markdown: str,
     model_name: str | None,
     generation_mode: str,
-) -> UUID:
+    duration_ms: int = 0,
+) -> UUID | None:
+    """Persist the answer only if the turn has not been stopped.
+
+    This check shares the turn advisory lock with the abort marker. It is the
+    final database guard for an SSE that started before another tab stopped the
+    turn; the marker wins and no answer row is written.
+    """
+    _lock_agent_turn_terminal_write(db, session_id, turn_id)
+    if agent_turn_aborted(db, session_id, turn_id):
+        return None
     row = db.execute(
         _message_returning_statement(
             """
@@ -3208,7 +3290,12 @@ def insert_agent_answer_message(
             "workspace_id": DEFAULT_WORKSPACE_ID,
             "session_id": session_id,
             "content": _json_dumps(
-                {"message_type": "agent_answer", "turn_id": turn_id, "markdown": markdown}
+                {
+                    "message_type": "agent_answer",
+                    "turn_id": turn_id,
+                    "markdown": markdown,
+                    "duration_ms": max(0, int(duration_ms or 0)),
+                }
             ),
             "metadata_json": {
                 "message_type": "agent_answer",

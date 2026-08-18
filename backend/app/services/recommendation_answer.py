@@ -27,6 +27,9 @@ MAX_SELECTION_NOTE_LENGTH = 300
 
 _URL_OR_LINK = re.compile(r"https?://|www\.|\[[^\]]+\]\([^)]+\)|/targets/", re.IGNORECASE)
 _PROMISES_FULL_LIST = re.compile(r"(?:列出|展示|看看?|给我).{0,8}(?:全部|所有|完整).{0,8}(?:候选|名单|\d+\s*家)")
+_ADVISER_STYLE_FOLLOW_UP = re.compile(
+    r"^(?:建议|可补充|可以考虑|考虑是否|明确是否|确认一下|需要进一步|可以进一步)"
+)
 
 
 def build_answer_prompt_variables(brief: dict[str, Any]) -> dict[str, Any]:
@@ -312,7 +315,16 @@ def sanitize_writer_output(
 ) -> str:
     """Remove model-authored links, URLs and executable ids before link backfill."""
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", answer_text or "")
-    text = re.sub(r"https?://\S+|www\.\S+|/targets/\S+", "", text, flags=re.IGNORECASE)
+    # ``\S+`` is unsafe in Chinese prose: there is often no whitespace after
+    # the URL, so it can consume the rest of the paragraph together with the
+    # target name.  Internal ids have a deliberately narrow alphabet; public
+    # URLs stop at Markdown punctuation or whitespace.
+    text = re.sub(
+        r"https?://[^\s)\]]+|www\.[^\s)\]]+|/targets/[A-Za-z0-9-]+",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
     for candidate_id in sorted({str(value) for value in (forbidden_ids or []) if str(value)}, key=len, reverse=True):
         text = text.replace(candidate_id, "")
     for phrase in sorted({str(value).strip() for value in (forbidden_phrases or []) if str(value).strip()}, key=len, reverse=True):
@@ -321,12 +333,28 @@ def sanitize_writer_output(
 
 
 def backfill_target_links(answer_text: str, link_map: dict[str, str]) -> str:
-    """Replace exact target-name occurrences with safe internal links."""
+    """Replace target names, or safe unique abbreviations, with internal links.
+
+    Writer prose often drops a legal suffix.  Full database names always win;
+    an abbreviation is accepted only when it is at least four characters and
+    unique inside this turn's final brief, so a short/common prefix cannot link
+    to the wrong target.
+    """
     if not answer_text or not link_map:
         return answer_text
-    names = sorted(link_map, key=len, reverse=True)
+    replacements = dict(link_map)
+    aliases: dict[str, set[str]] = {}
+    for name, target_id in link_map.items():
+        alias = _target_name_alias(name)
+        if alias and alias != name and len(alias) >= 4:
+            aliases.setdefault(alias, set()).add(target_id)
+    for alias, target_ids in aliases.items():
+        if len(target_ids) == 1 and alias not in replacements:
+            replacements[alias] = next(iter(target_ids))
+
+    names = sorted(replacements, key=len, reverse=True)
     pattern = re.compile("|".join(re.escape(name) for name in names))
-    used: dict[str, int] = {}
+    used_target_ids: dict[str, int] = {}
 
     def already_linked(text: str, start: int, end: int) -> bool:
         has_opening_bracket = start > 0 and text[start - 1] == "["
@@ -335,15 +363,32 @@ def backfill_target_links(answer_text: str, link_map: dict[str, str]) -> str:
 
     def replace(match: re.Match[str]) -> str:
         name = match.group(0)
-        target_id = link_map.get(name)
+        target_id = replacements.get(name)
         if target_id is None or already_linked(answer_text, match.start(), match.end()):
             return name
-        if used.get(name, 0) >= MAX_LINKS_PER_TARGET:
+        if used_target_ids.get(target_id, 0) >= MAX_LINKS_PER_TARGET:
             return name
-        used[name] = used.get(name, 0) + 1
+        used_target_ids[target_id] = used_target_ids.get(target_id, 0) + 1
         return f"[{name}](/targets/{target_id})"
 
     return pattern.sub(replace, answer_text)
+
+
+_TARGET_LEGAL_SUFFIXES = (
+    "集团股份有限公司",
+    "股份有限公司",
+    "有限责任公司",
+    "集团有限公司",
+    "有限公司",
+)
+
+
+def _target_name_alias(name: str) -> str:
+    value = str(name or "").strip()
+    for suffix in _TARGET_LEGAL_SUFFIXES:
+        if value.endswith(suffix):
+            return value[: -len(suffix)].strip()
+    return value
 
 
 def plain_text_for_copy(answer_text: str) -> str:
@@ -482,6 +527,9 @@ def _normalise_follow_ups(raw: Any, *, pool_ids: list[str], notes: list[str]) ->
             continue
         if _PROMISES_FULL_LIST.search(suggestion):
             notes.append(f"follow_up_suggestions[{index}] 承诺超预算全集，已丢弃")
+            continue
+        if _ADVISER_STYLE_FOLLOW_UP.match(suggestion):
+            notes.append(f"follow_up_suggestions[{index}] 是顾问建议口吻，已丢弃：{suggestion}")
             continue
         if len(suggestion) > MAX_FOLLOW_UP_LENGTH:
             suggestion = suggestion[:MAX_FOLLOW_UP_LENGTH].rstrip("，,。；; ")

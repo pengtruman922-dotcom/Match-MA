@@ -164,7 +164,7 @@ def test_brief_caps_list_sizes() -> None:
                 {"id": f"t-{index}", "reason_points": ["点"] * 9} for index in range(20)
             ],
             "runner_ups": [{"id": f"t-{index}"} for index in range(6, 15)],
-            "follow_up_suggestions": [f"建议{index}" for index in range(9)],
+            "follow_up_suggestions": [f"再看第{index}批" for index in range(9)],
         },
         tools=tools,
         mode="buyer_to_target",
@@ -306,6 +306,27 @@ def test_follow_up_suggestions_are_short_deduplicated_and_budget_safe() -> None:
     assert "再看下一批候选" in suggestions
     assert all(len(value) <= 80 for value in suggestions)
     assert not any("全部56家" in value or "/targets/" in value for value in suggestions)
+
+
+def test_adviser_style_follow_up_suggestions_are_dropped_with_trace_notes() -> None:
+    tools = _tools_with({"t-1": _CANDIDATE})
+    brief = _build_answer_brief(
+        {
+            "recommended_ids": ["t-1"],
+            "follow_up_suggestions": [
+                "明确是否要求控股",
+                "建议补充地区限制",
+                "可补充估值区间",
+                "是否可以只看上市的",
+                "净利放宽到500万",
+            ],
+        },
+        tools=tools,
+        mode="buyer_to_target",
+    )
+
+    assert brief["follow_up_suggestions"] == ["是否可以只看上市的", "净利放宽到500万"]
+    assert any("顾问建议口吻" in note for note in tools.final_output_normalization_notes)
 
 
 # -- 4A intent snapshot wiring -----------------------------------------

@@ -58,6 +58,7 @@ export default function Recommend() {
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const pollRef = useRef<number | null>(null);
+  const writerTimerRef = useRef<number | null>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
   const bootstrappedRef = useRef(false);
 
@@ -73,10 +74,18 @@ export default function Recommend() {
     }
   }, []);
 
+  const stopWriterTimer = useCallback(() => {
+    if (writerTimerRef.current) {
+      window.clearInterval(writerTimerRef.current);
+      writerTimerRef.current = null;
+    }
+  }, []);
+
   useEffect(() => () => {
     stopPolling();
+    stopWriterTimer();
     streamAbortRef.current?.abort();
-  }, [stopPolling]);
+  }, [stopPolling, stopWriterTimer]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -89,9 +98,14 @@ export default function Recommend() {
   /** Stream the write-up. Resumable: the endpoint replays a persisted answer. */
   const streamAnswer = useCallback(async (activeSessionId: string, turnId: string) => {
     streamAbortRef.current?.abort();
+    stopWriterTimer();
     const controller = new AbortController();
     streamAbortRef.current = controller;
-    patchTurn(turnId, { streaming: true });
+    const writerStartedAt = Date.now();
+    patchTurn(turnId, { streaming: true, writerElapsedMs: 0 });
+    writerTimerRef.current = window.setInterval(() => {
+      patchTurn(turnId, { writerElapsedMs: Date.now() - writerStartedAt });
+    }, 250);
     let accumulated = '';
     try {
       for await (const event of recommendations.answerStream(activeSessionId, turnId, { signal: controller.signal })) {
@@ -99,33 +113,63 @@ export default function Recommend() {
           accumulated += String(event.data.text || '');
           patchTurn(turnId, { answer: accumulated });
         } else if (event.event === 'done') {
+          stopWriterTimer();
           // done 带的是回填过链接的最终正文，覆盖流式累积的裸文本。
           patchTurn(turnId, {
             answer: String(event.data.markdown || accumulated),
             answerDone: true,
             streaming: false,
             failed: null,
+            writerDurationMs: Math.max(0, Number(event.data.duration_ms) || 0),
+            writerElapsedMs: 0,
           });
           return;
         } else if (event.event === 'error') {
           patchTurn(turnId, { failed: `生成回答失败：${String(event.data.message || '未知错误')}` });
+        } else if (event.event === 'aborted') {
+          stopWriterTimer();
+          patchTurn(turnId, {
+            aborted: true,
+            answer: '',
+            followUps: [],
+            failed: null,
+            answerDone: true,
+            streaming: false,
+            writerElapsedMs: 0,
+          });
+          return;
         }
       }
-      patchTurn(turnId, { answerDone: true, streaming: false });
+      stopWriterTimer();
+      patchTurn(turnId, {
+        answerDone: true,
+        streaming: false,
+        writerDurationMs: Date.now() - writerStartedAt,
+        writerElapsedMs: 0,
+      });
     } catch (streamError) {
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted) {
+        stopWriterTimer();
+        return;
+      }
+      stopWriterTimer();
       patchTurn(turnId, {
         streaming: false,
         failed: streamError instanceof Error ? streamError.message : '回答流中断',
+        writerDurationMs: Date.now() - writerStartedAt,
+        writerElapsedMs: 0,
       });
     }
-  }, [patchTurn]);
+  }, [patchTurn, stopWriterTimer]);
 
   const applyMessages = useCallback((turnId: string, messages: RecommendationMessage[]) => {
     const steps: RecommendationAgentSearchStep[] = [];
     let question: RecommendationAgentQuestion | null = null;
     let brief: RecommendationAgentBrief | null = null;
     let aborted = false;
+    let understandingDurationMs: number | null = null;
+    let deepEvalDurationMs: number | null = null;
+    let briefDurationMs: number | null = null;
 
     for (const message of messages) {
       const metadata = (message.metadata_json || {}) as Record<string, unknown>;
@@ -138,17 +182,31 @@ export default function Recommend() {
         continue;
       }
       const messageType = String(metadata.message_type || payload.message_type || '');
-      if (messageType === 'agent_step' && payload.step) {
+      const durationMs = Math.max(0, Number(payload.duration_ms) || 0);
+      if (messageType === 'agent_understanding') {
+        understandingDurationMs = durationMs;
+      } else if (messageType === 'agent_step' && payload.step) {
         steps.push(payload.step as RecommendationAgentSearchStep);
       } else if (messageType === 'agent_question' && payload.question) {
         question = payload.question as RecommendationAgentQuestion;
       } else if (messageType === 'agent_brief' && payload.brief) {
         brief = payload.brief as RecommendationAgentBrief;
+        briefDurationMs = durationMs;
+      } else if (messageType === 'agent_deep_eval') {
+        deepEvalDurationMs = durationMs;
       } else if (messageType === 'agent_aborted') {
         aborted = true;
       }
     }
-    return { steps, question, brief, aborted };
+    return {
+      steps,
+      question,
+      brief,
+      aborted,
+      understandingDurationMs,
+      deepEvalDurationMs,
+      briefDurationMs,
+    };
   }, []);
 
   const startPolling = useCallback((activeSessionId: string, turnId: string) => {
@@ -157,7 +215,7 @@ export default function Recommend() {
     const startedAt = Date.now();
     pollRef.current = window.setInterval(async () => {
       attempts += 1;
-      patchTurn(turnId, { elapsedSeconds: Math.floor((Date.now() - startedAt) / 1000) });
+      patchTurn(turnId, { elapsedMs: Date.now() - startedAt });
       if (attempts > POLL_MAX_ATTEMPTS) {
         stopPolling();
         patchTurn(turnId, { failed: '这一轮超时了。可以重试，或换个更具体的说法。' });
@@ -170,8 +228,21 @@ export default function Recommend() {
           recommendations.messages(activeSessionId, { limit: 500 }),
           recommendations.turnStatus(activeSessionId, turnId).catch(() => null),
         ]);
-        const { steps, question, brief, aborted } = applyMessages(turnId, messages);
-        patchTurn(turnId, { steps });
+        const {
+          steps,
+          question,
+          brief,
+          aborted,
+          understandingDurationMs,
+          deepEvalDurationMs,
+          briefDurationMs,
+        } = applyMessages(turnId, messages);
+        patchTurn(turnId, {
+          steps,
+          understandingDurationMs,
+          deepEvalDurationMs,
+          briefDurationMs,
+        });
         if (status?.failed && !aborted) {
           stopPolling();
           patchTurn(turnId, {
@@ -232,7 +303,12 @@ export default function Recommend() {
           streaming: false,
           failed: null,
           aborted: false,
-          elapsedSeconds: 0,
+          elapsedMs: 0,
+          understandingDurationMs: null,
+          deepEvalDurationMs: null,
+          briefDurationMs: null,
+          writerDurationMs: null,
+          writerElapsedMs: 0,
         },
       ]);
       startPolling(turn.session_id, turn.turn_id);
@@ -254,6 +330,7 @@ export default function Recommend() {
     try {
       await recommendations.abortTurn(sessionId, activeTurn.turnId);
       stopPolling();
+      stopWriterTimer();
       streamAbortRef.current?.abort();
       patchTurn(activeTurn.turnId, {
         aborted: true,
@@ -268,7 +345,7 @@ export default function Recommend() {
     } finally {
       setStopping(false);
     }
-  }, [activeTurn, patchTurn, sessionId, stopPolling, stopping]);
+  }, [activeTurn, patchTurn, sessionId, stopPolling, stopWriterTimer, stopping]);
 
   const handleSubmit = useCallback((message: string) => {
     const ready = attachments.filter((item) => item.status === 'ready');
@@ -378,13 +455,14 @@ export default function Recommend() {
 
   const startNewConversation = useCallback(() => {
     stopPolling();
+    stopWriterTimer();
     streamAbortRef.current?.abort();
     setSessionId(null);
     setTurns([]);
     setError(null);
     setAttachments([]);
     setSearchParams(new URLSearchParams(), { replace: true });
-  }, [setSearchParams, stopPolling]);
+  }, [setSearchParams, stopPolling, stopWriterTimer]);
 
   const restoreSession = useCallback(async (restoreId: string) => {
     let resumeTurnIds: string[] = [];
@@ -464,6 +542,7 @@ export default function Recommend() {
 
   const openSession = (pickId: string) => {
     stopPolling();
+    stopWriterTimer();
     streamAbortRef.current?.abort();
     setTurns([]);
     const next = new URLSearchParams();
@@ -580,7 +659,12 @@ function rebuildTurns(messages: RecommendationMessage[]): RebuiltConversation {
       streaming: false,
       failed: null,
       aborted: false,
-      elapsedSeconds: 0,
+      elapsedMs: 0,
+      understandingDurationMs: null,
+      deepEvalDurationMs: null,
+      briefDurationMs: null,
+      writerDurationMs: null,
+      writerElapsedMs: 0,
     };
     byTurn.set(turnId, created);
     landed.set(turnId, { brief: false, answer: false });
@@ -608,7 +692,10 @@ function rebuildTurns(messages: RecommendationMessage[]): RebuiltConversation {
       pendingUserMessage = '';
     }
     const messageType = String(metadata.message_type || payload.message_type || '');
-    if (messageType === 'agent_step' && payload.step) {
+    const durationMs = Math.max(0, Number(payload.duration_ms) || 0);
+    if (messageType === 'agent_understanding') {
+      turn.understandingDurationMs = durationMs;
+    } else if (messageType === 'agent_step' && payload.step) {
       turn.steps.push(payload.step as RecommendationAgentSearchStep);
     } else if (messageType === 'agent_question' && payload.question) {
       turn.question = payload.question as RecommendationAgentQuestion;
@@ -616,9 +703,13 @@ function rebuildTurns(messages: RecommendationMessage[]): RebuiltConversation {
       turn.followUps = normalizeBriefFollowUps(
         (payload.brief as RecommendationAgentBrief).follow_up_suggestions,
       );
+      turn.briefDurationMs = durationMs;
       landed.get(turnId)!.brief = true;
+    } else if (messageType === 'agent_deep_eval') {
+      turn.deepEvalDurationMs = durationMs;
     } else if (messageType === 'agent_answer') {
       turn.answer = String(payload.markdown || '');
+      turn.writerDurationMs = durationMs;
       landed.get(turnId)!.answer = true;
     } else if (messageType === 'agent_aborted') {
       turn.aborted = true;

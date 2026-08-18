@@ -423,18 +423,21 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
     if agent_turn_aborted(db, session_id, turn_id):
         # 排队期间就被停掉了：一次模型调用都不该花。
         return _aborted_agent_turn_result(job, session_id=session_id, turn_id=turn_id)
+    parser_started = time.perf_counter()
     intent_snapshot = parse_recommendation_intent(
         db,
         mode=mode,
         user_message=user_message,
         history_context=history_context,
     )
+    parser_duration_ms = max(0, int((time.perf_counter() - parser_started) * 1000))
     _insert_agent_understanding_message(
         db,
         session_id=session_id,
         turn_id=turn_id,
         job_id=job.id,
         snapshot=intent_snapshot,
+        duration_ms=parser_duration_ms,
     )
     # 立刻提交，与 agent_step 同样的理由：前端轮询要在 agent 还在跑的时候
     # 就能看到「已读懂需求」。
@@ -653,6 +656,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             turn_id=turn_id,
             job_id=job.id,
             result=deep_eval,
+            duration_ms=int(deep_eval.get("latency_ms") or 0),
         )
         db.commit()
 
@@ -674,6 +678,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             turn_id=turn_id,
             job_id=job.id,
             brief=brief,
+            duration_ms=max(0, int(loop.usage.latency_ms or 0)),
         )
         outcome = "brief_ready"
 
@@ -1735,6 +1740,7 @@ def _insert_agent_message(
     job_id: UUID,
     message_type: str,
     content: dict[str, Any],
+    duration_ms: int = 0,
 ) -> None:
     """One shape for every agent-produced message; turn_id is what groups them."""
     db.execute(
@@ -1754,7 +1760,14 @@ def _insert_agent_message(
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
             "session_id": session_id,
-            "content": _json_dumps({"message_type": message_type, "turn_id": turn_id, **content}),
+            "content": _json_dumps(
+                {
+                    "message_type": message_type,
+                    "turn_id": turn_id,
+                    "duration_ms": max(0, int(duration_ms or 0)),
+                    **content,
+                }
+            ),
             "metadata_json": {
                 "message_type": message_type,
                 "turn_id": turn_id,
@@ -1780,6 +1793,7 @@ def _insert_agent_step_message(
         job_id=job_id,
         message_type="agent_step",
         content={"step": _json_safe_dict(step)},
+        duration_ms=int(step.get("duration_ms") or 0),
     )
 
 
@@ -1808,6 +1822,7 @@ def _insert_agent_understanding_message(
     turn_id: str,
     job_id: UUID,
     snapshot: dict[str, Any],
+    duration_ms: int = 0,
 ) -> None:
     """这一轮读懂了什么，原样落库。
 
@@ -1826,6 +1841,7 @@ def _insert_agent_understanding_message(
             "understanding": _json_safe_dict(snapshot),
             "summary": describe_intent_snapshot(snapshot),
         },
+        duration_ms=duration_ms,
     )
 
 
@@ -1836,6 +1852,7 @@ def _insert_agent_deep_eval_message(
     turn_id: str,
     job_id: UUID,
     result: dict[str, Any],
+    duration_ms: int = 0,
 ) -> None:
     """这一轮深评判了什么、怎么排的，连同筛选来源原样落库。"""
     _insert_agent_message(
@@ -1848,6 +1865,7 @@ def _insert_agent_deep_eval_message(
             "deep_eval": _json_safe_dict(result),
             "summary": describe_deep_eval_result(result),
         },
+        duration_ms=duration_ms,
     )
 
 
@@ -1914,6 +1932,7 @@ def _insert_agent_brief_message(
     turn_id: str,
     job_id: UUID,
     brief: dict[str, Any],
+    duration_ms: int = 0,
 ) -> None:
     _insert_agent_message(
         db,
@@ -1922,6 +1941,7 @@ def _insert_agent_brief_message(
         job_id=job_id,
         message_type="agent_brief",
         content={"brief": _json_safe_dict(brief)},
+        duration_ms=duration_ms,
     )
 
 

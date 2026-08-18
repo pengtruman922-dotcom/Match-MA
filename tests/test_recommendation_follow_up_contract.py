@@ -32,6 +32,7 @@ def test_aborted_failed_and_clarification_turns_hide_answer_and_chips() -> None:
     assert "Boolean(turn.answer.trim())" in view
     assert "answer: ''" in page
     assert "followUps: []" in page
+    assert "event.event === 'aborted'" in page
 
 
 def test_history_restore_uses_persisted_agent_brief_and_does_not_regenerate_chips() -> None:
@@ -41,3 +42,18 @@ def test_history_restore_uses_persisted_agent_brief_and_does_not_regenerate_chip
     assert "payload.brief as RecommendationAgentBrief" in restore_branch
     assert "normalizeBriefFollowUps" in restore_branch
     assert "resumeTurnIds.push(turn.turnId)" in source
+
+
+def test_process_timing_survives_history_and_writer_keeps_the_spinner_running() -> None:
+    page = (ROOT / "frontend/src/pages/Recommend.tsx").read_text(encoding="utf-8")
+    view = (ROOT / "frontend/src/features/recommend/AgentTurnView.tsx").read_text(encoding="utf-8")
+    process = (ROOT / "frontend/src/features/recommend/AgentProcessLine.tsx").read_text(encoding="utf-8")
+
+    assert "turn.understandingDurationMs = durationMs" in page
+    assert "turn.deepEvalDurationMs = durationMs" in page
+    assert "turn.briefDurationMs = durationMs" in page
+    assert "turn.writerDurationMs = durationMs" in page
+    assert "running={running}" in view
+    assert "writerRunning={turn.streaming}" in view
+    assert "整理推荐正文（至末字完成）" in process
+    assert "safe < 1000" in process  # sub-second nodes render as e.g. 0.4s, never blank

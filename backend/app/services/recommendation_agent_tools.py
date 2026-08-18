@@ -12,6 +12,7 @@ The agent orchestrates; it never sees the library. 初筛是 `screening_sql` 那
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 from sqlalchemy import bindparam, text
@@ -266,26 +267,38 @@ class RecommendationAgentTools:
         self.deep_eval_result: dict[str, Any] | None = None
         self.final_output_contract: dict[str, Any] | None = None
         self.final_output_normalization_notes: list[str] = []
+        self._tool_started_at: float | None = None
 
     def _emit_step(self, step: dict[str, Any]) -> None:
         if self._step_sink is None:
             return
+        payload = dict(step)
+        payload.setdefault(
+            "duration_ms",
+            max(0, int((time.perf_counter() - self._tool_started_at) * 1000))
+            if self._tool_started_at is not None
+            else 0,
+        )
         try:
-            self._step_sink(step)
+            self._step_sink(payload)
         except Exception:  # noqa: BLE001 - 进度回显失败不该拖垮整次推荐
             pass
 
     # -- dispatch ---------------------------------------------------------
     def execute(self, call: ToolCall) -> Any:
-        if call.name == "search_targets":
-            return self._search_targets(call.arguments)
-        if call.name == "get_target_detail":
-            return self._get_target_detail(call.arguments)
-        if call.name == "deep_evaluate_candidates":
-            return self._deep_evaluate_candidates()
-        if call.name == "ask_user":
-            return self._ask_user(call.arguments)
-        return {"error": f"unknown tool: {call.name}"}
+        self._tool_started_at = time.perf_counter()
+        try:
+            if call.name == "search_targets":
+                return self._search_targets(call.arguments)
+            if call.name == "get_target_detail":
+                return self._get_target_detail(call.arguments)
+            if call.name == "deep_evaluate_candidates":
+                return self._deep_evaluate_candidates()
+            if call.name == "ask_user":
+                return self._ask_user(call.arguments)
+            return {"error": f"unknown tool: {call.name}"}
+        finally:
+            self._tool_started_at = None
 
     @property
     def should_stop(self) -> bool:
@@ -424,7 +437,6 @@ class RecommendationAgentTools:
         if not wanted:
             return {"error": "target_ids 里没有新的标的（可能已经取过）。"}
         self.detail_target_ids.extend(wanted)
-        self._emit_step({"kind": "detail", "count": len(wanted), "total": len(self.detail_target_ids)})
 
         rows = self._db.execute(
             text(
@@ -491,6 +503,7 @@ class RecommendationAgentTools:
         payload: dict[str, Any] = {"details": details}
         if truncated:
             payload["note"] = f"超出上限的 id 未读取，累计上限 {MAX_DETAIL_TARGETS_TOTAL} 个。"
+        self._emit_step({"kind": "detail", "count": len(wanted), "total": len(self.detail_target_ids)})
         return payload
 
     def candidate_pool(self) -> CandidatePool:

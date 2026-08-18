@@ -1,4 +1,5 @@
 import json
+import time
 from decimal import Decimal
 from typing import Any, Literal
 from urllib.parse import quote
@@ -54,6 +55,7 @@ from backend.app.services.recommendation_flow import (  # noqa: F401 - re-export
     _build_recommendation_selected_status,
     _build_recommendation_session_bundle,
     _build_recommendation_session_summary,
+    _build_recommendation_agent_status,
     _build_rerank_query,
     _candidate_display_badges,
     _candidate_display_meta,
@@ -464,6 +466,7 @@ class RecommendationSessionSummaryOut(BaseModel):
     rerank_status: dict[str, Any]
     report_status: dict[str, Any]
     selected_status: dict[str, Any]
+    agent_status: dict[str, Any] = Field(default_factory=dict)
     activity: dict[str, Any]
     debug_ref: dict[str, Any]
 
@@ -485,6 +488,7 @@ class RecommendationSessionStatusOut(BaseModel):
     rerank_status: dict[str, Any]
     report_status: dict[str, Any]
     selected_status: dict[str, Any]
+    agent_status: dict[str, Any] = Field(default_factory=dict)
     activity: dict[str, Any]
     debug_ref: dict[str, Any]
 
@@ -1306,7 +1310,15 @@ def stream_recommendation_answer(
         return StreamingResponse(
             iter([
                 _sse("delta", {"text": replay["markdown"]}),
-                _sse("done", {"markdown": replay["markdown"], "message_id": str(replay["id"]), "replayed": True}),
+                _sse(
+                    "done",
+                    {
+                        "markdown": replay["markdown"],
+                        "message_id": str(replay["id"]),
+                        "duration_ms": int(replay.get("duration_ms") or 0),
+                        "replayed": True,
+                    },
+                ),
             ]),
             media_type="text/event-stream",
             headers=_SSE_HEADERS,
@@ -1329,7 +1341,17 @@ def stream_recommendation_answer(
 
     link_map = target_link_map(brief)
 
-    def persist(markdown: str, *, mode: str) -> str:
+    def turn_aborted_now() -> bool:
+        # The request-scoped session is already closed once the generator runs.
+        # A fresh read is required so a stop from this or another tab becomes
+        # visible while the Writer stream is in flight.
+        with session_scope() as check_db:
+            return agent_turn_aborted(check_db, session_id, turn_id)
+
+    def aborted_event() -> str:
+        return _sse("aborted", {"turn_id": turn_id, "message": "This turn was stopped."})
+
+    def persist(markdown: str, *, mode: str, duration_ms: int) -> str | None:
         # 独立 session：请求的那个已经随函数返回关掉了。
         with session_scope() as write_db:
             message_id = insert_agent_answer_message(
@@ -1339,15 +1361,38 @@ def stream_recommendation_answer(
                 markdown=markdown,
                 model_name=(node_config or {}).get("model_name"),
                 generation_mode=mode,
+                duration_ms=duration_ms,
             )
-            _touch_recommendation_session(write_db, session_id)
-        return str(message_id)
+            if message_id is not None:
+                _touch_recommendation_session(write_db, session_id)
+        return str(message_id) if message_id is not None else None
 
     def generate():
+        writer_started = time.perf_counter()
+
+        def writer_duration_ms() -> int:
+            # Measures the whole Writer SSE stage through the final chunk (or
+            # rule fallback), not merely time-to-first-token.
+            return max(0, int((time.perf_counter() - writer_started) * 1000))
+
+        if turn_aborted_now():
+            yield aborted_event()
+            return
         if node_config is None:
             markdown = backfill_target_links(fallback_answer_markdown(brief), link_map)
+            if turn_aborted_now():
+                yield aborted_event()
+                return
             yield _sse("delta", {"text": markdown})
-            yield _sse("done", {"markdown": markdown, "message_id": persist(markdown, mode="fallback")})
+            duration_ms = writer_duration_ms()
+            message_id = persist(markdown, mode="fallback", duration_ms=duration_ms)
+            if message_id is None:
+                yield aborted_event()
+                return
+            yield _sse(
+                "done",
+                {"markdown": markdown, "message_id": message_id, "duration_ms": duration_ms},
+            )
             return
 
         chunks: list[str] = []
@@ -1363,13 +1408,27 @@ def stream_recommendation_answer(
                 max_tokens=node_config["max_tokens"],
                 timeout_seconds=node_config["timeout_seconds"] or 180,
             ):
+                if turn_aborted_now():
+                    yield aborted_event()
+                    return
                 chunks.append(delta)
                 yield _sse("delta", {"text": delta})
         except Exception as exc:  # noqa: BLE001 - 生成失败要给出可用兜底，不是空页面
+            if turn_aborted_now():
+                yield aborted_event()
+                return
             markdown = backfill_target_links(fallback_answer_markdown(brief), link_map)
             yield _sse("error", {"message": str(exc)})
             yield _sse("delta", {"text": markdown})
-            yield _sse("done", {"markdown": markdown, "message_id": persist(markdown, mode="fallback")})
+            duration_ms = writer_duration_ms()
+            message_id = persist(markdown, mode="fallback", duration_ms=duration_ms)
+            if message_id is None:
+                yield aborted_event()
+                return
+            yield _sse(
+                "done",
+                {"markdown": markdown, "message_id": message_id, "duration_ms": duration_ms},
+            )
             return
 
         # 回填放在落库这一步：流式增量里做替换要处理跨 chunk 的半个名字，
@@ -1385,9 +1444,17 @@ def stream_recommendation_answer(
         else:
             generation_mode = "llm"
         markdown = backfill_target_links(markdown, link_map)
+        if turn_aborted_now():
+            yield aborted_event()
+            return
+        duration_ms = writer_duration_ms()
+        message_id = persist(markdown, mode=generation_mode, duration_ms=duration_ms)
+        if message_id is None:
+            yield aborted_event()
+            return
         yield _sse(
             "done",
-            {"markdown": markdown, "message_id": persist(markdown, mode=generation_mode)},
+            {"markdown": markdown, "message_id": message_id, "duration_ms": duration_ms},
         )
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers=_SSE_HEADERS)

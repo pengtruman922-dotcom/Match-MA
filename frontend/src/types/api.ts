@@ -1855,6 +1855,7 @@ export interface RecommendationSessionSummary {
   rerank_status: { status?: string; [key: string]: unknown };
   report_status: { status?: string; report_count?: number; [key: string]: unknown };
   selected_status: { active_count?: number; [key: string]: unknown };
+  agent_status?: { status?: string; turn_id?: string | null; writer_pending?: boolean; [key: string]: unknown };
   activity: { last_activity_at?: string | null; [key: string]: unknown };
 }
 
@@ -2017,6 +2018,7 @@ export interface RecommendationAgentSearchStep {
   returned_count?: number;
   count?: number;
   total?: number;
+  duration_ms?: number;
 }
 
 export interface RecommendationAgentQuestion {

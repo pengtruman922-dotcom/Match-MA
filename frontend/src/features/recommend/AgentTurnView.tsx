@@ -16,7 +16,13 @@ export interface AgentTurnState {
   failed: string | null;
   /** 用户点了停止。终态，不重试、不续接、不进下一轮上下文。 */
   aborted: boolean;
-  elapsedSeconds: number;
+  /** 进行中的前端墙钟；完成后展示值只取下面的落库耗时。 */
+  elapsedMs: number;
+  understandingDurationMs: number | null;
+  deepEvalDurationMs: number | null;
+  briefDurationMs: number | null;
+  writerDurationMs: number | null;
+  writerElapsedMs: number;
 }
 
 export default function AgentTurnView({
@@ -40,8 +46,14 @@ export default function AgentTurnView({
 
       <AgentProcessLine
         steps={turn.steps}
-        running={running && !turn.streaming}
-        elapsedSeconds={turn.elapsedSeconds}
+        running={running}
+        elapsedMs={turn.elapsedMs}
+        understandingDurationMs={turn.understandingDurationMs}
+        deepEvalDurationMs={turn.deepEvalDurationMs}
+        briefDurationMs={turn.briefDurationMs}
+        writerDurationMs={turn.writerDurationMs}
+        writerElapsedMs={turn.writerElapsedMs}
+        writerRunning={turn.streaming}
       />
 
       {turn.question && <ClarifyBlock question={turn.question} onPick={onSendSuggestion} />}

@@ -67,18 +67,62 @@ const MONEY_FILTERS = new Set([
 export default function AgentProcessLine({
   steps,
   running,
-  elapsedSeconds,
+  elapsedMs,
+  understandingDurationMs,
+  deepEvalDurationMs,
+  briefDurationMs,
+  writerDurationMs,
+  writerElapsedMs,
+  writerRunning,
 }: {
   steps: RecommendationAgentSearchStep[];
   running: boolean;
-  elapsedSeconds: number;
+  elapsedMs: number;
+  understandingDurationMs: number | null;
+  deepEvalDurationMs: number | null;
+  briefDurationMs: number | null;
+  writerDurationMs: number | null;
+  writerElapsedMs: number;
+  writerRunning: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const searchSteps = steps.filter((step) => step.kind !== 'detail');
+  const searchSteps = steps.filter((step) => step.kind === 'search' || step.kind === 'search_rejected');
   const detailStep = [...steps].reverse().find((step) => step.kind === 'detail');
+  const visibleSteps = steps.filter((step) => step.kind !== 'deep_eval');
+
+  const phaseRows: { key: string; label: string; durationMs: number }[] = [];
+  if (understandingDurationMs !== null) {
+    phaseRows.push({ key: 'understanding', label: '理解当前需求快照', durationMs: understandingDurationMs });
+  }
+  for (const [index, step] of visibleSteps.entries()) {
+    phaseRows.push({
+      key: `step-${index}`,
+      label: step.kind === 'detail'
+        ? `读取详细资料 ${step.count} 家（累计 ${step.total}）`
+        : describeSearch(step),
+      durationMs: Math.max(0, Number(step.duration_ms) || 0),
+    });
+  }
+  if (deepEvalDurationMs !== null) {
+    phaseRows.push({ key: 'deep-eval', label: '深评候选池', durationMs: deepEvalDurationMs });
+  }
+  if (briefDurationMs !== null) {
+    phaseRows.push({ key: 'brief', label: '主 Agent 选择名单并收口素材', durationMs: briefDurationMs });
+  }
+  if (writerDurationMs !== null || writerRunning) {
+    phaseRows.push({
+      key: 'writer',
+      label: writerRunning ? '正在整理推荐正文…' : '整理推荐正文（至末字完成）',
+      durationMs: writerRunning ? writerElapsedMs : writerDurationMs || 0,
+    });
+  }
+  const persistedTotalMs = phaseRows.reduce((total, row) => total + row.durationMs, 0);
+  const totalMs = running ? Math.max(elapsedMs, persistedTotalMs) : persistedTotalMs;
 
   const summary = running
-    ? searchSteps.length === 0
+    ? writerRunning
+      ? `已筛选 ${searchSteps.length} 次${detailStep ? ` · 细看了 ${detailStep.total ?? detailStep.count} 家` : ''} · 正在整理推荐…`
+      : searchSteps.length === 0
       ? '正在理解需求…'
       : detailStep
         ? `已筛选 ${searchSteps.length} 次 · 正在细看 ${detailStep.total ?? detailStep.count} 家资料…`
@@ -95,15 +139,14 @@ export default function AgentProcessLine({
       >
         {running ? <Loader2 className="h-3 w-3 animate-spin" /> : open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
         <span>{summary}</span>
-        <span className="tabular-nums text-gray-300">{formatElapsed(elapsedSeconds)}</span>
+        <span className="tabular-nums text-gray-300">{formatDuration(totalMs)}</span>
       </button>
-      {open && steps.length > 0 && (
+      {open && phaseRows.length > 0 && (
         <ul className="mt-1.5 space-y-1 border-l border-gray-200 pl-3">
-          {steps.map((step, index) => (
-            <li key={index} className="text-gray-500">
-              {step.kind === 'detail'
-                ? `读取详细资料 ${step.count} 家（累计 ${step.total}）`
-                : describeSearch(step)}
+          {phaseRows.map((row) => (
+            <li key={row.key} className="flex items-start justify-between gap-3 text-gray-500">
+              <span>{row.label}</span>
+              <span className="shrink-0 tabular-nums text-gray-300">{formatDuration(row.durationMs)}</span>
             </li>
           ))}
         </ul>
@@ -151,9 +194,12 @@ function formatFilterValue(field: string, value: unknown): string {
   return valueLabel(VALUE_LABEL_FIELDS[field] || field, value);
 }
 
-function formatElapsed(seconds: number): string {
-  if (seconds <= 0) return '';
+function formatDuration(milliseconds: number): string {
+  const safe = Math.max(0, Number(milliseconds) || 0);
+  if (safe < 1000) return `${(safe / 1000).toFixed(1)}s`;
+  const seconds = safe / 1000;
+  if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`;
   const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
+  const rest = Math.floor(seconds % 60);
   return `${minutes}:${String(rest).padStart(2, '0')}`;
 }
