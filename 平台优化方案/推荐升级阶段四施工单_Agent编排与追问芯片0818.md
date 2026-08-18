@@ -1162,7 +1162,9 @@ required 单向放宽、去重只在汇总环节、追问只在芯片。
   `f19e5623fc2d4ef59f6feb4b1a1c9654` 只落 `agent_user_message + agent_aborted`。
 - 链接：内部路径清洗从 `/targets/\S+` 收窄为 `/targets/[A-Za-z0-9-]+`，避免吞掉后续中文；
   全名优先，其次只接受本轮唯一且不少于 4 字的去法律后缀简称；同一 target id 全名与简称共享“一处
-  链接”预算。正常 Writer、规则兜底和答案重放共用相同回填，复制仍输出裸名字。
+  链接”预算。生产冒烟又发现 Writer 会省略测试数据固定的 `Mock测试-YYYYMMDD-` 前缀，故只为这一
+  精确格式增加同样受“≥4 字且本轮唯一”约束的别名，不开放任意横线截断。正常 Writer、规则兜底和
+  答案重放共用相同回填，复制仍输出裸名字。
 - 追问：v0.2.1 Prompt 写入 §4D.5 的五对正反例；代码保守丢弃以“建议/可补充/可以考虑/
   考虑是否/明确是否/确认一下/需要进一步/可以进一步”开头的顾问口吻，并把丢弃原因写入归一 notes。
 - debug：recommendation-session trace 查询补上 `entity_type='recommendation_session' + entity_id`，
@@ -1172,7 +1174,7 @@ required 单向放宽、去重只在汇总环节、追问只在芯片。
 
 #### 自动化测试（最终真实结果）
 
-- `python -m pytest -q` → **1161 passed, 36 skipped, 5 warnings in 12.76s**，0 failed。
+- `python -m pytest -q` → **1162 passed, 36 skipped, 5 warnings in 11.76s**，0 failed。
   5 条均为既有 Starlette `HTTP_422_UNPROCESSABLE_ENTITY` 弃用警告。
 - `cd frontend && npm run typecheck` → 退出码 0。
 - `cd frontend && npm run build` → 退出码 0，1570 modules，约 7.09s；保留既有 Browserslist

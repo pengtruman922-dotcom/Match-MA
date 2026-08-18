@@ -149,6 +149,15 @@ def test_full_name_and_alias_share_the_same_one_link_budget() -> None:
     assert linked.count("](/targets/t-1)") == 1
 
 
+def test_mock_test_prefix_can_be_omitted_when_the_remaining_name_is_unique() -> None:
+    linked = backfill_target_links(
+        "重点看宁波精密注塑模具厂。",
+        {"Mock测试-20260624-宁波精密注塑模具厂": "t-1"},
+    )
+
+    assert linked == "重点看[宁波精密注塑模具厂](/targets/t-1)。"
+
+
 # -- fallback ------------------------------------------------------------
 
 

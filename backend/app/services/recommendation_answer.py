@@ -345,8 +345,7 @@ def backfill_target_links(answer_text: str, link_map: dict[str, str]) -> str:
     replacements = dict(link_map)
     aliases: dict[str, set[str]] = {}
     for name, target_id in link_map.items():
-        alias = _target_name_alias(name)
-        if alias and alias != name and len(alias) >= 4:
+        for alias in _target_name_aliases(name):
             aliases.setdefault(alias, set()).add(target_id)
     for alias, target_ids in aliases.items():
         if len(target_ids) == 1 and alias not in replacements:
@@ -381,14 +380,21 @@ _TARGET_LEGAL_SUFFIXES = (
     "集团有限公司",
     "有限公司",
 )
+_MOCK_TEST_PREFIX = re.compile(r"^Mock测试-\d{8}-")
 
 
-def _target_name_alias(name: str) -> str:
+def _target_name_aliases(name: str) -> set[str]:
     value = str(name or "").strip()
-    for suffix in _TARGET_LEGAL_SUFFIXES:
-        if value.endswith(suffix):
-            return value[: -len(suffix)].strip()
-    return value
+    variants = {value}
+    without_test_prefix = _MOCK_TEST_PREFIX.sub("", value).strip()
+    if without_test_prefix:
+        variants.add(without_test_prefix)
+    for variant in tuple(variants):
+        for suffix in _TARGET_LEGAL_SUFFIXES:
+            if variant.endswith(suffix):
+                variants.add(variant[: -len(suffix)].strip())
+                break
+    return {alias for alias in variants if alias != value and len(alias) >= 4}
 
 
 def plain_text_for_copy(answer_text: str) -> str:
