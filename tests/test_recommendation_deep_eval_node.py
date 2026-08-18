@@ -15,6 +15,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import pathlib
+import sys
 from typing import Any
 
 import pytest
@@ -546,33 +547,34 @@ def test_the_answer_brief_cannot_see_the_deep_eval() -> None:
 
 
 # =========================================================================
-# Prompt v0.2.0：变量必须真的被替换成值
+# Prompt v0.3.0：变量必须真的被替换成值
 # =========================================================================
 
 
 def _prompt_module():
-    path = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "publish_deep_eval_v020_prompt.py"
-    spec = importlib.util.spec_from_file_location("publish_deep_eval_v020_prompt", path)
+    path = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "publish_deep_eval_v030_prompt.py"
+    spec = importlib.util.spec_from_file_location("publish_deep_eval_v030_prompt", path)
     loaded = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(loaded)
     return loaded
 
 
-def test_prompt_v020_declares_exactly_the_variables_the_node_injects() -> None:
+def test_prompt_v030_declares_exactly_the_variables_the_node_injects() -> None:
     from backend.app.ai.prompting import extract_template_variables
     from backend.app.registry.nodes import node_by_name
 
     prompt = _prompt_module()
     spec = node_by_name(prompt.NODE_NAME)
     assert spec is not None
+    assert prompt.VERSION == "v0.3.0"
 
     used = set(extract_template_variables(prompt.SYSTEM_PROMPT, prompt.USER_PROMPT_TEMPLATE))
     assert used == set(spec.prompt_variables)
     assert "qualitative_requirements_json" in used
 
 
-def test_prompt_v020_renders_every_variable_into_a_value(monkeypatch) -> None:
+def test_prompt_v030_renders_every_variable_into_a_value(monkeypatch) -> None:
     """单花括号不会报错，只会让模型收到字面量 —— 上一轮就是这么错了一整轮。"""
     from backend.app.ai.prompting import render_template
     from backend.app.api.routes.model_config import _validate_prompt_variables
@@ -596,7 +598,7 @@ def test_prompt_v020_renders_every_variable_into_a_value(monkeypatch) -> None:
         assert value in rendered
 
 
-def test_prompt_v020_writes_the_closed_set_and_the_no_grading_rule_into_the_body() -> None:
+def test_prompt_v030_writes_the_closed_set_and_the_no_grading_rule_into_the_body() -> None:
     prompt = _prompt_module()
     body = prompt.SYSTEM_PROMPT + prompt.USER_PROMPT_TEMPLATE
 
@@ -608,3 +610,41 @@ def test_prompt_v020_writes_the_closed_set_and_the_no_grading_rule_into_the_body
     assert "明显不符合" in body                 # dropped 的门槛
     # few_shot_examples_json 是死存储，示例必须写进正文
     assert body.count('"ranked"') >= 2
+
+
+def test_prompt_v030_rejects_a_same_version_with_a_different_schema() -> None:
+    prompt = _prompt_module()
+    conflicting = {
+        "version": prompt.VERSION,
+        "system_prompt": prompt.SYSTEM_PROMPT,
+        "user_prompt_template": prompt.USER_PROMPT_TEMPLATE,
+        "output_schema_json": {"type": "object", "required": ["results"]},
+        "variables_json": list(prompt.EXPECTED_VARIABLES),
+    }
+
+    with pytest.raises(prompt.PromptVersionConflict, match="schema.*不同"):
+        prompt.ensure_existing_version_compatible([conflicting])
+
+
+def test_prompt_v030_conflict_exits_nonzero_instead_of_skipping(monkeypatch) -> None:
+    prompt = _prompt_module()
+
+    class FakeApi:
+        @staticmethod
+        def _resolve_token(_base):
+            return "token"
+
+        @staticmethod
+        def _request_json(*_args, **_kwargs):
+            return [{
+                "version": prompt.VERSION,
+                "system_prompt": prompt.SYSTEM_PROMPT,
+                "user_prompt_template": prompt.USER_PROMPT_TEMPLATE,
+                "output_schema_json": {"type": "object", "required": ["results"]},
+                "variables_json": list(prompt.EXPECTED_VARIABLES),
+            }]
+
+    monkeypatch.setattr(prompt, "_api_client", lambda: FakeApi)
+    monkeypatch.setattr(sys, "argv", ["publish_deep_eval_v030_prompt.py", "--dry-run"])
+
+    assert prompt.main() != 0

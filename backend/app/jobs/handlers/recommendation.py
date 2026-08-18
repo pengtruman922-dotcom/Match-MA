@@ -323,6 +323,66 @@ AGENT_MAX_ITERATIONS = 12
 AGENT_WALL_CLOCK_BUDGET_SECONDS = 240
 
 
+def _build_recommendation_agent_context(
+    *,
+    user_message: str,
+    intent_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the existing `recommendation_context_json` variable for the agent.
+
+    The parser's complete snapshot is the only structured baseline. 4B will
+    enforce condition-group calls at the tool boundary; 4A makes the data and
+    failure semantics explicit before the agent sees them. In particular, a
+    degraded parser result is sanitised again here so an accidental condition
+    in a fallback payload can never masquerade as an approved baseline.
+
+    History deliberately stays out of this JSON and continues through the
+    separate `history_context` prompt variable, preserving its visible tags.
+    """
+    status = str(intent_snapshot.get("parser_status") or "fallback")
+    if status == "ok":
+        groups = intent_snapshot.get("condition_groups")
+        qualitative = intent_snapshot.get("qualitative_requirements")
+        exclusions = intent_snapshot.get("exclusions")
+        notes = intent_snapshot.get("unstructured_notes")
+        safe_snapshot = {
+            "condition_groups": list(groups) if isinstance(groups, list) else [],
+            "qualitative_requirements": list(qualitative) if isinstance(qualitative, list) else [],
+            "exclusions": dict(exclusions) if isinstance(exclusions, dict) else {
+                "industries": [],
+                "risk_flags": [],
+            },
+            "unstructured_notes": list(notes) if isinstance(notes, list) else [],
+            "parser_status": "ok",
+        }
+    else:
+        # 解析失败时不信任任何结构化输出。当前原话只作为定性兜底，Agent 只可
+        # 无条件初筛或提问；不能借「解析失败」重新发明一套筛选条件。
+        raw_message = str(user_message or "").strip()
+        safe_snapshot = {
+            "condition_groups": [],
+            "qualitative_requirements": [raw_message] if raw_message else [],
+            "exclusions": {"industries": [], "risk_flags": []},
+            "unstructured_notes": [],
+            "parser_status": status,
+        }
+
+    return {
+        "user_message": user_message,
+        "intent_snapshot": safe_snapshot,
+        "intent_snapshot_policy": {
+            "condition_groups_are_the_only_structured_baseline": True,
+            "allow_agent_invent_structured_conditions": False,
+            "on_parser_failure": "只允许无条件初筛或向用户提问",
+        },
+        "budgets": {
+            "max_search_calls": MAX_SEARCH_CALLS,
+            "max_detail_targets": MAX_DETAIL_TARGETS_TOTAL,
+            "max_tool_iterations": AGENT_MAX_ITERATIONS,
+        },
+    }
+
+
 def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object]:
     """Run one agent turn: understand, screen, read a few, hand over a brief.
 
@@ -376,14 +436,10 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
     if agent_turn_aborted(db, session_id, turn_id):
         return _aborted_agent_turn_result(job, session_id=session_id, turn_id=turn_id)
 
-    agent_context = {
-        "user_message": user_message,
-        "budgets": {
-            "max_search_calls": MAX_SEARCH_CALLS,
-            "max_detail_targets": MAX_DETAIL_TARGETS_TOTAL,
-            "max_tool_iterations": AGENT_MAX_ITERATIONS,
-        },
-    }
+    agent_context = _build_recommendation_agent_context(
+        user_message=user_message,
+        intent_snapshot=intent_snapshot,
+    )
     # 历史单独一个变量而不是塞进 JSON：塞进去会被转义成一行 \n，标签就不再是
     # 模型看得见的边界了。
     attachment_ids = [str(value) for value in (payload.get("attachment_ids") or []) if str(value or "").strip()]

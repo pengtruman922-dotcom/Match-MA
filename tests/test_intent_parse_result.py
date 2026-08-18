@@ -10,6 +10,9 @@
 from __future__ import annotations
 
 import json
+import importlib.util
+import pathlib
+import sys
 
 import pytest
 
@@ -58,6 +61,15 @@ def only_group(result: dict) -> dict:
 def all_text(result: dict) -> str:
     """定性诉求 + 残留笔记拼起来，用来断言「这句话没丢」。"""
     return " || ".join([*result["qualitative_requirements"], *result["unstructured_notes"]])
+
+
+def _query_prompt_module():
+    path = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "publish_query_parser_v030_prompt.py"
+    spec = importlib.util.spec_from_file_location("publish_query_parser_v030_prompt", path)
+    loaded = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(loaded)
+    return loaded
 
 
 # -- 用例 1-4：正常解析 ----------------------------------------------------
@@ -174,6 +186,111 @@ def test_case4_soft_wish_lands_in_qualitative_requirements() -> None:
     )
     assert only_group(result)["conditions"]["industries_json"] == ["制造与工业"]
     assert result["qualitative_requirements"] == ["最好有成熟的海外仓"]
+
+
+# -- 阶段四 4A：最近五轮驱动的完整当前快照 -------------------------------
+
+
+def test_4a_add_condition_keeps_previous_industry_and_profit_in_the_full_snapshot() -> None:
+    """「只看上市公司」不是一份只含 listed 的增量，输出仍是完整当前需求。"""
+    result = parse(
+        {
+            "condition_groups": [{
+                "label": "当前需求",
+                "conditions": {
+                    "industries_json": ["制造与工业"],
+                    "min_net_profit_yuan": 10000000,
+                    "acceptable_listed_status_json": ["listed"],
+                },
+                "strength": {},
+            }],
+            "qualitative_requirements": [],
+            "exclusions": {},
+            "unstructured_notes": [],
+        },
+        "只看上市公司",
+    )
+
+    assert only_group(result)["conditions"] == {
+        "industries_json": ["制造与工业"],
+        "min_net_profit_yuan": 10000000,
+        "acceptable_listed_status_json": ["listed"],
+    }
+    assert result["raw_text"] == "只看上市公司"
+
+
+def test_4a_replace_condition_changes_only_profit_when_everything_else_stays() -> None:
+    result = parse(
+        {
+            "condition_groups": [{
+                "conditions": {
+                    "industries_json": ["制造与工业"],
+                    "region_constraints_json": [{"province": "江苏省"}],
+                    "min_net_profit_yuan": 5000000,
+                    "acceptable_listed_status_json": ["listed"],
+                }
+            }],
+            "qualitative_requirements": [],
+            "exclusions": {},
+            "unstructured_notes": [],
+        },
+        "净利放宽到500万，其他不变",
+    )
+
+    assert only_group(result)["conditions"] == {
+        "industries_json": ["制造与工业"],
+        "region_constraints_json": [{"province": "江苏省"}],
+        "min_net_profit_yuan": 5000000,
+        "acceptable_listed_status_json": ["listed"],
+    }
+
+
+def test_4a_delete_condition_removes_only_region_from_the_full_snapshot() -> None:
+    result = parse(
+        {
+            "condition_groups": [{
+                "conditions": {
+                    "industries_json": ["制造与工业"],
+                    "min_net_profit_yuan": 5000000,
+                    "acceptable_listed_status_json": ["listed"],
+                }
+            }],
+            "qualitative_requirements": [],
+            "exclusions": {},
+            "unstructured_notes": [],
+        },
+        "去掉地区限制",
+    )
+
+    conditions = only_group(result)["conditions"]
+    assert "region_constraints_json" not in conditions
+    assert conditions == {
+        "industries_json": ["制造与工业"],
+        "min_net_profit_yuan": 5000000,
+        "acceptable_listed_status_json": ["listed"],
+    }
+
+
+def test_4a_reset_can_discard_the_old_demand_entirely() -> None:
+    result = parse(
+        {
+            "condition_groups": [{
+                "conditions": {
+                    "industries_json": ["医药与健康"],
+                    "region_constraints_json": [{"province": "浙江省"}],
+                }
+            }],
+            "qualitative_requirements": [],
+            "exclusions": {},
+            "unstructured_notes": [],
+        },
+        "重新找浙江医疗行业",
+    )
+
+    assert only_group(result)["conditions"] == {
+        "industries_json": ["医药与健康"],
+        "region_constraints_json": [{"province": "浙江省"}],
+    }
 
 
 # -- 用例 5：必须过 —— 白名单吃掉的表达不得静默蒸发 --------------------------
@@ -628,3 +745,67 @@ def test_exclusion_field_description_says_it_removes_candidates() -> None:
     assert "出局" in by_field["excluded_industries_json"]["note"]
     assert "出局" in by_field["unacceptable_risk_flags_json"]["note"]
     assert "通过" in by_field["industries_json"]["note"]
+
+
+# -- Prompt v0.3.0 ------------------------------------------------------
+
+
+def test_query_parser_v030_uses_exactly_the_node_variables() -> None:
+    from backend.app.ai.prompting import extract_template_variables
+    from backend.app.registry.nodes import node_by_name
+
+    prompt = _query_prompt_module()
+    spec = node_by_name(prompt.NODE_NAME)
+    assert spec is not None
+    assert prompt.VERSION == "v0.3.0"
+    assert set(extract_template_variables(prompt.SYSTEM_PROMPT, prompt.USER_PROMPT_TEMPLATE)) == set(
+        spec.prompt_variables
+    )
+
+
+def test_query_parser_v030_spells_out_add_replace_delete_and_reset_semantics() -> None:
+    prompt = _query_prompt_module()
+    body = prompt.SYSTEM_PROMPT + prompt.USER_PROMPT_TEMPLATE
+
+    assert "完整快照" in body and "不是本轮增量" in body
+    for phrase in ("只看上市公司", "净利放宽到 500 万", "其他不变", "去掉地区限制", "重新找浙江医疗行业"):
+        assert phrase in body
+    assert "raw_text" in body and "本轮原话" in body
+
+
+def test_query_parser_v030_rejects_a_same_version_with_different_content() -> None:
+    prompt = _query_prompt_module()
+    conflicting = {
+        "version": prompt.VERSION,
+        "system_prompt": "不同正文",
+        "user_prompt_template": prompt.USER_PROMPT_TEMPLATE,
+        "output_schema_json": prompt.OUTPUT_SCHEMA,
+        "variables_json": list(prompt.EXPECTED_VARIABLES),
+    }
+
+    with pytest.raises(prompt.PromptVersionConflict, match="正文.*不同"):
+        prompt.ensure_existing_version_compatible([conflicting])
+
+
+def test_query_parser_v030_conflict_exits_nonzero(monkeypatch) -> None:
+    prompt = _query_prompt_module()
+
+    class FakeApi:
+        @staticmethod
+        def _resolve_token(_base):
+            return "token"
+
+        @staticmethod
+        def _request_json(*_args, **_kwargs):
+            return [{
+                "version": prompt.VERSION,
+                "system_prompt": "冲突正文",
+                "user_prompt_template": prompt.USER_PROMPT_TEMPLATE,
+                "output_schema_json": prompt.OUTPUT_SCHEMA,
+                "variables_json": list(prompt.EXPECTED_VARIABLES),
+            }]
+
+    monkeypatch.setattr(prompt, "_api_client", lambda: FakeApi)
+    monkeypatch.setattr(sys, "argv", ["publish_query_parser_v030_prompt.py", "--dry-run"])
+
+    assert prompt.main() != 0

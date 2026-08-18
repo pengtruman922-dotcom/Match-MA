@@ -1,6 +1,8 @@
 """Agent turn contract: the brief joins model picks to code-held facts."""
 
 from typing import Any
+from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
@@ -9,7 +11,10 @@ from backend.app.api.routes.recommendations import (
     AGENT_INPUT_MAX_CHARS,
     RecommendationAgentTurnRequest,
 )
-from backend.app.jobs.handlers.recommendation import _build_answer_brief
+from backend.app.jobs.handlers.recommendation import (
+    _build_answer_brief,
+    _build_recommendation_agent_context,
+)
 from backend.app.registry.nodes import (
     recommendation_agent_node_by_mode,
     recommendation_answer_writer_node_by_mode,
@@ -125,6 +130,114 @@ def test_brief_reports_the_last_eligible_count_the_agent_actually_saw() -> None:
 
     assert brief["total_eligible"] == 56
     assert len(brief["search_story"]) == 3
+
+
+# -- 4A intent snapshot wiring -----------------------------------------
+
+
+def test_agent_context_receives_the_real_intent_snapshot() -> None:
+    snapshot = {
+        "condition_groups": [{"label": "当前需求", "conditions": {"min_net_profit_yuan": 5000000}}],
+        "qualitative_requirements": ["有成熟海外仓"],
+        "exclusions": {"industries": ["房地产与建筑"], "risk_flags": []},
+        "unstructured_notes": ["其他不变"],
+        "raw_text": "净利放宽到500万，其他不变",
+        "parser_status": "ok",
+        "parser_notes": [],
+        "prompt_version": "v0.3.0",
+    }
+
+    context = _build_recommendation_agent_context(
+        user_message="净利放宽到500万，其他不变",
+        intent_snapshot=snapshot,
+    )
+
+    assert context["intent_snapshot"] == {
+        "condition_groups": snapshot["condition_groups"],
+        "qualitative_requirements": snapshot["qualitative_requirements"],
+        "exclusions": snapshot["exclusions"],
+        "unstructured_notes": snapshot["unstructured_notes"],
+        "parser_status": "ok",
+    }
+    assert context["intent_snapshot_policy"]["allow_agent_invent_structured_conditions"] is False
+    assert "history_context" not in context
+
+
+@pytest.mark.parametrize("status", ["fallback", "schema_mismatch"])
+def test_parser_degradation_clears_structured_conditions_before_the_agent(status: str) -> None:
+    """就算降级结果意外夹带条件，主 Agent 边界也必须把它们清空。"""
+    context = _build_recommendation_agent_context(
+        user_message="杭州的制造业",
+        intent_snapshot={
+            "condition_groups": [{"conditions": {"min_net_profit_yuan": 99999999}}],
+            "qualitative_requirements": ["模型编出来的"],
+            "exclusions": {"industries": ["医药与健康"], "risk_flags": ["equity_frozen"]},
+            "unstructured_notes": ["旧残留"],
+            "parser_status": status,
+        },
+    )
+
+    assert context["intent_snapshot"] == {
+        "condition_groups": [],
+        "qualitative_requirements": ["杭州的制造业"],
+        "exclusions": {"industries": [], "risk_flags": []},
+        "unstructured_notes": [],
+        "parser_status": status,
+    }
+    assert context["intent_snapshot_policy"]["on_parser_failure"] == "只允许无条件初筛或向用户提问"
+
+
+def test_abort_after_parsing_persists_understanding_but_never_enters_the_tool_loop(monkeypatch) -> None:
+    from backend.app.jobs.handlers import recommendation as handler
+
+    class Db:
+        commits = 0
+
+        def commit(self) -> None:
+            self.commits += 1
+
+    db = Db()
+    session_id = uuid4()
+    job = SimpleNamespace(
+        id=uuid4(),
+        job_type="recommendation_agent",
+        payload_json={
+            "mode": "buyer_to_target",
+            "turn_id": "turn-1",
+            "user_message": "杭州制造业",
+            "history_context": "<history_context>\n<user>：旧问题\n<AI>：旧回答\n</history_context>",
+        },
+    )
+    snapshot = {
+        "condition_groups": [{"conditions": {"industries_json": ["制造与工业"]}}],
+        "qualitative_requirements": [],
+        "exclusions": {"industries": [], "risk_flags": []},
+        "unstructured_notes": [],
+        "parser_status": "ok",
+    }
+    abort_checks = iter([False, True])
+    persisted: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(handler, "_resolve_entity_id", lambda *_args, **_kwargs: session_id)
+    monkeypatch.setattr(handler, "_get_default_node_config", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(handler, "agent_turn_aborted", lambda *_args, **_kwargs: next(abort_checks))
+    monkeypatch.setattr(handler, "parse_recommendation_intent", lambda *_args, **_kwargs: snapshot)
+    monkeypatch.setattr(
+        handler,
+        "_insert_agent_understanding_message",
+        lambda *_args, **kwargs: persisted.append(kwargs["snapshot"]),
+    )
+    monkeypatch.setattr(
+        handler,
+        "run_tool_loop",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("中止后不得进入工具循环")),
+    )
+
+    result = handler._handle_recommendation_agent(db, job)
+
+    assert result["outcome"] == "aborted"
+    assert persisted == [snapshot]
+    assert db.commits == 1
 
 
 # -- request contract ----------------------------------------------------

@@ -3284,8 +3284,8 @@ def _enqueue_recommendation_agent_job(
     return row["id"]
 
 
-AGENT_HISTORY_MAX_TURNS = 6
-# 兜底而已，正常 6 轮远到不了。超了按整轮丢，不截断。
+AGENT_HISTORY_MAX_TURNS = 5
+# 兜底而已，正常 5 轮远到不了。超了按整轮丢，不截断。
 AGENT_HISTORY_MAX_CHARS = 40000
 
 

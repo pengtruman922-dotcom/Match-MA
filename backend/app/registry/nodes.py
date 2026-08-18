@@ -248,7 +248,8 @@ NODES: tuple[NodeSpec, ...] = (
         ),
         runtime_inputs=(
             "用户输入的需求原文",
-            "最近 6 轮已完成对话的原文（中止的轮次不带）",
+            "最近 5 轮已完成对话的原文（中止的轮次不带）",
+            "需求解析节点产出的完整当前需求快照",
             "可用过滤条件与预算",
         ),
         prompt_variables=("recommendation_context_json", "history_context"),
@@ -289,7 +290,7 @@ NODES: tuple[NodeSpec, ...] = (
         runtime_inputs=(
             "推荐方向",
             "用户消息",
-            "最近 6 轮对话原文",
+            "最近 5 轮已完成对话原文",
             "可筛字段清单（由指标注册表生成，自动注入）",
             "一级 / 二级行业字典（自动注入）",
         ),
@@ -471,10 +472,10 @@ PROMPT_VARIABLE_LABELS: dict[str, str] = {
     "qualitative_requirements_json": "定性诉求清单 JSON（翻不成 SQL 条件、只能由深评逐条判定的那些要求）",
     "current_conditions_json": "当前生效的推荐条件 JSON",
     "user_message": "用户在推荐对话中输入的消息",
-    "history_context": "最近 6 轮已完成对话的原文（<history_context> 标签包裹，中止的轮次不带）",
+    "history_context": "最近 5 轮已完成对话的原文（<history_context> 标签包裹，中止的轮次不带）",
     "report_context_json": "报告上下文 JSON",
     "selected_items_json": "已选推荐项 JSON",
-    "recommendation_context_json": "推荐编排上下文 JSON（需求原文、对话历史、可用条件与预算）",
+    "recommendation_context_json": "推荐编排上下文 JSON（需求原文、完整当前需求快照、可用条件与预算）",
     "answer_brief_json": "推荐回答写作素材包 JSON",
 }
 

@@ -5,10 +5,11 @@ output shape:
 
 - `parse_recommendation_message` -> `condition_ops`, the **incremental** form
   the old `/candidates` list page patched its condition panel with.
-- `parse_recommendation_intent` -> a **complete snapshot** of what this one
-  sentence asks for. That is what the agent chat链路 needs, because the point
-  of splitting parsing out of the agent is to have a baseline the agent can
-  only consume, never invent.
+- `parse_recommendation_intent` -> a **complete snapshot** of what the user
+  wants now, after the parser reads the last completed turns and the current
+  message. It is not an incremental patch. That is what the agent chat链路
+  needs, because the point of splitting parsing out of the agent is to have a
+  baseline the agent can only consume, never invent.
 
 Either way the LLM only extracts. Routing, whitelisting and type coercion are
 derived in code so they stay deterministic and testable.
@@ -294,7 +295,8 @@ def parse_recommendation_message(
 #
 # 上面那套 `condition_ops` 是**增量操作**：给列表页的条件面板打补丁，语义是
 # 「在已有条件上改一处」。对话链路要的是另一种东西 —— 一份**完整快照**：
-# 用户这一句话本身要什么，与之前筛过什么无关。
+# 解析节点读最近已完成问答与本轮消息后，判断用户现在完整地要什么。保留、替换、
+# 删除或整体重置由模型结合原文判断，代码不拿上一份 JSON 机械打补丁。
 #
 # 拆出来的理由只有一个：解析与执行在同一个模型里时，没有任何地方能比对
 # 「用户说了什么」和「agent 筛了什么」。实测出现过用户只说「杭州标的」，
@@ -302,7 +304,7 @@ def parse_recommendation_message(
 # 就是基线，主 Agent 只能消费不能创造，编条件这个问题从结构上消失。
 #
 # 两套解析共用同一个节点（`recommendation_query_parser`）与同一份节点配置，
-# 只是提示词版本不同：v0.2.0 起默认提示词产出快照。旧的 `/candidates` 链路
+# 只是提示词版本不同：v0.3.0 起默认提示词产出多轮语义下的当前完整快照。旧的 `/candidates` 链路
 # 前端已无调用方，拿到快照形状时 `normalize_parse_result` 会得到空操作集，
 # 退化成「这一轮没解析出条件」，不会报错。
 
@@ -658,7 +660,10 @@ def parse_recommendation_intent(
     user_message: str,
     history_context: str = "",
 ) -> dict[str, Any]:
-    """跑一次需求解析节点，产出这一轮的需求快照。
+    """跑一次需求解析节点，产出用户经过本轮表达后的完整当前需求快照。
+
+    历史原文与本轮消息一起交给模型，由模型判断保留、替换、删除或重置；代码
+    只归一化模型给出的完整结果，不从上一轮 JSON 机械累计条件。
 
     只有「调不通」才降级（节点没配、超时、模型报错）。归一化刻意留在 try 之外：
     把它也包进去的话，归一化里的一个 bug 会被记成 `fallback`，看起来像模型不

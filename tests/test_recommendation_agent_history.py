@@ -102,6 +102,7 @@ def test_turn_without_a_write_up_is_left_out(messages: list[dict[str, Any]]) -> 
 
 
 def test_stopped_turns_do_not_consume_the_turn_budget(messages: list[dict[str, Any]]) -> None:
+    assert AGENT_HISTORY_MAX_TURNS == 5
     for index in range(AGENT_HISTORY_MAX_TURNS):
         messages.extend(_turn(f"ok{index}", f"问题{index}", f"回答{index}"))
     messages.extend([_user("停掉的", turn_id="stopped"), _aborted("stopped")])
@@ -115,7 +116,8 @@ def test_stopped_turns_do_not_consume_the_turn_budget(messages: list[dict[str, A
 # -- 预算 -----------------------------------------------------------------
 
 
-def test_only_the_last_six_turns_survive(messages: list[dict[str, Any]]) -> None:
+def test_only_the_last_five_turns_survive(messages: list[dict[str, Any]]) -> None:
+    assert AGENT_HISTORY_MAX_TURNS == 5
     for index in range(AGENT_HISTORY_MAX_TURNS + 3):
         messages.extend(_turn(f"t{index}", f"问题{index}", f"回答{index}"))
 
