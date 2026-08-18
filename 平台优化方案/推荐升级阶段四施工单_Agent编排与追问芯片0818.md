@@ -1288,3 +1288,165 @@ required 单向放宽、去重只在汇总环节、追问只在芯片。
 - **4D 最终结论：通过。** 自动化、八组 UAT、失败/中止矩阵、Prompt、Railway 生产复核和系统总纲
   均已收口。阶段五现在可以开始做“确认无调用方后拆旧”，但仍不得顺手删除当前主路径正在使用的
   parser/deep-eval 节点，也不得把反向推荐误算成已经交付。
+
+---
+
+### 4D 复核验收记录（2026-08-18，第二次 4D 对话，独立重跑）
+
+> 上一节的 4D 记录写于 Agent Prompt **v0.2.1 apply 之前**，八组 UAT 跑在 v0.2.0 上，
+> 它自己也写明「v0.2.1 apply 后必须再抽一轮确认」。本节是在**最终生产状态**（代码 `e72a30a` +
+> 四份目标 Prompt 全部生效）下重跑的独立复核，不复用上一节的任何结论。
+
+#### 基线与工作树
+
+- 开工分支 `main`，HEAD `e72a30a`，`origin/main` 与本地同点（`git rev-list --left-right --count` = `0 0`）。
+- 用户既有工作树原样保留：阶段二施工单的既有修改、`.claude/`、两份 UAT xlsx、以及若干历史施工文档
+  仍为未跟踪/已修改状态，**未 reset / checkout / stash / clean / pull**，也未纳入本次提交。
+- 本次实际改动文件（仅 3 个 + 本记录）：
+  - `backend/app/services/recommendation_answer.py`（重名标的链接回填修复）
+  - `tests/test_recommendation_answer_stream.py`（+2 条回归）
+  - `docs/系统总纲.md` §3.3（回填重名回填口径）
+
+#### 自动化测试（本次真实执行）
+
+| 命令 | 结果 |
+|---|---|
+| `python -m pytest -q`（修复前） | **1162 passed, 36 skipped, 5 warnings in 12.50s**，0 failed |
+| `python -m pytest -q`（修复后） | **1164 passed, 36 skipped, 5 warnings in 12.45s**，0 failed |
+| `cd frontend && npm run typecheck` | 退出码 0，无输出 |
+| `cd frontend && npm run build` | 退出码 0，1570 modules，8.82s；保留既有 Browserslist 过期提示与主 chunk 662.58 kB（>500 kB）警告 |
+| `cd frontend && npm run lint` | 退出码 0，**0 errors / 17 warnings**，全部是既有 Fast Refresh / hook 警告，位于 `CascadeFilter.tsx`、buyers/targets `presentation.tsx`、`PromptDrawer.tsx`、settings `shared.tsx`、`DebugEntity.tsx`，均非本包文件 |
+
+5 条 warning 全是既有 Starlette `HTTP_422_UNPROCESSABLE_ENTITY` 弃用告警，与本包无关，如实保留。
+
+#### 生产状态核对（只读）
+
+- `/api/v1/health` 的 `git_commit_sha` = `e72a30ad3ca13370a9cf6272bb6e411a5ddb1cb8`，与复核开始时的本地 HEAD 完全一致。
+- `/model-config/prompts` 实际生效版本：
+
+  | 节点 | 生产 default | 变量数 | id |
+  |---|---|---|---|
+  | `recommendation_query_parser` | **v0.3.0** | 6 | `e342602b-0c02-40af-b8f5-dd63942ef39f` |
+  | `recommendation_deep_eval_to_target` | **v0.3.1** | 4 | `44bfd504-f7ae-4ad2-b63b-00a4a75767a9` |
+  | `recommendation_agent_to_target` | **v0.2.1** | 2 | `3c5f69be-2b73-45e3-a7a7-dca118677b91` |
+  | `recommendation_answer_writer_to_target` | **v0.2.0** | 1 | `94e8fc49-fee8-4327-9e64-660535ca4d5d` |
+
+- 四份脚本 `--check` 全部「本地变量集合与 NodeSpec 一致」；`--dry-run` 四份全部
+  `exists-identical` + `[no-op] 未改生产 Prompt`，证明**仓库里的 Prompt 正文/schema/变量与生产逐字一致**；
+  `--render-preview` 四份全部通过（`prompt_publish_utils.validate_render_preview` 会在任何双花括号残留时抛错，
+  因此「变量全部替换」是被代码断言过的，不是目测）。本次**未执行任何 `--apply`**，也不需要执行。
+- 版本口径提醒：4D 任务书正文的表格写的是 Agent `v0.2.0`，但本单 §4D.1 与
+  `阶段四4D验收范围追加_发给4D对话0818.md` 都已把它改成 **v0.2.1**（只改追问芯片语态段落）。
+  生产实际是 v0.2.1，本节按 v0.2.1 验收。
+
+#### 链路真实性（代码 + 落库双证）
+
+| 环节 | 代码证据 | 生产证据 |
+|---|---|---|
+| 最近 5 轮 | `recommendation_flow.AGENT_HISTORY_MAX_TURNS = 5`，`complete[-5:]`，另有 40000 字符预算按整轮丢弃 | UAT 2/3/4 的快照逐轮继承 |
+| 完整当前快照 | parser 输出后整体落 `agent_understanding`，代码不做条件补丁合并 | 见下方逐组 |
+| 初筛不排除前批 ID | `_search_targets` 只把 `plan.conditions` 交给 `_screen_targets_fn`，全文无 exclude / NOT IN / 前批 id 逻辑 | UAT5 补充组两组各自独立筛 |
+| 并集 ≤40 公平收口 | `recommendation_agent_policy.build_deep_eval_pool`，`DEEP_EVAL_POOL_LIMIT=40`，超限时跨 group 轮询取数 | UAT5 补充组 `raw_occurrences=6 → unique_before_cap=6 → capped=false` |
+| 3×20 且 30 条重复 → 30 家全进 | `test_three_batches_of_twenty_with_thirty_duplicate_occurrences_yield_thirty` | — |
+| 深评最多一次 + 回灌 | `deep_eval_already_called` 拒绝二次调用；`screening_frozen` 冻结筛选；结果作为 tool result 回到同一 Agent | 八组均恰好一条 `agent_deep_eval` |
+| 忘调深评的兜底 | `tools.run_deep_eval_if_needed()` + `_agent_finalize_after_auto_deep_eval()`（同节点、`tools=None`） | 三参数化测试 ok / unavailable / schema_mismatch |
+| 3–6 家 + 最多 5 备选 | `MIN_RECOMMENDED=3 / MAX_RECOMMENDED=6 / MAX_RUNNER_UPS=5 / MAX_FOLLOW_UPS=4` | 八组实际 3+0 ~ 3+3 |
+
+#### 八组真实生产 UAT（全部在最终 Prompt 状态下重跑）
+
+| # | session / turn | 真实证据 | 结论 |
+|---:|---|---|---|
+| 1 | `6fa59acd-6e37-4449-9fc3-78ccd126fd44` / `6fb08ddda1934a7fb4cf11de32ea6fd8` | 快照 = 江苏省 + 制造与工业 + 净利≥1000万，三项均 required；一次完整初筛 `eligible=6 / returned=6`，`full_conditions=true` 无放宽；6 家全进深评（ranked 6 / dropped 0）；brief 3 重点 + 3 备选；正文 5 个 `/targets/<uuid>` | 通过 |
+| 2 | 同 session / `032d5466978344aab2d41150aa9f53ce` | 快照保留江苏/制造业/1000万并**新增** `acceptable_listed_status_json=["listed"]`；独立完整筛 3 家，深评 3，brief 3+0，3 链接 | 通过 |
+| 3 | 同 session / `29e3534be7e54971af4a270d6e9aa52e` | 仅 `min_net_profit_yuan` 由 `10000000` **替换**为 `5000000`，江苏/制造业/listed 全部保留；筛 3、深评 3、brief 3+0 | 通过 |
+| 4 | 同 session（`去掉地区限制`） | 快照**删除** `region_constraints_json`，其余三项保留；筛 5、深评 5、brief 3 重点 + 2 备选，正文 5 链接（出现广东惠州、安徽芜湖标的，证明地区确已解除） | 通过 |
+| 5 | `86e3cdbe-1e38-4050-a937-0721936eae55` / `22688b8ff32d4abc97cee0dafc3177d6`；复测 `95d7832d-f82c-4105-9146-d3cd9c95252f` / `b0acb2a5ca1a4acaa55e7f11f92af9d8` | **原话两次独立运行都只解析出 1 个条件组**，把「上市看市值和PE / 非上市看营收」放进 `qualitative_requirements`。链路本身正常（筛 3、深评 3、brief 3+0、3 链接），但未达成该组「两组独立初筛」的验收点。详见「已知偏差 1」 | 有条件通过 |
+| 5补 | `6365063e-fcc1-4036-9158-acac2fccdce5` / `a0ea5c2d4a8a4883a2f42f17f45af353` | 换成带阈值的同义原话「上市的要市值20亿以上、PE低于40；非上市的营收5000万以上」后，parser 稳定给出 **2 个条件组**；call1(group-1) 与 call2(group-2) 各自 `full_conditions=true` 且均 0 家；call3 引用 `based_on_call_index=1`、call4 引用 `=2` 分别放宽 `industry_l2_json`；真实召回 2 + 4 = **6 家唯一池全进深评**；brief 3 重点 + 1 备选，四家全部标 `relaxed_fields=[industry_l2_json(required)]`、`matched_full_conditions=false`；正文写明「因放宽了必须条件，以下标的仅供参考，需进一步核实」 | 通过 |
+| 6 | `df5fe4f0-7f71-4a4c-8d9c-e0e62279223e` / `f1d288e4834e49ee9800f361a15fa3b3` | 「江苏制造业 + 已上市 + 净利1000万 + PE<5」→ call1 完整条件 **0 家**，`excluded_by_condition.max_pe = {总计 3, 字段为空 3, 确实不达标 0}`；call2 只放宽 `max_pe`，`based_on_call_index=1`，放宽理由原文：**「首次筛选matched=0，excluded_by_condition显示max_pe条件有3家因字段为空被排除，属数据未录而非真实不达标，故移除PE上限」**；真实召回 3 全进深评；brief 三家均带 `relaxed_fields=max_pe(required)`；正文写明「放宽了PE上限条件…以下名单仅供参考，具体估值需进一步核实」 | 通过 |
+| 7 | `64f0f02f-74b5-4f24-89a9-0a9e025dd4c4` / `11d77bd3bcf74ebcada3cdb9cf9410b8` | 快照保留浙江/制造业/净利500万，并把「最好有成熟海外仓」「与现有业务有协同」拆成两条 `qualitative_requirements`；4 家真实池一次深评，每家逐条给 `qualitative_verdicts`（本轮全为「无法判断」并在 `info_gaps` 写明「海外仓布局及与买家现有业务协同性均未披露」，**没有编造判定**）；brief 3+1；正文 4 链接 | 通过 |
+| 8 | 同 session / `010602302f444a3781c81697c2b107c5` | 点击第 7 组芯片「我的现有业务是跨境电商，看看哪家更有协同」→ 原样成为下一轮 user message；parser 结合最近完整问答保留原三条硬条件，并把跨境电商写进 `unstructured_notes` 与升级后的定性诉求；重新独立筛 4、深评 4、brief 3+1、正文 4 链接（`Mock测试-YYYYMMDD-` 前缀别名回填生效） | 通过 |
+
+**追问芯片语态（v0.2.1 的验收重点）**：八组共 32 条芯片逐条念过，全部是「用户下一句要说的话」，
+代码守卫命中数 0。抽样：`详细说说无锡贝斯特精机` / `只看汽车零部件行业的` / `净利放宽到500万` /
+`排除掉IPO撤回的` / `PE放宽到10倍` / `只要PE确实低于5倍的` / `只看能控股的` /
+`我的现有业务是跨境电商，看看哪家更有协同`。**没有再出现 v0.2.0 时期的「明确是否…」「可补充…」顾问口吻。**
+八组的芯片原句均未出现在正文中（追问只在芯片）。
+
+**分节点耗时落库**：`agent_understanding / agent_step / agent_deep_eval / agent_brief / agent_answer`
+五类消息体内均带 `duration_ms`（实测样本 12660 / 12 / 54191 / 49958 / 44202 ms），
+完成后与恢复历史都从落库值读取，不依赖前端秒表。
+
+#### 本次新发现并修复的缺陷：重名标的只有第一家能点
+
+- **现象**：UAT5 补充组的正文里，两家**同名**「浙江水晶光电科技股份有限公司」
+  （市值 351.7 亿与 349 亿，是数据库里两条不同 target 记录）只有第一处是链接，第二处是纯文本。
+  UAT 1 的「苏州亚德林股份有限公司」同样是两条记录，只是 Writer 恰好只写了一家，没暴露。
+- **根因**：`target_link_map` 用 `mapping.setdefault(name, target_id)` 建「name → 单个 id」字典，
+  重名时**第二个 target id 被直接丢弃**；再叠加 `MAX_LINKS_PER_TARGET = 1`，第二次出现必然无链接。
+  这是 4C 引入回填时就存在、而 §4D.5 追加项四列的三个假设（简称落空 / `\S+` 吞正文 / 三条路径未共用回填）
+  **都没有覆盖到**的第四种情况。
+- **修复**：`target_link_map` 对重名返回**有序 id 列表**（唯一名仍返回字符串，调用方与既有测试不受影响）；
+  `backfill_target_links` 新增 `_normalise_link_map` 同时接受两种形状，同名的第 N 次出现依次消费第 N 个 id，
+  id 用完即停止加链接。简称的唯一性判据从「id 唯一」改为「**归属的全名唯一**」，因此重名的简称同样能按序回填，
+  而两家不同公司撞出同一简称时仍然拒绝回填。
+- **回归**：新增 `test_two_targets_sharing_one_name_each_get_their_own_link`（直接用 UAT5 的真实数据形状）与
+  `test_a_repeated_name_still_stops_at_one_link_per_target`；既有的简称冲突、单标的一次链接、
+  `Mock测试-` 前缀别名三条测试仍绿。后端 1162 → **1164 passed**。
+
+#### 失败与中止矩阵（生产实测优先，其余以真实测试为证）
+
+| 故障点 | 证据 | 结论 |
+|---|---|---|
+| 需求解析 unavailable / schema_mismatch | `test_parser_degradation_clears_structured_conditions_before_the_agent[fallback / schema_mismatch]`、`test_fallback_keeps_the_sentence_and_says_so` | 空结构化组 + 原话定性兜底，状态如实分别落库，Agent 不编条件。通过 |
+| Agent 非法筛选 / 越权放宽 | `test_group_outside_field_and_cross_group_value_are_rejected`、`test_first_real_search_must_use_the_complete_group`、`test_min_only_lowers_and_max_only_rises`、`test_required_relaxation_without_basis_or_low_recall_is_rejected` | 工具拒绝、占用预算、写 `policy_errors` 与 `search_rejected` step，允许预算内纠正。通过 |
+| 排除项永不放宽 | `test_exclusions_are_injected_and_cannot_be_changed`、`test_fallback_group_accepts_only_code_injected_exclusions` | 排除项由代码注入且不可改。通过 |
+| 深评 unavailable / schema_mismatch | `test_deep_eval_degradation_is_explicit_agent_fallback[unavailable / schema_mismatch]` | 不伪造排序，保留真实 SQL 池并标 `agent_fallback`。通过 |
+| Agent 忘调深评 | `test_agent_forgets_deep_eval_code_runs_it_and_turn_still_finishes[ok / unavailable / schema_mismatch]`、`test_auto_deep_eval_result_is_given_back_to_the_same_agent_without_tools` | 代码补跑一次 + 同节点无工具收尾。通过 |
+| Writer 未配置 / 流式失败超时 | `test_unconfigured_writer_streams_and_persists_the_rule_fallback`、`test_writer_stream_failure_still_finishes_with_the_same_fallback` | 同一 brief v2 规则兜底，`generation_mode=fallback` 如实落库。通过 |
+| **中止：Agent 运行中（生产实测）** | session `064910c2-6f1e-4193-9b43-57372511dd77` / turn `44cf8951be4c4de995c66aa915627a2c`：第 30 秒发 abort，落库仅 `agent_user_message + agent_understanding + agent_step ×2 + agent_aborted`，**无 brief、无 answer**；随后请求 answer-stream 直接 **HTTP 409 Conflict**，不补生成正文/芯片 | 通过 |
+| **中止：Writer SSE 吐字中（生产实测）** | session `70700a26-d4e4-4b37-a513-9af132dc2252` / turn `f277c31edce0436394f80b23267284e4`：收到第 1 个 delta 立即 abort，SSE 共 59 个 delta 后最终事件为 **`aborted`**，落库只到 `agent_brief + agent_aborted`，**没有 `agent_answer`**，status `aborted=true` | 通过 |
+| **SSE 中途关页恢复（生产实测）** | session `5813667c-57ac-4b63-8275-929d93685b94` / turn `95fa4a40046a4e6d8c10684222a48bbc`：只跑到 brief 不连流 → `/recommendations/page` 的 `running_sessions` **仍包含该会话**（background job 已 succeeded），`agent_status={status: writing, writer_pending: true}`；重连 SSE 后 93 个 delta + `done`，`agent_answer` 落库，`running_sessions` 变空、`agent_status.status=completed` | 通过（同时实证 §4D.5 追加项三的 Writer 黄点） |
+
+#### Prompt 收口
+
+四份全部只读收口，**本次没有也不需要 apply**：`--check` 变量集合与 NodeSpec 一致 →
+`--dry-run` 四份 `exists-identical` → `--render-preview` 四份通过且无双花括号残留。
+仓库与生产逐字一致。未写任何 prompt seed 迁移，未新建节点，未改数据库 schema。
+
+#### 系统总纲回填
+
+`docs/系统总纲.md` §3.3 的链路图、落库契约、候选/放宽不变式、降级与终态语义、Prompt 目标版本
+经本次复核**逐条与生产实际行为核对无误**，保留原文；仅新增一条本次发现的口径：
+**重名标的的链接回填按有序 id 列表逐次消费**。图纸继续作为权威描述。
+
+#### 已知偏差（不掩盖，需用户决策）
+
+1. **UAT 用例 5 的原话不产生两个条件组。** parser v0.3.0 对
+   「机器人/AI行业，上市看市值和PE，非上市看营收」两次独立运行都只给 1 组，把上市/非上市口径
+   放进 `qualitative_requirements`。客观上这句话**没有给任何阈值**，没有可下推的过滤条件，
+   解析成定性诉求是可辩护的；但它确实没有达成 4D.2 用例 5 写的「两组独立初筛」验收点。
+   补充组（带阈值的同义原话）证明**多组链路本身完全正常**。
+   要让原话也稳定拆两组，需要改 parser Prompt 到 v0.3.1 —— 这会**超出本单钉死的版本表**，
+   属于设计/版本变更，因此**没有擅自改**，留给用户决定。
+2. **required 放宽有一个工单没写的量化护栏。** `REQUIRED_RELAXATION_MAX_MATCHES = 5`：
+   只有同组此前真实召回 ≤5 家时才允许放宽 required。§2.3 只说「候选过少」没给数字，
+   追加说明也强调「完全交给主 Agent 判断」。现状是**代码只做上界拦截、是否放宽仍由 Agent 决定**，
+   与「代码只做边界校验」一致；但这个 5 是实现引入的、工单与图纸都没记，在此显式登记。
+3. **UAT5 补充组里 group-2 的放宽依据是「确实不达标 4 家」而不是「字段为空」**，
+   与 §2.3 第 4 条「若主要是确实不达标，原则上保留」有张力。该组此前真实召回为 0，
+   代码护栏放行，Agent 也在正文里明确标了「仅供参考、需核实」。属于「原则上」允许的例外，登记备查。
+
+#### 阶段五开始拆旧前仍需处理
+
+- 上述偏差 1（用例 5 是否要 parser v0.3.1）需用户拍板；偏差 2 的量化护栏是否写进图纸/工单需用户确认。
+- 拆旧本身仍按原口径：逐一确认无调用方后再删旧 `/candidates` 打分链路、旧增量条件操作、
+  旧深评分片 / rerank、旧推荐消息与兼容分支；**不得删除主路径正在使用的
+  `recommendation_query_parser` 与 `recommendation_deep_eval_to_target`**。
+- 反向推荐（为标的找买家）仍未实现，不属于拆旧完成条件。
+
+#### 复核结论
+
+**有条件通过。** 自动化四项全绿；八组 UAT 中 7 组直接通过，用例 5 因 parser 对「无阈值原话」的
+分组行为未达该组验收点而计为有条件通过（多组链路已由补充组独立证明）；失败/中止矩阵全部通过，
+其中三项在生产真实复现；四份 Prompt 与生产逐字一致、无需 apply；
+新发现的重名标的链接缺陷已在本包修复并补回归测试。

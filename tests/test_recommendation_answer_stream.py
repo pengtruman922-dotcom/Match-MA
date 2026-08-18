@@ -149,6 +149,36 @@ def test_full_name_and_alias_share_the_same_one_link_budget() -> None:
     assert linked.count("](/targets/t-1)") == 1
 
 
+def test_two_targets_sharing_one_name_each_get_their_own_link() -> None:
+    """生产真实数据里同名不同标的确实存在（UAT5 的浙江水晶光电两条记录）。"""
+    brief = {
+        "recommended": [
+            {"id": "t-1", "name": "浙江水晶光电科技股份有限公司"},
+            {"id": "t-2", "name": "浙江水晶光电科技股份有限公司"},
+        ],
+        "runner_ups": [],
+    }
+    link_map = target_link_map(brief)
+
+    linked = backfill_target_links(
+        "浙江水晶光电科技股份有限公司市值351.7亿。浙江水晶光电科技股份有限公司市值349亿。",
+        link_map,
+    )
+
+    assert link_map == {"浙江水晶光电科技股份有限公司": ["t-1", "t-2"]}
+    assert linked.count("](/targets/t-1)") == 1
+    assert linked.count("](/targets/t-2)") == 1
+
+
+def test_a_repeated_name_still_stops_at_one_link_per_target() -> None:
+    link_map = {"同名公司": ["t-1", "t-2"]}
+
+    linked = backfill_target_links("同名公司、同名公司、同名公司。", link_map)
+
+    assert linked.count("](/targets/") == 2
+    assert linked.endswith("同名公司。")
+
+
 def test_mock_test_prefix_can_be_omitted_when_the_remaining_name_is_unique() -> None:
     linked = backfill_target_links(
         "重点看宁波精密注塑模具厂。",

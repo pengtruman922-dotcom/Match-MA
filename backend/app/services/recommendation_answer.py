@@ -295,16 +295,25 @@ def render_intent_summary(snapshot: dict[str, Any]) -> str:
     return "本轮按用户当前表达进行候选筛选"
 
 
-def target_link_map(brief: dict[str, Any]) -> dict[str, str]:
-    """Name -> target id for every final selection in the v2 brief."""
-    mapping: dict[str, str] = {}
+def target_link_map(brief: dict[str, Any]) -> dict[str, str | list[str]]:
+    """Name -> target id(s) for every final selection in the v2 brief.
+
+    The database really does hold distinct targets under one identical name, and
+    the Writer then mentions that name once per target.  Keeping only the first
+    id would leave every later mention unlinkable, so a repeated name carries
+    the full ordered id list instead.
+    """
+    ordered: dict[str, list[str]] = {}
     for bucket in ("recommended", "runner_ups"):
         for item in brief.get(bucket) or []:
             name = str(item.get("name") or "").strip()
             target_id = str(item.get("id") or "").strip()
-            if name and target_id:
-                mapping.setdefault(name, target_id)
-    return mapping
+            if not name or not target_id:
+                continue
+            ids = ordered.setdefault(name, [])
+            if target_id not in ids:
+                ids.append(target_id)
+    return {name: (ids[0] if len(ids) == 1 else list(ids)) for name, ids in ordered.items()}
 
 
 def sanitize_writer_output(
@@ -332,24 +341,30 @@ def sanitize_writer_output(
     return re.sub(r"[ \t]+\n", "\n", text).strip()
 
 
-def backfill_target_links(answer_text: str, link_map: dict[str, str]) -> str:
+def backfill_target_links(
+    answer_text: str, link_map: dict[str, str | list[str]]
+) -> str:
     """Replace target names, or safe unique abbreviations, with internal links.
 
     Writer prose often drops a legal suffix.  Full database names always win;
     an abbreviation is accepted only when it is at least four characters and
-    unique inside this turn's final brief, so a short/common prefix cannot link
-    to the wrong target.
+    belongs to exactly one name in this turn's final brief, so a short/common
+    prefix cannot link to the wrong target.  When one name covers several
+    distinct targets, successive mentions consume that name's ids in order, so
+    each selected target still gets its own link.
     """
     if not answer_text or not link_map:
         return answer_text
-    replacements = dict(link_map)
-    aliases: dict[str, set[str]] = {}
-    for name, target_id in link_map.items():
+    replacements = _normalise_link_map(link_map)
+    if not replacements:
+        return answer_text
+    alias_owners: dict[str, set[str]] = {}
+    for name in replacements:
         for alias in _target_name_aliases(name):
-            aliases.setdefault(alias, set()).add(target_id)
-    for alias, target_ids in aliases.items():
-        if len(target_ids) == 1 and alias not in replacements:
-            replacements[alias] = next(iter(target_ids))
+            alias_owners.setdefault(alias, set()).add(name)
+    for alias, owners in alias_owners.items():
+        if len(owners) == 1 and alias not in replacements:
+            replacements[alias] = list(replacements[next(iter(owners))])
 
     names = sorted(replacements, key=len, reverse=True)
     pattern = re.compile("|".join(re.escape(name) for name in names))
@@ -362,15 +377,32 @@ def backfill_target_links(answer_text: str, link_map: dict[str, str]) -> str:
 
     def replace(match: re.Match[str]) -> str:
         name = match.group(0)
-        target_id = replacements.get(name)
-        if target_id is None or already_linked(answer_text, match.start(), match.end()):
+        target_ids = replacements.get(name) or []
+        if already_linked(answer_text, match.start(), match.end()):
             return name
-        if used_target_ids.get(target_id, 0) >= MAX_LINKS_PER_TARGET:
-            return name
-        used_target_ids[target_id] = used_target_ids.get(target_id, 0) + 1
-        return f"[{name}](/targets/{target_id})"
+        for target_id in target_ids:
+            if used_target_ids.get(target_id, 0) >= MAX_LINKS_PER_TARGET:
+                continue
+            used_target_ids[target_id] = used_target_ids.get(target_id, 0) + 1
+            return f"[{name}](/targets/{target_id})"
+        return name
 
     return pattern.sub(replace, answer_text)
+
+
+def _normalise_link_map(link_map: dict[str, str | list[str]]) -> dict[str, list[str]]:
+    """Accept both the one-id-per-name and the repeated-name shapes."""
+    normalised: dict[str, list[str]] = {}
+    for name, value in link_map.items():
+        key = str(name or "").strip()
+        if not key:
+            continue
+        raw_ids = value if isinstance(value, (list, tuple)) else [value]
+        for raw in raw_ids:
+            target_id = str(raw or "").strip()
+            if target_id and target_id not in normalised.setdefault(key, []):
+                normalised[key].append(target_id)
+    return {name: ids for name, ids in normalised.items() if ids}
 
 
 _TARGET_LEGAL_SUFFIXES = (
