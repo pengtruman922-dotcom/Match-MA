@@ -1011,3 +1011,17 @@ npm run lint
 - 主 Agent v0.2.0 是 4B 已发布的旧原始 JSON 形态；4C 在代码边界兼容旧形态并落统一归一契约，
   以避免部署切换期间的在途轮次失配。4D 应从 trace 抽查两种输入形态得到相同 brief v2。
 - 自建环境未部署；推 Railway 不会更新自建。系统总纲最终链路与阶段四结论仍按边界留给 4D 回填。
+
+#### 用户授权后的 4C 生产发布补记（2026-08-18 03:53 -07:00）
+
+- 用户在本包任务中明确要求验收通过后 commit、push 并更新相关 Prompt。4C 代码提交
+  `bcc12b68af002e4f24f00c5a8235ceae61aec119` 已推送 `origin/main`；Railway 生产
+  `/api/v1/health` 已返回该完整 `git_commit_sha` 后才开始应用 Writer Prompt。
+- 已执行 `python scripts/publish_recommendation_writer_v020_prompt.py --apply`：创建并启用默认
+  `recommendation_answer_writer_to_target v0.2.0`，Prompt id
+  `94e8fc49-fee8-4327-9e64-660535ca4d5d`。
+- 应用后重新执行 `--dry-run`，返回 `exists-identical`；重新执行 `--render-preview`，1/1 变量
+  全部替换且无双花括号残留；再次幂等执行 `--apply` 返回 `no-op`，确认目标版本正文、schema、
+  变量集合一致且已经 `is_active=true / is_default=true`。
+- 没有部署自建环境；本次代码推送只触发 Railway。4D 的真实对话 UAT、语义改写风险抽查和
+  系统总纲最终回填仍按上一小节清单执行。
