@@ -21,6 +21,14 @@ from backend.app.ai.llm_client import ToolCall
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.services.industry_taxonomy import list_l1_terms, list_l2_terms
 from backend.app.services.profile_sections import load_profile_sections, render_profile_text
+from backend.app.services.recommendation_agent_policy import (
+    CandidatePool,
+    CompiledGroup,
+    ENFORCED_EXCLUSION_COLUMNS,
+    build_deep_eval_pool,
+    compile_condition_groups,
+    validate_search_call,
+)
 from backend.app.services.relation_flow import DEEP_PROGRESS_STATUSES
 from backend.app.services.screening_schema import build_conditions_properties
 from backend.app.services.screening_sql import (
@@ -41,11 +49,10 @@ MAX_ASK_USER_QUESTIONS = 3
 # 每次调用都必须带上的粘性条件：用户说不要的东西，放宽多少次都还是不要。
 # 在工具层强制，不依赖模型自觉。
 #
-# **只有行业排除进得来。** unacceptable_risk_flags_json 语义上也是「排除」，但它
-# 的 SQL 还要求标的已核查过风险（空数组 = 未核查 = 出局），而标的侧现在 69/71
-# 都没核查 —— 一旦粘住，后面每一次放宽都只剩 2 家可选，agent 再也退不出来。
-# 等调研把 major_risk_flags_json 回填起来再谈。
-STICKY_CONDITIONS: tuple[str, ...] = ("excluded_industries_json",)
+# 4B 起行业与重大风险排除都从当前需求快照编译后由代码注入。风险排除可能因
+# 库内核查覆盖率低而显著缩小召回，但那是用户明确的一票否决项，不能由 Agent
+# 为了凑数量静默删除。
+STICKY_CONDITIONS: tuple[str, ...] = ENFORCED_EXCLUSION_COLUMNS
 
 _SEARCH_TARGETS_DESCRIPTION = (
     "按结构化条件在标的库里硬筛，返回命中数、逐条件淘汰拆分与候选摘要。"
@@ -58,8 +65,13 @@ _SEARCH_TARGETS_DESCRIPTION = (
 )
 
 
-def build_search_targets_tool(db: Session) -> dict[str, Any]:
+def build_search_targets_tool(
+    db: Session,
+    groups: list[CompiledGroup] | None = None,
+) -> dict[str, Any]:
     """初筛工具的定义。行业闭集运行时注入，模型写不出字典外的行业名。"""
+    safe_groups = groups or compile_condition_groups({})
+    group_ids = [group.group_id for group in safe_groups]
     return {
         "type": "function",
         "function": {
@@ -68,6 +80,11 @@ def build_search_targets_tool(db: Session) -> dict[str, Any]:
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "group_id": {
+                        "type": "string",
+                        "enum": group_ids,
+                        "description": "本次执行的条件组 id，只能从当前需求快照的条件组中选择。",
+                    },
                     "conditions": {
                         "type": "object",
                         "description": "本次的一组 AND 条件。留空表示不限，会返回全库 A-D 级标的。",
@@ -93,11 +110,41 @@ def build_search_targets_tool(db: Session) -> dict[str, Any]:
                         "type": "string",
                         "description": "这次筛选想验证什么，一句话。会展示给用户看，让他知道你做了什么。",
                     },
+                    "relaxation_reason": {
+                        "type": "string",
+                        "description": (
+                            "仅放宽时必填：引用此前真实查询的召回量或 excluded_by_condition，"
+                            "解释为什么放宽。"
+                        ),
+                    },
+                    "based_on_call_index": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "仅放宽时必填：作为依据的同组此前真实查询 call_index。",
+                    },
                 },
-                "required": ["conditions"],
+                "required": ["group_id", "conditions"],
             },
         },
     }
+
+
+DEEP_EVALUATE_CANDIDATES_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "deep_evaluate_candidates",
+        "description": (
+            "冻结筛选并对全部真实初筛批次的候选并集做一次深评。"
+            "候选池、当前需求快照和业务参数均由代码持有，你不传候选 id。"
+            "至少形成一个非 count_only 的真实候选批次后才能调用，全程最多一次。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
+}
 
 GET_TARGET_DETAIL_TOOL: dict[str, Any] = {
     "type": "function",
@@ -166,11 +213,15 @@ def _int_argument(raw: Any, default: int) -> int:
         return default
 
 
-def build_agent_tools(db: Session) -> list[dict[str, Any]]:
+def build_agent_tools(
+    db: Session,
+    groups: list[CompiledGroup] | None = None,
+) -> list[dict[str, Any]]:
     """本轮下发给模型的工具集。search_targets 的 schema 依赖运行时的行业字典。"""
     return [
-        build_search_targets_tool(db),
+        build_search_targets_tool(db, groups),
         GET_TARGET_DETAIL_TOOL,
+        DEEP_EVALUATE_CANDIDATES_TOOL,
         ASK_USER_TOOL,
     ]
 
@@ -190,6 +241,8 @@ class RecommendationAgentTools:
         target_facts_fn: Any,
         step_sink: Any = None,
         screen_targets_fn: Any = screen_targets,
+        intent_snapshot: dict[str, Any] | None = None,
+        deep_eval_fn: Any = None,
     ) -> None:
         self._db = db
         # facts 的格式化注入而不是直接 import，避免 recommendation_flow <-> 本模块
@@ -199,18 +252,18 @@ class RecommendationAgentTools:
         # 每记录一步就回调一次。handler 用它把过程写进消息表并提交，
         # 前端轮询才能在 agent 还在跑的时候看到「已筛选 2 次」。
         self._step_sink = step_sink
+        self.intent_snapshot = dict(intent_snapshot or {})
+        self.compiled_groups = compile_condition_groups(self.intent_snapshot)
+        self._deep_eval_fn = deep_eval_fn
         self.search_calls: list[dict[str, Any]] = []
         self.detail_target_ids: list[str] = []
         self.ask_user_payload: dict[str, Any] | None = None
         self.last_candidates: list[dict[str, Any]] = []
         self.candidates_by_id: dict[str, dict[str, Any]] = {}
-        # 同一个标的被几组条件命中。与 candidates_by_id 并行维护，不合并进去：
-        # 去重要的是「候选只出现一次」，而「它又被另一组条件命中了一次」是另一件事 ——
-        # 同时满足「机器行业」和「机器行业 + 杭州 + 上市」的标的比只满足前者的强得多，
-        # 这个信号深评要用（见 services/recommendation_deep_eval.py）。
-        self.candidate_hit_counts: dict[str, int] = {}
-        # 一旦某次调用带过排除条件，后面每次都自动带上（见 STICKY_CONDITIONS）。
-        self.sticky_conditions: dict[str, Any] = {}
+        self.policy_errors: list[dict[str, Any]] = []
+        self.deep_eval_called = False
+        self.screening_frozen = False
+        self.deep_eval_result: dict[str, Any] | None = None
 
     def _emit_step(self, step: dict[str, Any]) -> None:
         if self._step_sink is None:
@@ -226,6 +279,8 @@ class RecommendationAgentTools:
             return self._search_targets(call.arguments)
         if call.name == "get_target_detail":
             return self._get_target_detail(call.arguments)
+        if call.name == "deep_evaluate_candidates":
+            return self._deep_evaluate_candidates()
         if call.name == "ask_user":
             return self._ask_user(call.arguments)
         return {"error": f"unknown tool: {call.name}"}
@@ -237,6 +292,12 @@ class RecommendationAgentTools:
 
     # -- tools ------------------------------------------------------------
     def _search_targets(self, arguments: dict[str, Any]) -> Any:
+        if self.screening_frozen:
+            return self._policy_error(
+                "screening_frozen",
+                "深评已经调用，筛选阶段已冻结，不能再调用 search_targets。",
+                tool_name="search_targets",
+            )
         if len(self.search_calls) >= MAX_SEARCH_CALLS:
             return {
                 "error": f"已达到本次会话的筛选次数上限（{MAX_SEARCH_CALLS} 次）。"
@@ -246,48 +307,67 @@ class RecommendationAgentTools:
         limit = max(1, min(limit, MAX_SEARCH_RESULTS_PER_CALL))
         offset = max(0, _int_argument(arguments.get("offset"), 0))
         count_only = bool(arguments.get("count_only"))
-        # `filters` 是改造前的键名，旧提示词还在用；两个都收，语义完全一样。
         raw_conditions = arguments.get("conditions")
         if not isinstance(raw_conditions, dict):
             raw_conditions = arguments.get("filters")
-        conditions = self._with_sticky(raw_conditions)
+        call_index = len(self.search_calls) + 1
+        plan = validate_search_call(
+            arguments.get("group_id"),
+            raw_conditions,
+            self.search_calls,
+            groups=self.compiled_groups,
+            count_only=count_only,
+            relaxation_reason=arguments.get("relaxation_reason"),
+            based_on_call_index=arguments.get("based_on_call_index"),
+        )
+        if not plan.valid:
+            record = {
+                "call_index": call_index,
+                "valid": False,
+                "group_id": plan.group_id or None,
+                "note": str(arguments.get("note") or "").strip() or None,
+                "count_only": count_only,
+                "error_code": plan.error_code,
+                "error": plan.error,
+            }
+            self.search_calls.append(record)
+            self.policy_errors.append(record)
+            self._emit_step({"kind": "search_rejected", **record})
+            return plan.error_payload()
 
         result = self._screen_targets_fn(
-            self._db, conditions, limit=limit, offset=offset, count_only=count_only
+            self._db, plan.conditions, limit=limit, offset=offset, count_only=count_only
         )
-        self._remember_sticky(result.conditions)
 
         record = {
-            "call_index": len(self.search_calls) + 1,
+            "call_index": call_index,
+            "valid": True,
+            "group_id": plan.group_id,
             "note": str(arguments.get("note") or "").strip() or None,
             "filters": result.conditions,
             "count_only": count_only,
             "eligible_count": result.matched,
             "returned_count": result.returned_count,
+            "excluded_by_condition": result.excluded_by_condition,
+            "full_conditions": plan.full_conditions,
+            "relaxed_fields": list(plan.relaxed_fields),
+            "relaxation_reason": plan.relaxation_reason,
+            "based_on_call_index": plan.based_on_call_index,
+            "injected_exclusion_fields": list(plan.injected_exclusion_fields),
+            "candidate_ids": [str(row.get("id")) for row in result.rows if row.get("id")],
         }
         self.search_calls.append(record)
         self._emit_step({"kind": "search", **record})
 
         if not count_only:
             self._register_candidates(result.rows)
-        return result.as_tool_result()
-
-    def _with_sticky(self, raw_conditions: Any) -> dict[str, Any]:
-        """把粘性条件补回去。
-
-        用户说「不要房地产」之后，agent 在第三次放宽时把排除项一起丢掉是实测见过
-        的行为 —— 那时它已经只盯着命中数了。所以这一条在工具层强制，不写进提示词
-        指望模型自觉。
-        """
-        conditions = dict(raw_conditions) if isinstance(raw_conditions, dict) else {}
-        for column, value in self.sticky_conditions.items():
-            conditions.setdefault(column, value)
-        return conditions
-
-    def _remember_sticky(self, conditions: dict[str, Any]) -> None:
-        for column in STICKY_CONDITIONS:
-            if conditions.get(column):
-                self.sticky_conditions[column] = conditions[column]
+        return {
+            **result.as_tool_result(),
+            "call_index": call_index,
+            "group_id": plan.group_id,
+            "full_conditions": plan.full_conditions,
+            "relaxed_fields": list(plan.relaxed_fields),
+        }
 
     def _register_candidates(self, rows: list[dict[str, Any]]) -> None:
         """登记候选，附上代码算出的 facts 与「别的买家在深入推进」警示。
@@ -311,13 +391,18 @@ class RecommendationAgentTools:
             }
             candidates.append(candidate)
             # 已经取过详情的标的不要被摘要覆盖回去。首见为准是对的，候选内容在多次
-            # 查询之间没有差异，改成后见覆盖只会让结果不可复现 —— 所以命中次数另记
-            # 一份，而不是把这里改成覆盖。
+            # 查询之间没有差异，改成后见覆盖只会让结果不可复现。命中来源由每批
+            # candidate_ids 在汇总时计算，不靠覆盖候选正文。
             self.candidates_by_id.setdefault(key, candidate)
-            self.candidate_hit_counts[key] = self.candidate_hit_counts.get(key, 0) + 1
         self.last_candidates = candidates
 
     def _get_target_detail(self, arguments: dict[str, Any]) -> Any:
+        if self.screening_frozen:
+            return self._policy_error(
+                "screening_frozen",
+                "深评已经调用，筛选阶段已冻结，不能再调用 get_target_detail。",
+                tool_name="get_target_detail",
+            )
         raw_ids = arguments.get("target_ids")
         if not isinstance(raw_ids, list) or not raw_ids:
             return {"error": "target_ids 必须是非空数组。"}
@@ -406,6 +491,111 @@ class RecommendationAgentTools:
             payload["note"] = f"超出上限的 id 未读取，累计上限 {MAX_DETAIL_TARGETS_TOTAL} 个。"
         return payload
 
+    def candidate_pool(self) -> CandidatePool:
+        """The current union. count_only and rejected calls contribute nothing."""
+        return build_deep_eval_pool(self.search_calls)
+
+    def _deep_evaluate_candidates(self) -> dict[str, Any]:
+        if self.deep_eval_called:
+            return self._policy_error(
+                "deep_eval_already_called",
+                "deep_evaluate_candidates 全程最多调用一次。",
+                tool_name="deep_evaluate_candidates",
+            )
+        pool = self.candidate_pool()
+        if not pool.candidate_ids:
+            return self._policy_error(
+                "deep_eval_requires_real_candidates",
+                "没有非 count_only 真实候选，不能调用深评。",
+                tool_name="deep_evaluate_candidates",
+            )
+
+        # Once a real pool reaches this point, success and failure have the
+        # same state transition: screening is frozen and deep eval is spent.
+        self.deep_eval_called = True
+        self.screening_frozen = True
+        candidates = {
+            candidate_id: {
+                **dict(self.candidates_by_id[candidate_id]),
+                **pool.source_for(candidate_id),
+            }
+            for candidate_id in pool.candidate_ids
+            if candidate_id in self.candidates_by_id
+        }
+        try:
+            if self._deep_eval_fn is None:
+                raise RuntimeError("深评执行器未配置")
+            result = self._deep_eval_fn(candidates_by_id=candidates, candidate_pool=pool)
+            if not isinstance(result, dict):
+                raise RuntimeError("深评执行器返回的不是对象")
+        except Exception as exc:  # noqa: BLE001 - controlled tool failure must freeze and return a status
+            result = {
+                "deep_eval_status": "unavailable",
+                "ranked": [],
+                "dropped": [],
+                "uncovered": [],
+                "fallback_reason": None,
+                "notes": [f"深评执行失败：{type(exc).__name__}: {exc}"],
+            }
+
+        result = self._attach_pool_to_deep_eval(result, pool)
+        self.deep_eval_result = result
+        self._emit_step(
+            {
+                "kind": "deep_eval",
+                "deep_eval_status": result.get("deep_eval_status"),
+                **pool.stats(),
+            }
+        )
+        return result
+
+    def run_deep_eval_if_needed(self) -> dict[str, Any]:
+        """Handler fallback for an agent that forgot the mandatory tool."""
+        if self.deep_eval_called:
+            return self.deep_eval_result or {
+                "deep_eval_status": "unavailable",
+                "ranked": [],
+                "dropped": [],
+                "uncovered": [],
+                "notes": ["深评已调用但没有留下结果"],
+            }
+        return self._deep_evaluate_candidates()
+
+    @staticmethod
+    def _attach_pool_to_deep_eval(
+        result: dict[str, Any],
+        pool: CandidatePool,
+    ) -> dict[str, Any]:
+        enriched = dict(result)
+        for bucket in ("ranked", "dropped"):
+            items: list[dict[str, Any]] = []
+            for raw in enriched.get(bucket) or []:
+                if not isinstance(raw, dict):
+                    continue
+                candidate_id = str(raw.get("id") or "")
+                items.append({**raw, **pool.source_for(candidate_id)})
+            enriched[bucket] = items
+        enriched["candidate_pool"] = pool.stats()
+        # An ok result already carries sources on every ranked/dropped item;
+        # duplicating all 40 candidates at the top level can double the tool
+        # payload.  Degraded results have no ranked list, so they keep the
+        # source map needed for SQL-order fallback.
+        if enriched.get("deep_eval_status") != "ok":
+            enriched["candidate_sources"] = pool.selected_sources()
+        return enriched
+
+    def _policy_error(
+        self,
+        code: str,
+        message: str,
+        *,
+        tool_name: str,
+    ) -> dict[str, Any]:
+        record = {"tool": tool_name, "code": code, "message": message}
+        self.policy_errors.append(record)
+        self._emit_step({"kind": "tool_rejected", **record})
+        return {"error": record}
+
     def _targets_in_deep_progress(self, target_ids: list[str]) -> set[str]:
         """Which of these are already in due diligence / agreement with someone.
 
@@ -469,10 +659,15 @@ class RecommendationAgentTools:
         return list(self.search_calls)
 
     def as_trace_payload(self) -> dict[str, Any]:
+        pool = self.candidate_pool()
         return {
             "search_calls": self.search_calls,
             "detail_target_ids": self.detail_target_ids,
-            "candidate_hit_counts": self.candidate_hit_counts,
+            "candidate_pool": pool.stats(),
+            "candidate_sources": pool.selected_sources(),
+            "policy_errors": self.policy_errors,
+            "screening_frozen": self.screening_frozen,
+            "deep_eval_called": self.deep_eval_called,
             "asked_user": self.ask_user_payload is not None,
         }
 

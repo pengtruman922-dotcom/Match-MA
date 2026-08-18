@@ -258,7 +258,7 @@ _NODE_ROW: dict[str, Any] = {
     "base_url": "https://example.invalid/v1",
     "api_key_secret_ref": "ref",
     "api_key_encrypted": None,
-    "prompt_version": "v0.2.0",
+    "prompt_version": "v0.3.1",
     "system_prompt": "你是分析师。方向：{{ mode }}",
     "user_prompt_template": "{{ anchor_context }}\n诉求：{{ qualitative_requirements_json }}\n候选：{{ candidates_json }}",
 }
@@ -274,8 +274,54 @@ _SNAPSHOT: dict[str, Any] = {
 }
 
 _CANDIDATES: dict[str, dict[str, Any]] = {
-    T1: {"seller_target_name": "杭州XX精密制造", "facts": {"net_profit_text": "2800万", "region": "浙江杭州"}},
-    T2: {"seller_target_name": "苏州YY装备", "facts": {"net_profit_text": "1900万"}},
+    T1: {
+        "seller_target_name": "杭州XX精密制造",
+        "facts": {"net_profit_text": "2800万", "region": "浙江杭州"},
+        "matched_group_ids": ["group-1", "group-2"],
+        "matched_search_call_ids": [1, 3, 4],
+        "group_hit_count": 2,
+        "search_hit_count": 3,
+        "screening_hits": [
+            {
+                "call_index": 1,
+                "group_id": "group-1",
+                "full_conditions": True,
+                "applied_conditions": {"min_net_profit_yuan": 10_000_000},
+                "relaxed_fields": [],
+            },
+            {
+                "call_index": 3,
+                "group_id": "group-1",
+                "full_conditions": False,
+                "applied_conditions": {},
+                "relaxed_fields": ["min_net_profit_yuan"],
+            },
+            {
+                "call_index": 4,
+                "group_id": "group-2",
+                "full_conditions": True,
+                "applied_conditions": {"industries_json": ["制造与工业"]},
+                "relaxed_fields": [],
+            },
+        ],
+    },
+    T2: {
+        "seller_target_name": "苏州YY装备",
+        "facts": {"net_profit_text": "1900万"},
+        "matched_group_ids": ["group-1"],
+        "matched_search_call_ids": [2],
+        "group_hit_count": 1,
+        "search_hit_count": 1,
+        "screening_hits": [
+            {
+                "call_index": 2,
+                "group_id": "group-1",
+                "full_conditions": False,
+                "applied_conditions": {},
+                "relaxed_fields": ["min_net_profit_yuan"],
+            }
+        ],
+    },
 }
 
 
@@ -294,7 +340,7 @@ def _fake_chat(captured: dict[str, Any], parsed: Any):
 
 
 def _run(monkeypatch, *, parsed: Any, snapshot: dict[str, Any] | None = None,
-         candidates: dict[str, dict[str, Any]] | None = None, hit_counts: dict[str, int] | None = None,
+         candidates: dict[str, dict[str, Any]] | None = None,
          captured: dict[str, Any] | None = None, db: _RecordingDb | None = None) -> dict[str, Any]:
     monkeypatch.setattr(module, "call_openai_compatible_chat", _fake_chat(captured if captured is not None else {}, parsed))
     return run_recommendation_deep_eval(
@@ -302,7 +348,6 @@ def _run(monkeypatch, *, parsed: Any, snapshot: dict[str, Any] | None = None,
         mode="buyer_to_target",
         intent_snapshot=snapshot if snapshot is not None else _SNAPSHOT,
         candidates_by_id=candidates if candidates is not None else _CANDIDATES,
-        hit_counts=hit_counts,
     )
 
 
@@ -311,7 +356,7 @@ def test_run_passes_all_four_variables_and_reports_the_prompt_version(monkeypatc
     result = _run(monkeypatch, parsed={"ranked": [{"id": T1, "rank": 1}, {"id": T2, "rank": 2}]}, captured=captured)
 
     assert result["deep_eval_status"] == "ok"
-    assert result["prompt_version"] == "v0.2.0"
+    assert result["prompt_version"] == "v0.3.1"
     assert result["model_name"] == "test-model"
     assert result["candidate_count"] == 2
     assert result["total_tokens"] == 1234
@@ -369,13 +414,11 @@ def test_case9_no_qualitative_requirements_still_produces_a_ranking(monkeypatch)
     assert injected == "[]"
 
 
-def test_case10_hit_counts_reach_the_deep_eval_input(monkeypatch) -> None:
-    """本阶段唯一的新数据流。漏了不会报错，只会让深评永远看不到「强候选」信号。"""
+def test_case10_group_search_counts_and_screening_sources_reach_deep_eval(monkeypatch) -> None:
     captured: dict[str, Any] = {}
     result = _run(
         monkeypatch,
         parsed={"ranked": [{"id": T1, "rank": 1}, {"id": T2, "rank": 2}]},
-        hit_counts={T1: 2, T2: 1},
         captured=captured,
     )
 
@@ -384,8 +427,15 @@ def test_case10_hit_counts_reach_the_deep_eval_input(monkeypatch) -> None:
         for message in captured["messages"]
         if "候选：" in message["content"]
     ))
-    assert {item["id"]: item["hit_count"] for item in payload} == {T1: 2, T2: 1}
-    assert result["candidate_hit_counts"] == {T1: 2, T2: 1}
+    by_id = {item["id"]: item for item in payload}
+    assert by_id[T1]["group_hit_count"] == 2
+    assert by_id[T1]["search_hit_count"] == 3
+    assert by_id[T1]["full_conditions"] is True
+    assert by_id[T2]["full_conditions"] is False
+    assert by_id[T2]["relaxed_fields"] == ["min_net_profit_yuan"]
+    assert by_id[T1]["screening_hits"][1]["full_conditions"] is False
+    assert result["candidate_group_hit_counts"] == {T1: 2, T2: 1}
+    assert result["candidate_search_hit_counts"] == {T1: 3, T2: 1}
 
 
 def test_case11_an_unconfigured_node_never_falls_back_to_the_understudy(monkeypatch) -> None:
@@ -479,7 +529,8 @@ def test_candidates_without_a_profile_say_so_out_loud() -> None:
 
     assert [item["profile"] for item in items] == [NO_PROFILE_TEXT, NO_PROFILE_TEXT]
     assert [item["id"] for item in items] == [T1, T2]
-    assert [item["hit_count"] for item in items] == [0, 0]
+    assert [item["group_hit_count"] for item in items] == [2, 1]
+    assert [item["search_hit_count"] for item in items] == [3, 1]
 
 
 def test_placeholder_fact_fields_do_not_reach_the_model() -> None:
@@ -505,11 +556,12 @@ def test_placeholder_fact_fields_do_not_reach_the_model() -> None:
 # =========================================================================
 
 
-def test_anchor_context_tells_the_model_the_hard_conditions_already_passed() -> None:
+def test_anchor_context_declares_a_baseline_without_claiming_every_candidate_passed_it() -> None:
     context = build_anchor_context(_SNAPSHOT)
 
     assert "找华东的制造业标的" in context
-    assert "不要重复判断" in context
+    assert "完整条件基线" in context
+    assert "不要重复判断" not in context
     assert "房地产与建筑" in context
     assert "预算大概三个亿" in context
     # 定性诉求有自己的变量，不在这里重复一遍。
@@ -547,34 +599,34 @@ def test_the_answer_brief_cannot_see_the_deep_eval() -> None:
 
 
 # =========================================================================
-# Prompt v0.3.0：变量必须真的被替换成值
+# Prompt v0.3.1：变量必须真的被替换成值
 # =========================================================================
 
 
 def _prompt_module():
-    path = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "publish_deep_eval_v030_prompt.py"
-    spec = importlib.util.spec_from_file_location("publish_deep_eval_v030_prompt", path)
+    path = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "publish_deep_eval_v031_prompt.py"
+    spec = importlib.util.spec_from_file_location("publish_deep_eval_v031_prompt", path)
     loaded = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(loaded)
     return loaded
 
 
-def test_prompt_v030_declares_exactly_the_variables_the_node_injects() -> None:
+def test_prompt_v031_declares_exactly_the_variables_the_node_injects() -> None:
     from backend.app.ai.prompting import extract_template_variables
     from backend.app.registry.nodes import node_by_name
 
     prompt = _prompt_module()
     spec = node_by_name(prompt.NODE_NAME)
     assert spec is not None
-    assert prompt.VERSION == "v0.3.0"
+    assert prompt.VERSION == "v0.3.1"
 
     used = set(extract_template_variables(prompt.SYSTEM_PROMPT, prompt.USER_PROMPT_TEMPLATE))
     assert used == set(spec.prompt_variables)
     assert "qualitative_requirements_json" in used
 
 
-def test_prompt_v030_renders_every_variable_into_a_value(monkeypatch) -> None:
+def test_prompt_v031_renders_every_variable_into_a_value(monkeypatch) -> None:
     """单花括号不会报错，只会让模型收到字面量 —— 上一轮就是这么错了一整轮。"""
     from backend.app.ai.prompting import render_template
     from backend.app.api.routes.model_config import _validate_prompt_variables
@@ -586,7 +638,10 @@ def test_prompt_v030_renders_every_variable_into_a_value(monkeypatch) -> None:
     values = {
         "mode": "buyer_to_target",
         "anchor_context": "【用户原话】找华东的制造业标的",
-        "candidates_json": json.dumps([{"id": T1, "hit_count": 2}], ensure_ascii=False),
+        "candidates_json": json.dumps(
+            [{"id": T1, "full_conditions": False, "relaxed_fields": ["min_net_profit_yuan"]}],
+            ensure_ascii=False,
+        ),
         "qualitative_requirements_json": json.dumps([REQ_A], ensure_ascii=False),
     }
     rendered = render_template(prompt.SYSTEM_PROMPT, values) + "\n" + render_template(
@@ -598,7 +653,7 @@ def test_prompt_v030_renders_every_variable_into_a_value(monkeypatch) -> None:
         assert value in rendered
 
 
-def test_prompt_v030_writes_the_closed_set_and_the_no_grading_rule_into_the_body() -> None:
+def test_prompt_v031_writes_sources_relaxation_and_the_no_grading_rule_into_the_body() -> None:
     prompt = _prompt_module()
     body = prompt.SYSTEM_PROMPT + prompt.USER_PROMPT_TEMPLATE
 
@@ -606,13 +661,16 @@ def test_prompt_v030_writes_the_closed_set_and_the_no_grading_rule_into_the_body
     for verdict in ("符合", "不符合", VERDICT_UNKNOWN):
         assert verdict in body
     assert "原文" in body                      # 判定的键用原文
-    assert "已经在数据库层筛过" in body          # 硬条件不要重判
+    for field in ("full_conditions", "relaxed_fields", "screening_hits"):
+        assert field in body
+    assert "group_hit_count" in body and "search_hit_count" in body
+    assert "不得把放宽后补充写成满足原 required" in body
     assert "明显不符合" in body                 # dropped 的门槛
     # few_shot_examples_json 是死存储，示例必须写进正文
     assert body.count('"ranked"') >= 2
 
 
-def test_prompt_v030_rejects_a_same_version_with_a_different_schema() -> None:
+def test_prompt_v031_rejects_a_same_version_with_a_different_schema() -> None:
     prompt = _prompt_module()
     conflicting = {
         "version": prompt.VERSION,
@@ -626,7 +684,7 @@ def test_prompt_v030_rejects_a_same_version_with_a_different_schema() -> None:
         prompt.ensure_existing_version_compatible([conflicting])
 
 
-def test_prompt_v030_conflict_exits_nonzero_instead_of_skipping(monkeypatch) -> None:
+def test_prompt_v031_conflict_exits_nonzero_instead_of_skipping(monkeypatch) -> None:
     prompt = _prompt_module()
 
     class FakeApi:
@@ -645,6 +703,6 @@ def test_prompt_v030_conflict_exits_nonzero_instead_of_skipping(monkeypatch) -> 
             }]
 
     monkeypatch.setattr(prompt, "_api_client", lambda: FakeApi)
-    monkeypatch.setattr(sys, "argv", ["publish_deep_eval_v030_prompt.py", "--dry-run"])
+    monkeypatch.setattr(sys, "argv", ["publish_deep_eval_v031_prompt.py", "--dry-run"])
 
     assert prompt.main() != 0

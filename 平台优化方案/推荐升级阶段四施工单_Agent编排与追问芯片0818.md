@@ -793,3 +793,104 @@ npm run lint
   变量全部替换，无双花括号残留。
 - 只读查询 `/model-config/prompts` 确认两个 v0.3.0 均为各自节点唯一
   `is_default=true` 且 `is_active=true` 的 Prompt。没有部署自建环境；本次推送只触发 Railway。
+
+### 4B 施工记录（2026-08-18）
+
+#### 基线、4A 验收与工作树
+
+- 开工分支 `main`，HEAD `ba05e8a5033c7b7b0fa02550d157dd166a87eb9e`
+  （`ba05e8a docs: 记录4A生产发布`）。先完整阅读 `AGENTS.md`、系统总纲、本施工单、4A
+  施工记录与实际源码/测试/发布脚本，再读设计框架；没有 pull / reset / checkout / stash / clean。
+- 开工前实际执行 4A 相关回归：
+  `python -m pytest -q tests/test_recommendation_agent_history.py tests/test_intent_parse_result.py
+  tests/test_recommendation_agent_turn.py tests/test_recommendation_deep_eval_node.py`
+  → `111 passed in 2.33s`。由源码与测试确认最近 5 轮、query parser v0.3.0 完整当前快照、
+  `intent_snapshot` 注入与 deep eval v0.3.0 脚本闭环均已存在，4B 才开始施工。
+- 工作树原有用户资产保持不动：阶段二施工单的既有修改以及 `.claude/`、UAT 表、其他施工文档等
+  未跟踪文件均未清理或覆盖。本总施工单已随 4A 提交纳入跟踪，本包只在第十一节末尾追加本记录。
+- 结束核查（2026-08-18 03:01 -07:00）：仍在 `main`，HEAD 仍为 `ba05e8a`；本包修改均未提交。
+  未 commit、未 push、未部署、未发布生产 Prompt。
+
+#### 实际代码与接口
+
+- `backend/app/services/recommendation_agent_policy.py`（新叶子模块）
+  - `compile_condition_groups()` 生成稳定的 `group-1...`；空/降级快照只生成 `fallback-0` 空组。
+    行业与重大风险排除编译为全组代码注入项。
+  - `validate_search_call()` 强制组内字段、每组首次真实查询完整基线、preferred/required 放宽依据、
+    `min_*` 只降 / `max_*` 只升、枚举/能力/行业/地区不得换新值、排除项不可删除。
+    required 只有所引用的同组真实调用召回不超过 5 家时才允许 Agent 作放宽判断；无效调用返回
+    结构化错误并由 executor 计入 6 次筛选预算。
+  - `build_deep_eval_pool()` 只汇总有效的非 `count_only` 批次；保留每批原始 ID 顺序；先按 ID 求
+    并集，超过 40 时先跨 `group_id` 轮询、同组再按批次调用先后轮询，稳定公平收口。
+- `backend/app/services/recommendation_agent_tools.py`
+  - `search_targets` schema 新增必填 `group_id`，放宽时使用 `relaxation_reason /
+    based_on_call_index`；运行时 enum 只含当前快照生成的组 id。
+  - 每个真实批次记录 `candidate_ids / full_conditions / relaxed_fields / excluded_by_condition` 与
+    放宽依据；SQL 仍独立执行，没有任何“排除前批 ID”的参数。
+  - 候选来源改为 `matched_group_ids / matched_search_call_ids / screening_hits /
+    group_hit_count / search_hit_count`，不再用一个含义混淆的 `candidate_hit_counts`。
+  - 新增无业务参数的 `deep_evaluate_candidates`。只有真实候选池非空才可调用；成功、
+    `unavailable` 或 `schema_mismatch` 后都冻结 `search_targets / get_target_detail`，全程最多一次。
+    trace 带 `raw_occurrences / unique_before_cap / unique_after_cap / capped` 及策略拒绝记录。
+- `backend/app/services/recommendation_deep_eval.py`
+  - 深评输入逐家带 `full_conditions / relaxed_fields / screening_hits` 以及分开的 group/search hit；
+    anchor 不再谎称每家都通过完整硬条件。
+  - 结果元数据使用 `candidate_group_hit_counts / candidate_search_hit_counts`；executor 再把完整
+    筛选来源并回 `ranked / dropped`。降级无 ranked 时返回候选来源映射，供主 Agent 按 SQL 顺序收尾。
+- `backend/app/jobs/handlers/recommendation.py`
+  - Agent context 新增代码生成的 `search_group_catalog`，但 4A 的降级 `intent_snapshot` 仍保持空结构化组；
+    工具执行器只拿这份安全快照，不能利用异常 fallback 载荷编条件。
+  - 深评从 handler 旁路改为主 Agent 可见工具。Agent 忘调时，代码自动补跑一次，再把完整深评结果
+    放回同一 Agent 节点做一次 `tools=None` 无工具收尾；不把深评机械截成前 5。
+  - 深评前、深评期间、深评后无工具收尾三个边界都重新检查 `agent_aborted`；任何中止都只留 trace，
+    不写 `agent_brief`。深评降级不终止本轮，也不把状态伪装为 ok。
+- `backend/app/registry/nodes.py`：只校准现有两个节点的运行时说明，没有新建节点或 Prompt 变量。
+- 测试：新增 `tests/test_recommendation_agent_policy.py`；更新
+  `tests/test_recommendation_agent_tools.py`、`tests/test_recommendation_deep_eval_node.py`、
+  `tests/test_recommendation_agent_turn.py`，覆盖 4B.8 的 17 项，包括 3×20/30 重复得到 30、
+  >40 公平稳定、组命中与搜索命中分离、required 正反例、排除注入、count_only、深评一次/冻结、
+  忘调自动补跑、两种深评降级和深评前后中止。
+
+#### Prompt v0.3.1 / v0.2.0（未 apply）
+
+- `scripts/publish_deep_eval_v031_prompt.py`（新）：复用
+  `recommendation_deep_eval_to_target`，目标 **v0.3.1**；正文要求逐家读取完整/放宽来源，
+  区分 group/search hit，放宽 required 不得写成完整满足，排除命中进入 dropped。
+- `scripts/publish_recommendation_agent_v020_prompt.py`（新）：复用
+  `recommendation_agent_to_target`，目标 **v0.2.0**；只读快照与组目录，每组先完整真实筛，
+  放宽必须引用真实信号，深评后才输出重点/备选/追问，ok 时 ID 只能来自 ranked。
+- 两份脚本均复用 `prompt_publish_utils` 的变量完全一致校验、同版本内容冲突非零失败与
+  render-preview 残留检查。没有写 seed 迁移，没有新建节点。
+- 本地检查：deep eval 变量 4/4（`mode / anchor_context / candidates_json /
+  qualitative_requirements_json`），main Agent 变量 2/2（`recommendation_context_json /
+  history_context`），均与 NodeSpec 完全一致。
+- 两份脚本 `--dry-run` 只读确认服务端尚无目标版本，均显示“将创建并设为默认”；两份
+  `--render-preview` 均成功，分别替换 4/4、2/2 变量，无未解析双花括号。**未执行 `--apply`**。
+
+#### 测试结果
+
+- 4B 相关回归（policy/tools/deep eval/agent turn，加 4A parser/history）最终一轮：
+  `159 passed in 1.97s`；后续小修继续由全量回归覆盖。
+- 全量最终回归：`python -m pytest -q`
+  → `1132 passed, 36 skipped, 5 warnings in 15.59s`。5 条仍是既有 Starlette
+  `HTTP_422_UNPROCESSABLE_ENTITY` 弃用警告，无失败。
+- `git diff --check` 无空白错误，仅 Windows 工作树既有 LF→CRLF 提示。
+
+#### 给 4C 的准确接口与边界
+
+- 深评落库/工具结果：`deep_eval_status`（`ok | unavailable | schema_mismatch`）、`ranked / dropped /
+  uncovered / notes / fallback_reason`、`candidate_pool`（四项计数）、`auto_invoked`。`ranked` 与
+  `dropped` 每项除定性判定、`fit_points / risks / info_gaps` 外，还带
+  `matched_group_ids / matched_search_call_ids / group_hit_count / search_hit_count / screening_hits`；
+  深评降级时顶层 `candidate_sources` 保存同样来源，按映射插入序即公平收口后的 SQL 初筛顺序。
+- 主 Agent 最终原始输出：仍是 v0.2.0 的 `understanding / deep_eval_status / recommended /
+  runner_ups / follow_up_suggestions`，保存在本轮 `ai_trace.parsed_output_json`，随后进入现有
+  `_build_answer_brief()`。4B 只保证 Agent 真正看过深评；3–6 家严格归一、ranked/dropped ID
+  代码校验、brief v2 与 Writer 接线仍由 4C 完成。
+- 候选来源：每个 `screening_hit` 精确给出 `call_index / group_id / full_conditions /
+  applied_conditions / relaxed_fields / relaxation_reason / based_on_call_index`；同组多批只增加
+  `search_hit_count`，跨组才增加 `group_hit_count`。
+- 降级语义：`unavailable/schema_mismatch` 都冻结筛选但不中断本轮，主 Agent 能看到状态与公平候选
+  顺序并降级收尾；不得把状态改成 ok。没有真实候选时深评工具返回结构化拒绝且不消耗唯一一次深评。
+- 中止语义：深评前中止不调用深评；深评进行中或完成后中止可以在 trace 留下已发生工作，但绝不生成
+  `agent_brief`，因此 SSE/Writer 没有后续正文或芯片可生成。`agent_aborted` 继续拥有最高优先级。

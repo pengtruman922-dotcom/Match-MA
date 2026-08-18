@@ -162,20 +162,18 @@ def build_deep_eval_candidates(
     *,
     mode: str,
     candidates_by_id: dict[str, dict[str, Any]],
-    hit_counts: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     """本轮全部候选的完整画像，按初筛序（首次被登记的顺序）。
 
-    `hit_count` 是这个标的被几组筛选条件命中。重复命中本身是信号：同时满足
-    「机器行业」和「机器行业 + 杭州 + 上市」两组条件的标的，比只满足前者的强得多。
-    `0` 表示它不是筛出来的，是 agent 按 id 直接取详情带进来的。
+    ``group_hit_count`` 与 ``search_hit_count`` 刻意分开：前者表示命中过几个
+    不同需求组，是深评的强信号；后者只表示在几次筛选中重复出现，是稳定性解释。
+    同一组的完整筛和放宽筛都命中，前者仍然只能算 1。
     """
     entity_type = _ENTITY_TYPE_BY_MODE.get(mode)
     name_key = _NAME_KEY_BY_MODE.get(mode)
     if not entity_type or not name_key:
         raise ValueError(f"No deep eval candidate shape is registered for mode {mode!r}")
 
-    counts = hit_counts or {}
     ids = [key for key in candidates_by_id if str(key or "").strip()]
     sections_by_id = load_profile_sections(db, entity_type=entity_type, entity_ids=ids)
 
@@ -183,11 +181,24 @@ def build_deep_eval_candidates(
     for candidate_id in ids:
         candidate = candidates_by_id.get(candidate_id) or {}
         profile = render_profile_text(sections_by_id.get(candidate_id), entity_type=entity_type)
+        hits = [dict(item) for item in (candidate.get("screening_hits") or []) if isinstance(item, dict)]
+        relaxed_fields: list[str] = []
+        for hit in hits:
+            for value in hit.get("relaxed_fields") or []:
+                field = str(value or "").strip()
+                if field and field not in relaxed_fields:
+                    relaxed_fields.append(field)
         items.append(
             {
                 "id": candidate_id,
                 "name": candidate.get(name_key),
-                "hit_count": int(counts.get(candidate_id, 0)),
+                "full_conditions": any(bool(hit.get("full_conditions")) for hit in hits),
+                "relaxed_fields": relaxed_fields,
+                "matched_group_ids": list(candidate.get("matched_group_ids") or []),
+                "matched_search_call_ids": list(candidate.get("matched_search_call_ids") or []),
+                "group_hit_count": int(candidate.get("group_hit_count") or 0),
+                "search_hit_count": int(candidate.get("search_hit_count") or 0),
+                "screening_hits": hits,
                 "facts": _candidate_facts(candidate.get("facts")),
                 "profile": profile or NO_PROFILE_TEXT,
             }
@@ -202,8 +213,9 @@ def build_anchor_context(
 ) -> str:
     """需求快照渲染成给模型读的一段文本。定性诉求不在这里 —— 它有自己的变量。
 
-    结构化条件要写进来，但目的与直觉相反：**告诉模型硬门槛已经在 SQL 层过滤过了，
-    不要重复判断**，更不要因为「营收只比门槛高一点」扣分。排除项同理，只用于解释。
+    结构化条件要写进来，但不能再笼统宣称每家都通过完整门槛：4B 允许 Agent 在
+    有真实召回依据时放宽。每家的 ``full_conditions / relaxed_fields /
+    screening_hits`` 才是它实际通过了什么的事实源。
     """
     data = snapshot if isinstance(snapshot, dict) else {}
     parts: list[str] = []
@@ -215,15 +227,14 @@ def build_anchor_context(
     groups = data.get("condition_groups") or []
     if groups:
         parts.append(
-            "【已生效的硬条件（初筛 SQL 已按它们过滤过，不要重复判断，也不要因为"
-            "「只比门槛高一点」扣分）】\n"
+            "【当前需求的完整条件基线】\n"
             + json.dumps(groups, ensure_ascii=False, default=str)
         )
 
     exclusions = data.get("exclusions") if isinstance(data.get("exclusions"), dict) else {}
     if exclusions.get("industries") or exclusions.get("risk_flags"):
         parts.append(
-            "【已生效的排除项（同样已在 SQL 层生效，仅供你解释判断）】\n"
+            "【始终由代码强制执行的排除项】\n"
             + json.dumps(exclusions, ensure_ascii=False, default=str)
         )
 
@@ -525,7 +536,6 @@ def run_recommendation_deep_eval(
     mode: str,
     intent_snapshot: dict[str, Any],
     candidates_by_id: dict[str, dict[str, Any]],
-    hit_counts: dict[str, int] | None = None,
     buyer_party_id: Any = None,
 ) -> dict[str, Any]:
     """跑一次深评节点，产出这一轮的定性判定与排序。
@@ -546,9 +556,7 @@ def run_recommendation_deep_eval(
     started = time.perf_counter()
     try:
         node = _get_deep_eval_node_config(db, mode)
-        items = build_deep_eval_candidates(
-            db, mode=mode, candidates_by_id=candidates_by_id, hit_counts=hit_counts
-        )
+        items = build_deep_eval_candidates(db, mode=mode, candidates_by_id=candidates_by_id)
         if not items:
             raise ValueError("本轮没有候选，深评无从做起")
         variables = {
@@ -597,7 +605,12 @@ def run_recommendation_deep_eval(
             "mode": mode,
             "qualitative_requirements": qualitative,
             "candidate_count": len(items),
-            "candidate_hit_counts": {item["id"]: item["hit_count"] for item in items},
+            "candidate_group_hit_counts": {
+                item["id"]: item["group_hit_count"] for item in items
+            },
+            "candidate_search_hit_counts": {
+                item["id"]: item["search_hit_count"] for item in items
+            },
             # 哪一版提示词、哪个模型产出的这份排序，一起落库：失配要响，得先能指认。
             "node_name": node.get("node_name"),
             "prompt_version": str(node.get("prompt_version") or ""),

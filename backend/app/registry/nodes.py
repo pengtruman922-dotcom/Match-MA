@@ -209,8 +209,13 @@ NODES: tuple[NodeSpec, ...] = (
         # 0818 起这个节点服务对话链路的新形态深评：逐条判定定性诉求、整体提交、
         # 只排序不评级（见 services/recommendation_deep_eval.py）。旧的 /candidates
         # 链路仍走共用节点的旧形态提示词，两边的提示词不能互抄。
-        description="固定买家需求，逐条判定定性诉求并对候选标的重排序。",
-        runtime_inputs=("推荐方向", "买家需求条件与画像", "定性诉求清单", "候选标的清单（整体提交，不分片）"),
+        description="固定买家需求，读取完整/放宽筛选来源，逐条判定定性诉求并对候选标的重排序。",
+        runtime_inputs=(
+            "推荐方向",
+            "买家需求条件与画像",
+            "定性诉求清单",
+            "候选标的清单及条件组/调用/放宽来源（整体提交，不分片）",
+        ),
         prompt_variables=("mode", "anchor_context", "candidates_json", "qualitative_requirements_json"),
         understudy="recommendation_deep_eval",
         understudy_kind="solo",
@@ -242,15 +247,16 @@ NODES: tuple[NodeSpec, ...] = (
         domain="recommendation",
         node_type="llm",
         description=(
-            "把一段自然语言并购需求变成推荐结果的编排者：理解需求、决定筛几次、"
-            "读少数候选的详情、产出写作素材包。初筛与打分仍由代码执行，"
+            "只读需求解析快照，编排分组 SQL 初筛与可追溯放宽，调用一次受控深评，"
+            "看到深评结果后再产出写作素材。初筛与候选并集仍由代码执行，"
             "本节点只选择工具参数，永远拿不到全库。"
         ),
         runtime_inputs=(
             "用户输入的需求原文",
             "最近 5 轮已完成对话的原文（中止的轮次不带）",
             "需求解析节点产出的完整当前需求快照",
-            "可用过滤条件与预算",
+            "代码生成的条件组 id、可用过滤条件与预算",
+            "深评工具返回的排序、逐条判定、风险、缺口与筛选来源",
         ),
         prompt_variables=("recommendation_context_json", "history_context"),
         agent_mode="buyer_to_target",

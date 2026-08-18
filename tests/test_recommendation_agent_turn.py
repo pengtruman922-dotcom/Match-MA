@@ -1,5 +1,9 @@
-"""Agent turn contract: the brief joins model picks to code-held facts."""
+"""Agent turn contract: deep eval is visible before the code-held brief join."""
 
+import importlib.util
+import json
+import pathlib
+import sys
 from typing import Any
 from types import SimpleNamespace
 from uuid import uuid4
@@ -12,14 +16,26 @@ from backend.app.api.routes.recommendations import (
     RecommendationAgentTurnRequest,
 )
 from backend.app.jobs.handlers.recommendation import (
+    _agent_finalize_after_auto_deep_eval,
     _build_answer_brief,
     _build_recommendation_agent_context,
 )
+from backend.app.ai.llm_client import ToolCall
+from backend.app.services.screening_sql import ScreeningResult
 from backend.app.registry.nodes import (
     recommendation_agent_node_by_mode,
     recommendation_answer_writer_node_by_mode,
 )
 from backend.app.services.recommendation_agent_tools import RecommendationAgentTools
+
+
+def _agent_prompt_module():
+    path = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "publish_recommendation_agent_v020_prompt.py"
+    spec = importlib.util.spec_from_file_location("publish_recommendation_agent_v020_prompt", path)
+    loaded = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(loaded)
+    return loaded
 
 
 def _tools_with(candidates: dict[str, dict[str, Any]]) -> RecommendationAgentTools:
@@ -160,6 +176,7 @@ def test_agent_context_receives_the_real_intent_snapshot() -> None:
         "parser_status": "ok",
     }
     assert context["intent_snapshot_policy"]["allow_agent_invent_structured_conditions"] is False
+    assert context["search_group_catalog"][0]["group_id"] == "group-1"
     assert "history_context" not in context
 
 
@@ -185,6 +202,16 @@ def test_parser_degradation_clears_structured_conditions_before_the_agent(status
         "parser_status": status,
     }
     assert context["intent_snapshot_policy"]["on_parser_failure"] == "只允许无条件初筛或向用户提问"
+    assert context["search_group_catalog"] == [
+        {
+            "group_id": "fallback-0",
+            "label": "无结构化条件",
+            "conditions": {},
+            "strength": {},
+            "enforced_exclusions": {},
+            "fallback": True,
+        }
+    ]
 
 
 def test_abort_after_parsing_persists_understanding_but_never_enters_the_tool_loop(monkeypatch) -> None:
@@ -238,6 +265,242 @@ def test_abort_after_parsing_persists_understanding_but_never_enters_the_tool_lo
     assert result["outcome"] == "aborted"
     assert persisted == [snapshot]
     assert db.commits == 1
+
+
+class _Usage:
+    def __init__(self) -> None:
+        self.llm_calls = 1
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.total_tokens = 0
+        self.latency_ms = 10
+        self.tool_calls_by_name: dict[str, int] = {}
+
+    def record_llm(self, _result) -> None:
+        self.llm_calls += 1
+
+
+def _llm_result(payload: dict[str, Any]):
+    return SimpleNamespace(
+        parsed_output_json=payload,
+        raw_output_text=json.dumps(payload, ensure_ascii=False),
+    )
+
+
+def test_auto_deep_eval_result_is_given_back_to_the_same_agent_without_tools(monkeypatch) -> None:
+    from backend.app.jobs.handlers import recommendation as handler
+
+    first = _llm_result({"recommended": [{"id": "t-1"}]})
+    final = _llm_result({"deep_eval_status": "ok", "recommended": [{"id": "t-2"}]})
+    loop = SimpleNamespace(
+        result=first,
+        messages=[{"role": "user", "content": "找制造业"}],
+        usage=_Usage(),
+        json_finalization_attempted=False,
+    )
+    captured: dict[str, Any] = {}
+
+    def chat(*, messages, tools):
+        captured["messages"] = messages
+        captured["tools"] = tools
+        return final
+
+    monkeypatch.setattr(handler, "_agent_chat_caller", lambda _config: chat)
+
+    result = _agent_finalize_after_auto_deep_eval(
+        loop,
+        node_config={},
+        deep_eval={"deep_eval_status": "ok", "ranked": [{"id": "t-2"}], "dropped": []},
+    )
+
+    assert result.result is final
+    assert captured["tools"] is None
+    assert "忘了调用必经的深评工具" in captured["messages"][-1]["content"]
+    assert '"id": "t-2"' in captured["messages"][-1]["content"]
+    assert result.usage.llm_calls == 2
+
+
+def _exercise_handler_4b(
+    monkeypatch,
+    *,
+    deep_status: str = "ok",
+    abort_checks: list[bool] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    from backend.app.jobs.handlers import recommendation as handler
+
+    class EmptyRows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return []
+
+    class Db:
+        commits = 0
+
+        def commit(self):
+            self.commits += 1
+
+        def execute(self, *_args, **_kwargs):
+            return EmptyRows()
+
+    def screen(_db, conditions, *, limit, offset=0, count_only=False):
+        rows = [] if count_only else [{
+            "id": "t-1",
+            "target_name": "标的一",
+            "current_net_profit_yuan": 10_000_000,
+        }]
+        return ScreeningResult(
+            conditions=dict(conditions),
+            matched=1,
+            excluded_by_condition={},
+            rows=rows,
+            ignored=[],
+            limit=limit,
+            offset=offset,
+            count_only=count_only,
+        )
+
+    real_tools = RecommendationAgentTools
+
+    def tools_factory(db, **kwargs):
+        return real_tools(db, screen_targets_fn=screen, **kwargs)
+
+    state: dict[str, Any] = {"deep_calls": 0, "finalize_calls": 0, "briefs": [], "deep_messages": []}
+    checks = iter(abort_checks or [])
+    monkeypatch.setattr(handler, "RecommendationAgentTools", tools_factory)
+    monkeypatch.setattr(handler, "_resolve_entity_id", lambda *_args, **_kwargs: uuid4())
+    monkeypatch.setattr(
+        handler,
+        "_get_default_node_config",
+        lambda *_args, **_kwargs: {
+            "node_name": "recommendation_agent_to_target",
+            "base_url": "https://example.invalid",
+            "api_key_secret_ref": "x",
+            "model_name": "test",
+            "temperature": 0.2,
+            "top_p": 1,
+            "max_tokens": 1000,
+            "timeout_seconds": 30,
+            "response_format": "json_object",
+        },
+    )
+    monkeypatch.setattr(handler, "agent_turn_aborted", lambda *_args, **_kwargs: next(checks, False))
+    monkeypatch.setattr(
+        handler,
+        "parse_recommendation_intent",
+        lambda *_args, **_kwargs: {
+            "condition_groups": [],
+            "qualitative_requirements": ["制造业"],
+            "exclusions": {"industries": [], "risk_flags": []},
+            "unstructured_notes": [],
+            "parser_status": "fallback",
+        },
+    )
+    monkeypatch.setattr(handler, "_render_prompt_messages", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(handler, "_agent_image_inputs", lambda *_args, **_kwargs: ([], []))
+    monkeypatch.setattr(handler, "build_agent_tools", lambda *_args, **_kwargs: [])
+    for name in ("_insert_agent_understanding_message", "_insert_agent_step_message", "_insert_agent_question_message"):
+        monkeypatch.setattr(handler, name, lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        handler,
+        "_insert_agent_brief_message",
+        lambda *_args, **kwargs: state["briefs"].append(kwargs["brief"]),
+    )
+    monkeypatch.setattr(
+        handler,
+        "_insert_agent_deep_eval_message",
+        lambda *_args, **kwargs: state["deep_messages"].append(kwargs["result"]),
+    )
+    monkeypatch.setattr(handler, "_insert_recommendation_agent_trace", lambda *_args, **_kwargs: None)
+
+    def run_loop(**kwargs):
+        executor = kwargs["execute_tool"].__self__
+        screened = executor.execute(
+            ToolCall(
+                id="s1",
+                name="search_targets",
+                arguments={"group_id": "fallback-0", "conditions": {}},
+                raw_arguments="{}",
+            )
+        )
+        assert screened["returned_count"] == 1
+        return SimpleNamespace(
+            result=_llm_result({"recommended": [{"id": "t-1"}]}),
+            messages=[],
+            usage=_Usage(),
+            hit_iteration_limit=False,
+            json_finalization_attempted=False,
+        )
+
+    monkeypatch.setattr(handler, "run_tool_loop", run_loop)
+
+    def deep_eval(*_args, **kwargs):
+        state["deep_calls"] += 1
+        assert list(kwargs["candidates_by_id"]) == ["t-1"]
+        return {
+            "deep_eval_status": deep_status,
+            "ranked": [{"id": "t-1", "rank": 1}] if deep_status == "ok" else [],
+            "dropped": [],
+            "uncovered": [],
+            "notes": [],
+        }
+
+    monkeypatch.setattr(handler, "run_recommendation_deep_eval", deep_eval)
+
+    def finalize(loop, **kwargs):
+        state["finalize_calls"] += 1
+        assert kwargs["deep_eval"]["deep_eval_status"] == deep_status
+        loop.result = _llm_result(
+            {"deep_eval_status": deep_status, "recommended": [{"id": "t-1"}]}
+        )
+        return loop
+
+    monkeypatch.setattr(handler, "_agent_finalize_after_auto_deep_eval", finalize)
+    db = Db()
+    job = SimpleNamespace(
+        id=uuid4(),
+        job_type="recommendation_agent",
+        payload_json={
+            "mode": "buyer_to_target",
+            "turn_id": "turn-1",
+            "user_message": "制造业",
+            "history_context": "",
+        },
+    )
+    return handler._handle_recommendation_agent(db, job), state
+
+
+@pytest.mark.parametrize("deep_status", ["ok", "unavailable", "schema_mismatch"])
+def test_agent_forgets_deep_eval_code_runs_it_and_turn_still_finishes(monkeypatch, deep_status) -> None:
+    result, state = _exercise_handler_4b(monkeypatch, deep_status=deep_status)
+
+    assert result["outcome"] == "brief_ready"
+    assert result["deep_eval_status"] == deep_status
+    assert state["deep_calls"] == 1
+    assert state["finalize_calls"] == 1
+    assert len(state["briefs"]) == 1
+    assert state["deep_messages"][0]["auto_invoked"] is True
+
+
+@pytest.mark.parametrize(
+    ("abort_checks", "expected_deep_calls"),
+    [
+        ([False, False, False, True], 0),
+        ([False, False, False, False, True], 1),
+    ],
+)
+def test_abort_before_or_after_deep_eval_never_writes_a_brief(
+    monkeypatch,
+    abort_checks,
+    expected_deep_calls,
+) -> None:
+    result, state = _exercise_handler_4b(monkeypatch, abort_checks=abort_checks)
+
+    assert result["outcome"] == "aborted"
+    assert state["deep_calls"] == expected_deep_calls
+    assert state["finalize_calls"] == 0
+    assert state["briefs"] == []
 
 
 # -- request contract ----------------------------------------------------
@@ -296,3 +559,80 @@ def test_agent_and_writer_are_distinct_nodes() -> None:
     writer = recommendation_answer_writer_node_by_mode()["buyer_to_target"]
 
     assert agent != writer
+
+
+# -- main Agent Prompt v0.2.0 ------------------------------------------
+
+
+def test_agent_prompt_v020_uses_exactly_the_node_variables() -> None:
+    from backend.app.ai.prompting import extract_template_variables
+    from backend.app.registry.nodes import node_by_name
+
+    prompt = _agent_prompt_module()
+    spec = node_by_name(prompt.NODE_NAME)
+    assert spec is not None
+    assert prompt.VERSION == "v0.2.0"
+    assert set(extract_template_variables(prompt.SYSTEM_PROMPT, prompt.USER_PROMPT_TEMPLATE)) == set(
+        spec.prompt_variables
+    )
+
+
+def test_agent_prompt_v020_spells_out_the_4b_orchestration_contract() -> None:
+    prompt = _agent_prompt_module()
+    body = prompt.SYSTEM_PROMPT + prompt.USER_PROMPT_TEMPLATE
+
+    for phrase in (
+        "只读当前快照",
+        "每组先完整真实筛",
+        "based_on_call_index",
+        "排除行业与重大风险",
+        "deep_evaluate_candidates",
+        "不能来自 `dropped`",
+        "不能冒充多方案命中",
+        "不要把深评机械截成前 5",
+    ):
+        assert phrase in body
+
+
+def test_agent_prompt_v020_renders_both_variables() -> None:
+    from backend.app.ai.prompting import render_template
+
+    prompt = _agent_prompt_module()
+    values = {
+        "recommendation_context_json": json.dumps(
+            {"intent_snapshot": {"parser_status": "ok"}, "search_group_catalog": []},
+            ensure_ascii=False,
+        ),
+        "history_context": "<history_context>历史</history_context>",
+    }
+    rendered = render_template(prompt.SYSTEM_PROMPT, values) + render_template(
+        prompt.USER_PROMPT_TEMPLATE, values
+    )
+
+    for name, value in values.items():
+        assert "{{ " + name + " }}" not in rendered
+        assert value in rendered
+
+
+def test_agent_prompt_v020_same_version_conflict_exits_nonzero(monkeypatch) -> None:
+    prompt = _agent_prompt_module()
+
+    class FakeApi:
+        @staticmethod
+        def _resolve_token(_base):
+            return "token"
+
+        @staticmethod
+        def _request_json(*_args, **_kwargs):
+            return [{
+                "version": prompt.VERSION,
+                "system_prompt": "冲突正文",
+                "user_prompt_template": prompt.USER_PROMPT_TEMPLATE,
+                "output_schema_json": prompt.OUTPUT_SCHEMA,
+                "variables_json": list(prompt.EXPECTED_VARIABLES),
+            }]
+
+    monkeypatch.setattr(prompt, "_api_client", lambda: FakeApi)
+    monkeypatch.setattr(sys, "argv", ["publish_recommendation_agent_v020_prompt.py", "--dry-run"])
+
+    assert prompt.main() != 0

@@ -46,6 +46,7 @@ from backend.app.services.recommendation_agent_tools import (
     RecommendationAgentTools,
     build_agent_tools,
 )
+from backend.app.services.recommendation_agent_policy import compile_condition_groups
 from backend.app.services.recommendation_conditions import (
     describe_intent_snapshot,
     parse_recommendation_intent,
@@ -313,8 +314,9 @@ DEEP_EVAL_FALLBACK_NODE = deep_eval_understudy_node_name()
 # 编排 Agent。刻意没有共用兜底节点：两个方向的工具集不同，一份提示词兜不住。
 RECOMMENDATION_AGENT_NODE_BY_MODE = recommendation_agent_node_by_mode()
 
-# tool_loop 的默认 8000 装不下 30 条候选摘要；调大到能容纳一次满额 search_targets。
-AGENT_TOOL_RESULT_LIMIT = 16000
+# 深评工具要把最多 40 家的判定与筛选来源完整回灌给主 Agent，不能沿用网页抓取
+# 类工具的 8000 字截断。这里仍是防御上限；候选数量由策略层锁在 40。
+AGENT_TOOL_RESULT_LIMIT = 240000
 AGENT_MAX_ITERATIONS = 12
 
 # 用户对整次推荐的耐心是 2-5 分钟，编排阶段留 4 分钟，剩下的给流式写作。
@@ -370,6 +372,9 @@ def _build_recommendation_agent_context(
     return {
         "user_message": user_message,
         "intent_snapshot": safe_snapshot,
+        "search_group_catalog": [
+            group.as_context_dict() for group in compile_condition_groups(safe_snapshot)
+        ],
         "intent_snapshot_policy": {
             "condition_groups_are_the_only_structured_baseline": True,
             "allow_agent_invent_structured_conditions": False,
@@ -481,13 +486,20 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
         db,
         target_facts_fn=target_facts_for_agent,
         step_sink=step_sink,
+        intent_snapshot=agent_context["intent_snapshot"],
+        deep_eval_fn=lambda *, candidates_by_id, candidate_pool: run_recommendation_deep_eval(
+            db,
+            mode=mode,
+            intent_snapshot={**intent_snapshot, **agent_context["intent_snapshot"]},
+            candidates_by_id=candidates_by_id,
+        ),
     )
     started = time.perf_counter()
     try:
         loop = run_tool_loop(
             chat=_agent_chat_caller(node_config),
             messages=messages,
-            tools=build_agent_tools(db),
+            tools=build_agent_tools(db, tools.compiled_groups),
             execute_tool=tools.execute,
             max_iterations=AGENT_MAX_ITERATIONS,
             tool_result_limit=AGENT_TOOL_RESULT_LIMIT,
@@ -508,6 +520,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             latency_ms=int((time.perf_counter() - started) * 1000),
             tools=tools,
             intent_snapshot=intent_snapshot,
+            deep_eval=tools.deep_eval_result,
             error_message="用户中止了本轮编排。",
         )
         db.commit()
@@ -534,6 +547,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             latency_ms=int((time.perf_counter() - started) * 1000),
             tools=tools,
             intent_snapshot=intent_snapshot,
+            deep_eval=tools.deep_eval_result,
             error_message=str(exc),
         )
         db.commit()
@@ -554,6 +568,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             latency_ms=loop.usage.latency_ms,
             tools=tools,
             intent_snapshot=intent_snapshot,
+            deep_eval=tools.deep_eval_result,
             error_message="用户中止了本轮编排。",
         )
         db.commit()
@@ -568,26 +583,69 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             "recommended_count": 0,
         }
 
-    # ② 定性诉求的消费者。agent loop 跑完之后、写作素材包之前，把全部候选连同这一轮
-    # 的定性诉求交给一次干净上下文的调用，逐条判定再重排序。
-    #
-    # **本阶段只产出、不改最终答案**：结果写成一条 agent_deep_eval 消息落库，
-    # 素材包保持原样，写作节点看不到它。接进最终名单是阶段四。这样切是有意的 ——
-    # 深评的质量要在真实数据上看了才知道，而在它稳定之前就让它决定用户看到的名单，
-    # 出了问题连对照组都没有。阶段二的需求快照就是这么先落库再接线的。
-    #
-    # 两种情况不跑：本轮一个候选都没有（没东西可评），以及本轮的输出是一个问题而不是
-    # 一份名单（ask_user 结束的轮次没有名单可排，白花一次调用）。除此之外无条件跑 ——
-    # 尤其是快照降级（parser_status 非 ok）和定性诉求为空这两种，照跑。
-    deep_eval: dict[str, Any] | None = None
-    if tools.candidates_by_id and tools.ask_user_payload is None:
-        deep_eval = run_recommendation_deep_eval(
-            db,
-            mode=mode,
-            intent_snapshot=intent_snapshot,
-            candidates_by_id=tools.candidates_by_id,
-            hit_counts=tools.candidate_hit_counts,
+    # 深评现在是主 Agent 可见的受控工具。正常路径里 Agent 自己调用；如果它有真实
+    # 候选却忘了调用，代码补跑一次，再把结果交回同一个节点做一次无工具收尾。
+    # count_only、按 id 取详情都不构成深评候选；候选池只来自真实初筛批次。
+    deep_eval: dict[str, Any] | None = tools.deep_eval_result
+    auto_deep_eval = False
+    if (
+        tools.ask_user_payload is None
+        and tools.candidate_pool().candidate_ids
+        and not tools.deep_eval_called
+    ):
+        if agent_turn_aborted(db, session_id, turn_id):
+            return _finish_aborted_agent_turn(
+                db,
+                job=job,
+                session_id=session_id,
+                turn_id=turn_id,
+                node_config=node_config,
+                agent_context=agent_context,
+                conversation=loop.messages,
+                loop=loop,
+                tools=tools,
+                intent_snapshot=intent_snapshot,
+                error_message="用户在自动深评前中止了本轮编排。",
+            )
+        deep_eval = tools.run_deep_eval_if_needed()
+        auto_deep_eval = True
+        if agent_turn_aborted(db, session_id, turn_id):
+            return _finish_aborted_agent_turn(
+                db,
+                job=job,
+                session_id=session_id,
+                turn_id=turn_id,
+                node_config=node_config,
+                agent_context=agent_context,
+                conversation=loop.messages,
+                loop=loop,
+                tools=tools,
+                intent_snapshot=intent_snapshot,
+                error_message="用户在自动深评期间中止了本轮编排。",
+            )
+        loop = _agent_finalize_after_auto_deep_eval(
+            loop,
+            node_config=node_config,
+            deep_eval=deep_eval,
         )
+        if agent_turn_aborted(db, session_id, turn_id):
+            return _finish_aborted_agent_turn(
+                db,
+                job=job,
+                session_id=session_id,
+                turn_id=turn_id,
+                node_config=node_config,
+                agent_context=agent_context,
+                conversation=loop.messages,
+                loop=loop,
+                tools=tools,
+                intent_snapshot=intent_snapshot,
+                error_message="用户在深评后的无工具收尾期间中止了本轮编排。",
+            )
+
+    if deep_eval is not None:
+        deep_eval = {**deep_eval, "auto_invoked": auto_deep_eval}
+        tools.deep_eval_result = deep_eval
         _insert_agent_deep_eval_message(
             db,
             session_id=session_id,
@@ -595,7 +653,6 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             job_id=job.id,
             result=deep_eval,
         )
-        # 与 agent_step / agent_understanding 同样的理由：即时提交，前端轮询看得到。
         db.commit()
 
     if tools.ask_user_payload is not None:
@@ -644,6 +701,91 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
         "detail_targets": len(tools.detail_target_ids),
         "recommended_count": len((brief or {}).get("recommended") or []),
         "deep_eval_status": (deep_eval or {}).get("deep_eval_status", "not_run"),
+    }
+
+
+def _agent_finalize_after_auto_deep_eval(
+    loop: Any,
+    *,
+    node_config: dict[str, Any],
+    deep_eval: dict[str, Any],
+) -> Any:
+    """Give an agent that forgot deep eval one tool-free chance to finish.
+
+    The first draft is preserved in the conversation for audit.  The deep-eval
+    result is then appended as authoritative tool output; the same configured
+    agent node performs the final JSON turn without any tools.
+    """
+    conversation = list(loop.messages)
+    previous = loop.result.raw_output_text
+    if not previous and isinstance(loop.result.parsed_output_json, dict):
+        previous = json.dumps(loop.result.parsed_output_json, ensure_ascii=False, default=str)
+    conversation.append({"role": "assistant", "content": previous or "{}"})
+    conversation.append(
+        {
+            "role": "user",
+            "content": (
+                "你在有真实候选时直接收尾，忘了调用必经的深评工具。代码已经自动补跑一次。"
+                "下面是本轮唯一可用的深评结果。请读完后重新输出最终 JSON；不得再调用工具。"
+                "deep_eval_status=ok 时，最终推荐 id 只能来自 ranked，不能来自 dropped 或候选池外；"
+                "unavailable/schema_mismatch 时如实标明降级，可按 SQL 初筛顺序收尾。\n\n"
+                + json.dumps(deep_eval, ensure_ascii=False, default=str)
+            ),
+        }
+    )
+    try:
+        result = _agent_chat_caller(node_config)(messages=conversation, tools=None)
+    except LlmCallError as exc:
+        notes = deep_eval.setdefault("notes", [])
+        notes.append(f"深评后的无工具收尾失败，沿用 Agent 首次原始输出：{exc}")
+        return loop
+    loop.usage.record_llm(result)
+    loop.result = result
+    loop.messages = conversation
+    loop.json_finalization_attempted = True
+    return loop
+
+
+def _finish_aborted_agent_turn(
+    db: Session,
+    *,
+    job: JobClaim,
+    session_id: UUID,
+    turn_id: str,
+    node_config: dict[str, Any],
+    agent_context: dict[str, Any],
+    conversation: list[dict[str, Any]],
+    loop: Any,
+    tools: RecommendationAgentTools,
+    intent_snapshot: dict[str, Any],
+    error_message: str,
+) -> dict[str, object]:
+    """Abort wins before/after deep eval: trace the work, never write a brief."""
+    _insert_recommendation_agent_trace(
+        db,
+        job=job,
+        session_id=session_id,
+        node_config=node_config,
+        status="succeeded",
+        input_json=agent_context,
+        conversation=conversation,
+        loop=loop,
+        latency_ms=loop.usage.latency_ms,
+        tools=tools,
+        intent_snapshot=intent_snapshot,
+        deep_eval=tools.deep_eval_result,
+        error_message=error_message,
+    )
+    db.commit()
+    return {
+        "handled": True,
+        "job_type": job.job_type,
+        "session_id": str(session_id),
+        "turn_id": turn_id,
+        "outcome": "aborted",
+        "search_calls": len(tools.search_calls),
+        "detail_targets": len(tools.detail_target_ids),
+        "recommended_count": 0,
     }
 
 
@@ -1736,12 +1878,7 @@ def _insert_agent_deep_eval_message(
     job_id: UUID,
     result: dict[str, Any],
 ) -> None:
-    """这一轮深评判了什么、怎么排的，原样落库。
-
-    本阶段前端还不渲染这条消息（无 UI 变更），素材包也拿不到它 —— 它先存在，是为了
-    能在真实数据上对着看：排序合不合理、定性判定准不准。接进最终名单是阶段四，
-    在那之前这条消息就是对照组。
-    """
+    """这一轮深评判了什么、怎么排的，连同筛选来源原样落库。"""
     _insert_agent_message(
         db,
         session_id=session_id,
@@ -1759,8 +1896,10 @@ def _deep_eval_trace_summary(result: dict[str, Any] | None) -> dict[str, Any]:
     """trace 里只留摘要：完整结果在 agent_deep_eval 消息里，不存两份。"""
     if not isinstance(result, dict):
         return {"deep_eval_status": "not_run"}
+    pool = result.get("candidate_pool") if isinstance(result.get("candidate_pool"), dict) else {}
     return {
         "deep_eval_status": result.get("deep_eval_status"),
+        "auto_invoked": bool(result.get("auto_invoked")),
         "prompt_version": result.get("prompt_version") or None,
         "model_name": result.get("model_name") or None,
         "candidate_count": result.get("candidate_count"),
@@ -1768,6 +1907,10 @@ def _deep_eval_trace_summary(result: dict[str, Any] | None) -> dict[str, Any]:
         "dropped": len(result.get("dropped") or []),
         "uncovered": len(result.get("uncovered") or []),
         "fallback_reason": result.get("fallback_reason"),
+        "raw_occurrences": pool.get("raw_occurrences"),
+        "unique_before_cap": pool.get("unique_before_cap"),
+        "unique_after_cap": pool.get("unique_after_cap"),
+        "capped": pool.get("capped"),
         "notes": list(result.get("notes") or []),
     }
 
