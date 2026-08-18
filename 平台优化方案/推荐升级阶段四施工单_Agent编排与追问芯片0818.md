@@ -1246,3 +1246,45 @@ required 单向放宽、去重只在汇总环节、追问只在芯片。
 - 阶段五开始拆旧前仍需：先完成下方 4D 生产发布补记并验证新 hash、v0.2.1 芯片、持久耗时/
   Writer 黄点/session debug/链接与中止；之后才可逐一确认旧 `/candidates`、旧增量条件操作、旧深评分片/
   rerank、旧推荐消息和兼容分支无调用方再删除。反向推荐仍未实现，不属于拆旧完成条件。
+
+#### 用户授权后的 4D 生产发布补记（2026-08-18）
+
+- 用户在本包任务中明确授权“验收通过就 commit/push，并更新涉及的提示词”。4D 主提交
+  `92f9223a63557a8e652d7aa52fcf1c4b25c2e2a9` 已推送 `origin/main`；生产 `/api/v1/health`
+  从 `ddf1815…` 精确切到该完整 hash 后才执行 Prompt apply。
+- 四份 Prompt 的实际生产状态：
+
+  | 节点 | 版本 / id | apply 结果 | 最终状态 |
+  |---|---|---|---|
+  | `recommendation_query_parser` | v0.3.0 / `e342602b-0c02-40af-b8f5-dd63942ef39f` | `exists-identical`，no-op | active + default，6 个变量 |
+  | `recommendation_deep_eval_to_target` | v0.3.1 / `44bfd504-f7ae-4ad2-b63b-00a4a75767a9` | `exists-identical`，no-op | active + default，4 个变量；节点 timeout=300s |
+  | `recommendation_agent_to_target` | v0.2.1 / `3c5f69be-2b73-45e3-a7a7-dca118677b91` | 新建并设默认 | active + default，2 个变量 |
+  | `recommendation_answer_writer_to_target` | v0.2.0 / `94e8fc49-fee8-4327-9e64-660535ca4d5d` | `exists-identical`，no-op | active + default，1 个变量 |
+
+- apply 后四份脚本重新 `--dry-run` 均为 `exists-identical`；四份 `--render-preview` 再次分别通过
+  6/6、4/4、2/2、1/1，无双花括号残留。
+- 新版本生产冒烟 session `b0a02335-9f11-4e28-9a82-c9b165d09712`、turn
+  `f8a8a20b52e4446e815babdb3cfcd87c`：
+  - background job 已 succeeded、Writer 尚未连接时，`/recommendations/page` 仍把该 session 放在
+    `running_sessions`，`agent_status={status: writing, writer_pending: true}`；
+  - understanding / 三条 step / deep eval / brief / answer 的落库耗时分别可见
+    `11229 / (13, 6, 44938) / 44938 / 33246 / 52094 ms`；
+  - session debug 已返回直连 trace，节点/版本/状态为
+    `recommendation_agent_to_target / v0.2.1 / succeeded`；
+  - brief 为 4 家池、3重点+1备选；芯片为“详细说说… / 只看能控股的 / 有没有海外业务…”等
+    用户口吻，守卫命中数 0。
+- 上述冒烟暴露一项测试数据链接边角：Writer 省略 `Mock测试-YYYYMMDD-` 前缀时第一家未回填。
+  小修提交 `9bacf8632600bcb3137aa8cacfcaee27b42ac507` 增加精确前缀别名与测试，后端全量更新为
+  `1162 passed, 36 skipped, 5 warnings`；推送后生产 `/health` 已精确切到该完整 hash。
+- 小修后的真实 session `23c8e958-cae7-4ea7-b2a0-0be2ed10d197`、turn
+  `c8bd8d4c968445218c653d31c50b296f`：brief 的 3重点+1备选在正文中均有唯一
+  `/targets/<uuid>`，`all_selected_linked=true`。
+- Writer 中途停止生产抽查 session `711e9cb3-b14b-4f3b-82cd-67aa1f949c9d`、turn
+  `e9b91c7f70824e75a4865718e53bfa90`：首个 delta 后调用 abort，SSE 最终事件为 `aborted`；
+  消息只有 user/understanding/steps/deep-eval/brief/aborted，**没有 `agent_answer`**，status
+  `aborted=true`。中止优先和终态锁在真实多请求竞态下成立。
+- Railway 已部署以上代码和 Prompt；**自建环境未部署**，未执行 SSH / pull / compose，符合两套部署
+  互不联动边界。未写 Prompt seed 迁移，未新建节点，未改数据库 schema。
+- **4D 最终结论：通过。** 自动化、八组 UAT、失败/中止矩阵、Prompt、Railway 生产复核和系统总纲
+  均已收口。阶段五现在可以开始做“确认无调用方后拆旧”，但仍不得顺手删除当前主路径正在使用的
+  parser/deep-eval 节点，也不得把反向推荐误算成已经交付。
