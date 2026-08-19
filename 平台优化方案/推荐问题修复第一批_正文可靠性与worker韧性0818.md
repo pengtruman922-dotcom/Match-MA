@@ -162,7 +162,7 @@ agent job `max_attempts=1`，被回收即 `failed`。
 
 ## 七、施工记录
 
-**2026-08-19 施工完成（未提交、未发布，等待发布指令）。**
+**2026-08-19 施工完成并已发布。** 提交 `8af3965`，CI 全绿，生产已切到该 commit。
 
 - **基线 HEAD**：`fbf7164`（docs: 补 5B 生产端到端验证结果），分支 `main`。
 - **测试通过数**：`1058 passed / 36 skipped` → **`1092 passed / 49 skipped`**（+34 通过，+13 跳过）。
@@ -231,15 +231,39 @@ agent job `max_attempts=1`，被回收即 `failed`。
 
 **其二，订阅占一个线程池槽位。** 同步生成器由 Starlette 放进线程池跑，`time.sleep(0.3)` 阻塞的是线程池 worker 而不是事件循环 —— 与改动前那个阻塞在 urlopen 上的实现是同一形状，不是新增的问题。区别是超时上限从「模型流多久」变成了固定 300 秒，但任务一进终态订阅就立刻返回，真正跑满 300 秒只会发生在 job 被重排、整轮重跑的情况下。按当前并发（个位数顾问）无需处理；若将来并发上来，改成异步生成器 + `asyncio.sleep` 即可，SSE 契约不受影响。
 
-### 7.4 待办：发布前与发布后
+### 7.4 验证结果
 
-- [ ] **迁移预演**：本机是 Windows、无 Docker、无本地 Postgres，`alembic upgrade head`
-      **没能在本地空库跑过**。已离线校验修订链（单 head `20260819_0066`、单 base、19 个修订）
-      与 splitter（`tests/test_migration_sql.py` 65 项全过）。需要用户决定怎么补：
-      CI 的 `Fresh database from baseline` job 做的正是这件事（pgvector/pg17 空库 → baseline →
-      `alembic upgrade head`），但它要推上去才会跑；另一条路是授权在自建 ECS 上起一个一次性
-      pgvector 容器预演，不碰跑着的那套。
-- [ ] **行为①**：正文开始流之后立刻关页签 → 重开会话应为绿点、正文完整、无重新生成。
-- [ ] **行为②**：一轮跑到一半 `docker compose restart worker-llm` → 秒级放回队列并重排，不挂 30 分钟。
-- [ ] **行为③**：一轮跑到一半点停止 → 不落 answer、不留草稿、状态 aborted。
+**CI**（run `32230342581`，全部 job success）——**这就是施工单第四节第 7 条要的迁移预演**：
 
+| job / step | 结果 |
+| --- | --- |
+| Backend tests (pytest) | success |
+| Fresh database from baseline → Apply the baseline to a fresh database | success（pgvector/pg17 **空库**） |
+| Fresh database from baseline → Apply any migrations after the baseline | success（即 `alembic upgrade head`，019 干净应用） |
+| → Exercise the job-queue SQL | success（含新增的释放/心跳 5 例） |
+| → Exercise the answer persistence SQL | success（新增 8 例：草稿唯一性、级联删除、锁内双复查） |
+| Frontend typecheck + build | success |
+
+**部署**：`/api/v1/health` 的 `git_commit_sha` 已切到 `8af3965313215d7210907cff5e494df8f5f46c5c`。
+前端服务按预期**没有**重建（本次提交没碰 `frontend/**`）。
+
+**生产行为验证**：
+
+| 项 | 会话 | 结果 |
+| --- | --- | --- |
+| **行为①** 正文开始流之后立刻断开 | `ed98a4e5` | **通过**。收到第 1 个 `delta` 后主动挂断连接，正文仍然完整落库：875 字、`generation_mode=llm`、`duration_ms=51734`、站内链接 4 个；`job_status=succeeded`；重连拿到 `replayed=true` 且正文与 duration 完全一致（**没有重新生成**）；该轮 `agent_answer` 行数 = 1；会话运行态 = `completed`（绿点）。 |
+| **行为③** 编排阶段点停止 | `0d49d10c` | **通过**。只有 `agent_aborted` + 过程消息，无 `agent_brief`、无 `agent_answer`；`answer-stream` 返回 409；运行态 = `aborted`。 |
+| **行为③b** 正文正在流的时候点停止（本批新代码路径） | `e487394b` | **通过**。订阅端先真实收到 3 个 `delta`（证明 worker 在落草稿、订阅端在读），此时发停止 → 无 `agent_answer`（**半截草稿没有升格**）、`answer-stream` 409（没有残留草稿被当成正文流出去）、运行态 = `aborted`，而 `job_status` 仍是 `succeeded`（编排段本来就跑完了，中止的是正文段）。 |
+| **心跳** | `e00b3cfa` | **通过**。一次约 3 分钟的 job 期间 `locked_at` 从 `08:11:52` → `08:12:41` → `08:13:51` 逐步前移，不再冻在领取时刻；`attempt_count` 全程 1/1。 |
+
+### 7.5 唯一未演的一条：行为②
+
+**行为②（跑到一半重启 worker）在 Railway 上演不了** —— 没有按需向 worker 发 SIGTERM 的手段，
+而借一次部署来触发的话，构建排队十几分钟到一小时，等 worker 真的收到信号时那一轮早就跑完了。
+施工单第五节写的验证方式本来就是自建环境的 `docker compose restart worker-llm`，那是秒级的。
+
+所以这一条要么在自建 ECS 上补（需要先把 `8af3965` 部署过去：
+`ssh match-ma-aliyun 'cd /opt/match-ma && git pull && cd deploy && docker compose build && docker compose up -d'`，
+`migrate` 会自动应用 019），要么接受「代码路径由
+`tests/test_worker_graceful_shutdown.py` 的 9 个用例覆盖 + 心跳已在生产实测前移」这个程度。
+**待用户决定。**
