@@ -163,6 +163,7 @@ agent job `max_attempts=1`，被回收即 `failed`。
 ## 七、施工记录
 
 **2026-08-19 施工完成并已发布。** 提交 `8af3965`，CI 全绿，生产已切到该 commit。
+**行为①③ 通过，行为② 实测未通过** —— 原因与补法见 7.5，需要用户决定是否追加一轮。
 
 - **基线 HEAD**：`fbf7164`（docs: 补 5B 生产端到端验证结果），分支 `main`。
 - **测试通过数**：`1058 passed / 36 skipped` → **`1092 passed / 49 skipped`**（+34 通过，+13 跳过）。
@@ -256,14 +257,45 @@ agent job `max_attempts=1`，被回收即 `failed`。
 | **行为③b** 正文正在流的时候点停止（本批新代码路径） | `e487394b` | **通过**。订阅端先真实收到 3 个 `delta`（证明 worker 在落草稿、订阅端在读），此时发停止 → 无 `agent_answer`（**半截草稿没有升格**）、`answer-stream` 409（没有残留草稿被当成正文流出去）、运行态 = `aborted`，而 `job_status` 仍是 `succeeded`（编排段本来就跑完了，中止的是正文段）。 |
 | **心跳** | `e00b3cfa` | **通过**。一次约 3 分钟的 job 期间 `locked_at` 从 `08:11:52` → `08:12:41` → `08:13:51` 逐步前移，不再冻在领取时刻；`attempt_count` 全程 1/1。 |
 
-### 7.5 唯一未演的一条：行为②
+### 7.5 行为②：在自建环境实测，**未通过**
 
-**行为②（跑到一半重启 worker）在 Railway 上演不了** —— 没有按需向 worker 发 SIGTERM 的手段，
-而借一次部署来触发的话，构建排队十几分钟到一小时，等 worker 真的收到信号时那一轮早就跑完了。
-施工单第五节写的验证方式本来就是自建环境的 `docker compose restart worker-llm`，那是秒级的。
+已把 `0fdf6aa` 部署到自建 ECS（`git pull && docker compose build && docker compose up -d`，
+9 个服务全部正常，`migrate` 干净应用 `20260817_0065 -> 20260819_0066`，
+`/health` 与 `/health/db` 均 ok）。然后按施工单第五节的方式实演：
 
-所以这一条要么在自建 ECS 上补（需要先把 `8af3965` 部署过去：
-`ssh match-ma-aliyun 'cd /opt/match-ma && git pull && cd deploy && docker compose build && docker compose up -d'`，
-`migrate` 会自动应用 019），要么接受「代码路径由
-`tests/test_worker_graceful_shutdown.py` 的 9 个用例覆盖 + 心跳已在生产实测前移」这个程度。
-**待用户决定。**
+| 时刻 | 事件 |
+| --- | --- |
+| 16:22:14 | job `8655b326` 被 `worker-aeabde37e349` 领取，开始跑（`attempt=1/1`） |
+| 16:24:08 | 编排跑到第 7 次工具调用时执行 `docker compose restart worker-llm` |
+| — | worker 日志确实打出 `Worker shutdown requested (SIGTERM); finishing at the next checkpoint.` |
+| 16:24:19 | 容器已重启完毕，但 job 仍是 `running`、`locked_at` 停在 16:22:14、`released_by_shutdown` 为 null |
+| ~16:52 | 1800 秒 stale 窗口到期，job 被判 `failed`，`error_code=stale_running_job` |
+
+**也就是说：这一轮还是挂了 30 分钟然后硬失败，正是本批要消灭的那个现象。**
+
+**根因（新发现，施工单第一节没有覆盖）**：信号处理是对的、标志位也置上了，但**释放动作要等到
+一个检查点**，而检查点只存在于「模型调用之间 / 工具调用之间」。这一轮实测的 `agent_step` 间隔是
+5 秒到 185 秒不等，而 `deploy/docker-compose.yml` 没有设 `stop_grace_period`，docker 默认只给
+**10 秒**，10 秒之后就是 SIGKILL。SIGTERM 落在一次长模型调用中间时，进程根本活不到下一个检查点。
+Railway 的宽限期同样是这个量级。
+
+**心跳也救不了这一条**：心跳是挂在 handler 现有 inline commit 上的（施工单第 2.2 节说的「最小实现」），
+而一次长模型调用期间根本没有 commit —— 生产实测的心跳间隔就是 49 秒、70 秒，不是 30 秒。
+所以 `locked_at` 只能证明「上一次有进展是什么时候」，还不能证明「进程还活着」，
+`--stale-after` 也就还不能安全下调。
+
+**三条可选的补法（本批不做，等指示）**：
+
+1. **让 SIGTERM 打断在途的 HTTP 调用**（真正的治本）。`llm_client` 持有 live response，
+   关机时从信号侧关掉它，`urlopen` 抛错后转成 `WorkerShutdown` 而不是 `LlmCallError`
+   —— 要小心别把它和真实的模型失败混为一谈，否则会把该失败的一轮误放回队列。
+2. **心跳改成后台线程按秒计**，让 `locked_at` 真正表示「进程还活着」，然后把 llm 队列的
+   `--stale-after` 从 1800 降到 120~180 秒。暴露窗口从 30 分钟变成 2~3 分钟，
+   不需要动 LLM 客户端。**性价比最高。**
+3. 给 worker 服务加 `stop_grace_period`。只对「检查点间隔短于宽限期」的情况有用，
+   本轮实测最长间隔 185 秒，要设到那个量级并不现实，且 Railway 侧不归我们设。
+
+顺带记一条排查中发现的环境事实：**自建库的 `model_node_config` 里没有任何 Writer 节点行**
+（`recommendation_answer_writer_to_target` 行数 = 0），所以自建环境的每一条 `agent_answer` 都是
+`generation_mode=fallback`、8 毫秒写完 —— 自建环境**演不了 Writer 段**，行为②在那里只能在编排段演。
+Writer 段的真实行为已在 Railway 生产验过（见 7.4 的行为①与③b）。
