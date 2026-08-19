@@ -1,5 +1,9 @@
 [build]
 builder = "NIXPACKS"
+watchPatterns = [
+  # 路径相对仓库根目录。只有前端源码变了才重建前端。
+  "frontend/**",
+]
 buildCommand = "npm run build"
 
 [deploy]

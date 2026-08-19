@@ -1,5 +1,18 @@
 [build]
 builder = "NIXPACKS"
+watchPatterns = [
+  # 只有影响后端运行时的路径才触发重建。tests/ 不随镜像发布、
+  # deploy/ 只服务自建、docs 与 平台优化方案 是文档，都不该触发。
+  # railway*.toml 用通配：4 个后端服务到底读哪一个配置文件由面板决定，
+  # 通配可以保证「改到自己那份」一定会重建。
+  "backend/**",
+  "scripts/**",
+  "alembic/**",
+  "alembic.ini",
+  "database/**",
+  "pyproject.toml",
+  "railway*.toml",
+]
 
 [deploy]
 startCommand = "python -m backend.app.worker --queue ocr --sleep 2"
