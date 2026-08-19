@@ -1378,21 +1378,6 @@ def _candidate_targets_for_intent(
     )
 
 
-def search_targets_for_agent(
-    db: Session,
-    anchor: dict[str, Any],
-    limit: int,
-) -> dict[str, Any]:
-    """The agent's screening tool, bound to the same code path as everything else.
-
-    Deliberately a thin public alias rather than a second implementation: the
-    agent must not be able to screen by rules the rest of the system does not
-    apply. `anchor` comes from `anchor_from_filters` and carries no id, so no
-    scenario rows are loaded and the implicit single-scenario path is used.
-    """
-    return _candidate_targets_for_intent(db, anchor, limit)
-
-
 def target_facts_for_agent(target_row: dict[str, Any]) -> dict[str, Any]:
     """Facts for a target the agent pulled by id rather than through screening.
 
