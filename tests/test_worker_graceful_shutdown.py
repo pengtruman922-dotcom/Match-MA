@@ -24,6 +24,7 @@ from backend.app.jobs.heartbeat import JobHeartbeat
 from backend.app.jobs.queue import JobClaim
 from backend.app.shutdown import (
     WorkerShutdown,
+    interruptible,
     raise_if_shutting_down,
     request_shutdown,
     reset_shutdown,
@@ -262,3 +263,171 @@ def test_the_agent_turn_checkpoint_raises_instead_of_reporting_an_abort(monkeypa
 
     with pytest.raises(WorkerShutdown):
         handler._handle_recommendation_agent(object(), job)
+
+
+# -- the in-flight teardown ----------------------------------------------
+#
+# 2026-08-19 自建环境实测暴露的一条：信号处理是对的、标志位也置上了，但释放要等到
+# 一个检查点，而检查点只存在于模型/工具调用之间（实测间隔 5~185 秒），容器只给
+# 10 秒宽限。SIGTERM 落在一次长模型调用中间 = SIGKILL，job 照样挂满 1800 秒。
+# 所以关机还必须把在途的 HTTP 响应拆掉，让阻塞中的读立刻抛错。
+
+
+class _FakeResponse:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_shutdown_tears_down_whatever_request_is_in_flight() -> None:
+    response = _FakeResponse()
+
+    with interruptible(response):
+        assert response.closed is False
+        request_shutdown("SIGTERM")
+        assert response.closed is True
+
+
+def test_a_finished_request_is_not_closed_later() -> None:
+    """注册要随调用结束解除，否则关机会去关一个早就还给连接池的对象。"""
+    response = _FakeResponse()
+
+    with interruptible(response):
+        pass
+
+    request_shutdown("SIGTERM")
+
+    assert response.closed is False
+
+
+def test_no_new_model_call_starts_once_shutdown_is_under_way() -> None:
+    """已经在关机了还去付一次模型调用的钱，等于白花。"""
+    request_shutdown("SIGTERM")
+
+    with pytest.raises(WorkerShutdown):
+        with interruptible(_FakeResponse()):
+            raise AssertionError("the body must not run")
+
+
+def test_closing_one_response_cannot_stop_the_others_from_closing() -> None:
+    class _Angry(_FakeResponse):
+        def close(self) -> None:
+            raise RuntimeError("already detached")
+
+    good = _FakeResponse()
+    with interruptible(_Angry()), interruptible(good):
+        request_shutdown("SIGTERM")
+
+    assert good.closed is True
+
+
+def _stream_response(monkeypatch, lines):
+    """A urlopen whose read blocks until the test closes it, like a real one."""
+
+    class _Blocking:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def __iter__(self):
+            for line in lines:
+                if self.closed:
+                    raise ValueError("read of closed file")
+                yield line
+
+        def close(self) -> None:
+            self.closed = True
+
+    response = _Blocking()
+    monkeypatch.setattr(
+        "backend.app.ai.llm_client.request.urlopen",
+        lambda *args, **kwargs: response,
+    )
+    return response
+
+
+def test_a_shutdown_mid_stream_surfaces_as_shutdown_not_as_a_model_failure(monkeypatch) -> None:
+    """这是整条链路的关键分辨：同一个 OSError，两种完全相反的处置。
+
+    普通失败 → 这一轮判失败；关机 → job 放回队列且不消耗 attempts。认错了的话，
+    优雅退出就变成了「每次部署都判死一轮推荐」。
+    """
+    from backend.app.ai.llm_client import stream_openai_compatible_chat
+
+    _stream_response(monkeypatch, [
+        b'data: {"choices":[{"delta":{"content":"first"}}]}',
+        b'data: {"choices":[{"delta":{"content":"second"}}]}',
+    ])
+
+    stream = stream_openai_compatible_chat(
+        base_url="https://example.test/v1",
+        api_key_secret_ref=None,
+        model_name="m",
+        messages=[],
+        temperature=None,
+        top_p=None,
+        max_tokens=None,
+        timeout_seconds=30,
+    )
+    assert next(stream)  # 第一个 delta 正常拿到
+    request_shutdown("SIGTERM")
+
+    with pytest.raises(WorkerShutdown):
+        next(stream)
+
+
+def test_an_ordinary_dropped_stream_is_still_a_model_failure(monkeypatch) -> None:
+    from backend.app.ai.llm_client import LlmCallError, stream_openai_compatible_chat
+
+    class _Broken:
+        def __iter__(self):
+            raise OSError("connection reset by peer")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "backend.app.ai.llm_client.request.urlopen",
+        lambda *args, **kwargs: _Broken(),
+    )
+
+    stream = stream_openai_compatible_chat(
+        base_url="https://example.test/v1",
+        api_key_secret_ref=None,
+        model_name="m",
+        messages=[],
+        temperature=None,
+        top_p=None,
+        max_tokens=None,
+        timeout_seconds=30,
+    )
+
+    with pytest.raises(LlmCallError):
+        next(stream)
+
+
+def test_a_tool_that_hits_shutdown_does_not_report_itself_as_a_failed_tool(monkeypatch) -> None:
+    """深评是在工具里调模型的，关机必须穿透工具循环而不是变成一行 error 回给模型。"""
+    from backend.app.ai.llm_client import ToolCall
+    from backend.app.ai.tool_loop import _tool_result_content
+
+    call = ToolCall(id="1", name="deep_evaluate_candidates", arguments={}, raw_arguments="{}")
+
+    def explode(_call):
+        raise WorkerShutdown("SIGTERM")
+
+    with pytest.raises(WorkerShutdown):
+        _tool_result_content(call, explode, 8000)
+
+
+def test_an_ordinary_tool_failure_still_goes_back_to_the_model() -> None:
+    from backend.app.ai.llm_client import ToolCall
+    from backend.app.ai.tool_loop import _tool_result_content
+
+    call = ToolCall(id="1", name="search_targets", arguments={}, raw_arguments="{}")
+
+    def explode(_call):
+        raise ValueError("bad filter")
+
+    assert "bad filter" in _tool_result_content(call, explode, 8000)

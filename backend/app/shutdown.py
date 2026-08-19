@@ -23,6 +23,18 @@ Two halves, deliberately separate:
 * inside a job — handlers that call `raise_if_shutting_down` at a checkpoint
   raise `WorkerShutdown`, and the worker hands that job **back** to the queue.
 
+A checkpoint is only useful if the process reaches one before SIGKILL. It does
+not, on its own: checkpoints sit *between* model and tool calls, and 2026-08-19
+measurements on the self-hosted stack put those 5 to 185 seconds apart while
+Docker allows 10 seconds and Railway a similar order. A SIGTERM landing inside
+a model call therefore used to be a SIGKILL, and the job hung until the stale
+sweep — the very failure this module exists to prevent.
+
+So the shutdown also **tears down whatever HTTP response is in flight**
+(`interruptible`). The blocked read raises at once, the next checkpoint is
+microseconds away, and the release happens in the grace period instead of
+thirty minutes later.
+
 Handing back is not failing. A released job keeps its attempt (see
 `queue.release_job_for_shutdown`) because being interrupted by our own deploy
 is not one of the chances the user gets.
@@ -34,12 +46,62 @@ import os
 import signal
 import sys
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any, Protocol
 
 # Module-level rather than passed around: signal handlers have no argument of
 # their own, and a worker process consumes exactly one queue.
 _shutdown = threading.Event()
 _reason = ""
 _signal_count = 0
+
+# Reentrant on purpose. The signal handler runs *in the thread that was
+# interrupted*, which may be the very thread holding this lock to register a
+# response. A plain Lock would deadlock the handler against itself.
+_in_flight_lock = threading.RLock()
+_in_flight: set[Any] = set()
+
+
+class _Closeable(Protocol):
+    def close(self) -> None: ...
+
+
+@contextmanager
+def interruptible(closeable: _Closeable) -> Iterator[None]:
+    """Expose a live HTTP response so a shutdown can tear it down mid-read.
+
+    CPython's signal handling is what makes this work: a blocking socket read
+    is interrupted by the signal, the handler runs (closing the file
+    descriptor), and PEP 475 then retries the read — which now fails on a
+    closed socket. The caller sees an ordinary exception a few microseconds
+    after the signal instead of blocking for the rest of the model's timeout.
+
+    Refuses to start at all once shutdown is under way: paying for a model call
+    whose result is about to be thrown away is the same waste as letting it run.
+    """
+    raise_if_shutting_down()
+    with _in_flight_lock:
+        _in_flight.add(closeable)
+    try:
+        yield
+    finally:
+        with _in_flight_lock:
+            _in_flight.discard(closeable)
+
+
+def _close_in_flight() -> None:
+    with _in_flight_lock:
+        pending = list(_in_flight)
+        _in_flight.clear()
+    for closeable in pending:
+        try:
+            closeable.close()
+        except Exception:  # noqa: BLE001 - 关机路上不能再抛
+            pass
+    if pending:
+        print(f"Closed {len(pending)} in-flight request(s) on shutdown.",
+              file=sys.stderr, flush=True)
 
 
 class WorkerShutdown(Exception):
@@ -58,6 +120,9 @@ def request_shutdown(reason: str) -> None:
         _shutdown.set()
         print(f"Worker shutdown requested ({reason}); finishing at the next checkpoint.",
               file=sys.stderr, flush=True)
+        # 顺序要紧：先置标志再拆连接，这样被打断的读抬头看到的一定是
+        # 「在关机」而不是「网络抖了一下」。
+        _close_in_flight()
 
 
 def shutdown_requested() -> bool:
@@ -85,6 +150,8 @@ def reset_shutdown() -> None:
     _shutdown.clear()
     _reason = ""
     _signal_count = 0
+    with _in_flight_lock:
+        _in_flight.clear()
 
 
 def install_signal_handlers() -> None:

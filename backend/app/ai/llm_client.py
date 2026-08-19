@@ -9,6 +9,7 @@ from typing import Any
 from urllib import error, request
 
 from backend.app.services.model_secrets import ModelSecretError, decrypt_model_secret
+from backend.app.shutdown import interruptible, raise_if_shutting_down
 
 
 class LlmCallError(RuntimeError):
@@ -87,18 +88,31 @@ def call_openai_compatible_chat(
     req = request.Request(endpoint, data=body, headers=headers, method="POST")
     try:
         with request.urlopen(req, timeout=timeout_seconds) as response:
-            response_body = response.read().decode("utf-8")
+            # 关机时这个 response 会被从信号侧关掉，下面的 read 立刻抛错 ——
+            # 否则一次 SIGTERM 要等满整个 timeout_seconds 才轮得到检查点，
+            # 而容器只给十几秒。
+            with interruptible(response):
+                response_body = response.read().decode("utf-8")
     except error.HTTPError as exc:
+        raise_if_shutting_down()
         error_body = exc.read().decode("utf-8", errors="replace")
         raise LlmCallError(f"LLM HTTP {exc.code}: {error_body}") from exc
     except error.URLError as exc:
+        raise_if_shutting_down()
         raise LlmCallError(f"LLM request failed: {exc.reason}") from exc
     except (TimeoutError, ConnectionError) as exc:
         # 读超时从 urlopen 抛的是裸 TimeoutError（OSError 子类），不是 URLError。
         # 不包起来它就绕过了调用方的 except LlmCallError —— 失败分支写 trace 的
         # 代码不会执行，一次 15 分钟的挂死最后什么记录都不留。
         # `from exc` 必须保留：重试判定靠 __cause__ 链认出 TimeoutError。
+        raise_if_shutting_down()
         raise LlmCallError(f"LLM request timed out or dropped after {timeout_seconds}s: {exc!r}") from exc
+    except (OSError, ValueError) as exc:
+        # 我们自己关掉 fd 之后，重试的那次读会抛 EBADF / read of closed file。
+        # 先认关机，再退回普通失败 —— 这两者的处置完全相反：一个是把 job 放回
+        # 队列（不消耗 attempts），一个是判这一轮失败。
+        raise_if_shutting_down()
+        raise LlmCallError(f"LLM request failed: {exc!r}") from exc
 
     latency_ms = int((time.perf_counter() - started) * 1000)
     try:
@@ -185,32 +199,42 @@ def stream_openai_compatible_chat(
     try:
         response = request.urlopen(req, timeout=timeout_seconds)
     except error.HTTPError as exc:
+        raise_if_shutting_down()
         error_body = exc.read().decode("utf-8", errors="replace")
         raise LlmCallError(f"LLM HTTP {exc.code}: {error_body}") from exc
     except error.URLError as exc:
+        raise_if_shutting_down()
         raise LlmCallError(f"LLM stream failed: {exc.reason}") from exc
     except (TimeoutError, ConnectionError) as exc:
+        raise_if_shutting_down()
         raise LlmCallError(f"LLM stream timed out after {timeout_seconds}s: {exc!r}") from exc
 
     try:
-        for raw_line in response:
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if not line or not line.startswith("data:"):
-                continue
-            data = line[len("data:"):].strip()
-            if data == "[DONE]":
-                return
-            try:
-                chunk = json.loads(data)
-            except json.JSONDecodeError:
-                # provider 偶发的心跳/注释行，跳过而不是终止整个流。
-                continue
-            for choice in chunk.get("choices") or []:
-                delta = (choice.get("delta") or {}).get("content")
-                if delta:
-                    yield str(delta)
+        # 关机时这个 response 会被从信号侧关掉，阻塞中的那次读立刻抛错，
+        # 于是检查点在几微秒之后而不是几百秒之后。
+        with interruptible(response):
+            for raw_line in response:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[len("data:"):].strip()
+                if data == "[DONE]":
+                    return
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    # provider 偶发的心跳/注释行，跳过而不是终止整个流。
+                    continue
+                for choice in chunk.get("choices") or []:
+                    delta = (choice.get("delta") or {}).get("content")
+                    if delta:
+                        yield str(delta)
     except (TimeoutError, ConnectionError) as exc:
+        raise_if_shutting_down()
         raise LlmCallError(f"LLM stream dropped after {timeout_seconds}s: {exc!r}") from exc
+    except (OSError, ValueError) as exc:
+        raise_if_shutting_down()
+        raise LlmCallError(f"LLM stream failed: {exc!r}") from exc
     finally:
         response.close()
 

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.jobs.queue import JobClaim
+from backend.app.shutdown import WorkerShutdown
 from backend.app.jobs.handlers.business_update import (
     _build_business_update_attachment_context,
     _build_business_update_image_context,
@@ -174,6 +175,9 @@ def _handle_relation_followup_draft_parse(db: Session, job: JobClaim) -> dict[st
             "model_name": node_config["model_name"],
             "prompt_version": node_config["prompt_version"],
         }
+    except WorkerShutdown:
+        # 关机不是草稿解析失败了，别写失败记录。
+        raise
     except Exception as exc:
         db.rollback()
         if job.attempt_count >= job.max_attempts:

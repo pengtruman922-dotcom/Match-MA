@@ -59,6 +59,7 @@ from backend.app.jobs.handlers.traces import (
     _insert_llm_trace,
 )
 from backend.app.jobs.queue import JobClaim
+from backend.app.shutdown import WorkerShutdown
 from backend.app.services.extracted_action_apply import (
     apply_buyer_intent_target_exclusion_action,
     apply_buyer_intent_update_action,
@@ -276,6 +277,9 @@ def _handle_business_update_extract_actions(db: Session, job: JobClaim) -> dict[
                 },
             },
         )
+    except WorkerShutdown:
+        # 关机不是这条动态解析失败了，别把业务实体一起判死。
+        raise
     except Exception as exc:
         db.rollback()
         _mark_business_update_failed_if_final_attempt(db, job, business_update_id, str(exc))

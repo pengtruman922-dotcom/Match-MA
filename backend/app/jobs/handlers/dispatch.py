@@ -4,6 +4,7 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from backend.app.jobs.queue import JobClaim
+from backend.app.shutdown import WorkerShutdown
 from backend.app.jobs.retry_policy import research_failure_is_final
 
 from backend.app.jobs.handlers.attachment_ocr import (
@@ -50,6 +51,8 @@ def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
     if job.job_type == "seller_target_parse":
         try:
             return _handle_seller_target_parse(db, job)
+        except WorkerShutdown:
+            raise
         except Exception as exc:
             if job.entity_id is not None:
                 db.rollback()
@@ -80,6 +83,8 @@ def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
     if job.job_type == "seller_target_research_map":
         try:
             return _handle_seller_target_research_map(db, job)
+        except WorkerShutdown:
+            raise
         except Exception as exc:
             # The mapper is the second half of the same user-visible research
             # operation. Keep the target busy while retries remain, then
@@ -92,6 +97,8 @@ def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
     if job.job_type == "seller_target_research":
         try:
             return _handle_seller_target_research(db, job)
+        except WorkerShutdown:
+            raise
         except Exception as exc:
             # The handler records expected provider/LLM/schema failures itself.
             # This final boundary also releases `researching` for unexpected

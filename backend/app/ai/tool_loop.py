@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from backend.app.ai.llm_client import ChatCompletionResult, ToolCall
+from backend.app.shutdown import WorkerShutdown
 
 # 每个工具返回给模型的字符数上限。一次网页抓取可能是几万字，几轮就撑爆上下文。
 DEFAULT_TOOL_RESULT_LIMIT = 8000
@@ -183,6 +184,11 @@ def _tool_result_content(
         return json.dumps({"error": call.arguments_error}, ensure_ascii=False)
     try:
         value = execute_tool(call)
+    except WorkerShutdown:
+        # 深评是在工具里调模型的，所以关机可以从这里冒出来。把它当成「这个工具
+        # 失败了」回传给模型，会让本轮带着一份编造的降级结论继续跑下去，而 worker
+        # 马上就要没了。关机必须穿透整个循环。
+        raise
     except Exception as exc:  # noqa: BLE001 - 工具失败要回传给模型，不是终止运行
         # 模型只看得到一行 error 字符串，那对排查毫无用处。堆栈进 stderr，
         # 于是 worker 日志里留得下第一现场（调用方负责让 session 保持可用，
