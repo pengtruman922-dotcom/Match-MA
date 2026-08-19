@@ -1,6 +1,7 @@
 """Recommendation session/candidate/report flow logic shared with API routes."""
 
 import re
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -273,7 +274,8 @@ def _recommendation_session_display(
 
 def _recommendation_session_is_processing(summary: dict[str, Any]) -> bool:
     # 黄点/绿点判据。5A 删掉 rerank 一支、5B 删掉 report 一支后只剩 agent_status，
-    # 它同时覆盖 Writer 间隙（有 brief 无 answer 时为 writing）。
+    # 它同时覆盖 Writer 间隙（有 brief 无 answer 时为 writing）—— 那个间隙现在由
+    # worker 自己关掉，不再取决于有没有页签连着。
     return (summary.get("agent_status") or {}).get("status") in {
         "queued", "running", "retry_waiting", "writing",
     }
@@ -287,9 +289,12 @@ def _build_recommendation_agent_status(
 ) -> dict[str, Any]:
     """Terminal state for the latest Agent turn, including the Writer gap.
 
-    Writer runs in the SSE request rather than a background job.  A brief with
-    no answer/abort therefore remains ``writing`` even after the Agent job has
-    succeeded; this is the server-side signal used by every tab's yellow dot.
+    A brief with no answer and no abort means the Writer is mid-flight, so the
+    turn reads ``writing`` — the server-side signal behind every tab's yellow
+    dot. That gap used to be unbounded because the Writer ran inside the SSE
+    request: nobody connected, nobody wrote, and the dot stayed yellow forever.
+    Since the agent job owns the Writer it closes on its own, whether or not a
+    browser is watching.
     """
     latest_turn_id = ""
     for message in messages:
@@ -721,15 +726,40 @@ def find_agent_turn_answer(db: Session, session_id: UUID, turn_id: str) -> dict[
 
     This is what makes the stream resumable: a reconnect after the write has
     landed replays the stored text instead of paying for a second generation.
+
+    One targeted row rather than a walk over `_agent_turn_messages`, which
+    decodes up to 500 messages: the answer-stream subscriber calls this a few
+    times a second while it waits for the worker to finish.
     """
-    for message in _agent_turn_messages(db, session_id, turn_id):
-        if message["message_type"] == "agent_answer":
-            return {
-                "id": message.get("id"),
-                "markdown": message["decoded_content"].get("markdown") or "",
-                "duration_ms": int(message["decoded_content"].get("duration_ms") or 0),
-            }
-    return None
+    row = db.execute(
+        text(
+            """
+            select id, content
+            from recommendation_message
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and session_id = :session_id
+              and metadata_json ->> 'message_type' = 'agent_answer'
+              and metadata_json ->> 'turn_id' = :turn_id
+            order by created_at asc
+            limit 1
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "session_id": session_id,
+            "turn_id": turn_id,
+        },
+    ).mappings().one_or_none()
+    if row is None:
+        return None
+    content = _json_loads(row["content"] or "{}")
+    return {
+        "id": row["id"],
+        "markdown": content.get("markdown") or "",
+        "duration_ms": int(content.get("duration_ms") or 0),
+    }
 
 
 def find_agent_turn_job(db: Session, session_id: UUID, turn_id: str) -> dict[str, Any] | None:
@@ -828,6 +858,51 @@ def insert_agent_aborted_message(
     return True
 
 
+def find_agent_answer_id(db: Session, session_id: UUID, turn_id: str) -> UUID | None:
+    """The answer row's id, without decoding every message in the session.
+
+    `find_agent_turn_answer` reads up to 500 messages and parses their JSON,
+    which is fine for a page load and much too heavy to run while holding the
+    turn's advisory lock.
+    """
+    row = db.execute(
+        text(
+            """
+            select id
+            from recommendation_message
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and session_id = :session_id
+              and metadata_json ->> 'message_type' = 'agent_answer'
+              and metadata_json ->> 'turn_id' = :turn_id
+            order by created_at asc
+            limit 1
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "session_id": session_id,
+            "turn_id": turn_id,
+        },
+    ).mappings().one_or_none()
+    return row["id"] if row is not None else None
+
+
+@dataclass(frozen=True)
+class AgentAnswerWrite:
+    """Why the terminal write did or did not happen.
+
+    "Stopped" and "someone already wrote it" both mean *this* caller wrote
+    nothing, and collapsing them into a bare None got them confused: a second
+    producer would report the finished turn to the browser as aborted and blank
+    a perfectly good answer.
+    """
+
+    status: str  # "inserted" | "aborted" | "already_exists"
+    message_id: UUID | None
+
+
 def insert_agent_answer_message(
     db: Session,
     *,
@@ -837,16 +912,22 @@ def insert_agent_answer_message(
     model_name: str | None,
     generation_mode: str,
     duration_ms: int = 0,
-) -> UUID | None:
-    """Persist the answer only if the turn has not been stopped.
+) -> AgentAnswerWrite:
+    """Persist the answer only if the turn is neither stopped nor already done.
 
-    This check shares the turn advisory lock with the abort marker. It is the
-    final database guard for an SSE that started before another tab stopped the
-    turn; the marker wins and no answer row is written.
+    Both checks share the turn advisory lock with the abort marker, so "is it
+    stopped", "is it already answered" and "write the answer" are one ordered
+    decision. Without the second check two producers racing the same turn —
+    a worker and an API instance mid-deploy, or two workers after a requeue —
+    would each append their own answer and the turn would end up saying the
+    same thing twice.
     """
     _lock_agent_turn_terminal_write(db, session_id, turn_id)
     if agent_turn_aborted(db, session_id, turn_id):
-        return None
+        return AgentAnswerWrite(status="aborted", message_id=None)
+    existing_id = find_agent_answer_id(db, session_id, turn_id)
+    if existing_id is not None:
+        return AgentAnswerWrite(status="already_exists", message_id=existing_id)
     row = db.execute(
         _message_returning_statement(
             """
@@ -881,7 +962,7 @@ def insert_agent_answer_message(
             "created_by": DEFAULT_ADMIN_USER_ID,
         },
     ).mappings().one()
-    return row["id"]
+    return AgentAnswerWrite(status="inserted", message_id=row["id"])
 
 
 def _enqueue_recommendation_agent_job(

@@ -1,11 +1,18 @@
-"""The streamed answer: SSE parsing, deterministic links, usable fallback."""
+"""The streamed answer: SSE parsing, deterministic links, usable fallback.
+
+Generation itself moved into the worker on 2026-08-19 (see
+`tests/test_recommendation_writer.py`); what is left here is the reading
+contract and the pure text helpers both sides share.
+"""
 
 import asyncio
+import pathlib
 from contextlib import contextmanager
 from typing import Any
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 
 from backend.app.ai.llm_client import LlmCallError, stream_openai_compatible_chat
 from backend.app.services.recommendation_answer import (
@@ -229,46 +236,66 @@ def test_fallback_answer_uses_explicit_degraded_wording() -> None:
     assert "需进一步核实" in markdown
 
 
-def _stream_route_body(monkeypatch: pytest.MonkeyPatch, *, configured: bool, fail_stream: bool = False) -> str:
+# -- the endpoint as a subscriber ----------------------------------------
+#
+# `/answer-stream` no longer generates anything. It replays a finished answer
+# or follows the draft row the worker is filling in, so these cases are about
+# the reading contract — the four event types the page understands, unchanged
+# from when this endpoint did the writing.
+
+
+class _TurnState:
+    """What the three tables say about one turn, from the reader's side."""
+
+    def __init__(self) -> None:
+        self.answer: dict[str, Any] | None = None
+        self.aborted = False
+        self.drafts: list[str] = []
+        self.job_status = "running"
+        self.polls = 0
+
+    def draft_now(self) -> str:
+        if not self.drafts:
+            return ""
+        return self.drafts[min(self.polls - 1, len(self.drafts) - 1)]
+
+
+def _subscribe_body(monkeypatch: pytest.MonkeyPatch, state: _TurnState) -> str:
     from backend.app.api.routes import recommendations as route
 
     monkeypatch.setattr(route, "ensure_recommendation_session_visible", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(route, "_get_recommendation_session_or_404", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(route, "agent_turn_aborted", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(route, "find_agent_turn_answer", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(route, "find_agent_turn_brief", lambda *_args, **_kwargs: _BRIEF)
-    monkeypatch.setattr(route, "_touch_recommendation_session", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(route, "insert_agent_answer_message", lambda *_args, **_kwargs: uuid4())
+    monkeypatch.setattr(route, "SUBSCRIBE_POLL_SECONDS", 0)
+
+    connect_check = {"done": False}
+
+    def aborted(*_args, **_kwargs) -> bool:
+        # 第一次是连接前的 409 判断，之后才是订阅循环里的复查。
+        if not connect_check["done"]:
+            connect_check["done"] = True
+            return False
+        state.polls += 1
+        return state.aborted
+
+    monkeypatch.setattr(route, "agent_turn_aborted", aborted)
+    monkeypatch.setattr(route, "find_agent_turn_answer", lambda *_args, **_kwargs: state.answer)
+    monkeypatch.setattr(
+        route,
+        "read_answer_draft",
+        lambda *_args, **_kwargs: {"markdown": state.draft_now()},
+    )
+    monkeypatch.setattr(
+        route,
+        "find_agent_turn_job",
+        lambda *_args, **_kwargs: {"status": state.job_status},
+    )
 
     @contextmanager
     def fake_scope():
         yield object()
 
     monkeypatch.setattr(route, "session_scope", fake_scope)
-    if configured:
-        monkeypatch.setattr(route, "_get_default_node_config", lambda *_args, **_kwargs: {
-            "base_url": "https://example.invalid",
-            "api_key_secret_ref": "x",
-            "model_name": "writer",
-            "temperature": 0.4,
-            "top_p": 1,
-            "max_tokens": 1000,
-            "timeout_seconds": 30,
-        })
-        monkeypatch.setattr(route, "_render_prompt_messages", lambda *_args, **_kwargs: [])
-
-        def stream(*_args, **_kwargs):
-            if fail_stream:
-                raise RuntimeError("writer failed")
-            yield "推荐杭州XX精密制造。"
-
-        monkeypatch.setattr(route, "stream_openai_compatible_chat", stream)
-    else:
-        monkeypatch.setattr(
-            route,
-            "_get_default_node_config",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("not configured")),
-        )
 
     response = route.stream_recommendation_answer(
         uuid4(),
@@ -286,78 +313,184 @@ def _stream_route_body(monkeypatch: pytest.MonkeyPatch, *, configured: bool, fai
     return asyncio.run(collect())
 
 
-def test_unconfigured_writer_streams_and_persists_the_rule_fallback(monkeypatch) -> None:
-    body = _stream_route_body(monkeypatch, configured=False)
+def test_subscriber_streams_the_draft_then_finishes_on_the_persisted_answer(monkeypatch) -> None:
+    state = _TurnState()
+    state.drafts = ["推荐杭州XX", "推荐杭州XX精密制造。"]
 
+    class _Answering(_TurnState):
+        pass
+
+    # 第三次轮询时 worker 已经把正文落库。
+    original = state.draft_now
+
+    def draft_now() -> str:
+        if state.polls >= 3:
+            state.answer = {
+                "id": uuid4(),
+                "markdown": "推荐[杭州XX精密制造](/targets/t-1)。",
+                "duration_ms": 46700,
+            }
+        return original()
+
+    state.draft_now = draft_now  # type: ignore[method-assign]
+
+    body = _subscribe_body(monkeypatch, state)
+
+    assert body.count("event: delta") == 2
+    assert '"text": "推荐杭州XX"' in body
+    # 第二个 delta 只带增量，不重发已经发过的前缀。
+    assert '"text": "精密制造。"' in body
     assert "event: done" in body
-    assert "30 家去重候选" in body
-    assert "](/targets/t-1)" in body
-    assert '"duration_ms":' in body
+    assert '"duration_ms": 46700' in body
 
 
-def test_writer_stream_failure_still_finishes_with_the_same_fallback(monkeypatch) -> None:
-    body = _stream_route_body(monkeypatch, configured=True, fail_stream=True)
+def test_subscriber_emits_the_writer_duration_measured_in_the_worker(monkeypatch) -> None:
+    state = _TurnState()
+    state.answer = {"id": uuid4(), "markdown": "正文。", "duration_ms": 46700}
 
-    assert "event: error" in body
-    assert "event: done" in body
-    assert "30 家去重候选" in body
+    body = _subscribe_body(monkeypatch, state)
+
+    # 走的是 find_agent_turn_answer 的回放分支：不重新生成，不二次计费。
+    assert '"replayed": true' in body
+    assert '"duration_ms": 46700' in body
 
 
-def test_abort_that_lands_after_stream_connect_prevents_answer_and_persistence(monkeypatch) -> None:
-    """The abort marker wins even when another tab already opened the SSE."""
-    from backend.app.api.routes import recommendations as route
+def test_two_tabs_watching_one_turn_both_get_the_same_answer(monkeypatch) -> None:
+    """双页签：两个订阅者都只是读者，谁都不会再生成一次正文。"""
+    answer = {"id": uuid4(), "markdown": "同一段正文。", "duration_ms": 1200}
+    bodies = []
+    for _ in range(2):
+        state = _TurnState()
+        state.answer = answer
+        bodies.append(_subscribe_body(monkeypatch, state))
 
-    checks = iter([False, True])
-    persisted: list[str] = []
-    monkeypatch.setattr(route, "ensure_recommendation_session_visible", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(route, "_get_recommendation_session_or_404", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(route, "agent_turn_aborted", lambda *_args, **_kwargs: next(checks, True))
-    monkeypatch.setattr(route, "find_agent_turn_answer", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(route, "find_agent_turn_brief", lambda *_args, **_kwargs: _BRIEF)
-    monkeypatch.setattr(route, "_touch_recommendation_session", lambda *_args, **_kwargs: None)
+    assert bodies[0] == bodies[1]
+    assert bodies[0].count("event: done") == 1
 
-    def persist(*_args, **_kwargs):
-        persisted.append("answer")
-        return uuid4()
 
-    monkeypatch.setattr(route, "insert_agent_answer_message", persist)
+def test_subscriber_reports_a_stop_written_by_another_tab(monkeypatch) -> None:
+    state = _TurnState()
+    state.drafts = ["写到一半"]
+    state.aborted = True
 
-    @contextmanager
-    def fake_scope():
-        yield object()
-
-    monkeypatch.setattr(route, "session_scope", fake_scope)
-    monkeypatch.setattr(route, "_get_default_node_config", lambda *_args, **_kwargs: {
-        "base_url": "https://example.invalid",
-        "api_key_secret_ref": "x",
-        "model_name": "writer",
-        "temperature": 0.4,
-        "top_p": 1,
-        "max_tokens": 1000,
-        "timeout_seconds": 30,
-    })
-    monkeypatch.setattr(route, "_render_prompt_messages", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(route, "stream_openai_compatible_chat", lambda *_args, **_kwargs: iter(["不应落库"]))
-
-    response = route.stream_recommendation_answer(
-        uuid4(),
-        "turn-1",
-        current_user=object(),
-        db=object(),
-    )
-
-    async def collect() -> str:
-        chunks: list[str] = []
-        async for chunk in response.body_iterator:
-            chunks.append(chunk.decode() if isinstance(chunk, bytes) else str(chunk))
-        return "".join(chunks)
-
-    body = asyncio.run(collect())
+    body = _subscribe_body(monkeypatch, state)
 
     assert "event: aborted" in body
     assert "event: delta" not in body
     assert "event: done" not in body
-    assert persisted == []
+
+
+def test_subscriber_says_so_when_the_job_ended_without_an_answer(monkeypatch) -> None:
+    state = _TurnState()
+    state.job_status = "failed"
+
+    body = _subscribe_body(monkeypatch, state)
+
+    assert "event: error" in body
+    assert "没能生成正文" in body
+    assert "event: done" not in body
+
+
+def test_an_answer_that_landed_is_never_reported_as_a_failed_turn(monkeypatch) -> None:
+    """worker 先提交正文、再标记成功，读者必须按同样的顺序读。
+
+    倒过来读会在这两次提交之间读到「已成功且没有正文」——一个并不存在的状态，
+    后果是把一轮刚刚写完的正文报成失败。
+    """
+    state = _TurnState()
+    state.job_status = "succeeded"
+    state.answer = {"id": uuid4(), "markdown": "写完了的正文。", "duration_ms": 1000}
+
+    body = _subscribe_body(monkeypatch, state)
+
+    assert "event: done" in body
+    assert "event: error" not in body
+
+
+def test_a_requeued_turn_keeps_the_reader_waiting_rather_than_failing_it(monkeypatch) -> None:
+    """优雅退出把 job 放回 queued —— 那是重排，不是失败，不该报 error。"""
+    state = _TurnState()
+    state.job_status = "queued"
+    state.drafts = ["新一轮开头"]
+
+    class _Finisher:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self) -> str:
+            self.calls += 1
+            if self.calls >= 3:
+                state.answer = {"id": uuid4(), "markdown": "重排后写完的正文。", "duration_ms": 900}
+            return state.drafts[0]
+
+    state.draft_now = _Finisher()  # type: ignore[method-assign]
+
+    body = _subscribe_body(monkeypatch, state)
+
+    assert "event: error" not in body
+    assert "event: done" in body
+    assert "重排后写完的正文。" in body
+
+
+def test_a_restarted_draft_is_not_replayed_as_duplicated_prose(monkeypatch) -> None:
+    """job 重排后草稿从头开始：已发出的收不回来，但也绝不能再发一遍。"""
+    state = _TurnState()
+    state.drafts = ["第一次的开头", "第二次完全不同的开头"]
+
+    original = state.draft_now
+
+    def draft_now() -> str:
+        if state.polls >= 3:
+            state.answer = {"id": uuid4(), "markdown": "第二次完全不同的开头，写完了。", "duration_ms": 800}
+        return original()
+
+    state.draft_now = draft_now  # type: ignore[method-assign]
+
+    body = _subscribe_body(monkeypatch, state)
+
+    assert body.count("event: delta") == 1
+    assert "第二次完全不同的开头" not in body.split("event: done")[0]
+    assert "event: done" in body
+
+
+def test_subscriber_gives_up_politely_instead_of_hanging_forever(monkeypatch) -> None:
+    from backend.app.api.routes import recommendations as route
+
+    monkeypatch.setattr(route, "SUBSCRIBE_MAX_SECONDS", 0)
+    state = _TurnState()
+
+    body = _subscribe_body(monkeypatch, state)
+
+    assert "event: error" in body
+    assert "还在生成中" in body
+
+
+def test_a_stopped_turn_is_refused_before_the_stream_opens(monkeypatch) -> None:
+    from backend.app.api.routes import recommendations as route
+
+    monkeypatch.setattr(route, "ensure_recommendation_session_visible", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(route, "_get_recommendation_session_or_404", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(route, "agent_turn_aborted", lambda *_args, **_kwargs: True)
+
+    with pytest.raises(HTTPException) as raised:
+        route.stream_recommendation_answer(uuid4(), "turn-1", current_user=object(), db=object())
+
+    assert raised.value.status_code == 409
+
+
+def test_the_endpoint_no_longer_knows_how_to_generate_anything(monkeypatch) -> None:
+    """回归护栏：正文的所有者是 worker job，不是这个请求。
+
+    这个断言看着像洁癖，其实是问题四的根：只要 API 还能自己生成一次，
+    「关页签就丢正文、重开又重新付费」这条路径就还在。
+    """
+    from backend.app.api.routes import recommendations as route
+
+    source = pathlib.Path(route.__file__).read_text(encoding="utf-8")
+
+    assert "stream_openai_compatible_chat" not in source
+    assert "insert_agent_answer_message" not in source
+    assert "fallback_answer_markdown" not in source
 
 
 # -- SSE parsing ---------------------------------------------------------

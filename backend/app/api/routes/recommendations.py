@@ -6,20 +6,10 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from backend.app.ai.llm_client import stream_openai_compatible_chat
 from backend.app.api.authn import CurrentUser
-from backend.app.jobs.handlers.common import _get_default_node_config, _render_prompt_messages
-from backend.app.registry.nodes import recommendation_answer_writer_node_by_mode
-from backend.app.services.recommendation_answer import (
-    backfill_target_links,
-    build_answer_prompt_variables,
-    fallback_answer_markdown,
-    sanitize_writer_output,
-    target_link_map,
-)
+from backend.app.services.recommendation_answer_draft import read_answer_draft
 from backend.app.api.routes.utils import (
     ensure_recommendation_session_visible,
 )
@@ -33,7 +23,6 @@ from backend.app.services.recommendation_flow import (
     _create_recommendation_session,
     find_agent_turn_answer,
     find_agent_turn_brief,
-    insert_agent_answer_message,
     _enqueue_recommendation_agent_job,
     _filter_recommendation_session_summaries,
     _get_recommendation_session_or_404,
@@ -64,6 +53,19 @@ _SSE_HEADERS = {
     "X-Accel-Buffering": "no",
     "Connection": "keep-alive",
 }
+
+# 订阅节奏。草稿由 worker 每约 500ms 落一次，读得比写快一点就够了；再快只是
+# 在给数据库加空转查询。
+SUBSCRIBE_POLL_SECONDS = 0.3
+# 一次连接最多跟多久。Writer 实测约 47 秒；留到 5 分钟是为了覆盖 job 被部署
+# 打断后重排、整轮从头再跑的情况。超了如实说「还在写」，不假装失败。
+SUBSCRIBE_MAX_SECONDS = 300
+# 任务状态查得比草稿稀：草稿是每一拍都要看的东西，任务状态只是「还有没有人
+# 在写」的兜底判据，跟前端 1.2 秒的轮询节奏对齐就够了。
+JOB_STATUS_EVERY_N_POLLS = 4
+_TERMINAL_JOB_STATUSES = {"succeeded", "failed", "cancelled", "missing"}
+TURN_WITHOUT_ANSWER_MESSAGE = "这一轮没能生成正文，请重新提问。"
+WRITER_STILL_RUNNING_MESSAGE = "正文还在生成中，稍后重新打开这个会话就能看到完整内容。"
 
 
 class RecommendationMessageOut(BaseModel):
@@ -370,14 +372,18 @@ def stream_recommendation_answer(
     current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> StreamingResponse:
-    """Stream the final write-up for one agent turn.
+    """Stream the final write-up for one agent turn — as a reader, not a writer.
 
-    This is the only streamed call in the system, and it is streamed here in
-    the API rather than in the worker because there is no worker→browser
-    channel (the queue is a Postgres table; there is no Redis). Everything the
-    generator needs is read *before* the response is returned: the request
-    session closes as soon as this function returns, so the generator opens its
-    own session for the final write.
+    This endpoint used to *generate* the prose, and persisted it only after the
+    stream loop finished. That made an already-paid-for answer depend on the
+    browser staying connected: closing the tab lost it outright, and reopening
+    the session generated and billed it a second time.
+
+    The agent job owns the Writer now (`services/recommendation_writer`). All
+    that happens here is: replay a finished answer, or follow the draft row the
+    worker is filling in. The SSE contract the page consumes — `delta`, `done`,
+    `error`, `aborted` — is deliberately unchanged, so the front end did not
+    move with it.
     """
     ensure_recommendation_session_visible(db, current_user, session_id)
     _get_recommendation_session_or_404(db, session_id)
@@ -415,133 +421,81 @@ def stream_recommendation_answer(
             detail="This turn has no writer brief yet; the agent may still be running.",
         )
 
-    node_name = recommendation_answer_writer_node_by_mode().get(str(brief.get("mode") or ""))
-    node_config = None
-    if node_name:
-        try:
-            node_config = _get_default_node_config(db, node_name)
-        except Exception:
-            node_config = None
+    return StreamingResponse(
+        _subscribe_to_answer(session_id, turn_id),
+        media_type="text/event-stream",
+        headers=_SSE_HEADERS,
+    )
 
-    link_map = target_link_map(brief)
 
-    def turn_aborted_now() -> bool:
-        # The request-scoped session is already closed once the generator runs.
-        # A fresh read is required so a stop from this or another tab becomes
-        # visible while the Writer stream is in flight.
-        with session_scope() as check_db:
-            return agent_turn_aborted(check_db, session_id, turn_id)
+def _subscribe_to_answer(session_id: UUID, turn_id: str):
+    """Follow one turn's draft until it becomes an answer, a stop, or a failure.
 
-    def aborted_event() -> str:
-        return _sse("aborted", {"turn_id": turn_id, "message": "This turn was stopped."})
+    Every read opens its own session: the request-scoped one is already closed
+    by the time a StreamingResponse generator runs.
 
-    def persist(markdown: str, *, mode: str, duration_ms: int) -> str | None:
-        # 独立 session：请求的那个已经随函数返回关掉了。
-        with session_scope() as write_db:
-            message_id = insert_agent_answer_message(
-                write_db,
-                session_id=session_id,
-                turn_id=turn_id,
-                markdown=markdown,
-                model_name=(node_config or {}).get("model_name"),
-                generation_mode=mode,
-                duration_ms=duration_ms,
+    Deltas are suffixes of what has already been sent. A draft that stops being
+    a prefix of that means the worker restarted the turn (a job released by a
+    deploy and requeued), and there is no way to un-send bytes — so the reader
+    skips silently to the new text and lets the final `done`, which carries the
+    complete markdown, be what the page actually renders.
+    """
+    sent = ""
+    polls = 0
+    job_status = "running"
+    deadline = time.monotonic() + SUBSCRIBE_MAX_SECONDS
+    while True:
+        with session_scope() as poll_db:
+            if agent_turn_aborted(poll_db, session_id, turn_id):
+                yield _sse("aborted", {"turn_id": turn_id, "message": "This turn was stopped."})
+                return
+            # 任务状态**必须**读在正文之前。worker 是「先提交正文、再标记成功」，
+            # 倒过来读就会在这两次提交之间读到「已成功且没有正文」——一个并不
+            # 存在的状态，而它的后果是把一轮刚写完的正文报成失败。
+            # 隔几轮读一次即可：读到的状态偏旧只会让订阅多等一拍，而偏旧的状态
+            # 仍然早于紧随其后的那次正文读取，上面那条不变式照样成立。
+            if polls % JOB_STATUS_EVERY_N_POLLS == 0:
+                job_status = str(
+                    (find_agent_turn_job(poll_db, session_id, turn_id) or {}).get("status") or "missing"
+                )
+            polls += 1
+            answer = find_agent_turn_answer(poll_db, session_id, turn_id)
+            draft = "" if answer is not None else str(
+                (read_answer_draft(poll_db, session_id=session_id, turn_id=turn_id) or {}).get(
+                    "markdown"
+                ) or ""
             )
-            if message_id is not None:
-                _touch_recommendation_session(write_db, session_id)
-        return str(message_id) if message_id is not None else None
 
-    def generate():
-        writer_started = time.perf_counter()
-
-        def writer_duration_ms() -> int:
-            # Measures the whole Writer SSE stage through the final chunk (or
-            # rule fallback), not merely time-to-first-token.
-            return max(0, int((time.perf_counter() - writer_started) * 1000))
-
-        if turn_aborted_now():
-            yield aborted_event()
-            return
-        if node_config is None:
-            markdown = backfill_target_links(fallback_answer_markdown(brief), link_map)
-            if turn_aborted_now():
-                yield aborted_event()
-                return
-            yield _sse("delta", {"text": markdown})
-            duration_ms = writer_duration_ms()
-            message_id = persist(markdown, mode="fallback", duration_ms=duration_ms)
-            if message_id is None:
-                yield aborted_event()
-                return
+        if answer is not None:
             yield _sse(
                 "done",
-                {"markdown": markdown, "message_id": message_id, "duration_ms": duration_ms},
+                {
+                    "markdown": answer["markdown"],
+                    "message_id": str(answer["id"]),
+                    # Real Writer duration, measured in the worker from the
+                    # first token to the last — no longer whatever slice of it
+                    # this particular connection happened to witness.
+                    "duration_ms": int(answer.get("duration_ms") or 0),
+                },
             )
             return
 
-        chunks: list[str] = []
-        try:
-            for delta in stream_openai_compatible_chat(
-                base_url=node_config["base_url"],
-                api_key_secret_ref=node_config["api_key_secret_ref"],
-                api_key_encrypted=node_config.get("api_key_encrypted"),
-                model_name=node_config["model_name"],
-                messages=_render_prompt_messages(node_config, build_answer_prompt_variables(brief)),
-                temperature=node_config["temperature"],
-                top_p=node_config["top_p"],
-                max_tokens=node_config["max_tokens"],
-                timeout_seconds=node_config["timeout_seconds"] or 180,
-            ):
-                if turn_aborted_now():
-                    yield aborted_event()
-                    return
-                chunks.append(delta)
-                yield _sse("delta", {"text": delta})
-        except Exception as exc:  # noqa: BLE001 - 生成失败要给出可用兜底，不是空页面
-            if turn_aborted_now():
-                yield aborted_event()
-                return
-            markdown = backfill_target_links(fallback_answer_markdown(brief), link_map)
-            yield _sse("error", {"message": str(exc)})
-            yield _sse("delta", {"text": markdown})
-            duration_ms = writer_duration_ms()
-            message_id = persist(markdown, mode="fallback", duration_ms=duration_ms)
-            if message_id is None:
-                yield aborted_event()
-                return
-            yield _sse(
-                "done",
-                {"markdown": markdown, "message_id": message_id, "duration_ms": duration_ms},
-            )
+        if draft != sent:
+            if draft.startswith(sent):
+                yield _sse("delta", {"text": draft[len(sent):]})
+            sent = draft
+
+        if job_status in _TERMINAL_JOB_STATUSES:
+            # 任务已经收尾却没有正文：真实失败，或者是发布窗口里那种「旧代码写完
+            # brief 就停下」的遗留轮次。说清楚比转圈到超时好。
+            yield _sse("error", {"message": TURN_WITHOUT_ANSWER_MESSAGE})
             return
 
-        # 回填放在落库这一步：流式增量里做替换要处理跨 chunk 的半个名字，
-        # 而前端在 done 事件里拿到的就是最终带链接的正文。
-        markdown = sanitize_writer_output(
-            "".join(chunks),
-            forbidden_ids=list(link_map.values()),
-            forbidden_phrases=[str(value) for value in brief.get("follow_up_suggestions") or []],
-        )
-        if not markdown:
-            markdown = fallback_answer_markdown(brief)
-            generation_mode = "fallback"
-        else:
-            generation_mode = "llm"
-        markdown = backfill_target_links(markdown, link_map)
-        if turn_aborted_now():
-            yield aborted_event()
+        if time.monotonic() >= deadline:
+            yield _sse("error", {"message": WRITER_STILL_RUNNING_MESSAGE})
             return
-        duration_ms = writer_duration_ms()
-        message_id = persist(markdown, mode=generation_mode, duration_ms=duration_ms)
-        if message_id is None:
-            yield aborted_event()
-            return
-        yield _sse(
-            "done",
-            {"markdown": markdown, "message_id": message_id, "duration_ms": duration_ms},
-        )
 
-    return StreamingResponse(generate(), media_type="text/event-stream", headers=_SSE_HEADERS)
+        time.sleep(SUBSCRIBE_POLL_SECONDS)
 
 
 @router.get("/sessions/{session_id}/messages", response_model=list[RecommendationMessageOut])

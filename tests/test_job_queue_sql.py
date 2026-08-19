@@ -117,3 +117,104 @@ def test_mark_job_succeeded_and_stale_requeue_execute(db, job_id) -> None:
     assert _job(db, job_id)["status"] == "succeeded"
     # 清扫器和失败标记跑在同一条路径上，一起过一遍。
     requeue_stale_running_jobs(db, queue_name="llm", stale_after_seconds=1800)
+
+
+def _claim(db, job_id):
+    """Put the job into the state a worker actually holds it in."""
+    db.execute(
+        text(
+            """
+            update background_job
+            set status = 'running',
+                locked_by = 'worker-test',
+                locked_at = now(),
+                started_at = now(),
+                attempt_count = attempt_count + 1
+            where id = :id
+            """
+        ),
+        {"id": job_id},
+    )
+    db.commit()
+
+
+def _row(db, job_id):
+    return db.execute(
+        text(
+            """
+            select status, attempt_count, locked_at, locked_by, metadata_json,
+                   error_code
+            from background_job
+            where id = :id
+            """
+        ),
+        {"id": job_id},
+    ).mappings().one()
+
+
+def test_touch_running_job_moves_the_lease_forward(db, job_id) -> None:
+    from backend.app.jobs.queue import touch_running_job
+
+    _claim(db, job_id)
+    db.execute(
+        text("update background_job set locked_at = now() - interval '20 minutes' where id = :id"),
+        {"id": job_id},
+    )
+    db.commit()
+    before = _row(db, job_id)["locked_at"]
+
+    assert touch_running_job(db, job_id=job_id) is True
+    db.commit()
+
+    assert _row(db, job_id)["locked_at"] > before
+
+
+def test_touch_ignores_a_job_that_is_no_longer_running(db, job_id) -> None:
+    from backend.app.jobs.queue import touch_running_job
+
+    assert touch_running_job(db, job_id=job_id) is False
+
+
+def test_release_on_shutdown_requeues_without_spending_the_attempt(db, job_id) -> None:
+    """agent job 的 max_attempts 是 1：花掉这一次就等于把重启做成了失败。"""
+    from backend.app.jobs.queue import release_job_for_shutdown
+
+    _claim(db, job_id)
+    assert _row(db, job_id)["attempt_count"] == 1
+
+    assert release_job_for_shutdown(db, job_id=job_id, worker_id="worker-test") == "queued"
+
+    row = _row(db, job_id)
+    assert row["status"] == "queued"
+    assert row["attempt_count"] == 0
+    assert row["locked_at"] is None
+    assert row["locked_by"] is None
+    assert row["metadata_json"]["released_by_shutdown"]["count"] == 1
+    assert row["metadata_json"]["released_by_shutdown"]["worker_id"] == "worker-test"
+
+
+def test_a_job_interrupted_too_often_stops_being_requeued(db, job_id) -> None:
+    """崩溃重启循环里，无限重排一个 agent turn 就是无限重新付费。"""
+    from backend.app.jobs.queue import release_job_for_shutdown
+
+    for expected in ("queued", "queued"):
+        _claim(db, job_id)
+        assert release_job_for_shutdown(
+            db, job_id=job_id, worker_id="worker-test", max_releases=2
+        ) == expected
+
+    _claim(db, job_id)
+    assert release_job_for_shutdown(
+        db, job_id=job_id, worker_id="worker-test", max_releases=2
+    ) == "failed"
+
+    row = _row(db, job_id)
+    assert row["status"] == "failed"
+    assert row["error_code"] == "worker_shutdown_exhausted"
+
+
+def test_releasing_a_job_nobody_holds_changes_nothing(db, job_id) -> None:
+    from backend.app.jobs.queue import release_job_for_shutdown
+
+    assert release_job_for_shutdown(db, job_id=job_id, worker_id="worker-test") == "unchanged"
+    assert _row(db, job_id)["status"] == "queued"

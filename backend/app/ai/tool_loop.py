@@ -10,6 +10,8 @@ the loop itself can be tested without a model.
 from __future__ import annotations
 
 import json
+import sys
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -182,6 +184,11 @@ def _tool_result_content(
     try:
         value = execute_tool(call)
     except Exception as exc:  # noqa: BLE001 - 工具失败要回传给模型，不是终止运行
+        # 模型只看得到一行 error 字符串，那对排查毫无用处。堆栈进 stderr，
+        # 于是 worker 日志里留得下第一现场（调用方负责让 session 保持可用，
+        # 见 RecommendationAgentTools.execute 的 savepoint）。
+        traceback.print_exc()
+        print(f"Tool {call.name} failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
         return json.dumps({"error": f"{type(exc).__name__}: {exc}"}, ensure_ascii=False)
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
     if len(text) <= limit:

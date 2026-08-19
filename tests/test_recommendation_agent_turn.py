@@ -27,6 +27,7 @@ from backend.app.registry.nodes import (
     recommendation_answer_writer_node_by_mode,
 )
 from backend.app.services.recommendation_agent_tools import RecommendationAgentTools
+from backend.app.services.recommendation_writer import WriterOutcome
 
 
 def _agent_prompt_module():
@@ -512,6 +513,7 @@ def _exercise_handler_4b(
     *,
     deep_status: str = "ok",
     abort_checks: list[bool] | None = None,
+    writer_aborted: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     from backend.app.jobs.handlers import recommendation as handler
 
@@ -553,7 +555,13 @@ def _exercise_handler_4b(
     def tools_factory(db, **kwargs):
         return real_tools(db, screen_targets_fn=screen, **kwargs)
 
-    state: dict[str, Any] = {"deep_calls": 0, "finalize_calls": 0, "briefs": [], "deep_messages": []}
+    state: dict[str, Any] = {
+        "deep_calls": 0,
+        "finalize_calls": 0,
+        "briefs": [],
+        "deep_messages": [],
+        "writer_briefs": [],
+    }
     checks = iter(abort_checks or [])
     monkeypatch.setattr(handler, "RecommendationAgentTools", tools_factory)
     monkeypatch.setattr(handler, "_resolve_entity_id", lambda *_args, **_kwargs: uuid4())
@@ -600,6 +608,15 @@ def _exercise_handler_4b(
         lambda *_args, **kwargs: state["deep_messages"].append(kwargs["result"]),
     )
     monkeypatch.setattr(handler, "_insert_recommendation_agent_trace", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(handler, "_writer_node_config", lambda *_args, **_kwargs: None)
+
+    def fake_writer(_db, **kwargs):
+        state["writer_briefs"].append(kwargs["brief"])
+        if writer_aborted:
+            return WriterOutcome("aborted", "", "", None, 0)
+        return WriterOutcome("answered", "fallback", "兜底正文", uuid4(), 47)
+
+    monkeypatch.setattr(handler, "run_writer_stage", fake_writer)
 
     def run_loop(**kwargs):
         executor = kwargs["execute_tool"].__self__
@@ -662,12 +679,14 @@ def _exercise_handler_4b(
 def test_agent_forgets_deep_eval_code_runs_it_and_turn_still_finishes(monkeypatch, deep_status) -> None:
     result, state = _exercise_handler_4b(monkeypatch, deep_status=deep_status)
 
-    assert result["outcome"] == "brief_ready"
+    assert result["outcome"] == "answer_ready"
     assert result["deep_eval_status"] == deep_status
     assert state["deep_calls"] == 1
     assert state["finalize_calls"] == 1
     assert len(state["briefs"]) == 1
     assert state["deep_messages"][0]["auto_invoked"] is True
+    # 这一轮不再停在 brief：同一个 job 接着把正文写完，前端不需要发起第二次调用。
+    assert state["writer_briefs"] == state["briefs"]
 
 
 @pytest.mark.parametrize(
@@ -688,6 +707,17 @@ def test_abort_before_or_after_deep_eval_never_writes_a_brief(
     assert state["deep_calls"] == expected_deep_calls
     assert state["finalize_calls"] == 0
     assert state["briefs"] == []
+    assert state["writer_briefs"] == []
+
+
+def test_a_turn_stopped_while_the_writer_runs_reports_aborted(monkeypatch) -> None:
+    """中止发生在正文段：brief 已经落库，但这一轮的终态是 aborted。"""
+    result, state = _exercise_handler_4b(monkeypatch, writer_aborted=True)
+
+    assert result["outcome"] == "aborted"
+    assert len(state["briefs"]) == 1
+    assert len(state["writer_briefs"]) == 1
+    assert result["answer_generation_mode"] is None
 
 
 # -- request contract ----------------------------------------------------

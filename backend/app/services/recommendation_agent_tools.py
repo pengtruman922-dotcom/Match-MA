@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import time
+import traceback
 from typing import Any
 
 from sqlalchemy import bindparam, text
@@ -20,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.ai.llm_client import ToolCall
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+from backend.app.db import savepoint
 from backend.app.services.industry_taxonomy import list_l1_terms, list_l2_terms
 from backend.app.services.profile_sections import load_profile_sections, render_profile_text
 from backend.app.services.recommendation_agent_policy import (
@@ -280,23 +282,32 @@ class RecommendationAgentTools:
             else 0,
         )
         try:
-            self._step_sink(payload)
+            with savepoint(self._db):
+                self._step_sink(payload)
         except Exception:  # noqa: BLE001 - 进度回显失败不该拖垮整次推荐
-            pass
+            # 吞掉的是「这一步没显示出来」，不是「这次推荐失败了」。但吞之前
+            # 必须留下现场：savepoint 把 session 还原成可用状态，traceback 进
+            # stderr —— 否则真正的错误会在下一次查询变成 InFailedSqlTransaction，
+            # 最初的原因永远查不到。
+            traceback.print_exc()
 
     # -- dispatch ---------------------------------------------------------
     def execute(self, call: ToolCall) -> Any:
         self._tool_started_at = time.perf_counter()
         try:
-            if call.name == "search_targets":
-                return self._search_targets(call.arguments)
-            if call.name == "get_target_detail":
-                return self._get_target_detail(call.arguments)
-            if call.name == "deep_evaluate_candidates":
-                return self._deep_evaluate_candidates()
-            if call.name == "ask_user":
-                return self._ask_user(call.arguments)
-            return {"error": f"unknown tool: {call.name}"}
+            # tool_loop 把工具异常当作结果回传给模型继续跑（这是对的：一次工具
+            # 失败不该废掉整轮）。但那之后用的还是同一个 session，所以失败必须
+            # 先回滚到进入工具前的位置，否则 session 带着 aborted 状态往下走。
+            with savepoint(self._db):
+                if call.name == "search_targets":
+                    return self._search_targets(call.arguments)
+                if call.name == "get_target_detail":
+                    return self._get_target_detail(call.arguments)
+                if call.name == "deep_evaluate_candidates":
+                    return self._deep_evaluate_candidates()
+                if call.name == "ask_user":
+                    return self._ask_user(call.arguments)
+                return {"error": f"unknown tool: {call.name}"}
         finally:
             self._tool_started_at = None
 

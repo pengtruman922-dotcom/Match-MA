@@ -221,3 +221,112 @@ def mark_job_failed(
         },
     )
     db.commit()
+
+
+def touch_running_job(db: Session, *, job_id: UUID) -> bool:
+    """Refresh the lease on a job that is still being worked on.
+
+    `claim_next_job` stamps `locked_at` once and never again, so the stale
+    sweep has always been measuring "how long ago was this claimed", not "is
+    anyone still on it". Handlers that run for minutes call this at their
+    checkpoints to answer the second question.
+
+    Deliberately does not commit: the recommendation handler is inline-commit
+    by design, and the lease rides along with the progress write it accompanies
+    instead of paying for a transaction of its own.
+    """
+    result = db.execute(
+        text(
+            """
+            update background_job
+            set locked_at = now(),
+                updated_at = now()
+            where id = :job_id
+              and status = 'running'
+            """
+        ),
+        {"job_id": job_id},
+    )
+    return bool(result.rowcount)
+
+
+# 同一个 job 被部署反复打断的次数上限。超过就判失败而不是无限放回队列：
+# 崩溃重启循环里的 worker 会一直收到 SIGTERM，而重排一次 recommendation_agent
+# 就是重新付一次模型钱。
+MAX_SHUTDOWN_RELEASES = 3
+
+
+def release_job_for_shutdown(
+    db: Session,
+    *,
+    job_id: UUID,
+    worker_id: str,
+    max_releases: int = MAX_SHUTDOWN_RELEASES,
+) -> str:
+    """Hand a running job back to the queue because *we* are stopping.
+
+    Releasing gives the attempt back (`attempt_count - 1`). With
+    `max_attempts = 1` on the agent turn, spending the attempt here would turn
+    every deploy into a failed recommendation — graceful shutdown would be
+    manufacturing exactly the failure it exists to prevent.
+
+    Returns "queued" when the job went back, "failed" when it has been
+    interrupted too many times to keep re-running for free.
+    """
+    row = db.execute(
+        text(
+            """
+            select coalesce((metadata_json -> 'released_by_shutdown' ->> 'count')::int, 0)
+                     as release_count
+            from background_job
+            where id = :job_id
+              and status = 'running'
+            """
+        ),
+        {"job_id": job_id},
+    ).mappings().one_or_none()
+    if row is None:
+        # Someone else already moved it — a stale sweep, or a cancel. Leave it.
+        return "unchanged"
+
+    release_count = int(row["release_count"]) + 1
+    if release_count > max_releases:
+        mark_job_failed(
+            db,
+            job_id=job_id,
+            error_message=(
+                f"Worker shut down while running this job {release_count - 1} times; "
+                "not requeueing again."
+            ),
+            error_code="worker_shutdown_exhausted",
+            retry_allowed=False,
+        )
+        return "failed"
+
+    db.execute(
+        text(
+            """
+            update background_job
+            set status = 'queued',
+                run_after = now(),
+                locked_by = null,
+                locked_at = null,
+                started_at = null,
+                finished_at = null,
+                attempt_count = greatest(attempt_count - 1, 0),
+                updated_at = now(),
+                metadata_json = coalesce(metadata_json, '{}'::jsonb) || jsonb_build_object(
+                  'released_by_shutdown', jsonb_build_object(
+                    'at', now()::text,
+                    'worker_id', cast(:worker_id as text),
+                    'count', cast(:release_count as int)
+                  )
+                )
+            where id = :job_id
+              and status = 'running'
+            """
+        ),
+        {"job_id": job_id, "worker_id": worker_id, "release_count": release_count},
+    )
+    db.commit()
+    return "queued"

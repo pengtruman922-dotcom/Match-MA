@@ -1,7 +1,6 @@
 import argparse
 import socket
 import sys
-import time
 import traceback
 
 from sqlalchemy import bindparam, text
@@ -15,7 +14,15 @@ from backend.app.jobs.queue import (
     claim_next_job,
     mark_job_failed,
     mark_job_succeeded,
+    release_job_for_shutdown,
     requeue_stale_running_jobs,
+)
+from backend.app.shutdown import (
+    WorkerShutdown,
+    install_signal_handlers,
+    shutdown_reason,
+    shutdown_requested,
+    wait_for_shutdown,
 )
 from backend.app.jobs.retry_policy import RESEARCH_JOB_TYPES, is_transient_research_error
 
@@ -36,6 +43,23 @@ def run_once(*, queue_name: str, worker_id: str, stale_after_seconds: int = 300)
         with session_scope() as db:
             result = execute_job(db, job)
             mark_job_succeeded(db, job_id=job.id, result_json=result)
+    except WorkerShutdown:
+        # 我们自己要停，不是这个任务不行。放回队列且不消耗 attempts，
+        # 更不能走下面的失败收尾 —— _finalize_attachment_job_failure 与
+        # _mark_related_business_update_failed_if_final 会把业务实体也判死，
+        # 而这里什么都没失败。
+        with session_scope() as db:
+            disposition = release_job_for_shutdown(
+                db,
+                job_id=job.id,
+                worker_id=worker_id,
+            )
+        print(
+            f"Job {job.id} ({job.job_type}) released on shutdown "
+            f"({shutdown_reason()}): {disposition}",
+            file=sys.stderr,
+            flush=True,
+        )
     except Exception as exc:  # pragma: no cover - defensive worker boundary
         with session_scope() as db:
             retry_allowed = (
@@ -136,13 +160,17 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # 装在解析参数之后、领第一个任务之前：一个还没领任务的 worker 收到 SIGTERM
+    # 应当直接退出，而不是先领一个再放回去。
+    install_signal_handlers()
+
     print(
         f"Starting Match-MA worker queue={args.queue} worker_id={args.worker_id} "
         f"stale_after={args.stale_after}s",
         flush=True,
     )
 
-    while True:
+    while not shutdown_requested():
         found = run_once(
             queue_name=args.queue,
             worker_id=args.worker_id,
@@ -151,7 +179,11 @@ def main() -> None:
         if args.once:
             return
         if not found:
-            time.sleep(args.sleep)
+            # Event.wait rather than time.sleep: a SIGTERM arriving during the
+            # idle poll should end the process now, not two seconds from now.
+            wait_for_shutdown(args.sleep)
+
+    print(f"Worker stopped ({shutdown_reason()}).", flush=True)
 
 
 if __name__ == "__main__":

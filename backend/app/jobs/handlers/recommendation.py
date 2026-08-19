@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import time
+import traceback
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
@@ -27,9 +29,12 @@ from backend.app.services.image_inputs import (
     is_supported_multimodal_image,
     prepare_image_for_multimodal,
 )
+from backend.app.jobs.heartbeat import JobHeartbeat
 from backend.app.jobs.queue import JobClaim
+from backend.app.shutdown import raise_if_shutting_down
 from backend.app.registry.nodes import (
     recommendation_agent_node_by_mode,
+    recommendation_answer_writer_node_by_mode,
 )
 from backend.app.services.recommendation_agent_tools import (
     MAX_DETAIL_TARGETS_TOTAL,
@@ -51,6 +56,7 @@ from backend.app.services.recommendation_flow import (
     agent_turn_aborted,
     target_facts_for_agent,
 )
+from backend.app.services.recommendation_writer import run_writer_stage
 
 
 # 编排 Agent。刻意没有共用兜底节点：两个方向的工具集不同，一份提示词兜不住。
@@ -131,11 +137,17 @@ def _build_recommendation_agent_context(
 
 
 def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object]:
-    """Run one agent turn: understand, screen, read a few, hand over a brief.
+    """Run one agent turn end to end: understand, screen, brief, write.
 
-    The turn deliberately stops at the brief. Prose generation is a separate,
-    tool-free node the API streams (see the answer-stream endpoint), which is
-    what lets the user watch words appear instead of a spinner.
+    The Writer used to be the browser's job — the page saw a brief and opened
+    an SSE that generated the prose inside the API request. That made the
+    persistence of a paid generation depend on a tab staying open, so closing
+    it lost the whole answer and reopening the session paid for it again.
+
+    The turn now finishes what it starts. Prose still streams to the user, but
+    through a draft row the answer-stream endpoint reads (see
+    `services/recommendation_writer`); the server owner of the work is this
+    job, which the queue already knows how to lease, reclaim and release.
     """
     session_id = _resolve_entity_id(job, expected_entity_type="recommendation_session")
     if session_id is None:
@@ -156,12 +168,30 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
     node_config = _get_default_node_config(db, node_name)
     history_context = str(payload.get("history_context") or "")
 
+    heartbeat = JobHeartbeat(db, job.id)
+
+    def turn_stopped() -> bool:
+        """Abort check that also honours a shutdown request, as two verdicts.
+
+        A user abort finalises the turn (marker written, nothing more runs). A
+        worker shutdown is our interruption, not theirs, so it raises instead:
+        the job goes back to the queue with its single attempt intact rather
+        than being recorded as a turn that failed.
+        """
+        raise_if_shutting_down()
+        return agent_turn_aborted(db, session_id, turn_id)
+
+    def commit_progress() -> None:
+        """Inline commit + lease refresh, the pair every progress write needs."""
+        heartbeat.beat()
+        db.commit()
+
     # ① 先把这句话解析成一份需求快照，再让主 Agent 动手。多花 3-8 秒换来的是
     # 一条可比对的基线：用户说了什么与 agent 筛了什么从此是两份可以并排看的
     # 东西，「agent 自己编条件」不再是一件查不出来的事。
     # 解析失败不中断本轮 —— 退化成「没有结构化条件的一轮」比直接报错有用得多，
     # 但状态会如实写进消息与 trace，不会假装成功（见 parser_status）。
-    if agent_turn_aborted(db, session_id, turn_id):
+    if turn_stopped():
         # 排队期间就被停掉了：一次模型调用都不该花。
         return _aborted_agent_turn_result(job, session_id=session_id, turn_id=turn_id)
     parser_started = time.perf_counter()
@@ -182,8 +212,8 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
     )
     # 立刻提交，与 agent_step 同样的理由：前端轮询要在 agent 还在跑的时候
     # 就能看到「已读懂需求」。
-    db.commit()
-    if agent_turn_aborted(db, session_id, turn_id):
+    commit_progress()
+    if turn_stopped():
         return _aborted_agent_turn_result(job, session_id=session_id, turn_id=turn_id)
 
     agent_context = _build_recommendation_agent_context(
@@ -225,7 +255,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             step=step,
         )
         # 立刻提交，否则前端要等整个 agent 跑完才看得到过程。
-        db.commit()
+        commit_progress()
 
     tools = RecommendationAgentTools(
         db,
@@ -249,7 +279,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             max_iterations=AGENT_MAX_ITERATIONS,
             tool_result_limit=AGENT_TOOL_RESULT_LIMIT,
             early_stop_instruction=lambda: _agent_early_stop(tools, started),
-            should_abort=lambda: agent_turn_aborted(db, session_id, turn_id),
+            should_abort=turn_stopped,
         )
     except ToolLoopAborted as aborted:
         # 标记已经由取消接口写好了，这里只留一条轨迹说明跑到哪一步停的。
@@ -298,7 +328,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
         db.commit()
         raise
 
-    if agent_turn_aborted(db, session_id, turn_id):
+    if turn_stopped():
         # 停止发生在最后一次模型调用期间：素材不落库，否则页面会在「任务已停止」
         # 底下再冒出一段回答。
         _insert_recommendation_agent_trace(
@@ -338,7 +368,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
         and tools.candidate_pool().candidate_ids
         and not tools.deep_eval_called
     ):
-        if agent_turn_aborted(db, session_id, turn_id):
+        if turn_stopped():
             return _finish_aborted_agent_turn(
                 db,
                 job=job,
@@ -354,7 +384,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             )
         deep_eval = tools.run_deep_eval_if_needed()
         auto_deep_eval = True
-        if agent_turn_aborted(db, session_id, turn_id):
+        if turn_stopped():
             return _finish_aborted_agent_turn(
                 db,
                 job=job,
@@ -373,7 +403,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             node_config=node_config,
             deep_eval=deep_eval,
         )
-        if agent_turn_aborted(db, session_id, turn_id):
+        if turn_stopped():
             return _finish_aborted_agent_turn(
                 db,
                 job=job,
@@ -399,7 +429,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             result=deep_eval,
             duration_ms=int(deep_eval.get("latency_ms") or 0),
         )
-        db.commit()
+        commit_progress()
 
     if tools.ask_user_payload is not None:
         _insert_agent_question_message(
@@ -437,7 +467,21 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
         intent_snapshot=intent_snapshot,
         deep_eval=deep_eval,
     )
-    db.commit()
+    # 提交在写正文之前，不是之后：brief 一落库前端就能看到进度并连上订阅，
+    # 正文开始流的时候读者已经在那里了。
+    commit_progress()
+
+    writer: dict[str, object] = {}
+    if brief is not None:
+        outcome, writer = _write_turn_answer(
+            db,
+            session_id=session_id,
+            turn_id=turn_id,
+            brief=brief,
+            is_aborted=turn_stopped,
+            heartbeat=heartbeat,
+        )
+
     return {
         "handled": True,
         "job_type": job.job_type,
@@ -448,6 +492,53 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
         "detail_targets": len(tools.detail_target_ids),
         "recommended_count": len((brief or {}).get("recommended") or []),
         "deep_eval_status": (deep_eval or {}).get("deep_eval_status", "not_run"),
+        **writer,
+    }
+
+
+def _write_turn_answer(
+    db: Session,
+    *,
+    session_id: UUID,
+    turn_id: str,
+    brief: dict[str, Any],
+    is_aborted: Callable[[], bool],
+    heartbeat: JobHeartbeat,
+) -> tuple[str, dict[str, object]]:
+    """Run the Writer for this turn and report how it ended.
+
+    Kept out of the orchestration body because the two stages fail differently:
+    the agent stage raises and the job fails, while a Writer that cannot reach
+    its model still owes the user a sendable answer and produces the rule-built
+    fallback instead.
+    """
+    node_config = _writer_node_config(db, brief)
+
+    def checkpoint() -> None:
+        # 每次 flush 都过一遍：Writer 段是整个 job 里最长的一段静默期，心跳停在
+        # 这里等于把这一轮暴露给 stale 清扫。**不**在这里查中止标记 —— Writer
+        # 紧接着就会自己查一次，查两遍只是多一次往返。
+        heartbeat.beat()
+        raise_if_shutting_down()
+
+    outcome = run_writer_stage(
+        db,
+        session_id=session_id,
+        turn_id=turn_id,
+        brief=brief,
+        node_config=node_config,
+        render_messages=_render_prompt_messages,
+        is_aborted=is_aborted,
+        checkpoint=checkpoint,
+    )
+    if outcome.status == "aborted":
+        return "aborted", {"answer_generation_mode": None}
+    return "answer_ready", {
+        "answer_generation_mode": outcome.generation_mode,
+        "answer_duration_ms": outcome.duration_ms,
+        "answer_message_id": str(outcome.message_id) if outcome.message_id else None,
+        "answer_already_existed": outcome.already_existed,
+        "answer_error_message": outcome.error_message,
     }
 
 
@@ -967,3 +1058,20 @@ def _insert_recommendation_agent_trace(
     )
 
 
+
+
+def _writer_node_config(db: Session, brief: dict[str, Any]) -> dict[str, Any] | None:
+    """The configured Writer node for this brief's mode, or None.
+
+    None is a supported state rather than an error: an unconfigured Writer
+    falls back to the rule-built answer, which is still text the consultant can
+    send. Losing the turn over a missing node config would be the worse trade.
+    """
+    node_name = recommendation_answer_writer_node_by_mode().get(str(brief.get("mode") or ""))
+    if not node_name:
+        return None
+    try:
+        return _get_default_node_config(db, node_name)
+    except Exception:  # noqa: BLE001 - 节点没配好不该让整轮没有输出
+        traceback.print_exc()
+        return None

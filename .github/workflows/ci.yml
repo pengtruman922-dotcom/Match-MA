@@ -64,6 +64,11 @@ jobs:
       # 都只有真库能验。用例把 71 条生产标的快照灌进这个空库后逐条断言命中数。
       - name: Exercise the screening SQL against the fresh database
         run: python -m pytest tests/test_screening_sql.py -q
+      # Writer 落库同理：草稿表靠 019 建的唯一索引做 ON CONFLICT，而正文的终态
+      # 写用 pg_advisory_xact_lock 串行化两个抢跑的生产者 —— 假 session 两样都
+      # 证明不了，而这两样正是「关页签丢正文、重开又重新付费」的修复本体。
+      - name: Exercise the answer persistence SQL against the fresh database
+        run: python -m pytest tests/test_recommendation_answer_persistence_sql.py -q
 
   frontend:
     name: Frontend typecheck + build
