@@ -51,12 +51,10 @@ from backend.app.services.recommendation_flow import (  # noqa: F401 - re-export
     _annotate_candidate_ownership,
     _build_recommendation_activity,
     _build_recommendation_report_status,
-    _build_recommendation_rerank_status,
     _build_recommendation_selected_status,
     _build_recommendation_session_bundle,
     _build_recommendation_session_summary,
     _build_recommendation_agent_status,
-    _build_rerank_query,
     _candidate_display_badges,
     _candidate_display_meta,
     _candidate_intents_for_target,
@@ -78,7 +76,6 @@ from backend.app.services.recommendation_flow import (  # noqa: F401 - re-export
     insert_agent_answer_message,
     _enqueue_recommendation_agent_job,
     _enqueue_recommendation_report_job,
-    _enqueue_recommendation_rerank_job,
     _enrich_candidates_for_frontend,
     _enrich_candidates_with_selection,
     _ensure_recommendation_report_visible,
@@ -88,11 +85,9 @@ from backend.app.services.recommendation_flow import (  # noqa: F401 - re-export
     _get_active_selected_item_for_pair,
     _get_buyer_intent_anchor,
     _get_buyer_party_id_for_intent,
-    _get_latest_recommendation_rerank_job,
     _get_recommendation_report_jobs,
     _get_recommendation_session_or_404,
     _get_recommendation_session_overview_or_404,
-    _get_rerank_anchor_for_session,
     _get_selected_item_or_404,
     _get_seller_target_anchor,
     _infer_recommendation_candidate_message_type,
@@ -181,7 +176,6 @@ class RecommendationCandidateRequest(BaseModel):
     temporary_input: str | None = Field(default=None, max_length=AGENT_INPUT_MAX_CHARS)
     limit: int = Field(default=20, ge=1, le=50)
     create_session: bool = True
-    enable_rerank: bool = True
     user_message: str | None = None
     # Continue an existing session (multi-round chat): append the user message
     # and a new candidate round instead of creating a new session.
@@ -438,23 +432,9 @@ class RecommendationSessionBundleOut(BaseModel):
     reranked_candidates: list[RecommendationCandidateOut] = Field(default_factory=list)
     latest_candidates: list[RecommendationCandidateOut] = Field(default_factory=list)
     candidate_source: str = "none"
-    rerank_status: dict[str, Any] = Field(default_factory=dict)
     selected_items: list[RecommendationSelectedItemOut]
     reports: list[RecommendationReportOut]
     debug: dict[str, Any]
-
-
-class RecommendationRerankJobCreate(BaseModel):
-    candidates: list[dict[str, Any]] | None = None
-    reason: str | None = Field(default=None, max_length=300)
-
-
-class RecommendationRerankJobOut(BaseModel):
-    job_id: UUID
-    job_status: str
-    queue_name: str
-    candidate_count: int
-    source: str
 
 
 class RecommendationSessionSummaryOut(BaseModel):
@@ -463,7 +443,6 @@ class RecommendationSessionSummaryOut(BaseModel):
     candidate_counts: dict[str, int]
     latest_candidates_preview: list[RecommendationCandidateOut] = Field(default_factory=list)
     candidate_source: str
-    rerank_status: dict[str, Any]
     report_status: dict[str, Any]
     selected_status: dict[str, Any]
     agent_status: dict[str, Any] = Field(default_factory=dict)
@@ -485,7 +464,6 @@ class RecommendationSessionStatusOut(BaseModel):
     candidate_counts: dict[str, int]
     latest_candidates_preview: list[RecommendationCandidateOut] = Field(default_factory=list)
     candidate_source: str
-    rerank_status: dict[str, Any]
     report_status: dict[str, Any]
     selected_status: dict[str, Any]
     agent_status: dict[str, Any] = Field(default_factory=dict)
@@ -655,7 +633,6 @@ def generate_recommendation_candidates(
         current_user=current_user,
     )["candidates"]
 
-    rerank_planned = new_round and payload.enable_rerank and len(candidates) > 1
     conversation = _build_conversation_payload(
         route=route,
         parse_result=parse_result,
@@ -663,13 +640,11 @@ def generate_recommendation_candidates(
         anchor=anchor,
         mode=payload.mode,
         candidate_count=len(candidates),
-        rerank_requested=rerank_planned,
         panel_summary=panel_summary,
         funnel=funnel,
     )
 
     session_id = None
-    rerank_job_id = None
     message_metadata = {"message_type": "initial_candidates"}
     if parse_result is not None:
         message_metadata["conversation"] = {
@@ -708,17 +683,6 @@ def generate_recommendation_candidates(
                 metadata_json=message_metadata,
                 created_by=current_user.user_id,
             )
-            if payload.enable_rerank and len(candidates) > 1:
-                rerank_job_id = _enqueue_recommendation_rerank_job(
-                    db,
-                    session_id=session_id,
-                    mode=payload.mode,
-                    anchor=effective_anchor,
-                    candidates=candidates,
-                    idempotency_suffix=uuid4().hex[:12],
-                    metadata_json={"source": "recommendation_candidate_api_round"},
-                    extra_query_lines=extra_query_lines,
-                )
         if parse_result is not None or panel_summary is not None:
             # Persist the reply so restoring the session replays the whole chat.
             _insert_recommendation_message(
@@ -760,15 +724,6 @@ def generate_recommendation_candidates(
             metadata_json=message_metadata,
             created_by=current_user.user_id,
         )
-        if payload.enable_rerank and len(candidates) > 1:
-            rerank_job_id = _enqueue_recommendation_rerank_job(
-                db,
-                session_id=session_id,
-                mode=payload.mode,
-                anchor=effective_anchor,
-                candidates=candidates,
-                extra_query_lines=extra_query_lines,
-            )
         if parse_result is not None:
             _insert_recommendation_message(
                 db,
@@ -791,9 +746,7 @@ def generate_recommendation_candidates(
         "funnel": funnel,
         "scenarios": scenarios,
         "debug": {
-            "engine": "rule_v3_deep_eval" if rerank_job_id else "rule_v3",
-            "rerank": bool(rerank_job_id),
-            "rerank_job_id": str(rerank_job_id) if rerank_job_id else None,
+            "engine": "rule_v3",
             "route": route,
             "embedding_similarity": False,
             "funnel": funnel,
@@ -825,7 +778,6 @@ def _build_conversation_payload(
     anchor: dict[str, Any],
     mode: str,
     candidate_count: int,
-    rerank_requested: bool,
     panel_summary: str | None = None,
     funnel: dict[str, int] | None = None,
 ) -> dict[str, Any]:
@@ -842,13 +794,10 @@ def _build_conversation_payload(
         if new_preferences:
             parts.append(f"已记录偏好：{'；'.join(new_preferences)}。")
         parts.append(_describe_funnel(funnel, candidate_count))
-        if rerank_requested:
-            parts.append("AI 深度评估进行中，完成后自动重排并标注评级。")
         system_reply = "".join(parts)
     elif route == "re_evaluate":
         system_reply = (
-            f"已记录偏好：{'；'.join(new_preferences) or '（无新增）'}。候选保持不变，"
-            + ("AI 正按新偏好重新评级。" if rerank_requested else "候选不足，未触发重新评级。")
+            f"已记录偏好：{'；'.join(new_preferences) or '（无新增）'}。候选保持不变。"
         )
     elif route == "display":
         system_reply = "已按要求调整当前展示。"
@@ -1458,56 +1407,6 @@ def stream_recommendation_answer(
         )
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers=_SSE_HEADERS)
-
-
-@router.post(
-    "/sessions/{session_id}/rerank-jobs",
-    response_model=RecommendationRerankJobOut,
-    status_code=status.HTTP_201_CREATED,
-)
-def create_recommendation_rerank_job(
-    session_id: UUID,
-    payload: RecommendationRerankJobCreate,
-    current_user: CurrentUser,
-    db: Session = Depends(get_db),
-) -> dict[str, Any]:
-    ensure_recommendation_session_visible(db, current_user, session_id)
-    session = _get_recommendation_session_or_404(db, session_id)
-    if session["mode"] not in {"buyer_to_target", "target_to_buyer"}:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported recommendation mode.")
-
-    anchor = _get_rerank_anchor_for_session(db, session)
-    messages = _list_recommendation_messages(db, session_id=session_id, limit=500, offset=0)
-    candidate_sets = _extract_recommendation_candidate_sets(messages)
-    candidates = _normalize_candidates(payload.candidates or candidate_sets["initial_candidates"])
-    source = "request" if payload.candidates is not None else "initial_candidates"
-    if len(candidates) < 2:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="At least two candidates are required to rerank a recommendation session.",
-        )
-
-    job_id = _enqueue_recommendation_rerank_job(
-        db,
-        session_id=session_id,
-        mode=str(session["mode"]),
-        anchor=anchor,
-        candidates=candidates,
-        idempotency_suffix=str(uuid4()),
-        metadata_json={
-            "source": "recommendation_rerank_job_api",
-            "rerank_reason": payload.reason,
-            "candidate_source": source,
-        },
-    )
-    db.commit()
-    return {
-        "job_id": job_id,
-        "job_status": "queued",
-        "queue_name": "llm",
-        "candidate_count": len(candidates),
-        "source": source,
-    }
 
 
 @router.get("/sessions/{session_id}/messages", response_model=list[RecommendationMessageOut])

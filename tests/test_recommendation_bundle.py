@@ -2,11 +2,8 @@
 
 from backend.app.api.authn import AuthContext
 from backend.app.api.routes.recommendations import (
-    DEEP_EVAL_CANDIDATE_LIMIT,
     RecommendationCandidateOut,
-    _build_recommendation_rerank_status,
     _candidate_targets_for_intent,
-    _enqueue_recommendation_rerank_job,
     _enrich_candidates_with_selection,
     _extract_recommendation_candidate_sets,
     _optional_uuid,
@@ -204,38 +201,6 @@ def test_frontend_candidate_fields_include_rule_and_deep_eval_breakdown() -> Non
     assert candidate["score_breakdown"]["rule_score"] == 80
     assert "embedding" not in candidate["display_badges"]
     assert "reranked" in candidate["display_badges"]
-
-
-def test_deep_eval_job_uses_llm_queue_and_caps_candidates_at_the_budget() -> None:
-    class _Result:
-        def mappings(self):
-            return self
-
-        def one(self):
-            return {"id": UUID("00000000-0000-0000-0000-000000000099")}
-
-    class _Db:
-        statement = ""
-        params = {}
-
-        def execute(self, statement, params):
-            self.statement = str(statement)
-            self.params = params
-            return _Result()
-
-    db = _Db()
-    job_id = _enqueue_recommendation_rerank_job(
-        db,
-        session_id=UUID("00000000-0000-0000-0000-000000000098"),
-        mode="buyer_to_target",
-        anchor={"id": BUYER_INTENT_ID, "intent_name": "测试需求"},
-        candidates=[{"rank": index + 1} for index in range(80)],
-    )
-
-    assert str(job_id).endswith("0099")
-    assert "'recommendation_deep_eval'" in db.statement
-    assert "'llm'" in db.statement
-    assert len(db.params["payload_json"]["candidates"]) == DEEP_EVAL_CANDIDATE_LIMIT
 
 
 def test_score_target_against_intent_uses_expanded_buyer_filters() -> None:
@@ -542,18 +507,6 @@ def test_pending_confirmation_fields_do_not_screen_or_rank() -> None:
     assert "营收达到门槛" not in evidence
     assert "满足控股要求" in evidence
     assert score == 100
-
-
-def test_rerank_status_without_job_is_not_requested() -> None:
-    status = _build_recommendation_rerank_status(
-        rerank_job=None,
-        reranked_candidates=[],
-        candidate_sets={},
-    )
-
-    assert status["requested"] is False
-    assert status["status"] == "not_requested"
-    assert status["job_id"] is None
 
 
 def test_optional_uuid_accepts_uuid_and_string() -> None:

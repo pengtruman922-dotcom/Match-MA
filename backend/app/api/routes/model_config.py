@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session
 from backend.app.ai.embedding_client import EmbeddingCallError, call_openai_compatible_embedding
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
 from backend.app.ai.prompting import extract_template_variables, render_template
-from backend.app.ai.rerank_client import RerankCallError, call_dashscope_compatible_rerank
 from backend.app.registry.nodes import (
     PROMPT_VARIABLE_LABELS,
     NodeSpec,
@@ -60,12 +59,12 @@ PROVIDER_TYPES = {
 }
 EXTERNAL_PROVIDER_TYPES = {"ocr", "search"}
 AUTH_TYPES = {"none", "bearer", "api_key_header", "custom"}
-NODE_TYPES = {"llm", "embedding", "ocr", "rerank", "research", "parser"}
+NODE_TYPES = {"llm", "embedding", "ocr", "research", "parser"}
 OUTPUT_MODES = {"text", "json", "embedding", "file", "mixed"}
 TEMPLATE_ENGINES = {"jinja", "plain", "custom"}
 PROMPT_EDITABLE_NODE_TYPES = {"llm", "parser", "research"}
 # 异步节点测试要靠 worker 消费，因此只有实际存在 worker 的队列对应的类型可测。
-# embedding / rerank 的 worker 已下线，把它们留在这里会让测试任务永久排队。
+# embedding 的 worker 已下线，把它留在这里会让测试任务永久排队。
 TESTABLE_NODE_TYPES = {"llm", "parser", "research", "ocr"}
 CHAT_NODE_TYPES = {"llm", "parser", "research"}
 
@@ -2004,8 +2003,6 @@ def _run_node_test(db: Session, *, node: dict[str, Any], payload: NodeTestCreate
         return _run_chat_node_test(db, node=node, payload=payload)
     if node_type == "embedding":
         return _run_embedding_node_test(db, node=node, payload=payload)
-    if node_type == "rerank":
-        return _run_rerank_node_test(db, node=node, payload=payload)
 
     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported node_type={node_type}.")
 
@@ -2152,85 +2149,6 @@ def _run_embedding_node_test(
         parsed_output_json=output_json,
         latency_ms=result.latency_ms,
         prompt_tokens=result.prompt_tokens,
-        total_tokens=result.total_tokens,
-    )
-    return _node_test_response(
-        node,
-        status_value="succeeded",
-        trace_id=trace_id,
-        latency_ms=result.latency_ms,
-        output_json=output_json,
-    )
-
-
-def _run_rerank_node_test(
-    db: Session,
-    *,
-    node: dict[str, Any],
-    payload: NodeTestCreate,
-) -> dict[str, Any]:
-    query = payload.query or payload.input_text or "Which target best matches healthcare growth capital?"
-    documents = payload.documents or [
-        "Healthcare target with stable net profit and consolidation potential.",
-        "Consumer retail business with limited strategic fit.",
-    ]
-    input_json = {
-        "node_id": str(node["id"]),
-        "node_name": node["node_name"],
-        "node_type": node["node_type"],
-        "query_preview": query[:500],
-        "document_count": len(documents),
-        "document_previews": [document[:300] for document in documents[:5]],
-    }
-    try:
-        result = call_dashscope_compatible_rerank(
-            base_url=str(node["base_url"]),
-            api_key_secret_ref=node.get("api_key_secret_ref"),
-            model_name=str(node["model_name"]),
-            query=query,
-            documents=documents,
-            top_n=payload.top_n or min(len(documents), 5),
-            instruct="Connectivity test for Match-MA rerank node.",
-            timeout_seconds=payload.timeout_seconds or int(node["timeout_seconds"]),
-        )
-    except RerankCallError as exc:
-        trace_id = _insert_node_test_trace(
-            db,
-            node=node,
-            trace_type="rerank",
-            status_value="failed",
-            input_json=input_json,
-            parsed_output_json=None,
-            latency_ms=None,
-            error_code="rerank_test_failed",
-            error_message=str(exc),
-        )
-        return _node_test_response(
-            node,
-            status_value="failed",
-            trace_id=trace_id,
-            latency_ms=None,
-            output_json={},
-            error_code="rerank_test_failed",
-            error_message=str(exc),
-        )
-
-    output_json = {
-        "model": result.model_name,
-        "results": [
-            {"index": item.index, "relevance_score": item.relevance_score}
-            for item in result.results
-        ],
-        "total_tokens": result.total_tokens,
-    }
-    trace_id = _insert_node_test_trace(
-        db,
-        node=node,
-        trace_type="rerank",
-        status_value="succeeded",
-        input_json=input_json,
-        parsed_output_json=output_json,
-        latency_ms=result.latency_ms,
         total_tokens=result.total_tokens,
     )
     return _node_test_response(

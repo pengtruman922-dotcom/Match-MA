@@ -22,7 +22,6 @@ from backend.app.jobs.handlers.model_node_test import (
 from backend.app.jobs.handlers.recommendation import (
     _handle_recommendation_agent,
     _handle_recommendation_report_generate,
-    _handle_recommendation_rerank,
 )
 from backend.app.jobs.handlers.relation_followup import (
     _handle_relation_followup_draft_parse,
@@ -79,8 +78,6 @@ def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
         return _handle_recommendation_agent(db, job)
     if job.job_type == "recommendation_report_generate":
         return _handle_recommendation_report_generate(db, job)
-    if job.job_type in {"recommendation_rerank", "recommendation_deep_eval"}:
-        return _handle_recommendation_rerank(db, job)
     if job.job_type == "model_node_test":
         return _handle_model_node_test(db, job)
     if job.job_type == "seller_target_research_map":

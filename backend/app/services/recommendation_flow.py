@@ -86,12 +86,6 @@ def _build_recommendation_session_bundle(
     candidate_source = "reranked_candidates" if reranked_candidates else (
         "initial_candidates" if initial_candidates else "none"
     )
-    rerank_job = _get_latest_recommendation_rerank_job(db, session_id=session_id)
-    rerank_status = _build_recommendation_rerank_status(
-        rerank_job=rerank_job,
-        reranked_candidates=reranked_candidates,
-        candidate_sets=candidate_sets,
-    )
     return {
         "session": session,
         "messages": messages,
@@ -99,7 +93,6 @@ def _build_recommendation_session_bundle(
         "reranked_candidates": reranked_candidates,
         "latest_candidates": latest_candidates,
         "candidate_source": candidate_source,
-        "rerank_status": rerank_status,
         "selected_items": selected_items,
         "reports": reports,
         "debug": {
@@ -225,9 +218,7 @@ def _list_running_recommendation_session_ids(
             with running_jobs as (
               select
                 case
-                  when job.job_type in (
-                         'recommendation_deep_eval', 'recommendation_rerank', 'recommendation_agent'
-                       )
+                  when job.job_type = 'recommendation_agent'
                     and job.entity_type = 'recommendation_session'
                     then job.entity_id
                   when job.payload_json ? 'session_id'
@@ -240,7 +231,6 @@ def _list_running_recommendation_session_ids(
               where job.team_id = :team_id
                 and job.workspace_id = :workspace_id
                 and job.job_type in (
-                      'recommendation_deep_eval', 'recommendation_rerank',
                       'recommendation_report_generate', 'recommendation_agent'
                     )
                 and job.status in ('queued', 'running', 'retry_waiting')
@@ -288,12 +278,6 @@ def _build_recommendation_session_summary(
     candidate_source = "reranked_candidates" if reranked_candidates else (
         "initial_candidates" if initial_candidates else "none"
     )
-    rerank_job = _get_latest_recommendation_rerank_job(db, session_id=session_id)
-    rerank_status = _build_recommendation_rerank_status(
-        rerank_job=rerank_job,
-        reranked_candidates=reranked_candidates,
-        candidate_sets=candidate_sets,
-    )
     report_jobs = _get_recommendation_report_jobs(db, session_id=session_id)
     report_status = _build_recommendation_report_status(reports=reports, jobs=report_jobs)
     selected_status = _build_recommendation_selected_status(selected_items)
@@ -306,7 +290,6 @@ def _build_recommendation_session_summary(
         session=session,
         messages=messages,
         reports=reports,
-        rerank_status=rerank_status,
         report_status=report_status,
     )
     return {
@@ -319,7 +302,6 @@ def _build_recommendation_session_summary(
         },
         "latest_candidates_preview": latest_candidates[:preview_limit],
         "candidate_source": candidate_source,
-        "rerank_status": rerank_status,
         "report_status": report_status,
         "selected_status": selected_status,
         "agent_status": agent_status,
@@ -422,7 +404,6 @@ def _recommendation_session_display(
 def _recommendation_session_is_processing(summary: dict[str, Any]) -> bool:
     return (
         (summary.get("agent_status") or {}).get("status") in {"queued", "running", "retry_waiting", "writing"}
-        or summary["rerank_status"].get("status") in {"queued", "running", "retry_waiting"}
         or summary["report_status"].get("status") in {"queued", "running", "retry_waiting", "generating"}
     )
 
@@ -485,8 +466,7 @@ def _filter_recommendation_session_summaries(
         return [
             summary
             for summary in summaries
-            if summary["rerank_status"].get("status") == "failed"
-            or summary["report_status"].get("status") == "failed"
+            if summary["report_status"].get("status") == "failed"
         ]
     if status_filter == "generated":
         return [summary for summary in summaries if summary["report_status"].get("status") == "generated"]
@@ -501,7 +481,6 @@ def _filter_recommendation_session_summaries(
             summary
             for summary in summaries
             if not _recommendation_session_is_processing(summary)
-            and summary["rerank_status"].get("status") != "failed"
             and summary["report_status"].get("status") != "failed"
         ]
     return summaries
@@ -514,16 +493,6 @@ def _recommendation_session_polling_hint(
 ) -> dict[str, Any]:
     enabled = _recommendation_session_is_processing(summary)
     watched_jobs = []
-    rerank_job_id = summary["rerank_status"].get("job_id")
-    if rerank_job_id and summary["rerank_status"].get("status") in {"queued", "running", "retry_waiting"}:
-        watched_jobs.append(
-            {
-                "job_type": "recommendation_deep_eval",
-                "job_id": rerank_job_id,
-                "queue_name": summary["rerank_status"].get("queue_name"),
-                "status": summary["rerank_status"].get("status"),
-            }
-        )
     latest_report_job = summary["report_status"].get("latest_job")
     if latest_report_job and latest_report_job.get("status") in {"queued", "running", "retry_waiting"}:
         watched_jobs.append(
@@ -541,7 +510,7 @@ def _recommendation_session_polling_hint(
         "status_endpoint": f"/api/v1/recommendations/sessions/{session_id}/status",
         "bundle_endpoint": f"/api/v1/recommendations/sessions/{session_id}/bundle",
         "watched_jobs": watched_jobs,
-        "reason": "rerank_or_report_running" if enabled else "terminal_or_not_requested",
+        "reason": "report_running" if enabled else "terminal_or_not_requested",
     }
 
 
@@ -553,7 +522,7 @@ def _recommendation_page_overview(
     generated_report_count = 0
     selected_count = 0
     for summary in recent_summaries:
-        if summary["rerank_status"].get("status") == "failed" or summary["report_status"].get("status") == "failed":
+        if summary["report_status"].get("status") == "failed":
             failed_count += 1
         generated_report_count += int(summary["report_status"].get("generated_count") or 0)
         selected_count += int(summary["selected_status"].get("active_count") or 0)
@@ -639,14 +608,12 @@ def _build_recommendation_activity(
     session: dict[str, Any],
     messages: list[dict[str, Any]],
     reports: list[dict[str, Any]],
-    rerank_status: dict[str, Any],
     report_status: dict[str, Any],
 ) -> dict[str, Any]:
     timestamps = [
         session.get("updated_at"),
         messages[-1].get("created_at") if messages else None,
         reports[0].get("created_at") if reports else None,
-        rerank_status.get("finished_at") or rerank_status.get("started_at") or rerank_status.get("created_at"),
         (report_status.get("latest_job") or {}).get("finished_at")
         or (report_status.get("latest_job") or {}).get("started_at")
         or (report_status.get("latest_job") or {}).get("created_at"),
@@ -1065,94 +1032,6 @@ def _candidate_pair_key(item: dict[str, Any]) -> tuple[str | None, str | None]:
         str(seller_target_id) if seller_target_id else None,
         str(buyer_intent_id) if buyer_intent_id else None,
     )
-
-
-def _get_latest_recommendation_rerank_job(
-    db: Session,
-    *,
-    session_id: UUID,
-) -> dict[str, Any] | None:
-    row = db.execute(
-        text(
-            """
-            select
-              id, status, queue_name, error_code, error_message,
-              attempt_count, max_attempts, run_after::text as run_after,
-              started_at::text as started_at, finished_at::text as finished_at,
-              created_at::text as created_at, updated_at::text as updated_at,
-              result_json, metadata_json
-            from background_job
-            where team_id = :team_id
-              and workspace_id = :workspace_id
-              and job_type in ('recommendation_deep_eval', 'recommendation_rerank')
-              and entity_type = 'recommendation_session'
-              and entity_id = :session_id
-            order by created_at desc
-            limit 1
-            """
-        ),
-        {
-            "session_id": session_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
-    ).mappings().one_or_none()
-    return dict(row) if row is not None else None
-
-
-def _build_recommendation_rerank_status(
-    *,
-    rerank_job: dict[str, Any] | None,
-    reranked_candidates: list[dict[str, Any]],
-    candidate_sets: dict[str, Any],
-) -> dict[str, Any]:
-    if rerank_job is None:
-        return {
-            "requested": False,
-            "status": "not_requested",
-            "job_id": None,
-            "queue_name": None,
-            "candidate_count": 0,
-            "reranked_at": None,
-            "error_code": None,
-            "error_message": None,
-        }
-
-    return {
-        "requested": True,
-        "status": rerank_job.get("status"),
-        "job_id": str(rerank_job["id"]),
-        "queue_name": rerank_job.get("queue_name"),
-        "candidate_count": len(reranked_candidates),
-        "message_id": candidate_sets.get("reranked_message_id"),
-        "reranked_at": candidate_sets.get("reranked_at") or rerank_job.get("finished_at"),
-        "created_at": rerank_job.get("created_at"),
-        "started_at": rerank_job.get("started_at"),
-        "finished_at": rerank_job.get("finished_at"),
-        "attempt_count": rerank_job.get("attempt_count"),
-        "max_attempts": rerank_job.get("max_attempts"),
-        "error_code": rerank_job.get("error_code"),
-        "error_message": rerank_job.get("error_message"),
-    }
-
-
-def _get_rerank_anchor_for_session(db: Session, session: dict[str, Any]) -> dict[str, Any]:
-    if session["mode"] == "buyer_to_target":
-        buyer_intent_id = _optional_uuid(session.get("buyer_intent_id"))
-        if buyer_intent_id is not None:
-            return _get_buyer_intent_anchor(db, buyer_intent_id)
-    if session["mode"] == "target_to_buyer":
-        seller_target_id = _optional_uuid(session.get("seller_target_id"))
-        if seller_target_id is not None:
-            return _get_seller_target_anchor(db, seller_target_id)
-
-    snapshot = session.get("latest_condition_snapshot_json")
-    if isinstance(snapshot, dict) and snapshot:
-        return snapshot
-    snapshot = session.get("initial_condition_snapshot_json")
-    if isinstance(snapshot, dict) and snapshot:
-        return snapshot
-    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Recommendation session has no rerank anchor.")
 
 
 def _get_active_selected_item_for_pair(
@@ -3437,95 +3316,6 @@ def agent_history_context(db: Session, session_id: UUID) -> str:
     if not blocks:
         return ""
     return "<history_context>\n{}\n</history_context>".format("\n\n".join(reversed(blocks)))
-
-
-def _enqueue_recommendation_rerank_job(
-    db: Session,
-    *,
-    session_id: UUID,
-    mode: str,
-    anchor: dict[str, Any],
-    candidates: list[dict[str, Any]],
-    idempotency_suffix: str | None = None,
-    metadata_json: dict[str, Any] | None = None,
-    extra_query_lines: list[str] | None = None,
-) -> UUID:
-    deep_eval_candidates = candidates[:DEEP_EVAL_CANDIDATE_LIMIT]
-    query = _build_rerank_query(mode=mode, anchor=anchor)
-    if extra_query_lines:
-        # Session semantic preferences and the latest user message steer deep eval.
-        query = "\n".join([query, "用户会话补充要求：", *extra_query_lines]).strip()
-    payload = _json_loads(
-        _json_dumps(
-            {
-                "session_id": session_id,
-                "mode": mode,
-                "query": query,
-                "anchor": anchor,
-                "candidates": deep_eval_candidates,
-            }
-        )
-    )
-    row = db.execute(
-        text(
-            """
-            insert into background_job (
-              team_id, workspace_id, job_type, priority, queue_name,
-              entity_type, entity_id, idempotency_key, payload_json,
-              max_attempts, created_by, metadata_json
-            )
-            values (
-              :team_id, :workspace_id, 'recommendation_deep_eval', 110, 'llm',
-              'recommendation_session', :session_id, :idempotency_key, :payload_json,
-              2, :created_by, :metadata_json
-            )
-            returning id
-            """
-        ).bindparams(
-            bindparam("payload_json", type_=JSONB),
-            bindparam("metadata_json", type_=JSONB),
-        ),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "session_id": session_id,
-            "idempotency_key": (
-                f"recommendation_deep_eval:{session_id}:{idempotency_suffix}"
-                if idempotency_suffix
-                else f"recommendation_deep_eval:{session_id}"
-            ),
-            "payload_json": payload,
-            "created_by": DEFAULT_ADMIN_USER_ID,
-            "metadata_json": metadata_json or {"source": "recommendation_candidate_api"},
-        },
-    ).mappings().one()
-    return row["id"]
-
-
-def _build_rerank_query(*, mode: str, anchor: dict[str, Any]) -> str:
-    if mode == "buyer_to_target":
-        parts = [
-            anchor.get("intent_name"),
-            # 原来这里取的是 preference_summary / negative_summary。那两列下线后，
-            # 定性内容住进各模块的「其他」，会随搜索文档一起进上下文；rerank 的
-            # 查询串改用需求摘要，它同样是整条需求的一句话概括。
-            anchor.get("intent_summary"),
-            anchor.get("industry_primary"),
-            anchor.get("industry_secondary"),
-            anchor.get("region_scope_summary"),
-        ]
-    else:
-        parts = [
-            anchor.get("target_name"),
-            anchor.get("industry_l1"),
-            anchor.get("industry_l2"),
-            anchor.get("location_province"),
-            anchor.get("location_city"),
-            anchor.get("location_district"),
-            anchor.get("business_summary"),
-            anchor.get("risk_summary"),
-        ]
-    return "\n".join(str(part) for part in parts if part)
 
 
 def _ensure_recommendation_report_visible(db: Session, current_user: CurrentUser, report_id: UUID) -> None:

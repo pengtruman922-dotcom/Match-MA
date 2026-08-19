@@ -13,7 +13,6 @@ from backend.app.ai.embedding_client import (
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
 from backend.app.ai.prompting import render_template
 from backend.app.ai.ocr_client import OcrInput, build_attachment_ocr_input_json, call_attachment_ocr
-from backend.app.ai.rerank_client import RerankCallError, call_dashscope_compatible_rerank
 from backend.app.jobs.queue import JobClaim
 from backend.app.registry.indicators import indicators_for
 from backend.app.services.industry_taxonomy import industry_l1_prompt_list, industry_l2_prompt_list
@@ -41,8 +40,6 @@ def _handle_model_node_test(db: Session, job: JobClaim) -> dict[str, object]:
         return _handle_model_chat_node_test(db, job=job, node_config=node_config)
     if node_type == "embedding":
         return _handle_model_embedding_node_test(db, job=job, node_config=node_config)
-    if node_type == "rerank":
-        return _handle_model_rerank_node_test(db, job=job, node_config=node_config)
     if node_type == "ocr":
         return _handle_model_ocr_node_test(db, job=job, node_config=node_config)
     raise ValueError(f"Unsupported model_node_test node_type: {node_type}")
@@ -170,82 +167,6 @@ def _handle_model_embedding_node_test(
         parsed_output_json=output_json,
         latency_ms=result.latency_ms,
         prompt_tokens=result.prompt_tokens,
-        total_tokens=result.total_tokens,
-    )
-    return _model_node_test_result(job, node_config, "succeeded", output_json, result.latency_ms)
-
-def _handle_model_rerank_node_test(
-    db: Session,
-    *,
-    job: JobClaim,
-    node_config: dict[str, Any],
-) -> dict[str, object]:
-    query = str(
-        job.payload_json.get("query")
-        or job.payload_json.get("input_text")
-        or "Which target best matches healthcare growth capital?"
-    )
-    documents = job.payload_json.get("documents")
-    if not isinstance(documents, list) or not documents:
-        documents = [
-            "Healthcare target with stable net profit and consolidation potential.",
-            "Consumer retail business with limited strategic fit.",
-        ]
-    documents = [str(document) for document in documents]
-    input_json = _model_node_test_input_json(
-        job,
-        node_config,
-        extra={
-            "query_preview": query[:500],
-            "document_count": len(documents),
-            "document_previews": [document[:300] for document in documents[:5]],
-        },
-    )
-    started = time.perf_counter()
-    try:
-        result = call_dashscope_compatible_rerank(
-            base_url=node_config["base_url"],
-            api_key_secret_ref=node_config["api_key_secret_ref"],
-            model_name=node_config["model_name"],
-            query=query,
-            documents=documents,
-            top_n=int(job.payload_json.get("top_n") or min(len(documents), 5)),
-            instruct="Connectivity test for Match-MA rerank node.",
-            timeout_seconds=int(job.payload_json.get("timeout_seconds") or node_config["timeout_seconds"]),
-        )
-    except RerankCallError as exc:
-        latency_ms = int((time.perf_counter() - started) * 1000)
-        _insert_model_node_test_trace(
-            db,
-            job=job,
-            node_config=node_config,
-            trace_type="rerank",
-            status="failed",
-            input_json=input_json,
-            parsed_output_json=None,
-            latency_ms=latency_ms,
-            error_code="rerank_test_failed",
-            error_message=str(exc),
-        )
-        raise
-
-    output_json = {
-        "model": result.model_name,
-        "results": [
-            {"index": item.index, "relevance_score": item.relevance_score}
-            for item in result.results
-        ],
-        "total_tokens": result.total_tokens,
-    }
-    _insert_model_node_test_trace(
-        db,
-        job=job,
-        node_config=node_config,
-        trace_type="rerank",
-        status="succeeded",
-        input_json=input_json,
-        parsed_output_json=output_json,
-        latency_ms=result.latency_ms,
         total_tokens=result.total_tokens,
     )
     return _model_node_test_result(job, node_config, "succeeded", output_json, result.latency_ms)

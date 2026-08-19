@@ -62,14 +62,12 @@ EXPECTED_NODE_NAMES = frozenset({
     "business_update_extractor",
     "embedding_seller_doc",
     "embedding_buyer_intent",
-    "recommendation_reranker",
 })
 
 EXPECTED_RETIRED = frozenset({
     "recommendation_report_writer",
     "embedding_seller_doc",
     "embedding_buyer_intent",
-    "recommendation_reranker",
 })
 
 
@@ -225,20 +223,15 @@ KNOWN_LITERAL_SITES: dict[str, frozenset[str]] = {
     "backend/app/api/routes/background_jobs.py": frozenset({"recommendation_deep_eval"}),
     "backend/app/api/routes/seller_targets.py": frozenset({"seller_target_parser"}),
     "backend/app/jobs/handlers/attachment_ocr.py": frozenset({"ocr_attachment_parser"}),
-    "backend/app/jobs/handlers/dispatch.py": frozenset({"recommendation_deep_eval"}),
     "backend/app/jobs/handlers/relation_followup.py": frozenset({"relation_followup_draft_parser"}),
     "backend/app/jobs/handlers/seller_target_parse.py": frozenset({"seller_target_parser"}),
     "backend/app/services/recommendation_conditions.py": frozenset({"recommendation_query_parser"}),
-    "backend/app/services/recommendation_flow.py": frozenset({"recommendation_deep_eval"}),
     "backend/app/jobs/handlers/research.py": frozenset({
         "seller_target_research_mapper", "seller_target_researcher",
     }),
     # [自称] trace 写入时把 node_name 写死在 INSERT 里。
-    # recommendation_reranker 是特例：每次深评都会写一条挂着这个名字的 trace，
-    # 实际干活的是深评 LLM —— 见《退役 AI 节点与代码清除》单。
     "backend/app/jobs/handlers/traces.py": frozenset({
-        "business_update_extractor", "buyer_intent_parser", "recommendation_reranker",
-        "seller_target_parser",
+        "business_update_extractor", "buyer_intent_parser", "seller_target_parser",
     }),
     # [退役] 随退役清除单处理
     "backend/app/jobs/handlers/search_embedding.py": frozenset({

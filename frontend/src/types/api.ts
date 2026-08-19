@@ -1836,7 +1836,6 @@ export interface RecommendationCandidateRequest {
   temporary_input?: string;
   limit?: number;
   create_session?: boolean;
-  enable_rerank?: boolean;
   user_message?: string;
   session_id?: string;
   condition_actions?: RecommendationConditionAction[];
@@ -1852,7 +1851,6 @@ export interface RecommendationSessionSummary {
   };
   candidate_counts: { initial: number; reranked: number; latest: number };
   candidate_source: string;
-  rerank_status: { status?: string; [key: string]: unknown };
   report_status: { status?: string; report_count?: number; [key: string]: unknown };
   selected_status: { active_count?: number; [key: string]: unknown };
   agent_status?: { status?: string; turn_id?: string | null; writer_pending?: boolean; [key: string]: unknown };
@@ -1865,14 +1863,6 @@ export interface RecommendationPage {
   overview: Record<string, unknown>;
   quick_actions: Array<Record<string, unknown>>;
   polling_hint: Record<string, unknown>;
-}
-
-export interface RecommendationRerankJob {
-  job_id: string;
-  job_status: string;
-  queue_name: string;
-  candidate_count: number;
-  source: string;
 }
 
 export interface RecommendationFunnel {
@@ -2126,12 +2116,6 @@ export interface RecommendationSessionBundle {
   reranked_candidates?: RecommendationCandidate[];
   latest_candidates?: RecommendationCandidate[];
   candidate_source?: string;
-  rerank_status?: {
-    requested: boolean;
-    status: string;
-    job_id: string | null;
-    [key: string]: unknown;
-  };
   selected_items: RecommendationSelectedItem[];
   reports: RecommendationReport[];
   debug: {

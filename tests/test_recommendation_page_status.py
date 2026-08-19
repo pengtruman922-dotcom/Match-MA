@@ -93,13 +93,11 @@ def test_selected_status_counts_active_and_canceled() -> None:
 
 def test_processing_and_page_overview_counts() -> None:
     processing_summary = {
-        "rerank_status": {"status": "running"},
-        "report_status": {"status": "not_requested", "generated_count": 0},
+        "report_status": {"status": "generating", "generated_count": 0},
         "selected_status": {"active_count": 2},
     }
     failed_summary = {
-        "rerank_status": {"status": "failed"},
-        "report_status": {"status": "generated", "generated_count": 1},
+        "report_status": {"status": "failed", "generated_count": 1},
         "selected_status": {"active_count": 1},
     }
 
@@ -121,7 +119,6 @@ def test_agent_brief_without_answer_keeps_session_processing_until_writer_lands(
     status = _build_recommendation_agent_status(None, session_id=SESSION_ID, messages=messages)
     summary = {
         "agent_status": status,
-        "rerank_status": {"status": "succeeded"},
         "report_status": {"status": "not_requested"},
     }
 
@@ -140,18 +137,23 @@ def test_agent_brief_without_answer_keeps_session_processing_until_writer_lands(
 
 def test_recommendation_session_filter_and_polling_hint() -> None:
     running_summary = {
-        "rerank_status": {"status": "running", "job_id": str(SELLER_TARGET_ID), "queue_name": "llm"},
-        "report_status": {"status": "not_requested", "latest_job": None},
+        "report_status": {
+            "status": "running",
+            "latest_job": {
+                "job_type": "recommendation_report_generate",
+                "id": str(SELLER_TARGET_ID),
+                "queue_name": "llm",
+                "status": "running",
+            },
+        },
         "selected_status": {"active_count": 0},
     }
     generated_summary = {
-        "rerank_status": {"status": "succeeded", "job_id": None},
         "report_status": {"status": "generated", "latest_job": None},
         "selected_status": {"active_count": 1},
     }
     failed_summary = {
-        "rerank_status": {"status": "failed", "job_id": None},
-        "report_status": {"status": "not_requested", "latest_job": None},
+        "report_status": {"status": "failed", "latest_job": None},
         "selected_status": {"active_count": 0},
     }
 
@@ -166,7 +168,7 @@ def test_recommendation_session_filter_and_polling_hint() -> None:
 
     assert hint["enabled"] is True
     assert hint["endpoint"] == f"/api/v1/recommendations/sessions/{SESSION_ID}/page-state"
-    assert hint["watched_jobs"][0]["job_type"] == "recommendation_deep_eval"
+    assert hint["watched_jobs"][0]["job_type"] == "recommendation_report_generate"
 
 
 def test_selected_item_must_match_session_anchor() -> None:

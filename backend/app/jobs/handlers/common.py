@@ -425,45 +425,6 @@ def _get_default_embedding_node_config(db: Session, node_name: str) -> dict[str,
         raise ValueError(f"Embedding dimension is not configured for node: {node_name}")
     return config
 
-def _get_default_rerank_node_config(db: Session, node_name: str) -> dict[str, Any]:
-    row = db.execute(
-        text(
-            """
-            select
-              node.id as node_config_id,
-              node.node_name,
-              node.model_name,
-              node.timeout_seconds,
-              node.metadata_json,
-              provider.id as provider_config_id,
-              provider.provider_name,
-              provider.base_url,
-              provider.api_key_secret_ref, provider.api_key_encrypted
-            from model_node_config node
-            join model_provider_config provider
-              on provider.id = node.provider_config_id
-            where node.team_id = :team_id
-              and node.workspace_id = :workspace_id
-              and node.node_name = :node_name
-              and node.node_type = 'rerank'
-              and node.is_default = true
-              and node.is_active = true
-            limit 1
-            """
-        ),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "node_name": node_name,
-        },
-    ).mappings().one_or_none()
-    if row is None:
-        raise ValueError(f"Default rerank node is not configured: {node_name}")
-    config = dict(row)
-    if not config.get("base_url"):
-        raise ValueError(f"Provider base_url is not configured for node: {node_name}")
-    return config
-
 def _get_default_ocr_node_config(db: Session, node_name: str) -> dict[str, Any]:
     row = db.execute(
         text(

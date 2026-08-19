@@ -72,7 +72,6 @@ import type {
   RecommendationReport,
   RecommendationReportCreate,
   RecommendationReportJob,
-  RecommendationRerankJob,
   RecommendationSelectedItem,
   RecommendationSelectedItemCreate,
   RecommendationSessionDebugBundle,
@@ -871,9 +870,4 @@ export const recommendations = {
   downloadReportDocx: (reportId: string) =>
     apiBlobResponse(`/recommendations/reports/${reportId}/docx`),
   page: () => apiRequest<RecommendationPage>('/recommendations/page'),
-  createRerankJob: (sessionId: string) =>
-    apiRequest<RecommendationRerankJob>(`/recommendations/sessions/${sessionId}/rerank-jobs`, {
-      method: 'POST',
-      body: JSON.stringify({}),
-    }),
 };

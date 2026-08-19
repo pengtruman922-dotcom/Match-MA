@@ -438,20 +438,6 @@ NODES: tuple[NodeSpec, ...] = (
         default_timeout_seconds=60,
         sort_order=910,
     ),
-    NodeSpec(
-        node_name="recommendation_reranker",
-        label="候选重排",
-        domain="recommendation",
-        node_type="rerank",
-        description="候选重排模型。随推荐 v3 退役，深评已取代它，专用 worker 已下线。",
-        prompt_required=False,
-        lifecycle="retired",
-        response_format=None,
-        default_temperature=None,
-        default_top_p=None,
-        default_timeout_seconds=90,
-        sort_order=920,
-    ),
 )
 
 

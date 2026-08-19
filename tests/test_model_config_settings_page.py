@@ -114,12 +114,12 @@ def test_required_business_nodes_make_fallback_visible() -> None:
     assert normalizer["using_fallback"] is True
 
 
-def test_settings_node_summary_hides_prompt_editor_for_rerank() -> None:
+def test_settings_node_summary_hides_prompt_editor_for_embedding() -> None:
     summary = _settings_node_summary(
         {
             "id": NODE_ID,
-            "node_name": "recommendation_reranker",
-            "node_type": "rerank",
+            "node_name": "embedding_seller_doc",
+            "node_type": "embedding",
             "is_active": True,
             "prompt_editable": False,
         },
@@ -127,7 +127,7 @@ def test_settings_node_summary_hides_prompt_editor_for_rerank() -> None:
         test_records=[],
     )
 
-    # rerank worker 已下线：节点既不可编 Prompt，也不再支持异步测试。
+    # embedding worker 已下线：节点既不可编 Prompt，也不再支持异步测试。
     assert summary["test_supported"] is False
     assert summary["queue_name"] is None
     assert summary["ui"]["show_prompt_editor"] is False
@@ -165,7 +165,6 @@ def test_safe_queue_name_for_node_type() -> None:
     assert _safe_queue_name_for_node_type("ocr") == "ocr"
     # 已下线的 worker 队列必须返回 None，否则测试任务会被投进无人消费的队列。
     assert _safe_queue_name_for_node_type("embedding") is None
-    assert _safe_queue_name_for_node_type("rerank") is None
     assert _safe_queue_name_for_node_type("unknown") is None
 
 
@@ -213,7 +212,7 @@ def test_configured_node_is_marked_configured() -> None:
     "node_name",
     [
         "not_a_real_node",              # 目录里没有
-        "recommendation_reranker",      # 已退役，不允许再建配置
+        "embedding_seller_doc",         # 已退役，不允许再建配置
     ],
 )
 def test_catalog_upsert_rejects_nodes_outside_the_catalog(node_name: str) -> None:
