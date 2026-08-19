@@ -774,6 +774,8 @@ export const debugApi = {
     apiRequest<DebugEntity>(`/debug/entities/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}`),
 };
 
+// 推荐链路的客户端。阶段五 5A 已删除 createRerankJob（后端 rerank 全链下线，
+// POST /sessions/{id}/rerank-jobs 现在返回 404）。
 export const recommendations = {
   agentTurn: (data: {
     mode: 'buyer_to_target';
