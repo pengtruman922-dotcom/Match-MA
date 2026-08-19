@@ -1744,64 +1744,6 @@ export interface RecommendationSessionDebugBundle {
   debug: Record<string, unknown>;
 }
 
-export interface RecommendationCandidate {
-  rank: number;
-  mode: 'buyer_to_target' | 'target_to_buyer';
-  seller_target_id: string | null;
-  seller_target_name: string | null;
-  buyer_intent_id: string | null;
-  buyer_intent_name: string | null;
-  buyer_party_id: string | null;
-  buyer_name: string | null;
-  score: number;
-  recommendation_level: 'strong' | 'recommended' | 'possible' | 'weak';
-  match_summary: string;
-  gap_summary: string | null;
-  risk_summary: string | null;
-  evidence_json: Record<string, unknown>;
-  /** 三态：compatible / possible / conflict（conflict 不会出现在结果里） */
-  match_state?: string | null;
-  known_count?: number;
-  /** 本次意向引用的维度里，该候选尚缺的部分——调研任务的输入 */
-  missing_dimensions?: string[];
-  best_scenario_id?: string | null;
-  best_scenario_label?: string | null;
-  matched_scenarios?: string[];
-  matched_scenario_labels?: string[];
-  deep_eval?: {
-    grade: string;
-    reason?: string | null;
-    risks?: string | null;
-    info_gaps?: string | null;
-    model?: string | null;
-  } | null;
-  /** 该候选与本意向已有的关系（已在推进）。 */
-  relation_id?: string | null;
-  relation_status?: string | null;
-  /** 对手方正与其他买家深入推进（尽调及以后），标注但不透露对方。 */
-  deep_progress_elsewhere?: boolean;
-  /** 同一标的与其他买家需求处于尽调或协议阶段。 */
-  seller_target_has_other_deep_progress?: boolean;
-  /** 同一买家需求与其他标的处于尽调或协议阶段。 */
-  buyer_intent_has_other_deep_progress?: boolean;
-  seller_target_owner_user_id?: string | null;
-  seller_target_owner_name?: string | null;
-  seller_target_owned_by_current_user?: boolean;
-  seller_target_operation_allowed?: boolean;
-  buyer_intent_owner_user_id?: string | null;
-  buyer_intent_owner_name?: string | null;
-  buyer_intent_owned_by_current_user?: boolean;
-  buyer_intent_operation_allowed?: boolean;
-}
-
-export interface RecommendationConditionOverrides {
-  fields: Record<string, unknown>;
-  removed_fields: string[];
-  extra_excluded_industries: string[];
-  semantic_preferences: string[];
-  disabled_scenarios?: string[];
-}
-
 export interface RecommendationSessionSummary {
   session: { id: string; mode: 'buyer_to_target' | 'target_to_buyer'; updated_at?: string; [key: string]: unknown };
   display: {
@@ -1810,10 +1752,6 @@ export interface RecommendationSessionSummary {
     mode_label: string;
     [key: string]: unknown;
   };
-  candidate_counts: { initial: number; reranked: number; latest: number };
-  candidate_source: string;
-  report_status: { status?: string; report_count?: number; [key: string]: unknown };
-  selected_status: { active_count?: number; [key: string]: unknown };
   agent_status?: { status?: string; turn_id?: string | null; writer_pending?: boolean; [key: string]: unknown };
   activity: { last_activity_at?: string | null; [key: string]: unknown };
 }
@@ -1847,31 +1785,6 @@ export interface BuyerIntentScenarioWrite {
   fields_json: Record<string, unknown>;
   needs_confirmation_json?: BuyerIntentConfirmationItem[];
   condition_effects_json?: Record<string, ConditionEffect>;
-}
-
-export interface RecommendationSession {
-  id: string;
-  mode: 'buyer_to_target' | 'target_to_buyer';
-  buyer_intent_id: string | null;
-  buyer_party_id: string | null;
-  seller_target_id: string | null;
-  status: string;
-  selected_count: number;
-  report_count: number;
-  anonymous_input_snapshot: string | null;
-  initial_condition_snapshot_json: Record<string, unknown>;
-  latest_condition_snapshot_json: Record<string, unknown>;
-  condition_overrides_json?: RecommendationConditionOverrides | Record<string, never>;
-  created_at: string;
-  updated_at: string;
-  metadata_json: Record<string, unknown>;
-}
-
-export interface RecommendationMessageCreate {
-  role?: 'user' | 'assistant' | 'system' | 'tool';
-  content: string;
-  content_type?: 'text' | 'json' | 'markdown';
-  metadata_json?: Record<string, unknown>;
 }
 
 export interface RecommendationMessage {
@@ -1975,91 +1888,6 @@ export interface RecommendationAgentBrief {
   }[];
   runner_ups?: RecommendationAgentBrief['recommended'];
   follow_up_suggestions?: string[];
-}
-
-export interface RecommendationSelectedItemCreate {
-  mode: 'buyer_to_target' | 'target_to_buyer';
-  seller_target_id?: string | null;
-  buyer_intent_id?: string | null;
-  buyer_party_id?: string | null;
-  rank_at_selection?: number;
-  recommendation_level?: 'strong' | 'recommended' | 'possible' | 'weak';
-  match_summary?: string | null;
-  risk_summary?: string | null;
-  gap_summary?: string | null;
-  reason_snapshot?: string | null;
-  evidence_snapshot_json?: Record<string, unknown>;
-  metadata_json?: Record<string, unknown>;
-}
-
-export interface RecommendationSelectedItem {
-  id: string;
-  session_id: string;
-  mode: 'buyer_to_target' | 'target_to_buyer';
-  seller_target_id: string | null;
-  seller_target_name: string | null;
-  buyer_intent_id: string | null;
-  buyer_intent_name: string | null;
-  buyer_party_id: string | null;
-  buyer_name: string | null;
-  rank_at_selection: number | null;
-  recommendation_level: 'strong' | 'recommended' | 'possible' | 'weak' | null;
-  match_summary: string | null;
-  risk_summary: string | null;
-  gap_summary: string | null;
-  reason_snapshot: string | null;
-  evidence_snapshot_json: Record<string, unknown>;
-  selected_at: string;
-  canceled_at: string | null;
-  metadata_json: Record<string, unknown>;
-}
-
-export interface RecommendationReportCreate {
-  report_type?: 'buyer_facing_target_report' | 'seller_facing_buyer_report';
-  selected_item_ids?: string[];
-  title?: string | null;
-  metadata_json?: Record<string, unknown>;
-}
-
-export interface RecommendationReport {
-  id: string;
-  session_id: string;
-  report_type: 'buyer_facing_target_report' | 'seller_facing_buyer_report';
-  selected_item_ids_json: string[];
-  title: string | null;
-  markdown_content: string | null;
-  file_path: string | null;
-  file_format: 'markdown' | 'docx' | 'pdf' | null;
-  status: 'generating' | 'generated' | 'failed' | 'archived';
-  generated_by_model: string | null;
-  prompt_version: string | null;
-  created_at: string;
-  metadata_json: Record<string, unknown>;
-}
-
-export interface RecommendationReportJob {
-  report: RecommendationReport;
-  job_id: string;
-  job_status: string;
-  queue_name: string;
-}
-
-export interface RecommendationSessionBundle {
-  session: RecommendationSession;
-  messages: RecommendationMessage[];
-  initial_candidates?: RecommendationCandidate[];
-  reranked_candidates?: RecommendationCandidate[];
-  latest_candidates?: RecommendationCandidate[];
-  candidate_source?: string;
-  selected_items: RecommendationSelectedItem[];
-  reports: RecommendationReport[];
-  debug: {
-    selected_count: number;
-    canceled_selected_count: number;
-    message_count: number;
-    report_count: number;
-    engine_hint: string;
-  };
 }
 
 export interface GlobalSearchItem {

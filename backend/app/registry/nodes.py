@@ -65,9 +65,6 @@ class NodeSpec:
     # 推荐方向专属节点的方向标识（buyer_to_target / target_to_buyer）。
     # 只有方向深评节点有值，运行时据此选节点。
     recommendation_mode: str | None = None
-    # 推荐报告节点的业务类型。报告方向与深评方向是两套独立映射，不能共用
-    # recommendation_mode，否则同一方向的两个节点会在 dict 推导时互相覆盖。
-    report_type: str | None = None
     # 推荐 Agent 与回答撰写节点的方向。同理，各自独立一套映射 —— 三者共用
     # recommendation_mode 会让同方向的节点互相覆盖。
     agent_mode: str | None = None
@@ -312,51 +309,6 @@ NODES: tuple[NodeSpec, ...] = (
         default_timeout_seconds=30,
         sort_order=120,
     ),
-    NodeSpec(
-        node_name="recommendation_target_report_writer",
-        label="推荐报告·推荐标的",
-        domain="recommendation",
-        node_type="llm",
-        description="面向买家客户，综合买家需求、标的完整画像与深评内容生成推荐标的报告。",
-        runtime_inputs=("买家需求与会话条件", "候选标的完整画像", "规则证据与深评内容"),
-        prompt_variables=("report_context_json",),
-        output_mode="text",
-        response_format=None,
-        default_temperature=0.3,
-        default_timeout_seconds=180,
-        sort_order=130,
-        report_type="buyer_facing_target_report",
-    ),
-    NodeSpec(
-        node_name="recommendation_buyer_report_writer",
-        label="推荐报告·推荐买家",
-        domain="recommendation",
-        node_type="llm",
-        description="面向卖方客户，使用真实买家名称并综合买家画像、需求与深评内容生成推荐买家报告。",
-        runtime_inputs=("标的完整画像", "候选买家及需求完整画像", "规则证据与深评内容"),
-        prompt_variables=("report_context_json",),
-        output_mode="text",
-        response_format=None,
-        default_temperature=0.3,
-        default_timeout_seconds=180,
-        sort_order=140,
-        report_type="seller_facing_buyer_report",
-    ),
-    NodeSpec(
-        node_name="recommendation_report_writer",
-        label="推荐报告生成（旧）",
-        domain="recommendation",
-        node_type="llm",
-        description="旧版双向共用报告节点，已由两个方向专属报告节点取代。",
-        runtime_inputs=("旧版报告上下文",),
-        prompt_variables=("context_json",),
-        output_mode="text",
-        response_format=None,
-        default_temperature=0.3,
-        default_timeout_seconds=180,
-        lifecycle="retired",
-        sort_order=900,
-    ),
     # ---- 通用 ----------------------------------------------------------
     NodeSpec(
         node_name="ocr_attachment_parser",
@@ -591,19 +543,6 @@ def deep_eval_understudy_node_name() -> str:
     if len(understudies) != 1:
         raise ValueError(f"方向深评的代跑节点必须唯一，实际为 {sorted(understudies)}")
     return understudies.pop()
-
-
-def report_writer_node_by_type() -> dict[str, str]:
-    """对外报告类型 → 专属撰写节点。旧共用节点不参与运行时路由。"""
-    mapping = {
-        spec.report_type: spec.node_name
-        for spec in NODES
-        if spec.lifecycle == "active" and spec.report_type
-    }
-    expected = {"buyer_facing_target_report", "seller_facing_buyer_report"}
-    if set(mapping) != expected:
-        raise ValueError(f"推荐报告节点类型必须为 {sorted(expected)}，实际为 {sorted(mapping)}")
-    return mapping
 
 
 def recommendation_agent_node_by_mode() -> dict[str, str]:

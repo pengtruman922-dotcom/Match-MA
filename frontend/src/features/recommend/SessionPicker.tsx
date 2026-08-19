@@ -29,7 +29,6 @@ export default function SessionPicker({ onPick }: { onPick: (sessionId: string) 
           const results = await recommendations.recentSessions({
             q: normalizedQuery,
             limit: 20,
-            preview_limit: 0,
           });
           if (requestSequence.current === sequence) setSessions(results);
         } else {

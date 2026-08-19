@@ -1,23 +1,14 @@
-import json
 from uuid import UUID, uuid4
 
-import pytest
-from fastapi import HTTPException
-
 from backend.app.api.authn import AuthContext
-from backend.app.api.routes.recommendations import (
-    RecommendationSelectedItemCreate,
+from backend.app.services.recommendation_flow import (
     _build_recommendation_agent_status,
-    _build_recommendation_report_status,
-    _build_recommendation_selected_status,
-    _ensure_selected_item_allowed_from_session_candidates,
-    _ensure_selected_item_matches_session,
     _filter_recommendation_session_summaries,
     _list_recommendation_session_overview_rows,
+    _optional_uuid,
     _recommendation_page_overview,
     _recommendation_session_display,
     _recommendation_session_is_processing,
-    _recommendation_session_polling_hint,
 )
 
 SESSION_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -58,57 +49,18 @@ def test_recommendation_session_display_for_target_to_buyer() -> None:
     assert display["primary_action"] == "recommend_buyers"
 
 
-def test_report_status_prefers_running_job() -> None:
-    status = _build_recommendation_report_status(
-        reports=[{"id": SESSION_ID, "status": "generating", "created_at": "2026-06-02"}],
-        jobs=[{"id": SELLER_TARGET_ID, "job_type": "recommendation_report_generate", "status": "running"}],
-    )
-
-    assert status["requested"] is True
-    assert status["status"] == "generating"
-    assert status["generating_count"] == 1
-    assert status["latest_job"]["status"] == "running"
-
-
-def test_report_status_without_reports_is_not_requested() -> None:
-    status = _build_recommendation_report_status(reports=[], jobs=[])
-
-    assert status["requested"] is False
-    assert status["status"] == "not_requested"
-    assert status["latest_report"] is None
-
-
-def test_selected_status_counts_active_and_canceled() -> None:
-    status = _build_recommendation_selected_status(
-        [
-            {"id": BUYER_INTENT_ID, "selected_at": "2026-06-02", "canceled_at": None},
-            {"id": SELLER_TARGET_ID, "selected_at": "2026-06-01", "canceled_at": "2026-06-02"},
-        ]
-    )
-
-    assert status["active_count"] == 1
-    assert status["canceled_count"] == 1
-    assert status["latest_selected_at"] == "2026-06-02"
-
-
 def test_processing_and_page_overview_counts() -> None:
-    processing_summary = {
-        "report_status": {"status": "generating", "generated_count": 0},
-        "selected_status": {"active_count": 2},
-    }
-    failed_summary = {
-        "report_status": {"status": "failed", "generated_count": 1},
-        "selected_status": {"active_count": 1},
-    }
+    # 驱动源随拆除逐层换过：rerank_status（5A 删）→ report_status（5B 删）→ agent_status。
+    # 判据本身没有变过，断言也没有跟着改。
+    processing_summary = {"agent_status": {"status": "running"}}
+    idle_summary = {"agent_status": {"status": "completed"}}
 
-    overview = _recommendation_page_overview([processing_summary, failed_summary], [processing_summary])
+    overview = _recommendation_page_overview([processing_summary, idle_summary], [processing_summary])
 
     assert _recommendation_session_is_processing(processing_summary) is True
+    assert _recommendation_session_is_processing(idle_summary) is False
     assert overview["recent_session_count"] == 2
     assert overview["running_session_count"] == 1
-    assert overview["failed_session_count"] == 1
-    assert overview["generated_report_count"] == 1
-    assert overview["active_selected_item_count"] == 3
 
 
 def test_agent_brief_without_answer_keeps_session_processing_until_writer_lands() -> None:
@@ -117,10 +69,7 @@ def test_agent_brief_without_answer_keeps_session_processing_until_writer_lands(
         {"role": "tool", "metadata_json": {"turn_id": "turn-1", "message_type": "agent_brief"}},
     ]
     status = _build_recommendation_agent_status(None, session_id=SESSION_ID, messages=messages)
-    summary = {
-        "agent_status": status,
-        "report_status": {"status": "not_requested"},
-    }
+    summary = {"agent_status": status}
 
     assert status == {"status": "writing", "turn_id": "turn-1", "writer_pending": True}
     assert _recommendation_session_is_processing(summary) is True
@@ -135,60 +84,28 @@ def test_agent_brief_without_answer_keeps_session_processing_until_writer_lands(
     assert _recommendation_session_is_processing(summary) is False
 
 
-def test_recommendation_session_filter_and_polling_hint() -> None:
-    running_summary = {
-        "report_status": {
-            "status": "running",
-            "latest_job": {
-                "job_type": "recommendation_report_generate",
-                "id": str(SELLER_TARGET_ID),
-                "queue_name": "llm",
-                "status": "running",
-            },
-        },
-        "selected_status": {"active_count": 0},
-    }
-    generated_summary = {
-        "report_status": {"status": "generated", "latest_job": None},
-        "selected_status": {"active_count": 1},
-    }
-    failed_summary = {
-        "report_status": {"status": "failed", "latest_job": None},
-        "selected_status": {"active_count": 0},
-    }
+def test_recommendation_session_filter_runs_off_the_same_yellow_dot_judgement() -> None:
+    # failed / generated / selected 三个取值随推荐报告与选中一起下线（阶段五 5B），
+    # 剩下的 running / idle 与黄点判据同源，所以两者永远不会互相矛盾。
+    running_summary = {"agent_status": {"status": "running"}}
+    writing_summary = {"agent_status": {"status": "writing", "writer_pending": True}}
+    idle_summary = {"agent_status": {"status": "completed"}}
 
-    summaries = [running_summary, generated_summary, failed_summary]
+    summaries = [running_summary, writing_summary, idle_summary]
 
-    assert _filter_recommendation_session_summaries(summaries, "running") == [running_summary]
-    assert _filter_recommendation_session_summaries(summaries, "generated") == [generated_summary]
-    assert _filter_recommendation_session_summaries(summaries, "selected") == [generated_summary]
-    assert _filter_recommendation_session_summaries(summaries, "failed") == [failed_summary]
-
-    hint = _recommendation_session_polling_hint(running_summary, session_id=SESSION_ID)
-
-    assert hint["enabled"] is True
-    assert hint["endpoint"] == f"/api/v1/recommendations/sessions/{SESSION_ID}/page-state"
-    assert hint["watched_jobs"][0]["job_type"] == "recommendation_report_generate"
+    assert _filter_recommendation_session_summaries(summaries, "running") == [
+        running_summary,
+        writing_summary,
+    ]
+    assert _filter_recommendation_session_summaries(summaries, "idle") == [idle_summary]
+    assert _filter_recommendation_session_summaries(summaries, "all") == summaries
+    assert _filter_recommendation_session_summaries(summaries, None) == summaries
 
 
-def test_selected_item_must_match_session_anchor() -> None:
-    payload = RecommendationSelectedItemCreate(
-        mode="buyer_to_target",
-        buyer_intent_id=uuid4(),
-        seller_target_id=SELLER_TARGET_ID,
-    )
-
-    with pytest.raises(HTTPException) as exc_info:
-        _ensure_selected_item_matches_session(
-            {
-                "mode": "buyer_to_target",
-                "buyer_intent_id": BUYER_INTENT_ID,
-                "seller_target_id": None,
-            },
-            payload,
-        )
-
-    assert exc_info.value.status_code == 400
+def test_optional_uuid_accepts_uuid_and_string() -> None:
+    assert _optional_uuid(SELLER_TARGET_ID) == SELLER_TARGET_ID
+    assert _optional_uuid(str(SELLER_TARGET_ID)) == SELLER_TARGET_ID
+    assert _optional_uuid("not-a-uuid") is None
 
 
 class _MessageResult:
@@ -203,14 +120,6 @@ class _MessageResult:
 
     def first(self):
         return self._rows[0] if self._rows else None
-
-
-class _MessageDb:
-    def __init__(self, rows: list[dict]) -> None:
-        self._rows = rows
-
-    def execute(self, *_args, **_kwargs) -> _MessageResult:
-        return _MessageResult(self._rows)
 
 
 class _OverviewDb:
@@ -247,163 +156,6 @@ def test_recommendation_history_search_is_scoped_and_mode_specific() -> None:
     assert "creator.username" in db.statement
     assert db.params["scope_user_id"] == current_user.user_id
     assert db.params["q"] == "%医疗%"
-
-
-def test_owner_scoped_selected_item_must_come_from_session_candidates() -> None:
-    current_user = AuthContext(user_id=uuid4(), role="consultant", name="consultant")
-    db = _MessageDb(
-        [
-            {
-                "id": uuid4(),
-                "content_type": "json",
-                "content": json.dumps(
-                    {
-                        "message_type": "initial_candidates",
-                        "candidates": [
-                            {
-                                "seller_target_id": str(SELLER_TARGET_ID),
-                                "buyer_intent_id": str(BUYER_INTENT_ID),
-                            }
-                        ],
-                    }
-                ),
-                "metadata_json": {"message_type": "initial_candidates"},
-                "created_at": "2026-07-09T00:00:00",
-            }
-        ]
-    )
-
-    _ensure_selected_item_allowed_from_session_candidates(
-        db,
-        current_user,
-        SESSION_ID,
-        RecommendationSelectedItemCreate(
-            mode="buyer_to_target",
-            buyer_intent_id=BUYER_INTENT_ID,
-            seller_target_id=SELLER_TARGET_ID,
-        ),
-    )
-
-    with pytest.raises(HTTPException) as exc_info:
-        _ensure_selected_item_allowed_from_session_candidates(
-            db,
-            current_user,
-            SESSION_ID,
-            RecommendationSelectedItemCreate(
-                mode="buyer_to_target",
-                buyer_intent_id=BUYER_INTENT_ID,
-                seller_target_id=uuid4(),
-            ),
-        )
-
-    assert exc_info.value.status_code == 403
-
-
-def test_owner_scoped_selected_item_rejects_other_users_candidate() -> None:
-    current_user = AuthContext(user_id=uuid4(), role="consultant", name="consultant")
-    messages = [
-        {
-            "id": uuid4(),
-            "content_type": "json",
-            "content": json.dumps(
-                {
-                    "message_type": "initial_candidates",
-                    "candidates": [
-                        {
-                            "seller_target_id": str(SELLER_TARGET_ID),
-                            "buyer_intent_id": str(BUYER_INTENT_ID),
-                        }
-                    ],
-                }
-            ),
-            "metadata_json": {"message_type": "initial_candidates"},
-            "created_at": "2026-08-03T00:00:00",
-        }
-    ]
-
-    class _OwnerDb:
-        def execute(self, statement, *_args, **_kwargs):
-            if "from recommendation_message" in str(statement):
-                return _MessageResult(messages)
-            return _MessageResult([])
-
-    with pytest.raises(HTTPException) as exc_info:
-        _ensure_selected_item_allowed_from_session_candidates(
-            _OwnerDb(),
-            current_user,
-            SESSION_ID,
-            RecommendationSelectedItemCreate(
-                mode="buyer_to_target",
-                buyer_intent_id=BUYER_INTENT_ID,
-                seller_target_id=SELLER_TARGET_ID,
-            ),
-        )
-
-    assert exc_info.value.status_code == 403
-
-
-def test_create_selected_item_only_writes_collection(monkeypatch) -> None:
-    from backend.app.api.routes import recommendations as route
-
-    selected_item_id = uuid4()
-    current_user = AuthContext(user_id=uuid4(), role="consultant", name="consultant")
-    row = {
-        "id": selected_item_id,
-        "session_id": SESSION_ID,
-        "mode": "buyer_to_target",
-        "seller_target_id": SELLER_TARGET_ID,
-        "buyer_intent_id": BUYER_INTENT_ID,
-        "buyer_party_id": None,
-        "selected_by": current_user.user_id,
-        "metadata_json": {},
-    }
-
-    class _InsertResult:
-        def mappings(self):
-            return self
-
-        def one(self):
-            return row
-
-    class _Db:
-        statements: list[str] = []
-        committed = False
-
-        def execute(self, statement, *_args, **_kwargs):
-            self.statements.append(str(statement))
-            return _InsertResult()
-
-        def commit(self):
-            self.committed = True
-
-    db = _Db()
-    monkeypatch.setattr(route, "ensure_recommendation_session_visible", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        route,
-        "_get_recommendation_session_or_404",
-        lambda *_args, **_kwargs: {"id": SESSION_ID, "mode": "buyer_to_target", "buyer_intent_id": BUYER_INTENT_ID, "metadata_json": {}},
-    )
-    monkeypatch.setattr(route, "_ensure_selected_item_allowed_from_session_candidates", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(route, "_get_active_selected_item_for_pair", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(route, "_refresh_session_selected_count", lambda *_args, **_kwargs: None)
-
-    created = route.create_selected_item(
-        SESSION_ID,
-        RecommendationSelectedItemCreate(
-            mode="buyer_to_target",
-            buyer_intent_id=BUYER_INTENT_ID,
-            seller_target_id=SELLER_TARGET_ID,
-        ),
-        current_user,
-        db,
-    )
-
-    assert created["id"] == selected_item_id
-    assert db.committed is True
-    assert len(db.statements) == 1
-    assert "insert into recommendation_selected_item" in db.statements[0]
-    assert "buyer_seller_relation" not in db.statements[0]
-    assert "relation_event" not in db.statements[0]
 
 
 # -- Agent 会话在「最近推荐」里必须彼此可辨 --------------------------------
@@ -458,3 +210,5 @@ def test_legacy_temporary_filter_sessions_keep_their_old_label() -> None:
     )
 
     assert display["title"] == "临时条件筛选"
+    assert display["anchor"] == {"entity_type": None, "entity_id": None}
+    assert display["primary_action"] == "temporary_filter"

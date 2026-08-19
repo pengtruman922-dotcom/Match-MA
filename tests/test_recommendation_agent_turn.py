@@ -137,11 +137,17 @@ def test_brief_survives_a_non_json_agent_answer() -> None:
 
 
 def test_brief_carries_progress_flags_without_naming_the_other_side() -> None:
+    """只给布尔值，不泄露另一段关系的对象或阶段。
+
+    原来还断言过 `already_in_progress`（本买家与这家标的的推进状态）。阶段五 5B
+    删掉了它：新链路是无买家主体的自然语言会话，会话里没有 buyer_intent_id，
+    这个字段在结构上算不出来，`relation_status` 一直是硬编码的 None。
+    `other_buyer_in_deep_progress` 只需要 target_id，来源真实，留着。
+    """
     tools = _tools_with(
         {
             "t-1": {
                 **_CANDIDATE,
-                "relation_status": "contacted",
                 "seller_target_has_other_deep_progress": True,
             }
         }
@@ -151,7 +157,7 @@ def test_brief_carries_progress_flags_without_naming_the_other_side() -> None:
         {"recommended": [{"id": "t-1"}]}, tools=tools, mode="buyer_to_target"
     )["recommended"][0]
 
-    assert item["already_in_progress"] == "contacted"
+    assert "already_in_progress" not in item
     assert item["other_buyer_in_deep_progress"] is True
 
 

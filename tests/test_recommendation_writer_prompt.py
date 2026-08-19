@@ -95,9 +95,12 @@ def test_writer_v020_conflict_exits_nonzero(monkeypatch) -> None:
 def test_new_brief_and_fallback_have_no_total_eligible_reader() -> None:
     answer_source = (ROOT / "backend/app/services/recommendation_answer.py").read_text(encoding="utf-8")
     brief_source = (ROOT / "backend/app/jobs/handlers/recommendation.py").read_text(encoding="utf-8")
-    brief_function = brief_source.split("def _build_answer_brief(", 1)[1].split(
-        "\ndef _get_deep_eval_node_config", 1
-    )[0]
+    # 下界原来是 _get_deep_eval_node_config，它随阶段五 5B 删掉了。切界必须显式断言
+    # 存在：str.split 找不到分隔符时会静默返回整段，用例会从「限定在这个函数里」
+    # 悄悄变成「扫到文件末尾」，坏了也不会有人知道。
+    end_marker = "\ndef _insert_agent_message"
+    assert end_marker in brief_source, "切界函数已改名或被删，请更新这里的下界"
+    brief_function = brief_source.split("def _build_answer_brief(", 1)[1].split(end_marker, 1)[0]
 
     assert "total_eligible" not in answer_source
     assert "total_eligible" not in brief_function

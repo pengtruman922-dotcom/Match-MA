@@ -21,83 +21,6 @@ from backend.app.registry.indicators import indicator_by_column
 from backend.app.services.relation_flow import DEEP_PROGRESS_STATUSES
 
 
-def _build_recommendation_session_bundle(
-    db: Session,
-    *,
-    session_id: UUID,
-    include_canceled: bool,
-    current_user: CurrentUser,
-) -> dict[str, Any]:
-    session = _get_recommendation_session_or_404(db, session_id)
-    messages = _list_recommendation_messages(db, session_id=session_id, limit=500, offset=0)
-    selected_items = _list_selected_items(
-        db,
-        session_id=session_id,
-        include_canceled=include_canceled,
-        limit=500,
-        offset=0,
-    )
-    reports = _list_recommendation_reports(db, session_id=session_id, limit=100, offset=0)
-    candidate_sets = _extract_recommendation_candidate_sets(messages)
-    initial_candidates = _enrich_candidates_with_selection(
-        candidate_sets["initial_candidates"],
-        selected_items,
-    )
-    reranked_candidates = _enrich_candidates_with_selection(
-        candidate_sets["reranked_candidates"],
-        selected_items,
-    )
-    # Candidate messages are an immutable recommendation snapshot, whereas a
-    # buyer-seller relation can be created or move stage while the page is
-    # polling.  Recompute relation annotations on every bundle read so a
-    # locally-created "已在推进" badge cannot revert after the next refresh and
-    # the other-buyer deep-progress warning stays current.
-    mode = str(session["mode"])
-    initial_candidates = _annotate_candidate_relations(
-        db, {"candidates": initial_candidates}, mode=mode
-    )["candidates"]
-    reranked_candidates = _annotate_candidate_relations(
-        db, {"candidates": reranked_candidates}, mode=mode
-    )["candidates"]
-    initial_candidates = _annotate_candidate_ownership(
-        db,
-        {"candidates": initial_candidates},
-        mode=mode,
-        current_user=current_user,
-    )["candidates"]
-    reranked_candidates = _annotate_candidate_ownership(
-        db,
-        {"candidates": reranked_candidates},
-        mode=mode,
-        current_user=current_user,
-    )["candidates"]
-    latest_candidates = reranked_candidates or initial_candidates
-    candidate_source = "reranked_candidates" if reranked_candidates else (
-        "initial_candidates" if initial_candidates else "none"
-    )
-    return {
-        "session": session,
-        "messages": messages,
-        "initial_candidates": initial_candidates,
-        "reranked_candidates": reranked_candidates,
-        "latest_candidates": latest_candidates,
-        "candidate_source": candidate_source,
-        "selected_items": selected_items,
-        "reports": reports,
-        "debug": {
-            "selected_count": len([item for item in selected_items if item.get("canceled_at") is None]),
-            "canceled_selected_count": len([item for item in selected_items if item.get("canceled_at") is not None]),
-            "message_count": len(messages),
-            "report_count": len(reports),
-            "initial_candidate_count": len(initial_candidates),
-            "reranked_candidate_count": len(reranked_candidates),
-            "latest_candidate_count": len(latest_candidates),
-            "candidate_source": candidate_source,
-            "engine_hint": "rule_sql_python_deep_eval_v1",
-        },
-    }
-
-
 def _list_recommendation_session_overview_rows(
     db: Session,
     *,
@@ -219,9 +142,7 @@ def _list_running_recommendation_session_ids(
               from background_job job
               where job.team_id = :team_id
                 and job.workspace_id = :workspace_id
-                and job.job_type in (
-                      'recommendation_report_generate', 'recommendation_agent'
-                    )
+                and job.job_type = 'recommendation_agent'
                 and job.status in ('queued', 'running', 'retry_waiting')
             )
             select distinct session_id
@@ -242,59 +163,19 @@ def _build_recommendation_session_summary(
     db: Session,
     *,
     session: dict[str, Any],
-    preview_limit: int,
 ) -> dict[str, Any]:
     session_id = session["id"]
     messages = _list_recommendation_messages(db, session_id=session_id, limit=500, offset=0)
-    selected_items = _list_selected_items(
-        db,
-        session_id=session_id,
-        include_canceled=True,
-        limit=500,
-        offset=0,
-    )
-    reports = _list_recommendation_reports(db, session_id=session_id, limit=50, offset=0)
-    candidate_sets = _extract_recommendation_candidate_sets(messages)
-    initial_candidates = _enrich_candidates_with_selection(
-        candidate_sets["initial_candidates"],
-        selected_items,
-    )
-    reranked_candidates = _enrich_candidates_with_selection(
-        candidate_sets["reranked_candidates"],
-        selected_items,
-    )
-    latest_candidates = reranked_candidates or initial_candidates
-    candidate_source = "reranked_candidates" if reranked_candidates else (
-        "initial_candidates" if initial_candidates else "none"
-    )
-    report_jobs = _get_recommendation_report_jobs(db, session_id=session_id)
-    report_status = _build_recommendation_report_status(reports=reports, jobs=report_jobs)
-    selected_status = _build_recommendation_selected_status(selected_items)
     agent_status = _build_recommendation_agent_status(
         db,
         session_id=session_id,
         messages=messages,
     )
-    activity = _build_recommendation_activity(
-        session=session,
-        messages=messages,
-        reports=reports,
-        report_status=report_status,
-    )
     return {
         "session": session,
         "display": _recommendation_session_display(session, messages=messages),
-        "candidate_counts": {
-            "initial": len(initial_candidates),
-            "reranked": len(reranked_candidates),
-            "latest": len(latest_candidates),
-        },
-        "latest_candidates_preview": latest_candidates[:preview_limit],
-        "candidate_source": candidate_source,
-        "report_status": report_status,
-        "selected_status": selected_status,
         "agent_status": agent_status,
-        "activity": activity,
+        "activity": _build_recommendation_activity(session=session, messages=messages),
         "debug_ref": {
             "entity_type": "recommendation_session",
             "entity_id": str(session_id),
@@ -391,10 +272,11 @@ def _recommendation_session_display(
 
 
 def _recommendation_session_is_processing(summary: dict[str, Any]) -> bool:
-    return (
-        (summary.get("agent_status") or {}).get("status") in {"queued", "running", "retry_waiting", "writing"}
-        or summary["report_status"].get("status") in {"queued", "running", "retry_waiting", "generating"}
-    )
+    # 黄点/绿点判据。5A 删掉 rerank 一支、5B 删掉 report 一支后只剩 agent_status，
+    # 它同时覆盖 Writer 间隙（有 brief 无 answer 时为 writing）。
+    return (summary.get("agent_status") or {}).get("status") in {
+        "queued", "running", "retry_waiting", "writing",
+    }
 
 
 def _build_recommendation_agent_status(
@@ -451,76 +333,20 @@ def _filter_recommendation_session_summaries(
         return summaries
     if status_filter == "running":
         return [summary for summary in summaries if _recommendation_session_is_processing(summary)]
-    if status_filter == "failed":
-        return [
-            summary
-            for summary in summaries
-            if summary["report_status"].get("status") == "failed"
-        ]
-    if status_filter == "generated":
-        return [summary for summary in summaries if summary["report_status"].get("status") == "generated"]
-    if status_filter == "selected":
-        return [
-            summary
-            for summary in summaries
-            if int(summary["selected_status"].get("active_count") or 0) > 0
-        ]
     if status_filter == "idle":
-        return [
-            summary
-            for summary in summaries
-            if not _recommendation_session_is_processing(summary)
-            and summary["report_status"].get("status") != "failed"
-        ]
+        # failed / generated / selected 三个取值随推荐报告与选中一起下线（阶段五 5B）：
+        # 它们全部读 report_status / selected_status，那两块已经没有数据来源了。
+        return [summary for summary in summaries if not _recommendation_session_is_processing(summary)]
     return summaries
-
-
-def _recommendation_session_polling_hint(
-    summary: dict[str, Any],
-    *,
-    session_id: UUID,
-) -> dict[str, Any]:
-    enabled = _recommendation_session_is_processing(summary)
-    watched_jobs = []
-    latest_report_job = summary["report_status"].get("latest_job")
-    if latest_report_job and latest_report_job.get("status") in {"queued", "running", "retry_waiting"}:
-        watched_jobs.append(
-            {
-                "job_type": latest_report_job.get("job_type"),
-                "job_id": latest_report_job.get("id"),
-                "queue_name": latest_report_job.get("queue_name"),
-                "status": latest_report_job.get("status"),
-            }
-        )
-    return {
-        "enabled": enabled,
-        "interval_ms": 3000 if enabled else None,
-        "endpoint": f"/api/v1/recommendations/sessions/{session_id}/page-state",
-        "status_endpoint": f"/api/v1/recommendations/sessions/{session_id}/status",
-        "bundle_endpoint": f"/api/v1/recommendations/sessions/{session_id}/bundle",
-        "watched_jobs": watched_jobs,
-        "reason": "report_running" if enabled else "terminal_or_not_requested",
-    }
 
 
 def _recommendation_page_overview(
     recent_summaries: list[dict[str, Any]],
     running_summaries: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    failed_count = 0
-    generated_report_count = 0
-    selected_count = 0
-    for summary in recent_summaries:
-        if summary["report_status"].get("status") == "failed":
-            failed_count += 1
-        generated_report_count += int(summary["report_status"].get("generated_count") or 0)
-        selected_count += int(summary["selected_status"].get("active_count") or 0)
     return {
         "recent_session_count": len(recent_summaries),
         "running_session_count": len(running_summaries),
-        "failed_session_count": failed_count,
-        "generated_report_count": generated_report_count,
-        "active_selected_item_count": selected_count,
     }
 
 
@@ -550,153 +376,20 @@ def _recommendation_quick_actions(overview: dict[str, Any]) -> list[dict[str, An
     ]
 
 
-def _build_recommendation_report_status(
-    *,
-    reports: list[dict[str, Any]],
-    jobs: list[dict[str, Any]],
-) -> dict[str, Any]:
-    latest_report = reports[0] if reports else None
-    latest_job = jobs[0] if jobs else None
-    status_counts = _count_by_key(reports, "status")
-    job_status = latest_job.get("status") if latest_job else None
-    report_status = latest_report.get("status") if latest_report else None
-    running_statuses = {"queued", "running", "retry_waiting"}
-    if job_status in running_statuses or report_status == "generating":
-        aggregate_status = "generating"
-    elif job_status == "failed" or report_status == "failed":
-        aggregate_status = "failed"
-    elif status_counts.get("generated", 0) > 0:
-        aggregate_status = "generated"
-    else:
-        aggregate_status = "not_requested"
-    return {
-        "requested": bool(reports or jobs),
-        "status": aggregate_status,
-        "latest_report": _compact_recommendation_report(latest_report) if latest_report else None,
-        "latest_job": _compact_background_job(latest_job) if latest_job else None,
-        "total_count": len(reports),
-        "generated_count": int(status_counts.get("generated", 0)),
-        "generating_count": int(status_counts.get("generating", 0)),
-        "failed_count": int(status_counts.get("failed", 0)),
-        "archived_count": int(status_counts.get("archived", 0)),
-    }
-
-
-def _build_recommendation_selected_status(selected_items: list[dict[str, Any]]) -> dict[str, Any]:
-    active_items = [item for item in selected_items if item.get("canceled_at") is None]
-    return {
-        "active_count": len(active_items),
-        "canceled_count": len(selected_items) - len(active_items),
-        "latest_selected_at": active_items[0].get("selected_at") if active_items else None,
-        "latest_item": _compact_selected_item(active_items[0]) if active_items else None,
-    }
-
-
 def _build_recommendation_activity(
     *,
     session: dict[str, Any],
     messages: list[dict[str, Any]],
-    reports: list[dict[str, Any]],
-    report_status: dict[str, Any],
 ) -> dict[str, Any]:
     timestamps = [
         session.get("updated_at"),
         messages[-1].get("created_at") if messages else None,
-        reports[0].get("created_at") if reports else None,
-        (report_status.get("latest_job") or {}).get("finished_at")
-        or (report_status.get("latest_job") or {}).get("started_at")
-        or (report_status.get("latest_job") or {}).get("created_at"),
     ]
     latest_activity_at = max([value for value in timestamps if value] or [None])
     return {
         "latest_activity_at": latest_activity_at,
         "message_count": len(messages),
-        "report_count": len(reports),
         "last_message": _compact_recommendation_message(messages[-1]) if messages else None,
-    }
-
-
-def _get_recommendation_report_jobs(db: Session, *, session_id: UUID) -> list[dict[str, Any]]:
-    rows = db.execute(
-        text(
-            """
-            select
-              id, job_type, status, priority, queue_name, entity_type, entity_id,
-              result_json, error_code, error_message, attempt_count, max_attempts,
-              started_at::text as started_at, finished_at::text as finished_at,
-              created_at::text as created_at, updated_at::text as updated_at, metadata_json
-            from background_job
-            where team_id = :team_id
-              and workspace_id = :workspace_id
-              and job_type = 'recommendation_report_generate'
-              and (
-                payload_json ->> 'session_id' = :session_id_text
-                or entity_id in (
-                  select id
-                  from recommendation_report
-                  where session_id = :session_id
-                    and team_id = :team_id
-                    and workspace_id = :workspace_id
-                )
-              )
-            order by created_at desc
-            limit 50
-            """
-        ),
-        {
-            "session_id": session_id,
-            "session_id_text": str(session_id),
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
-    ).mappings().all()
-    return [dict(row) for row in rows]
-
-
-def _compact_recommendation_report(report: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "id": report.get("id"),
-        "session_id": report.get("session_id"),
-        "report_type": report.get("report_type"),
-        "title": report.get("title"),
-        "status": report.get("status"),
-        "generated_by_model": report.get("generated_by_model"),
-        "prompt_version": report.get("prompt_version"),
-        "created_at": report.get("created_at"),
-        "metadata_json": report.get("metadata_json"),
-    }
-
-
-def _compact_background_job(job: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "id": job.get("id"),
-        "job_type": job.get("job_type"),
-        "status": job.get("status"),
-        "queue_name": job.get("queue_name"),
-        "entity_type": job.get("entity_type"),
-        "entity_id": job.get("entity_id"),
-        "error_code": job.get("error_code"),
-        "error_message": job.get("error_message"),
-        "attempt_count": job.get("attempt_count"),
-        "max_attempts": job.get("max_attempts"),
-        "created_at": job.get("created_at"),
-        "started_at": job.get("started_at"),
-        "finished_at": job.get("finished_at"),
-        "updated_at": job.get("updated_at"),
-    }
-
-
-def _compact_selected_item(item: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "id": item.get("id"),
-        "seller_target_id": item.get("seller_target_id"),
-        "seller_target_name": item.get("seller_target_name"),
-        "buyer_intent_id": item.get("buyer_intent_id"),
-        "buyer_intent_name": item.get("buyer_intent_name"),
-        "buyer_party_id": item.get("buyer_party_id"),
-        "buyer_name": item.get("buyer_name"),
-        "recommendation_level": item.get("recommendation_level"),
-        "selected_at": item.get("selected_at"),
     }
 
 
@@ -751,362 +444,6 @@ def _list_recommendation_messages(
             "offset": offset,
         },
     ).mappings().all()
-    return [dict(row) for row in rows]
-
-
-def _list_selected_items(
-    db: Session,
-    *,
-    session_id: UUID,
-    include_canceled: bool,
-    limit: int,
-    offset: int,
-) -> list[dict[str, Any]]:
-    where = ["ri.session_id = :session_id", "ri.team_id = :team_id", "ri.workspace_id = :workspace_id"]
-    if not include_canceled:
-        where.append("ri.canceled_at is null")
-    rows = db.execute(
-        text(
-            f"""
-            select {_selected_item_select_columns()}
-            from recommendation_selected_item ri
-            left join seller_target st on st.id = ri.seller_target_id
-            left join buyer_intent bi on bi.id = ri.buyer_intent_id
-            left join buyer_party bp on bp.id = ri.buyer_party_id
-            where {' and '.join(where)}
-            order by ri.selected_at desc
-            limit :limit offset :offset
-            """
-        ),
-        {
-            "session_id": session_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "limit": limit,
-            "offset": offset,
-        },
-    ).mappings().all()
-    return [dict(row) for row in rows]
-
-
-def _list_recommendation_reports(
-    db: Session,
-    *,
-    session_id: UUID,
-    limit: int,
-    offset: int,
-) -> list[dict[str, Any]]:
-    rows = db.execute(
-        text(
-            f"""
-            select {_report_select_columns()}
-            from recommendation_report
-            where session_id = :session_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
-            order by created_at desc
-            limit :limit offset :offset
-            """
-        ),
-        {
-            "session_id": session_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "limit": limit,
-            "offset": offset,
-        },
-    ).mappings().all()
-    return [dict(row) for row in rows]
-
-
-def _extract_recommendation_candidate_sets(
-    messages: list[dict[str, Any]],
-) -> dict[str, Any]:
-    initial_candidates: list[dict[str, Any]] = []
-    reranked_candidates: list[dict[str, Any]] = []
-    initial_message_id: str | None = None
-    reranked_message_id: str | None = None
-    reranked_at: str | None = None
-
-    for message in messages:
-        if message.get("content_type") != "json":
-            continue
-
-        content = _json_loads(message.get("content") or "{}")
-        metadata = message.get("metadata_json") if isinstance(message.get("metadata_json"), dict) else {}
-        message_type = str(
-            metadata.get("message_type")
-            or content.get("message_type")
-            or _infer_recommendation_candidate_message_type(content)
-            or ""
-        )
-        candidates = content.get("candidates")
-        if not isinstance(candidates, list):
-            continue
-
-        if message_type == "reranked_candidates":
-            reranked_candidates = _normalize_candidates(candidates)
-            reranked_message_id = str(message["id"])
-            reranked_at = message.get("created_at")
-        elif message_type == "initial_candidates":
-            initial_candidates = _normalize_candidates(candidates)
-            initial_message_id = str(message["id"])
-
-    return {
-        "initial_candidates": initial_candidates,
-        "reranked_candidates": reranked_candidates,
-        "initial_message_id": initial_message_id,
-        "reranked_message_id": reranked_message_id,
-        "reranked_at": reranked_at,
-    }
-
-
-def _infer_recommendation_candidate_message_type(content: dict[str, Any]) -> str | None:
-    candidates = content.get("candidates")
-    if not isinstance(candidates, list):
-        return None
-    if not candidates:
-        return "initial_candidates"
-
-    has_rerank_score = any(
-        isinstance(candidate, dict)
-        and isinstance(candidate.get("evidence_json"), dict)
-        and isinstance(candidate["evidence_json"].get("score"), dict)
-        and candidate["evidence_json"]["score"].get("rerank_score") is not None
-        for candidate in candidates
-    )
-    return "reranked_candidates" if has_rerank_score else "initial_candidates"
-
-
-def _normalize_candidates(candidates: list[Any]) -> list[dict[str, Any]]:
-    normalized_candidates: list[dict[str, Any]] = []
-    for candidate in candidates:
-        if isinstance(candidate, dict):
-            normalized_candidates.append(dict(candidate))
-    return normalized_candidates
-
-
-def _enrich_candidates_with_selection(
-    candidates: list[dict[str, Any]],
-    selected_items: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    selected_by_pair = {
-        _candidate_pair_key(selected_item): selected_item
-        for selected_item in selected_items
-        if selected_item.get("canceled_at") is None
-    }
-    enriched: list[dict[str, Any]] = []
-    for candidate in candidates:
-        item = dict(candidate)
-        selected_item = selected_by_pair.get(_candidate_pair_key(item))
-        if selected_item is not None:
-            item["selected"] = True
-            item["selected_item_id"] = selected_item.get("id")
-            item["selected_at"] = selected_item.get("selected_at")
-        else:
-            item["selected"] = False
-            item["selected_item_id"] = None
-            item["selected_at"] = None
-        enriched.append(_with_frontend_candidate_fields(item))
-    return enriched
-
-
-def _enrich_candidates_for_frontend(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [_with_frontend_candidate_fields(candidate) for candidate in candidates]
-
-
-def _with_frontend_candidate_fields(candidate: dict[str, Any]) -> dict[str, Any]:
-    item = dict(candidate)
-    mode = str(item.get("mode") or "")
-    if mode == "buyer_to_target":
-        primary_entity_type = "seller_target"
-        primary_entity_id = item.get("seller_target_id")
-        counterpart_entity_type = "buyer_intent"
-        counterpart_entity_id = item.get("buyer_intent_id")
-        title = item.get("seller_target_name")
-        subtitle = _join_display_parts([item.get("buyer_intent_name"), item.get("buyer_name")])
-        action_label = "add_target_to_recommendation"
-    else:
-        primary_entity_type = "buyer_intent"
-        primary_entity_id = item.get("buyer_intent_id")
-        counterpart_entity_type = "seller_target"
-        counterpart_entity_id = item.get("seller_target_id")
-        title = item.get("buyer_intent_name") or item.get("buyer_name")
-        subtitle = _join_display_parts([item.get("buyer_name"), item.get("seller_target_name")])
-        action_label = "add_buyer_to_recommendation"
-
-    score_breakdown = _candidate_score_breakdown(item)
-    display_meta = _candidate_display_meta(item, score_breakdown)
-    display_badges = _candidate_display_badges(item, score_breakdown)
-    item.update(
-        {
-            "primary_entity_type": primary_entity_type,
-            "primary_entity_id": primary_entity_id,
-            "counterpart_entity_type": counterpart_entity_type,
-            "counterpart_entity_id": counterpart_entity_id,
-            "display_title": title,
-            "display_subtitle": subtitle,
-            "display_meta": display_meta,
-            "display_badges": display_badges,
-            "score_breakdown": score_breakdown,
-            "card_json": {
-                "title": title,
-                "subtitle": subtitle,
-                "meta": display_meta,
-                "badges": display_badges,
-                "score": item.get("score"),
-                "recommendation_level": item.get("recommendation_level"),
-                "selected": bool(item.get("selected")),
-                "action_label": action_label,
-                "primary_entity_type": primary_entity_type,
-                "primary_entity_id": str(primary_entity_id) if primary_entity_id else None,
-                "counterpart_entity_type": counterpart_entity_type,
-                "counterpart_entity_id": str(counterpart_entity_id) if counterpart_entity_id else None,
-            },
-        }
-    )
-    return item
-
-
-def _candidate_score_breakdown(candidate: dict[str, Any]) -> dict[str, Any]:
-    evidence_json = candidate.get("evidence_json") if isinstance(candidate.get("evidence_json"), dict) else {}
-    score_json = evidence_json.get("score") if isinstance(evidence_json.get("score"), dict) else {}
-    return {
-        "rule_score": score_json.get("rule_score"),
-        "rerank_score": score_json.get("rerank_score"),
-        "rerank_boost": score_json.get("rerank_boost"),
-        "rerank_model": score_json.get("rerank_model"),
-        "hard_mismatches": score_json.get("hard_mismatches") or [],
-        "excluded_hit": score_json.get("excluded_hit"),
-        "deep_eval_grade": score_json.get("deep_eval_grade"),
-        "deep_eval_model": score_json.get("deep_eval_model"),
-        "final_score": score_json.get("final_score") or candidate.get("score"),
-    }
-
-
-def _candidate_display_meta(candidate: dict[str, Any], score_breakdown: dict[str, Any]) -> list[str]:
-    meta = [
-        f"score {candidate.get('score')}",
-        f"level {candidate.get('recommendation_level')}",
-    ]
-    if score_breakdown.get("rerank_score") is not None:
-        meta.append(f"rerank {float(score_breakdown['rerank_score']):.2f}")
-    return [item for item in meta if item and not item.endswith("None")]
-
-
-def _candidate_display_badges(candidate: dict[str, Any], score_breakdown: dict[str, Any]) -> list[str]:
-    badges = [str(candidate.get("recommendation_level") or "unrated")]
-    if score_breakdown.get("deep_eval_grade"):
-        badges.append(f"深评{score_breakdown['deep_eval_grade']}档")
-    if score_breakdown.get("excluded_hit"):
-        badges.append("命中排除项")
-    elif score_breakdown.get("hard_mismatches"):
-        badges.append("硬性条件不符")
-    if score_breakdown.get("rerank_score") is not None:
-        badges.append("reranked")
-    if candidate.get("selected"):
-        badges.append("selected")
-    return badges
-
-
-def _join_display_parts(parts: list[Any]) -> str | None:
-    values = [str(part) for part in parts if part]
-    return " / ".join(values) if values else None
-
-
-def _candidate_pair_key(item: dict[str, Any]) -> tuple[str | None, str | None]:
-    seller_target_id = item.get("seller_target_id")
-    buyer_intent_id = item.get("buyer_intent_id")
-    return (
-        str(seller_target_id) if seller_target_id else None,
-        str(buyer_intent_id) if buyer_intent_id else None,
-    )
-
-
-def _get_active_selected_item_for_pair(
-    db: Session,
-    *,
-    session_id: UUID,
-    buyer_intent_id: UUID | None,
-    seller_target_id: UUID | None,
-) -> dict[str, Any] | None:
-    if buyer_intent_id is None or seller_target_id is None:
-        return None
-    row = db.execute(
-        text(
-            f"""
-            select {_selected_item_select_columns()}
-            from recommendation_selected_item ri
-            left join seller_target st on st.id = ri.seller_target_id
-            left join buyer_intent bi on bi.id = ri.buyer_intent_id
-            left join buyer_party bp on bp.id = ri.buyer_party_id
-            where ri.session_id = :session_id
-              and ri.buyer_intent_id = :buyer_intent_id
-              and ri.seller_target_id = :seller_target_id
-              and ri.team_id = :team_id
-              and ri.workspace_id = :workspace_id
-              and ri.canceled_at is null
-            order by ri.selected_at desc
-            limit 1
-            """
-        ),
-        {
-            "session_id": session_id,
-            "buyer_intent_id": buyer_intent_id,
-            "seller_target_id": seller_target_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
-    ).mappings().one_or_none()
-    return dict(row) if row else None
-
-
-def _list_selected_items_for_report(
-    db: Session,
-    *,
-    session_id: UUID,
-    selected_item_ids: list[UUID] | None,
-) -> list[dict[str, Any]]:
-    where = [
-        "ri.session_id = :session_id",
-        "ri.team_id = :team_id",
-        "ri.workspace_id = :workspace_id",
-        "ri.canceled_at is null",
-    ]
-    params: dict[str, Any] = {
-        "session_id": session_id,
-        "team_id": DEFAULT_TEAM_ID,
-        "workspace_id": DEFAULT_WORKSPACE_ID,
-    }
-    statement = text(
-        f"""
-        select {_selected_item_select_columns()}
-        from recommendation_selected_item ri
-        left join seller_target st on st.id = ri.seller_target_id
-        left join buyer_intent bi on bi.id = ri.buyer_intent_id
-        left join buyer_party bp on bp.id = ri.buyer_party_id
-        where {' and '.join(where)}
-        order by ri.rank_at_selection nulls last, ri.selected_at asc
-        """
-    )
-    if selected_item_ids is not None:
-        if not selected_item_ids:
-            return []
-        where.append("ri.id in :selected_item_ids")
-        params["selected_item_ids"] = tuple(selected_item_ids)
-        statement = text(
-            f"""
-            select {_selected_item_select_columns()}
-            from recommendation_selected_item ri
-            left join seller_target st on st.id = ri.seller_target_id
-            left join buyer_intent bi on bi.id = ri.buyer_intent_id
-            left join buyer_party bp on bp.id = ri.buyer_party_id
-            where {' and '.join(where)}
-            order by ri.rank_at_selection nulls last, ri.selected_at asc
-            """
-        ).bindparams(bindparam("selected_item_ids", expanding=True))
-
-    rows = db.execute(statement, params).mappings().all()
     return [dict(row) for row in rows]
 
 
@@ -1192,196 +529,6 @@ def _target_facts(item: dict[str, Any]) -> dict[str, Any]:
         ),
     }
     return {key: value for key, value in facts.items() if value is not None}
-
-
-def _annotate_candidate_relations(db: Session, result: dict[str, Any], *, mode: str) -> dict[str, Any]:
-    """Mark existing relations and both directions of anonymous deep progress.
-
-    Recommendation and progress meet here: a candidate the buyer is already
-    working is shown apart from fresh ones instead of silently re-ranked, and a
-    target or intent deep in progress elsewhere is flagged without naming the
-    other relation or exposing its stage.
-    """
-    candidates = result.get("candidates") or []
-    if not candidates:
-        return result
-
-    pairs = [
-        (str(candidate["buyer_intent_id"]), str(candidate["seller_target_id"]))
-        for candidate in candidates
-        if candidate.get("buyer_intent_id") and candidate.get("seller_target_id")
-    ]
-    if not pairs:
-        return result
-
-    intent_ids = sorted({intent for intent, _ in pairs})
-    target_ids = sorted({target for _, target in pairs})
-    rows = db.execute(
-        text(
-            """
-            select id, buyer_intent_id::text as buyer_intent_id,
-                   seller_target_id::text as seller_target_id, status
-            from buyer_seller_relation
-            where team_id = :team_id and workspace_id = :workspace_id
-              and deleted_at is null
-              and buyer_intent_id in :intent_ids
-              and seller_target_id in :target_ids
-            """
-        ).bindparams(
-            bindparam("intent_ids", expanding=True),
-            bindparam("target_ids", expanding=True),
-        ),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "intent_ids": intent_ids,
-            "target_ids": target_ids,
-        },
-    ).mappings().all()
-
-    exact: dict[tuple[str, str], dict[str, Any]] = {}
-    for row in rows:
-        exact[(row["buyer_intent_id"], row["seller_target_id"])] = {"id": row["id"], "status": row["status"]}
-
-    # Seller-side warning: do not constrain by candidate intent IDs, otherwise
-    # the query hides exactly the “other buyer is in due diligence” relation.
-    target_deep_rows = db.execute(
-        text(
-            """
-            select buyer_intent_id::text as buyer_intent_id,
-                   seller_target_id::text as seller_target_id
-            from buyer_seller_relation
-            where team_id = :team_id and workspace_id = :workspace_id
-              and deleted_at is null
-              and seller_target_id in :target_ids
-              and status in :deep_statuses
-            """
-        ).bindparams(
-            bindparam("target_ids", expanding=True),
-            bindparam("deep_statuses", expanding=True),
-        ),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "target_ids": target_ids,
-            "deep_statuses": list(DEEP_PROGRESS_STATUSES),
-        },
-    ).mappings().all()
-    deep_intents_by_target: dict[str, set[str]] = {}
-    for row in target_deep_rows:
-        deep_intents_by_target.setdefault(row["seller_target_id"], set()).add(row["buyer_intent_id"])
-
-    # Buyer-side warning is the inverse dimension: this intent may already be
-    # in due diligence or agreement with another target.
-    intent_deep_rows = db.execute(
-        text(
-            """
-            select buyer_intent_id::text as buyer_intent_id,
-                   seller_target_id::text as seller_target_id
-            from buyer_seller_relation
-            where team_id = :team_id and workspace_id = :workspace_id
-              and deleted_at is null
-              and buyer_intent_id in :intent_ids
-              and status in :deep_statuses
-            """
-        ).bindparams(
-            bindparam("intent_ids", expanding=True),
-            bindparam("deep_statuses", expanding=True),
-        ),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "intent_ids": intent_ids,
-            "deep_statuses": list(DEEP_PROGRESS_STATUSES),
-        },
-    ).mappings().all()
-    deep_targets_by_intent: dict[str, set[str]] = {}
-    for row in intent_deep_rows:
-        deep_targets_by_intent.setdefault(row["buyer_intent_id"], set()).add(row["seller_target_id"])
-
-    for candidate in candidates:
-        intent_id = str(candidate.get("buyer_intent_id") or "")
-        target_id = str(candidate.get("seller_target_id") or "")
-        relation = exact.get((intent_id, target_id))
-        candidate["relation_id"] = str(relation["id"]) if relation else None
-        candidate["relation_status"] = relation["status"] if relation else None
-        seller_has_other = bool(
-            deep_intents_by_target.get(target_id, set()) - {intent_id}
-        )
-        buyer_has_other = bool(
-            deep_targets_by_intent.get(intent_id, set()) - {target_id}
-        )
-        candidate["seller_target_has_other_deep_progress"] = seller_has_other
-        candidate["buyer_intent_has_other_deep_progress"] = buyer_has_other
-        # Compatibility for clients deployed before the directional fields:
-        # choose the correct meaning for the current recommendation direction.
-        candidate["deep_progress_elsewhere"] = (
-            seller_has_other if mode == "buyer_to_target" else buyer_has_other
-        )
-    return result
-
-
-def _annotate_candidate_ownership(
-    db: Session,
-    result: dict[str, Any],
-    *,
-    mode: str,
-    current_user: CurrentUser,
-) -> dict[str, Any]:
-    """Overlay the primary candidate's live owner and operation boundary."""
-    candidates = result.get("candidates") or []
-    if not candidates:
-        return result
-
-    if mode == "buyer_to_target":
-        entity_ids = sorted(
-            {str(candidate["seller_target_id"]) for candidate in candidates if candidate.get("seller_target_id")}
-        )
-        table = "seller_target"
-        id_key = "seller_target_id"
-        prefix = "seller_target"
-    else:
-        entity_ids = sorted(
-            {str(candidate["buyer_intent_id"]) for candidate in candidates if candidate.get("buyer_intent_id")}
-        )
-        table = "buyer_intent"
-        id_key = "buyer_intent_id"
-        prefix = "buyer_intent"
-    if not entity_ids:
-        return result
-
-    rows = db.execute(
-        text(
-            f"""
-            select entity.id::text as entity_id,
-                   entity.owner_user_id::text as owner_user_id,
-                   owner.name as owner_name
-            from {table} entity
-            left join app_user owner on owner.id = entity.owner_user_id
-            where entity.team_id = :team_id
-              and entity.workspace_id = :workspace_id
-              and entity.deleted_at is null
-              and entity.id in :entity_ids
-            """
-        ).bindparams(bindparam("entity_ids", expanding=True)),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "entity_ids": entity_ids,
-        },
-    ).mappings().all()
-    ownership = {row["entity_id"]: row for row in rows}
-    current_user_id = str(current_user.user_id)
-
-    for candidate in candidates:
-        row = ownership.get(str(candidate.get(id_key) or ""))
-        owner_user_id = str(row["owner_user_id"]) if row and row.get("owner_user_id") else None
-        owned_by_current_user = owner_user_id == current_user_id
-        candidate[f"{prefix}_owner_user_id"] = owner_user_id
-        candidate[f"{prefix}_owner_name"] = row.get("owner_name") if row else None
-        candidate[f"{prefix}_owned_by_current_user"] = owned_by_current_user
-        candidate[f"{prefix}_operation_allowed"] = current_user.is_admin or owned_by_current_user
-    return result
 
 
 # 存在 critical 风险记录时的系统级降权（与买家条件无关，不影响三态）。
@@ -1515,31 +662,6 @@ def _get_recommendation_session_or_404(db: Session, session_id: UUID) -> dict[st
     return dict(row)
 
 
-def _get_selected_item_or_404(db: Session, selected_item_id: UUID) -> dict[str, Any]:
-    row = db.execute(
-        text(
-            f"""
-            select {_selected_item_select_columns()}
-            from recommendation_selected_item ri
-            left join seller_target st on st.id = ri.seller_target_id
-            left join buyer_intent bi on bi.id = ri.buyer_intent_id
-            left join buyer_party bp on bp.id = ri.buyer_party_id
-            where ri.id = :selected_item_id
-              and ri.team_id = :team_id
-              and ri.workspace_id = :workspace_id
-            """
-        ),
-        {
-            "selected_item_id": selected_item_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
-    ).mappings().one_or_none()
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Selected item not found.")
-    return dict(row)
-
-
 def _get_buyer_party_id_for_intent(db: Session, buyer_intent_id: UUID) -> UUID | None:
     row = db.execute(
         text(
@@ -1561,12 +683,6 @@ def _get_buyer_party_id_for_intent(db: Session, buyer_intent_id: UUID) -> UUID |
     return row["buyer_party_id"] if row else None
 
 
-def _optional_uuid_from_mapping(value: Any, key: str) -> UUID | None:
-    if not isinstance(value, dict) or not value.get(key):
-        return None
-    return _optional_uuid(value[key])
-
-
 def _optional_uuid(value: Any) -> UUID | None:
     if not value:
         return None
@@ -1574,70 +690,6 @@ def _optional_uuid(value: Any) -> UUID | None:
         return UUID(str(value))
     except (TypeError, ValueError):
         return None
-
-
-def _refresh_session_selected_count(db: Session, session_id: UUID) -> None:
-    db.execute(
-        text(
-            """
-            update recommendation_session
-            set selected_count = (
-                  select count(*)
-                  from recommendation_selected_item
-                  where session_id = :session_id
-                    and canceled_at is null
-                ),
-                updated_at = now()
-            where id = :session_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
-            """
-        ),
-        {"session_id": session_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
-    )
-
-
-def _enqueue_recommendation_report_job(
-    db: Session,
-    *,
-    report_id: UUID,
-    session_id: UUID,
-    selected_item_ids: list[str],
-) -> UUID:
-    row = db.execute(
-        text(
-            """
-            insert into background_job (
-              team_id, workspace_id, job_type, priority, queue_name,
-              entity_type, entity_id, idempotency_key, payload_json,
-              max_attempts, created_by, metadata_json
-            )
-            values (
-              :team_id, :workspace_id, 'recommendation_report_generate', 120, 'llm',
-              'recommendation_report', :report_id, :idempotency_key, :payload_json,
-              1, :created_by, :metadata_json
-            )
-            returning id
-            """
-        ).bindparams(
-            bindparam("payload_json", type_=JSONB),
-            bindparam("metadata_json", type_=JSONB),
-        ),
-        {
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "report_id": report_id,
-            "idempotency_key": f"recommendation_report_generate:{report_id}",
-            "payload_json": {
-                "report_id": str(report_id),
-                "session_id": str(session_id),
-                "selected_item_ids": selected_item_ids,
-            },
-            "created_by": DEFAULT_ADMIN_USER_ID,
-            "metadata_json": {"source": "recommendation_report_job_api"},
-        },
-    ).mappings().one()
-    return row["id"]
 
 
 def _agent_turn_messages(db: Session, session_id: UUID, turn_id: str) -> list[dict[str, Any]]:
@@ -1977,52 +1029,6 @@ def agent_history_context(db: Session, session_id: UUID) -> str:
     return "<history_context>\n{}\n</history_context>".format("\n\n".join(reversed(blocks)))
 
 
-def _ensure_recommendation_report_visible(db: Session, current_user: CurrentUser, report_id: UUID) -> None:
-    if not owner_scope_required(current_user):
-        return
-    row = db.execute(
-        text(
-            f"""
-            select 1
-            from recommendation_report rr
-            where rr.id = :report_id
-              and rr.team_id = :team_id
-              and rr.workspace_id = :workspace_id
-              and {recommendation_report_visible_sql("rr")}
-            """
-        ),
-        {
-            "report_id": report_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-            "scope_user_id": current_user.user_id,
-        },
-    ).first()
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recommendation report not found.")
-
-
-def _refresh_session_report_count(db: Session, session_id: UUID) -> None:
-    db.execute(
-        text(
-            """
-            update recommendation_session
-            set report_count = (
-                  select count(*)
-                  from recommendation_report
-                  where session_id = :session_id
-                    and status <> 'archived'
-                ),
-                updated_at = now()
-            where id = :session_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
-            """
-        ),
-        {"session_id": session_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
-    )
-
-
 def _touch_recommendation_session(db: Session, session_id: UUID) -> None:
     db.execute(
         text(
@@ -2064,10 +1070,6 @@ def _session_overview_select_columns() -> str:
     """
 
 
-def _session_returning_statement(prefix_sql: str):
-    return text(f"{prefix_sql} returning {_session_select_columns()}")
-
-
 def _message_select_columns() -> str:
     return """
       id, session_id, role, content, content_type,
@@ -2077,78 +1079,6 @@ def _message_select_columns() -> str:
 
 def _message_returning_statement(prefix_sql: str):
     return text(f"{prefix_sql} returning {_message_select_columns()}")
-
-
-def _selected_item_select_columns() -> str:
-    return """
-      ri.id, ri.session_id, ri.mode,
-      ri.seller_target_id, st.target_name as seller_target_name,
-      ri.buyer_intent_id, bi.intent_name as buyer_intent_name,
-      ri.buyer_party_id, bp.buyer_name,
-      ri.rank_at_selection, ri.recommendation_level, ri.match_summary,
-      ri.risk_summary, ri.gap_summary, ri.reason_snapshot,
-      ri.evidence_snapshot_json, ri.selected_at::text as selected_at,
-      ri.canceled_at::text as canceled_at, ri.selected_by, ri.metadata_json
-    """
-
-
-def _selected_item_returning_statement(prefix_sql: str):
-    return text(
-        f"""
-        with changed as (
-          {prefix_sql}
-          returning *
-        )
-        select
-          changed.id, changed.session_id, changed.mode,
-          changed.seller_target_id, st.target_name as seller_target_name,
-          changed.buyer_intent_id, bi.intent_name as buyer_intent_name,
-          changed.buyer_party_id, bp.buyer_name,
-          changed.rank_at_selection, changed.recommendation_level,
-          changed.match_summary, changed.risk_summary, changed.gap_summary,
-          changed.reason_snapshot, changed.evidence_snapshot_json,
-          changed.selected_at::text as selected_at,
-          changed.canceled_at::text as canceled_at,
-          changed.selected_by, changed.metadata_json
-        from changed
-        left join seller_target st on st.id = changed.seller_target_id
-        left join buyer_intent bi on bi.id = changed.buyer_intent_id
-        left join buyer_party bp on bp.id = changed.buyer_party_id
-        """
-    )
-
-
-def _report_select_columns() -> str:
-    return """
-      id, session_id, report_type, selected_item_ids_json, title,
-      markdown_content, file_path, file_format, status,
-      generated_by_model, prompt_version,
-      created_at::text as created_at, metadata_json
-    """
-
-
-def _report_returning_statement(prefix_sql: str):
-    return text(f"{prefix_sql} returning {_report_select_columns()}")
-
-
-def _recommendation_level(score: float) -> str:
-    if score >= 80:
-        return "strong"
-    if score >= 60:
-        return "recommended"
-    if score >= 35:
-        return "possible"
-    return "weak"
-
-
-def _summary_text(items: list[str], *, fallback: str | None = None) -> str | None:
-    if items:
-        return "；".join(items[:4])
-    return fallback
-
-
-def _yes_like(value: Any) -> bool:
-    return str(value or "").lower() in {"yes", "likely", "true", "1"}
 
 
 def _optional_float(value: Any) -> float | None:

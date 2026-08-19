@@ -401,7 +401,6 @@ class RecommendationAgentTools:
                 "seller_target_id": key,
                 "seller_target_name": row.get("target_name"),
                 "facts": self._target_facts_fn(dict(row)),
-                "relation_status": None,
                 "seller_target_has_other_deep_progress": key in deep_progress_ids,
             }
             candidates.append(candidate)
@@ -484,8 +483,7 @@ class RecommendationAgentTools:
                     "seller_target_id": key,
                     "seller_target_name": row["target_name"],
                     "facts": self._target_facts_fn(dict(row)),
-                    "relation_status": None,
-                    "seller_target_has_other_deep_progress": key in deep_progress_ids,
+                        "seller_target_has_other_deep_progress": key in deep_progress_ids,
                 }
                 self.candidates_by_id[key] = candidate
             details.append(

@@ -65,16 +65,8 @@ import type {
   RelationMeta,
   RelationCreateResult,
   RecommendationMessage,
-  RecommendationMessageCreate,
   RecommendationPage,
-  RecommendationReport,
-  RecommendationReportCreate,
-  RecommendationReportJob,
-  RecommendationSelectedItem,
-  RecommendationSelectedItemCreate,
   RecommendationSessionDebugBundle,
-  RecommendationSession,
-  RecommendationSessionBundle,
   RecommendationSessionSummary,
   AppUser,
   AppUserCreate,
@@ -772,8 +764,8 @@ export const debugApi = {
     apiRequest<DebugEntity>(`/debug/entities/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}`),
 };
 
-// 推荐链路的客户端。阶段五 5A 已删除 createRerankJob（后端 rerank 全链下线，
-// POST /sessions/{id}/rerank-jobs 现在返回 404）。
+// 推荐链路的客户端。阶段五 5B 后只剩下推荐页真正在用的 7 个方法：
+// 旧的候选生成、选中、推荐报告 / docx、会话读写入口连同后端路由一起删掉了。
 export const recommendations = {
   agentTurn: (data: {
     mode: 'buyer_to_target';
@@ -799,70 +791,15 @@ export const recommendations = {
       `/recommendations/sessions/${sessionId}/turns/${turnId}/abort`,
       { method: 'POST' },
     ),
-  sessions: (params?: {
-    mode?: 'buyer_to_target' | 'target_to_buyer';
-    buyer_intent_id?: string;
-    seller_target_id?: string;
-    limit?: number;
-    offset?: number;
-  }) => apiRequest<RecommendationSession[]>(`/recommendations/sessions${buildQuery(params || {})}`),
   recentSessions: (params?: {
     mode?: 'buyer_to_target' | 'target_to_buyer';
     q?: string;
     limit?: number;
     offset?: number;
-    preview_limit?: number;
   }) => apiRequest<RecommendationSessionSummary[]>(`/recommendations/sessions/recent${buildQuery(params || {})}`),
-  getSession: (sessionId: string) => apiRequest<RecommendationSession>(`/recommendations/sessions/${sessionId}`),
-  bundle: (sessionId: string, params?: { include_canceled?: boolean }) =>
-    apiRequest<RecommendationSessionBundle>(
-      `/recommendations/sessions/${sessionId}/bundle${buildQuery(params || {})}`,
-    ),
   messages: (sessionId: string, params?: { limit?: number; offset?: number }) =>
     apiRequest<RecommendationMessage[]>(
       `/recommendations/sessions/${sessionId}/messages${buildQuery(params || {})}`,
     ),
-  createMessage: (sessionId: string, data: RecommendationMessageCreate) =>
-    apiRequest<RecommendationMessage>(`/recommendations/sessions/${sessionId}/messages`, {
-      method: 'POST',
-      body: JSON.stringify(data),
-    }),
-  selectItem: (sessionId: string, data: RecommendationSelectedItemCreate) =>
-    apiRequest<RecommendationSelectedItem>(`/recommendations/sessions/${sessionId}/selected-items`, {
-      method: 'POST',
-      body: JSON.stringify(data),
-    }),
-  selectedItems: (params?: {
-    session_id?: string;
-    buyer_intent_id?: string;
-    seller_target_id?: string;
-    relation_id?: string;
-    include_canceled?: boolean;
-    limit?: number;
-    offset?: number;
-  }) => apiRequest<RecommendationSelectedItem[]>(`/recommendations/selected-items${buildQuery(params || {})}`),
-  sessionSelectedItems: (sessionId: string, params?: { include_canceled?: boolean }) =>
-    apiRequest<RecommendationSelectedItem[]>(
-      `/recommendations/sessions/${sessionId}/selected-items${buildQuery(params || {})}`,
-    ),
-  cancelSelectedItem: (selectedItemId: string) =>
-    apiRequest<RecommendationSelectedItem>(`/recommendations/selected-items/${selectedItemId}/cancel`, {
-      method: 'POST',
-    }),
-  createReport: (sessionId: string, data: RecommendationReportCreate = {}) =>
-    apiRequest<RecommendationReport>(`/recommendations/sessions/${sessionId}/reports`, {
-      method: 'POST',
-      body: JSON.stringify(data),
-    }),
-  createReportJob: (sessionId: string, data: RecommendationReportCreate = {}) =>
-    apiRequest<RecommendationReportJob>(`/recommendations/sessions/${sessionId}/reports/jobs`, {
-      method: 'POST',
-      body: JSON.stringify(data),
-    }),
-  reports: (sessionId: string, params?: { limit?: number; offset?: number }) =>
-    apiRequest<RecommendationReport[]>(`/recommendations/sessions/${sessionId}/reports${buildQuery(params || {})}`),
-  getReport: (reportId: string) => apiRequest<RecommendationReport>(`/recommendations/reports/${reportId}`),
-  downloadReportDocx: (reportId: string) =>
-    apiBlobResponse(`/recommendations/reports/${reportId}/docx`),
   page: () => apiRequest<RecommendationPage>('/recommendations/page'),
 };

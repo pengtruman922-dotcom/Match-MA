@@ -114,7 +114,6 @@ def build_answer_brief_v2(
             "matched_full_conditions": any(bool(hit.get("full_conditions")) for hit in screening_hits),
             "relaxed_fields": relaxed_fields,
             "required_relaxation": any(item.get("strength") == "required" for item in relaxed_fields),
-            "already_in_progress": candidate.get("relation_status"),
             "other_buyer_in_deep_progress": bool(candidate.get("seller_target_has_other_deep_progress")),
         }
 
@@ -490,9 +489,7 @@ def _fallback_candidate_lines(item: dict[str, Any], *, prefix: str) -> list[str]
         lines.append(f"   风险：{item['risks']}")
     if item.get("info_gaps"):
         lines.append(f"   信息缺口：{item['info_gaps']}")
-    if item.get("already_in_progress"):
-        lines.append("   （这家已经在推进中）")
-    elif item.get("other_buyer_in_deep_progress"):
+    if item.get("other_buyer_in_deep_progress"):
         lines.append("   （这家正与其他买家深入推进）")
     return lines
 

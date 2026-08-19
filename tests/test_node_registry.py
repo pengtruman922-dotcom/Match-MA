@@ -16,10 +16,6 @@ import re
 import pytest
 
 from backend.app.api.routes.model_config import NODE_TYPES
-from backend.app.jobs.handlers.recommendation import (
-    DEEP_EVAL_FALLBACK_NODE,
-    DEEP_EVAL_NODE_BY_MODE,
-)
 from backend.app.registry.nodes import (
     DOMAINS,
     LIFECYCLES,
@@ -28,10 +24,11 @@ from backend.app.registry.nodes import (
     UNDERSTUDY_KINDS,
     active_node_names,
     all_node_names,
+    deep_eval_node_by_mode,
+    deep_eval_understudy_node_name,
     must_configure_node_names,
     node_by_name,
     prompt_required_node_names,
-    report_writer_node_by_type,
     retired_node_names,
 )
 
@@ -54,9 +51,6 @@ EXPECTED_NODE_NAMES = frozenset({
     "recommendation_agent_to_target",
     "recommendation_answer_writer_to_target",
     "recommendation_query_parser",
-    "recommendation_target_report_writer",
-    "recommendation_buyer_report_writer",
-    "recommendation_report_writer",
     "ocr_attachment_parser",
     "relation_followup_draft_parser",
     "business_update_extractor",
@@ -65,7 +59,6 @@ EXPECTED_NODE_NAMES = frozenset({
 })
 
 EXPECTED_RETIRED = frozenset({
-    "recommendation_report_writer",
     "embedding_seller_doc",
     "embedding_buyer_intent",
 })
@@ -123,26 +116,23 @@ def test_and_group_is_symmetric() -> None:
 def test_deep_eval_mode_keys_match_the_runtime_contract() -> None:
     """方向标识写错会让深评静默退回共用节点 —— 这里把契约钉死。
 
-    recommendation.py 的 DEEP_EVAL_NODE_BY_MODE 现在派生自注册表，所以不能再
-    拿它俩互相比对；改为断言方向取值本身，一个拼写错误就会被抓住。
+    原来读的是 handlers/recommendation.py 的 DEEP_EVAL_NODE_BY_MODE /
+    DEEP_EVAL_FALLBACK_NODE 两个模块级常量；阶段五 5B 删掉旧分片深评的最后一个
+    调用方后它们成了孤儿，改为直接读注册表函数——同一份数据、同一条契约，
+    运行时的真实读者现在是 services/recommendation_deep_eval.py。
     """
-    assert set(DEEP_EVAL_NODE_BY_MODE) == {"buyer_to_target", "target_to_buyer"}
+    node_by_mode = deep_eval_node_by_mode()
+    fallback_node = deep_eval_understudy_node_name()
+    assert set(node_by_mode) == {"buyer_to_target", "target_to_buyer"}
     directional = {
         spec.node_name for spec in NODES
-        if spec.understudy_kind == "solo" and spec.understudy == DEEP_EVAL_FALLBACK_NODE
+        if spec.understudy_kind == "solo" and spec.understudy == fallback_node
     }
-    assert directional == set(DEEP_EVAL_NODE_BY_MODE.values())
-    assert node_by_name(DEEP_EVAL_FALLBACK_NODE) is not None
+    assert directional == set(node_by_mode.values())
+    assert node_by_name(fallback_node) is not None
     for spec in NODES:
         if spec.recommendation_mode:
             assert spec.understudy_kind == "solo", "方向节点必须是独立代跑，不是 and 组"
-
-
-def test_report_types_route_to_two_dedicated_nodes() -> None:
-    assert report_writer_node_by_type() == {
-        "buyer_facing_target_report": "recommendation_target_report_writer",
-        "seller_facing_buyer_report": "recommendation_buyer_report_writer",
-    }
 
 
 def test_prompt_variables_have_labels() -> None:
@@ -180,9 +170,8 @@ def test_must_configure_excludes_nodes_that_have_an_understudy() -> None:
     for spec in NODES:
         if spec.understudy is not None:
             assert spec.node_name not in required
-    # 旧共用报告节点退役、两个专属报告节点接替，必配总数净增 1；
-    # 推荐 Agent 与回答撰写各一个正向节点，且刻意没有代跑，再净增 2。
-    assert len(required) == 14
+    # 阶段五 5B 删掉三个推荐报告节点（两个在用的是必配），必配总数从 14 降到 12。
+    assert len(required) == 12
     assert "buyer_intent_semantic_parser" not in required
     assert "recommendation_deep_eval_to_target" not in required
     assert "recommendation_deep_eval" in required

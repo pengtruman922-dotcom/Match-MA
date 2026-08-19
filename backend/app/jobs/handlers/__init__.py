@@ -73,7 +73,6 @@ from backend.app.jobs.handlers.traces import (
     _insert_llm_trace,
     _insert_model_node_test_trace,
     _insert_ocr_trace,
-    _insert_recommendation_report_llm_trace,
     _insert_seller_target_parse_trace,
 )
 from backend.app.jobs.handlers.seller_target_parse import (
@@ -187,17 +186,8 @@ from backend.app.jobs.handlers.search_embedding import (
     _update_search_doc_embedding,
 )
 from backend.app.jobs.handlers.recommendation import (
-    _get_deep_eval_node_config,
-    _build_fallback_recommendation_report_markdown,
-    _build_recommendation_report_context,
-    _get_recommendation_report_for_job,
-    _get_recommendation_session_for_report,
-    _get_selected_items_for_recommendation_report,
     _build_answer_brief,
     _handle_recommendation_agent,
-    _handle_recommendation_report_generate,
-    _insert_recommendation_report_message,
-    _update_recommendation_report_generated,
 )
 from backend.app.jobs.handlers.model_node_test import (
     _handle_model_chat_node_test,
