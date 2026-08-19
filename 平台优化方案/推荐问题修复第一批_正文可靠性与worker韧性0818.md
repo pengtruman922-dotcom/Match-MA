@@ -163,10 +163,10 @@ agent job `max_attempts=1`，被回收即 `failed`。
 ## 七、施工记录
 
 **2026-08-19 施工完成并已发布。** 提交 `8af3965`，CI 全绿，生产已切到该 commit。
-**行为①③ 通过，行为② 实测未通过** —— 原因与补法见 7.5，需要用户决定是否追加一轮。
+**行为①②③ 全部通过**（行为②第一次实测未通过，补 `ecbceb4` 后通过，全过程见 7.5）。
 
 - **基线 HEAD**：`fbf7164`（docs: 补 5B 生产端到端验证结果），分支 `main`。
-- **测试通过数**：`1058 passed / 36 skipped` → **`1092 passed / 49 skipped`**（+34 通过，+13 跳过）。
+- **测试通过数**：`1058 passed / 36 skipped` → **`1100 passed / 49 skipped`**（+42 通过，+13 跳过）。
   新增的 13 个跳过全部是需要真实 Postgres 的 SQL 用例（`DATABASE_URL` 未设置时跳过），
   由 CI 的 `Fresh database from baseline` job 实跑。
 - **前端**：**一行未改**（`git status frontend/` 为空）。`npm run typecheck` / `build` / `lint`
@@ -257,45 +257,61 @@ agent job `max_attempts=1`，被回收即 `failed`。
 | **行为③b** 正文正在流的时候点停止（本批新代码路径） | `e487394b` | **通过**。订阅端先真实收到 3 个 `delta`（证明 worker 在落草稿、订阅端在读），此时发停止 → 无 `agent_answer`（**半截草稿没有升格**）、`answer-stream` 409（没有残留草稿被当成正文流出去）、运行态 = `aborted`，而 `job_status` 仍是 `succeeded`（编排段本来就跑完了，中止的是正文段）。 |
 | **心跳** | `e00b3cfa` | **通过**。一次约 3 分钟的 job 期间 `locked_at` 从 `08:11:52` → `08:12:41` → `08:13:51` 逐步前移，不再冻在领取时刻；`attempt_count` 全程 1/1。 |
 
-### 7.5 行为②：在自建环境实测，**未通过**
+### 7.5 行为②：先实测未通过，补完后通过
 
-已把 `0fdf6aa` 部署到自建 ECS（`git pull && docker compose build && docker compose up -d`，
-9 个服务全部正常，`migrate` 干净应用 `20260817_0065 -> 20260819_0066`，
-`/health` 与 `/health/db` 均 ok）。然后按施工单第五节的方式实演：
+**第一次实测（`0fdf6aa`）：未通过。** 自建 ECS 上按施工单第五节的方式演：
 
 | 时刻 | 事件 |
 | --- | --- |
-| 16:22:14 | job `8655b326` 被 `worker-aeabde37e349` 领取，开始跑（`attempt=1/1`） |
-| 16:24:08 | 编排跑到第 7 次工具调用时执行 `docker compose restart worker-llm` |
+| 16:22:14 | job `8655b326` 被领取，开始跑 |
+| 16:24:08 | 编排跑到第 7 次工具调用时 `docker compose restart worker-llm` |
 | — | worker 日志确实打出 `Worker shutdown requested (SIGTERM); finishing at the next checkpoint.` |
-| 16:24:19 | 容器已重启完毕，但 job 仍是 `running`、`locked_at` 停在 16:22:14、`released_by_shutdown` 为 null |
-| ~16:52 | 1800 秒 stale 窗口到期，job 被判 `failed`，`error_code=stale_running_job` |
+| 16:24:19 | job 仍是 `running`、`locked_at` 停在 16:22:14、`released_by_shutdown` 为 null |
+| ~16:52 | 1800 秒 stale 窗口到期，判 `failed`，`error_code=stale_running_job` |
 
-**也就是说：这一轮还是挂了 30 分钟然后硬失败，正是本批要消灭的那个现象。**
+**根因（施工单第一节没覆盖的一条）**：信号处理和标志位都对，但**释放要等到一个检查点**，
+而检查点只存在于「模型调用之间 / 工具调用之间」。这一轮实测的 `agent_step` 间隔是 5 到 185 秒，
+而 `deploy/docker-compose.yml` 没设 `stop_grace_period`，docker 默认只给 **10 秒**就 SIGKILL。
+SIGTERM 落在一次长模型调用中间时，进程根本活不到下一个检查点。Railway 的宽限期同一量级。
 
-**根因（新发现，施工单第一节没有覆盖）**：信号处理是对的、标志位也置上了，但**释放动作要等到
-一个检查点**，而检查点只存在于「模型调用之间 / 工具调用之间」。这一轮实测的 `agent_step` 间隔是
-5 秒到 185 秒不等，而 `deploy/docker-compose.yml` 没有设 `stop_grace_period`，docker 默认只给
-**10 秒**，10 秒之后就是 SIGKILL。SIGTERM 落在一次长模型调用中间时，进程根本活不到下一个检查点。
-Railway 的宽限期同样是这个量级。
+**补法（提交 `ecbceb4`）：让 SIGTERM 打断在途的模型调用。**
+`shutdown.interruptible()` 登记 live response，`request_shutdown` 从信号侧把它们关掉。
+CPython 的信号语义正好接得上 —— 阻塞的 socket 读被信号打断，处理器跑（关掉 fd），
+PEP 475 重试那次读时 fd 已经没了，于是立刻抛错，**检查点在几微秒之后而不是几百秒之后**。
 
-**心跳也救不了这一条**：心跳是挂在 handler 现有 inline commit 上的（施工单第 2.2 节说的「最小实现」），
-而一次长模型调用期间根本没有 commit —— 生产实测的心跳间隔就是 49 秒、70 秒，不是 30 秒。
-所以 `locked_at` 只能证明「上一次有进展是什么时候」，还不能证明「进程还活着」，
-`--stale-after` 也就还不能安全下调。
+最要紧的一处是**别把这个错认成模型失败** —— 两者处置完全相反（放回队列不消耗 attempts
+vs 判这一轮失败）。所以 `llm_client` 的每个 except 分支先 `raise_if_shutting_down()`，
+并在所有「失败即写脏业务实体」的地方补 `except WorkerShutdown: raise`：
+`tool_loop`（深评是在工具里调模型的）、`dispatch` 三处、`business_update`、`relation_followup`。
+另外已经在关机了就不再发起新的模型调用 —— 白花一次钱。
 
-**三条可选的补法（本批不做，等指示）**：
+**第二次实测（`ecbceb4`）：通过。**
 
-1. **让 SIGTERM 打断在途的 HTTP 调用**（真正的治本）。`llm_client` 持有 live response，
-   关机时从信号侧关掉它，`urlopen` 抛错后转成 `WorkerShutdown` 而不是 `LlmCallError`
-   —— 要小心别把它和真实的模型失败混为一谈，否则会把该失败的一轮误放回队列。
-2. **心跳改成后台线程按秒计**，让 `locked_at` 真正表示「进程还活着」，然后把 llm 队列的
-   `--stale-after` 从 1800 降到 120~180 秒。暴露窗口从 30 分钟变成 2~3 分钟，
-   不需要动 LLM 客户端。**性价比最高。**
-3. 给 worker 服务加 `stop_grace_period`。只对「检查点间隔短于宽限期」的情况有用，
-   本轮实测最长间隔 185 秒，要设到那个量级并不现实，且 Railway 侧不归我们设。
+| 时刻 | 事件 |
+| --- | --- |
+| 17:25:37 | 编排跑到第 3 次工具调用时 `docker compose restart worker-llm` |
+| 17:25:47 | job 已经是 `queued`、`attempt=0/1`（**那唯一一次 attempt 没被消耗**）、`locked_at` 清空、`metadata_json.released_by_shutdown = {count: 1, worker_id: worker-d1f15afd89a0}` |
+| — | worker 日志三行齐全：`shutdown requested` → `Job ... released on shutdown (SIGTERM): queued` → `Worker stopped (SIGTERM).` |
+| 17:27:05 | 重启后的 worker 重新领取（`attempt` 回到 1/1），整轮从头再跑 |
+| ~17:33 | `succeeded`，`agent_answer` 正常落库，无残留草稿 |
 
-顺带记一条排查中发现的环境事实：**自建库的 `model_node_config` 里没有任何 Writer 节点行**
-（`recommendation_answer_writer_to_target` 行数 = 0），所以自建环境的每一条 `agent_answer` 都是
-`generation_mode=fallback`、8 毫秒写完 —— 自建环境**演不了 Writer 段**，行为②在那里只能在编排段演。
-Writer 段的真实行为已在 Railway 生产验过（见 7.4 的行为①与③b）。
+**从打断到拿到完整回答约 8 分钟，其中「明确状态」在 10 秒内就有了；改之前是挂满 30 分钟然后硬失败。**
+
+### 7.6 重排的一个已知副作用：过程消息会重复
+
+job 放回队列后**整轮从头跑**，所以 `agent_understanding` / `agent_step` 会再写一遍 ——
+上面那一轮最终有 2 条 `agent_understanding` 和 12 条 `agent_step`（两次尝试之和），
+前端 `applyMessages` 里 `steps.push` 是累加的，于是「已筛选 N 次」会翻倍。
+
+**`agent_answer` 不会重复**：终态写在 advisory lock 里同时复查中止标记与已有 answer，
+第二个生产者拿到的是 `already_exists`。所以正文是对的，只是过程行多了一份。
+
+没有在重跑前清掉旧的过程消息，因为本批边界写了**不删历史消息**；而且那些步骤是真的发生过。
+按归属这属于第二批的「重试展示」：要么把过程行按 attempt 分组折叠，要么只渲染最后一次尝试。
+
+### 7.7 环境事实（排查中发现，记下来省得下次再撞）
+
+**自建库的 `model_node_config` 里没有任何 Writer 节点行**
+（`recommendation_answer_writer_to_target` 行数 = 0），所以自建环境每一条 `agent_answer`
+都是 `generation_mode=fallback`、8 毫秒写完 —— **自建环境演不了 Writer 段**，
+行为②在那里只能在编排段演，行为①③b 只能在 Railway 演。两边各能验什么，下次直接照这条走。
