@@ -33,7 +33,6 @@ from backend.app.services.profile_sections import PROFILE_SECTION_HINTS
 from backend.app.services.research_apply import RESEARCH_STRUCTURED_FIELDS
 
 REPO = Path(__file__).resolve().parents[1]
-RECOMMENDATION_FLOW = REPO / "backend/app/services/recommendation_flow.py"
 MIGRATIONS = REPO / "database/migrations"
 BASELINE = REPO / "database/migrations/001_baseline.sql"
 R4A_MIGRATION = REPO / "database/migrations/002_target_information_model.sql"
@@ -174,32 +173,6 @@ def test_closed_list_columns_match_their_db_check() -> None:
         assert "select" not in statement.lower(), "check 约束里出现了子查询"
 
 
-def _scorer_reads() -> set[str]:
-    source = RECOMMENDATION_FLOW.read_text(encoding="utf-8")
-    fields = set(re.findall(r"target\.get\(\"([a-z_0-9]+)\"", source))
-    fields |= set(re.findall(r"\(\s*\"[a-z_]+\",\s*\"([a-z_0-9]+)\",\s*[\d.]+,", source))
-    return fields
-
-
-def test_registry_screening_covers_everything_the_scorer_reads() -> None:
-    # 打分器读取的每个标的列都必须被注册表标为 screening；
-    # 折叠列（如 headquarter_city）由其父列的 screening 覆盖；
-    # 定性摘要与行业原文进画像/归一化，不作为独立筛选列。
-    not_screening_columns = {
-        "risk_summary", "gap_summary", "industry_primary", "industry_secondary",
-    }
-    screening = screening_columns()
-    covered = set(screening)
-    for ind in SELLER_TARGET_INDICATORS:
-        if ind.fold_into is not None and ind.fold_into in screening:
-            covered.add(ind.column)
-
-    reads = _scorer_reads()
-    known_columns = {ind.column for ind in SELLER_TARGET_INDICATORS}
-    unscreened = (reads & known_columns) - covered - not_screening_columns
-    assert not unscreened, f"打分器读取但注册表未标 screening：{sorted(unscreened)}"
-
-
 def test_every_indicator_is_a_real_seller_target_column() -> None:
     sql = BASELINE.read_text(encoding="utf-8")
     body = re.search(r"create table seller_target \((.*?)\n\);", sql, re.S)
@@ -247,9 +220,9 @@ def test_fact_projection_is_derived_everywhere_it_is_read() -> None:
     """标的事实列的 SELECT 投影只能有一份。
 
     以前信息页 / 解析 / 采纳 / 业务更新各手写一份，加一列漏改一处的表现是
-    「字段存进去了但某个页面看不见」，最难查。推荐域的两处（recommendation_flow、
-    recommendation_agent_tools）仍是手写，是有意的：它们只取打分需要的子集，
-    收敛它们要动打分文件。
+    「字段存进去了但某个页面看不见」，最难查。推荐域的 recommendation_agent_tools
+    仍是手写，是有意的：它只取候选摘要需要的子集。（另一处 recommendation_flow
+    的手写投影随阶段五 5B 的打分链路一起删掉了。）
     """
     projection = seller_target_fact_columns()
     assert set(projection) >= {ind.column for ind in SELLER_TARGET_INDICATORS}
@@ -330,23 +303,22 @@ def test_seller_screening_matches_who_points_at_it() -> None:
     顾问按角标决定先补哪个字段，角标错了就补错方向。
 
     两个方向都要守：标成会筛却没人比对，和有人比对却没标。
+
+    原来「有人比对」还包含旧规则打分器读到的列（`_scorer_reads`，扒
+    recommendation_flow 的源码）。阶段五 5B 删掉打分链路后那条来源没有了，
+    唯一的比对方就是买家条件的 `target_column` 映射，判据因此变严一档。
     """
     pointed: set[str] = set()
     for indicator in indicators_for("buyer_intent"):
         if indicator.target_column:
             pointed.update(_target_bases(indicator.target_column))
 
-    scorer_reads = _scorer_reads() & {ind.column for ind in SELLER_TARGET_INDICATORS}
     screening = screening_columns()
     folded = {
         ind.column: ind.fold_into for ind in SELLER_TARGET_INDICATORS if ind.fold_into
     }
 
-    unbacked = {
-        column
-        for column in screening
-        if column not in pointed and column not in scorer_reads
-    }
+    unbacked = {column for column in screening if column not in pointed}
     assert not unbacked, f"标为 screening 却没有任何买家条件或打分维度读它：{sorted(unbacked)}"
 
     unmarked = {

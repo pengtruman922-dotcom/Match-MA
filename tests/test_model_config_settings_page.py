@@ -38,8 +38,11 @@ def test_group_prompts_by_node_name() -> None:
 
 def test_settings_node_summary_exposes_ui_flags_and_latest_test() -> None:
     node = {
+        # 原来用 recommendation_report_writer，它随阶段五 5B 从目录里删掉了。
+        # 换成仍在目录里的同类节点（active 的 llm 写作节点），否则 node_by_name
+        # 返回 None，用例会静默改成在测「未登记节点」那条分支。
         "id": NODE_ID,
-        "node_name": "recommendation_report_writer",
+        "node_name": "recommendation_answer_writer_to_target",
         "node_type": "llm",
         "is_active": True,
         "prompt_editable": True,
