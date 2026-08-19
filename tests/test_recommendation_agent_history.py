@@ -75,23 +75,55 @@ def test_history_is_empty_when_nothing_completed(messages: list[dict[str, Any]])
     assert agent_history_context(None, SESSION_ID) == ""
 
 
-# -- 半截的轮次一律整轮丢掉 ------------------------------------------------
+# -- 中止轮：留提问，标明没答；其余半截轮次照旧整轮丢掉 --------------------
 
 
-def test_stopped_turn_is_left_out_entirely(messages: list[dict[str, Any]]) -> None:
+def test_stopped_turn_keeps_the_question_and_says_nobody_answered_it(
+    messages: list[dict[str, Any]],
+) -> None:
+    """0819 起改设计：按停止常常是「还是这个需求，只是先别跑」。
+
+    整轮丢掉会让下一句补充（「那就江苏吧」）找不到它在补充什么。
+    """
     messages.extend(_turn("t1", "第一问", "第一答"))
-    messages.extend([_user("被停掉的问题", turn_id="t2"), _answer("t2", "半截答案"), _aborted("t2")])
+    messages.extend([_user("被停掉的问题", turn_id="t2"), _aborted("t2")])
 
     context = agent_history_context(None, SESSION_ID)
 
     assert "第一问" in context
-    assert "被停掉的问题" not in context
+    assert "<aborted_user_turn>" in context
+    assert "被停掉的问题" in context
+    assert "AI未作答" in context
+
+
+def test_a_stopped_turn_gets_no_empty_answer_slot(messages: list[dict[str, Any]]) -> None:
+    """空的 `<AI>：` 读起来就是「助手什么都没说」，等于请模型再答一遍。"""
+    messages.extend([_user("被停掉的问题", turn_id="t2"), _aborted("t2")])
+
+    context = agent_history_context(None, SESSION_ID)
+
+    assert "<AI>：" not in context
+
+
+def test_prose_that_had_already_streamed_before_the_stop_is_not_carried(
+    messages: list[dict[str, Any]],
+) -> None:
+    """停止优先：即使那一轮曾落过正文，中止轮也只带用户原话。"""
+    messages.extend([_user("被停掉的问题", turn_id="t2"), _answer("t2", "半截答案"), _aborted("t2")])
+
+    context = agent_history_context(None, SESSION_ID)
+
+    assert "被停掉的问题" in context
     assert "半截答案" not in context
 
 
 def test_turn_without_a_write_up_is_left_out(messages: list[dict[str, Any]]) -> None:
+    """没写完 ≠ 用户喊停。前者是半截轮次，后者是一句明确说过的话。
+
+    只有中止有用户的明确意图背书；单纯没跑完的一轮进上下文，模型会当成
+    一个待回答的问题再答一遍。
+    """
     messages.extend(_turn("t1", "第一问", "第一答"))
-    # 素材落库了但正文没写（关页签），这一轮同样不该进上下文。
     messages.append(_user("第二问", turn_id="t2"))
     messages.append(_json_message("t2", "agent_brief", {"brief": {"understanding": "..."}}))
 
@@ -101,7 +133,10 @@ def test_turn_without_a_write_up_is_left_out(messages: list[dict[str, Any]]) -> 
     assert "第二问" not in context
 
 
-def test_stopped_turns_do_not_consume_the_turn_budget(messages: list[dict[str, Any]]) -> None:
+def test_stopped_turns_take_up_a_slot_like_any_other_turn(
+    messages: list[dict[str, Any]],
+) -> None:
+    """中止轮是用户真的说过的一句话，所以和已完成轮一样挤占最近 5 轮。"""
     assert AGENT_HISTORY_MAX_TURNS == 5
     for index in range(AGENT_HISTORY_MAX_TURNS):
         messages.extend(_turn(f"ok{index}", f"问题{index}", f"回答{index}"))
@@ -110,7 +145,20 @@ def test_stopped_turns_do_not_consume_the_turn_budget(messages: list[dict[str, A
     context = agent_history_context(None, SESSION_ID)
 
     assert context.count("<user>：") == AGENT_HISTORY_MAX_TURNS
-    assert "问题0" in context
+    # 最旧的那一轮被挤出去了，中止轮进来了。
+    assert "问题0" not in context
+    assert "停掉的" in context
+
+
+def test_several_stops_in_a_row_still_stop_at_five(messages: list[dict[str, Any]]) -> None:
+    for index in range(AGENT_HISTORY_MAX_TURNS + 2):
+        messages.extend([_user(f"停{index}", turn_id=f"s{index}"), _aborted(f"s{index}")])
+
+    context = agent_history_context(None, SESSION_ID)
+
+    assert context.count("<aborted_user_turn>") == AGENT_HISTORY_MAX_TURNS
+    assert "停0" not in context
+    assert f"停{AGENT_HISTORY_MAX_TURNS + 1}" in context
 
 
 # -- 预算 -----------------------------------------------------------------

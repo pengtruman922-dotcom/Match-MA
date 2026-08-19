@@ -59,6 +59,10 @@ class NodeSpec:
     response_format: str | None = "json_object"
     default_temperature: float | None = 0.1
     default_top_p: float | None = 0.9
+    # 本节点**一次执行**的整体超时（秒），从节点真正开始跑算起，不含排队等待。
+    # 0819 之前它被直接喂给 urlopen(timeout=…)，那是每次 socket 操作的超时 ——
+    # 非流式还近似成立，流式则每来一个 token 就重置，配 180 秒也能跑十分钟。
+    # 现在流式路径自己算 deadline，多次调用的 Agent 把它当成整轮总预算。
     default_timeout_seconds: int = 120
     lifecycle: str = "active"
     sort_order: int = 0
@@ -196,6 +200,10 @@ NODES: tuple[NodeSpec, ...] = (
         prompt_variables=("mode", "anchor_context", "candidates_json"),
         default_temperature=0.2,
         default_timeout_seconds=180,
+        # 0819 退役：对话链路走方向节点，旧 /candidates 链路已于阶段五 5B 拆除，
+        # 这个共用节点没有任何调用方了。标 retired 而不是删定义 ——
+        # 删掉它会变成「未登记节点」重新出现在设置页（5A/5B 就是这么脏的）。
+        lifecycle="retired",
         sort_order=90,
     ),
     NodeSpec(
@@ -214,8 +222,9 @@ NODES: tuple[NodeSpec, ...] = (
             "候选标的清单及条件组/调用/放宽来源（整体提交，不分片）",
         ),
         prompt_variables=("mode", "anchor_context", "candidates_json", "qualitative_requirements_json"),
-        understudy="recommendation_deep_eval",
-        understudy_kind="solo",
+        # 0819 摘掉 understudy：共用深评已退役，而这个服务本来就明确
+        # 「取不到就是取不到，不回落共用节点」（services/recommendation_deep_eval.py）。
+        # 留着指针只会让设置页的「继承提示词」指向一个不再展示的节点。
         recommendation_mode="buyer_to_target",
         default_temperature=0.2,
         # 不分片之后单次调用要读完全部候选，180 秒不够。注意这只是**新建配置时**
@@ -231,9 +240,10 @@ NODES: tuple[NodeSpec, ...] = (
         description="固定标的画像，深度评价候选买家需求。",
         runtime_inputs=("推荐方向", "标的画像", "候选买家需求清单分片"),
         prompt_variables=("mode", "anchor_context", "candidates_json"),
-        understudy="recommendation_deep_eval",
-        understudy_kind="solo",
         recommendation_mode="target_to_buyer",
+        # 反向推荐整体未实现（阶段五 5B 删掉了旧实现）。重建时这个节点也要按
+        # 新架构重做，不是恢复旧提示词，所以先退役而不是留在页面上占位。
+        lifecycle="retired",
         default_temperature=0.2,
         default_timeout_seconds=180,
         sort_order=110,
@@ -250,7 +260,7 @@ NODES: tuple[NodeSpec, ...] = (
         ),
         runtime_inputs=(
             "用户输入的需求原文",
-            "最近 5 轮已完成对话的原文（中止的轮次不带）",
+            "最近 5 轮对话原文（已完成轮带问答；用户中止的轮次只带原话并标明未作答）",
             "需求解析节点产出的完整当前需求快照",
             "代码生成的条件组 id、可用过滤条件与预算",
             "深评工具返回的排序、逐条判定、风险、缺口与筛选来源",
@@ -294,7 +304,7 @@ NODES: tuple[NodeSpec, ...] = (
         runtime_inputs=(
             "推荐方向",
             "用户消息",
-            "最近 5 轮已完成对话原文",
+            "最近 5 轮对话原文（含用户中止、AI 未作答的轮次）",
             "可筛字段清单（由指标注册表生成，自动注入）",
             "一级 / 二级行业字典（自动注入）",
         ),
@@ -306,7 +316,11 @@ NODES: tuple[NodeSpec, ...] = (
             "industry_l1_list",
             "industry_l2_list",
         ),
-        default_timeout_seconds=30,
+        # 30 秒在带附件正文时确实偏紧。但这个节点**有降级路径**：超时即
+        # parser_status=fallback，主 Agent 只能无条件初筛或提问 ——
+        # 超时设得越长，降级来得越晚。一轮总耗时中位数才 105 秒，
+        # 配到 300 秒的死等会显著恶化尾部延迟，所以取中间的 120。
+        default_timeout_seconds=120,
         sort_order=120,
     ),
     # ---- 通用 ----------------------------------------------------------
@@ -360,6 +374,49 @@ NODES: tuple[NodeSpec, ...] = (
     # ---- 已退役 --------------------------------------------------------
     # 设置页不显示。物理清除见《退役 AI 节点与代码清除》单；在那之前保留登记，
     # 以免它们变成「未登记节点」而重新出现在页面上。
+    # 下面 4 个是阶段五 5A/5B **直接删掉 NodeSpec 定义**的旧推荐节点。删定义并不能
+    # 让它们消失：库里的配置行还在，于是它们变成「未登记节点」重新出现在设置页 ——
+    # 这正是这次目录脏掉的原因。补回登记并标 retired，页面才真正不显示。
+    NodeSpec(
+        node_name="recommendation_reranker",
+        label="推荐重排",
+        domain="recommendation",
+        node_type="llm",
+        description="旧推荐链路的候选重排。随阶段五 5A 拆除，无调用方。",
+        lifecycle="retired",
+        default_timeout_seconds=180,
+        sort_order=920,
+    ),
+    NodeSpec(
+        node_name="recommendation_report_writer",
+        label="推荐报告撰写",
+        domain="recommendation",
+        node_type="llm",
+        description="旧推荐报告生成。随阶段五 5B 拆除，无调用方。",
+        lifecycle="retired",
+        default_timeout_seconds=180,
+        sort_order=930,
+    ),
+    NodeSpec(
+        node_name="recommendation_target_report_writer",
+        label="推荐报告撰写·标的侧",
+        domain="recommendation",
+        node_type="llm",
+        description="旧推荐报告生成（标的侧）。随阶段五 5B 拆除，无调用方。",
+        lifecycle="retired",
+        default_timeout_seconds=180,
+        sort_order=940,
+    ),
+    NodeSpec(
+        node_name="recommendation_buyer_report_writer",
+        label="推荐报告撰写·买家侧",
+        domain="recommendation",
+        node_type="llm",
+        description="旧推荐报告生成（买家侧）。随阶段五 5B 拆除，无调用方。",
+        lifecycle="retired",
+        default_timeout_seconds=180,
+        sort_order=950,
+    ),
     NodeSpec(
         node_name="embedding_seller_doc",
         label="标的文档向量",
@@ -526,23 +583,17 @@ def buyer_parse_node_names() -> tuple[str, ...]:
 
 
 def deep_eval_node_by_mode() -> dict[str, str]:
-    """推荐方向 → 方向专属深评节点。未配置时各自回落到共用深评节点。"""
+    """推荐方向 → 方向专属深评节点。
+
+    0819 起没有代跑：共用深评节点已退役，取不到配置就是取不到
+    （见 `services/recommendation_deep_eval.py`），深评降级由那里如实标注。
+    反向那一条仍在表里，但反向推荐整体未实现，没有调用方。
+    """
     return {
         spec.recommendation_mode: spec.node_name
         for spec in NODES
         if spec.recommendation_mode
     }
-
-
-def deep_eval_understudy_node_name() -> str:
-    """方向深评节点未配置时的代跑目标。"""
-    understudies = {
-        spec.understudy for spec in NODES
-        if spec.recommendation_mode and spec.understudy
-    }
-    if len(understudies) != 1:
-        raise ValueError(f"方向深评的代跑节点必须唯一，实际为 {sorted(understudies)}")
-    return understudies.pop()
 
 
 def recommendation_agent_node_by_mode() -> dict[str, str]:

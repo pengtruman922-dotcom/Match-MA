@@ -1033,11 +1033,17 @@ AGENT_HISTORY_MAX_CHARS = 40000
 
 
 def _agent_history_turns(db: Session, session_id: UUID) -> list[dict[str, Any]]:
-    """Turns that actually completed, oldest first.
+    """Turns the next one is allowed to read, oldest first.
 
-    A turn only counts once both halves exist. A stopped turn, or one whose
-    write-up never landed, is dropped whole: half a turn reads to the model as
-    an unanswered question and pulls the next turn into answering it again.
+    Two kinds qualify. A **completed** turn contributes both halves verbatim.
+    A turn the user **stopped** contributes its question only — pressing stop
+    usually means "I am still asking this, just not like that", and dropping
+    the turn made the follow-up ("那就江苏吧") arrive with nothing to attach
+    itself to.
+
+    Everything else is still dropped whole: a turn that failed, or whose
+    write-up never landed without the user asking it to stop, is a half turn
+    the model would read as an unanswered question and answer a second time.
     """
     messages = _list_recommendation_messages(db, session_id=session_id, limit=500, offset=0)
     order: list[str] = []
@@ -1078,12 +1084,32 @@ def _agent_history_turns(db: Session, session_id: UUID) -> list[dict[str, Any]]:
         elif message_type == "agent_aborted":
             entry["aborted"] = True
 
-    complete = [
+    usable = [
         turns[turn_id]
         for turn_id in order
-        if not turns[turn_id]["aborted"] and turns[turn_id]["question"] and turns[turn_id]["answer"]
+        if turns[turn_id]["question"]
+        and (turns[turn_id]["aborted"] or turns[turn_id]["answer"])
     ]
-    return complete[-AGENT_HISTORY_MAX_TURNS:]
+    # 中止轮占额度：那是用户真的说过的一句话，和已完成轮一样挤占最近 5 轮。
+    return usable[-AGENT_HISTORY_MAX_TURNS:]
+
+
+# 中止轮的标记。刻意不复用 <user>/<AI> 那对标签：模型见到成对标签就默认
+# 「这一问已经被回答过」，而这里恰恰相反 —— 它没有被回答。
+ABORTED_TURN_NOTE = (
+    "用户主动中止了该轮，AI未作答；此输入仍属于当前需求，请与后续补充合并理解。"
+)
+
+
+def _history_block(turn: dict[str, Any]) -> str:
+    if turn.get("aborted"):
+        return (
+            "<aborted_user_turn>\n"
+            f"<user>：{turn['question']}\n"
+            f"<turn_note>{ABORTED_TURN_NOTE}</turn_note>\n"
+            "</aborted_user_turn>"
+        )
+    return f"<user>：{turn['question']}\n<AI>：{turn['answer']}"
 
 
 def agent_history_context(db: Session, session_id: UUID) -> str:
@@ -1094,13 +1120,19 @@ def agent_history_context(db: Session, session_id: UUID) -> str:
     anything the agent reads that differs from what the user read is a chance
     to misunderstand. Tool results stay out — the agent re-screens every turn
     and replaying old result sets would only spend context on stale numbers.
+
+    A stopped turn appears as `<aborted_user_turn>`: the question, plus an
+    explicit note that no answer was produced. It deliberately gets no empty
+    `<AI>：` line and never carries prose that had already streamed before the
+    stop — an empty answer slot reads as "the assistant said nothing", which is
+    an invitation to answer it all over again.
     """
     turns = _agent_history_turns(db, session_id)
     blocks: list[str] = []
     budget = AGENT_HISTORY_MAX_CHARS
     # 从最近一轮往回收，装不下就停 —— 丢掉的永远是最旧的整轮。
     for turn in reversed(turns):
-        block = f"<user>：{turn['question']}\n<AI>：{turn['answer']}"
+        block = _history_block(turn)
         if len(block) > budget:
             break
         budget -= len(block)

@@ -572,6 +572,41 @@ def test_stream_stops_at_done_and_ignores_trailing_noise(monkeypatch: pytest.Mon
     assert "".join(chunks) == "a"
 
 
+def test_stream_hangs_up_when_the_node_budget_is_spent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`timeout_seconds` 是节点整体超时，不是两个包之间的间隔。
+
+    urlopen 的 timeout 每来一个 token 就重置 —— 配 180 秒的 Writer，只要上游
+    一直滴字就能跑十分钟。所以流自己也要掐表。
+    """
+    import backend.app.ai.llm_client as client
+
+    ticks = iter([0.0, 0.0, 999.0, 999.0, 999.0])
+    monkeypatch.setattr(client.time, "perf_counter", lambda: next(ticks, 999.0))
+
+    with pytest.raises(LlmCallError) as raised:
+        _stream(monkeypatch, [
+            b'data: {"choices":[{"delta":{"content":"first"}}]}',
+            b'data: {"choices":[{"delta":{"content":"second"}}]}',
+        ])
+
+    assert "budget" in str(raised.value)
+
+
+def test_a_stream_inside_its_budget_is_left_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    import backend.app.ai.llm_client as client
+
+    monkeypatch.setattr(client.time, "perf_counter", lambda: 0.0)
+
+    chunks, response = _stream(monkeypatch, [
+        b'data: {"choices":[{"delta":{"content":"first"}}]}',
+        b'data: [DONE]',
+    ])
+
+    assert chunks == ["first"]
+    # 断开也好、正常收尾也好，连接都必须关掉。
+    assert response.closed is True
+
+
 def test_stream_wraps_transport_failures(monkeypatch: pytest.MonkeyPatch) -> None:
     def boom(*args: Any, **kwargs: Any):
         raise TimeoutError("read timed out")

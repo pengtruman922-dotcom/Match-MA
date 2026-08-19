@@ -493,7 +493,7 @@ def test_auto_deep_eval_result_is_given_back_to_the_same_agent_without_tools(mon
         captured["tools"] = tools
         return final
 
-    monkeypatch.setattr(handler, "_agent_chat_caller", lambda _config: chat)
+    monkeypatch.setattr(handler, "_agent_chat_caller", lambda _config, **_kwargs: chat)
 
     result = _agent_finalize_after_auto_deep_eval(
         loop,
@@ -756,19 +756,83 @@ def test_only_the_forward_direction_is_registered_this_round() -> None:
 def test_early_stop_fires_on_ask_user_and_on_the_wall_clock() -> None:
     import time
 
-    from backend.app.jobs.handlers.recommendation import (
-        AGENT_WALL_CLOCK_BUDGET_SECONDS,
-        _agent_early_stop,
-    )
+    from backend.app.jobs.handlers.recommendation import _agent_early_stop
 
     tools = _tools_with({})
     now = time.perf_counter()
+    budget = 240.0
 
-    assert _agent_early_stop(tools, now) is None
-    assert "时间已用尽" in _agent_early_stop(tools, now - AGENT_WALL_CLOCK_BUDGET_SECONDS - 1)
+    assert _agent_early_stop(tools, now, budget) is None
+    assert "时间已用尽" in _agent_early_stop(tools, now - budget - 1, budget)
 
     tools.ask_user_payload = {"questions": []}
-    assert "已向用户提问" in _agent_early_stop(tools, now)
+    assert "已向用户提问" in _agent_early_stop(tools, now, budget)
+
+
+def test_the_turn_budget_comes_from_the_node_config_not_a_hardcoded_number() -> None:
+    """0819 起 timeout_seconds 就是「这个节点这一次执行的整体超时」。
+
+    改之前编排段写死 240 秒而生产节点配的是 600 —— 管理员在设置页调那个数字
+    没有任何效果，两个数谁说了算也说不清。
+    """
+    import time
+
+    from backend.app.jobs.handlers.recommendation import _agent_early_stop
+
+    tools = _tools_with({})
+    elapsed_90s_ago = time.perf_counter() - 90
+
+    # 节点配 60 秒：90 秒前开始的这一轮早该收口了。
+    assert "时间已用尽" in _agent_early_stop(tools, elapsed_90s_ago, 60.0)
+    # 同一时刻、节点配 300 秒：还能接着跑。
+    assert _agent_early_stop(tools, elapsed_90s_ago, 300.0) is None
+
+
+def test_each_request_gets_the_smaller_of_node_timeout_and_time_left() -> None:
+    """单次调用不能比它所属的那一轮还长。"""
+    import time
+
+    from backend.app.jobs.handlers.recommendation import _agent_chat_caller
+
+    seen: list[int] = []
+
+    def fake_call(**kwargs):
+        seen.append(kwargs["timeout_seconds"])
+        return None
+
+    import backend.app.jobs.handlers.recommendation as handler
+
+    original = handler.call_openai_compatible_chat
+    handler.call_openai_compatible_chat = fake_call
+    try:
+        config = {
+            "base_url": "", "api_key_secret_ref": "", "model_name": "m",
+            "temperature": 0, "top_p": 1, "max_tokens": 10,
+            "timeout_seconds": 300, "response_format": None,
+        }
+        # 一轮总预算 300，已经跑了 250 秒 → 这次调用最多还剩 50 秒。
+        chat = _agent_chat_caller(
+            config, started=time.perf_counter() - 250, budget_seconds=300.0
+        )
+        chat(messages=[], tools=None)
+        assert 40 <= seen[-1] <= 55
+
+        # 预算充裕时，取节点配置值本身。
+        chat = _agent_chat_caller(
+            config, started=time.perf_counter(), budget_seconds=3000.0
+        )
+        chat(messages=[], tools=None)
+        assert seen[-1] == 300
+
+        # 预算已经花光也不能传 0：那会让 urlopen 立刻抛，
+        # 真正的原因（预算用完）就被一条网络错误盖住了。
+        chat = _agent_chat_caller(
+            config, started=time.perf_counter() - 9999, budget_seconds=300.0
+        )
+        chat(messages=[], tools=None)
+        assert seen[-1] >= 5
+    finally:
+        handler.call_openai_compatible_chat = original
 
 
 def test_agent_and_writer_are_distinct_nodes() -> None:

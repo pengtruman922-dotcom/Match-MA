@@ -296,26 +296,49 @@ def _understudy_prompt(system: str | None, user: str | None, version: str = "v0.
 
 
 def test_prompt_seed_offers_copy_when_variables_are_covered() -> None:
-    """方向深评与共用深评的变量完全相同，复制过来就能改，是个真起点。"""
-    spec = node_by_name("recommendation_deep_eval_to_target")
+    """代跑节点的变量被完全覆盖时，复制过来就能改，是个真起点。
+
+    原来用方向深评 × 共用深评这一对；0819 共用深评退役、方向节点摘掉代跑指针后，
+    改用仍然成对的买家两阶段解析 —— 测的是同一个能力。
+    """
+    spec = node_by_name("buyer_intent_semantic_parser")
     assert spec is not None
 
     seed = _prompt_seed(
         spec,
         has_own_prompt=False,
         understudy_prompt=_understudy_prompt(
-            "你是评估助手。方向：{{ mode }}",
-            "{{ anchor_context }}\n候选：{{ candidates_json }}",
+            "你是需求解析助手。",
+            "材料：{{ raw_requirement_text }}",
             version="v0.2.0",
         ),
     )
 
     assert seed is not None
     assert seed["compatible"] is True
-    assert seed["source_node_name"] == "recommendation_deep_eval"
+    assert seed["source_node_name"] == "buyer_intent_parser"
     assert seed["source_version"] == "v0.2.0"
     assert seed["extra_variables"] == []
     assert seed["user_prompt_template"] is not None
+
+
+def test_directional_deep_eval_offers_no_seed_now_that_it_has_no_understudy() -> None:
+    """共用深评退役后，方向深评没有可抄的对象，也不该假装有。
+
+    深评服务本来就明确「取不到就是取不到，不回落共用节点」——
+    设置页再给一个「继承提示词」的入口，就是把一个不存在的回落讲成存在。
+    """
+    spec = node_by_name("recommendation_deep_eval_to_target")
+    assert spec is not None
+    assert spec.understudy is None
+
+    seed = _prompt_seed(
+        spec,
+        has_own_prompt=False,
+        understudy_prompt=_understudy_prompt(None, "{{ anchor_context }}"),
+    )
+
+    assert seed is None
 
 
 def test_prompt_seed_refuses_copy_when_understudy_uses_unavailable_variables() -> None:

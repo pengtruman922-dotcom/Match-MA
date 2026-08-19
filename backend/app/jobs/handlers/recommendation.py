@@ -67,10 +67,15 @@ RECOMMENDATION_AGENT_NODE_BY_MODE = recommendation_agent_node_by_mode()
 AGENT_TOOL_RESULT_LIMIT = 240000
 AGENT_MAX_ITERATIONS = 12
 
-# 用户对整次推荐的耐心是 2-5 分钟，编排阶段留 4 分钟，剩下的给流式写作。
-# 这同时是对 worker stale 窗口（1800s）的第二道保险：迭代上限管不住单次调用
+# 编排段的总预算**来自节点配置的 timeout_seconds**（0819 起 timeout_seconds
+# 的语义就是「本节点这一次执行的整体超时」）。下面这个只是节点没配时的兜底。
+#
+# 改之前这里写死 240 秒，而生产节点配的是 600 —— 管理员在设置页看到的数字
+# 和真实预算差了 2.5 倍，调它没有任何效果。现在调它就是调这一轮的总时长。
+#
+# 它同时是对 worker stale 窗口（1800s）的第二道保险：迭代上限管不住单次调用
 # 很慢的情况，墙钟能。
-AGENT_WALL_CLOCK_BUDGET_SECONDS = 240
+DEFAULT_AGENT_WALL_CLOCK_BUDGET_SECONDS = 240
 
 
 def _build_recommendation_agent_context(
@@ -270,15 +275,23 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
         ),
     )
     started = time.perf_counter()
+    # 整轮编排的总预算 = 这个节点配置的 timeout_seconds。
+    agent_budget_seconds = float(
+        node_config.get("timeout_seconds") or DEFAULT_AGENT_WALL_CLOCK_BUDGET_SECONDS
+    )
     try:
         loop = run_tool_loop(
-            chat=_agent_chat_caller(node_config),
+            chat=_agent_chat_caller(
+                node_config,
+                started=started,
+                budget_seconds=agent_budget_seconds,
+            ),
             messages=messages,
             tools=build_agent_tools(db, tools.compiled_groups),
             execute_tool=tools.execute,
             max_iterations=AGENT_MAX_ITERATIONS,
             tool_result_limit=AGENT_TOOL_RESULT_LIMIT,
-            early_stop_instruction=lambda: _agent_early_stop(tools, started),
+            early_stop_instruction=lambda: _agent_early_stop(tools, started, agent_budget_seconds),
             should_abort=turn_stopped,
         )
     except ToolLoopAborted as aborted:
@@ -296,6 +309,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             tools=tools,
             intent_snapshot=intent_snapshot,
             deep_eval=tools.deep_eval_result,
+            budget_seconds=agent_budget_seconds,
             error_message="用户中止了本轮编排。",
         )
         db.commit()
@@ -323,6 +337,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             tools=tools,
             intent_snapshot=intent_snapshot,
             deep_eval=tools.deep_eval_result,
+            budget_seconds=agent_budget_seconds,
             error_message=str(exc),
         )
         db.commit()
@@ -344,6 +359,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             tools=tools,
             intent_snapshot=intent_snapshot,
             deep_eval=tools.deep_eval_result,
+            budget_seconds=agent_budget_seconds,
             error_message="用户中止了本轮编排。",
         )
         db.commit()
@@ -402,6 +418,8 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             loop,
             node_config=node_config,
             deep_eval=deep_eval,
+            started=started,
+            budget_seconds=agent_budget_seconds,
         )
         if turn_stopped():
             return _finish_aborted_agent_turn(
@@ -466,6 +484,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
         tools=tools,
         intent_snapshot=intent_snapshot,
         deep_eval=deep_eval,
+        budget_seconds=agent_budget_seconds,
     )
     # 提交在写正文之前，不是之后：brief 一落库前端就能看到进度并连上订阅，
     # 正文开始流的时候读者已经在那里了。
@@ -547,6 +566,8 @@ def _agent_finalize_after_auto_deep_eval(
     *,
     node_config: dict[str, Any],
     deep_eval: dict[str, Any],
+    started: float | None = None,
+    budget_seconds: float | None = None,
 ) -> Any:
     """Give an agent that forgot deep eval one tool-free chance to finish.
 
@@ -572,7 +593,11 @@ def _agent_finalize_after_auto_deep_eval(
         }
     )
     try:
-        result = _agent_chat_caller(node_config)(messages=conversation, tools=None)
+        result = _agent_chat_caller(
+            node_config,
+            started=started,
+            budget_seconds=budget_seconds,
+        )(messages=conversation, tools=None)
     except LlmCallError as exc:
         notes = deep_eval.setdefault("notes", [])
         notes.append(f"深评后的无工具收尾失败，沿用 Agent 首次原始输出：{exc}")
@@ -692,14 +717,18 @@ def _agent_image_inputs(db: Session, attachment_ids: list[str]) -> tuple[list[di
     return images, summaries
 
 
-def _agent_early_stop(tools: RecommendationAgentTools, started: float) -> str | None:
+def _agent_early_stop(
+    tools: RecommendationAgentTools,
+    started: float,
+    budget_seconds: float,
+) -> str | None:
     """Two reasons to cut the loop short, both of which must still produce output."""
     if tools.should_stop:
         return (
             "已向用户提问，本轮到此结束。请只输出一个 JSON 对象，"
             '形如 {"asked_user": true}，不要再调用任何工具。'
         )
-    if time.perf_counter() - started >= AGENT_WALL_CLOCK_BUDGET_SECONDS:
+    if time.perf_counter() - started >= budget_seconds:
         return (
             "本轮编排时间已用尽。请立即基于已获得的候选给出最终 JSON 结果，"
             "不要再调用任何工具。"
@@ -707,8 +736,28 @@ def _agent_early_stop(tools: RecommendationAgentTools, started: float) -> str | 
     return None
 
 
-def _agent_chat_caller(node_config: dict[str, Any]):
-    """Bind node config for the loop; JSON format only on the tool-free turn."""
+def _agent_chat_caller(
+    node_config: dict[str, Any],
+    *,
+    started: float | None = None,
+    budget_seconds: float | None = None,
+):
+    """Bind node config for the loop; JSON format only on the tool-free turn.
+
+    Each request gets `min(节点配置值, 这一轮还剩多少)`. Without the second half
+    a single call could legitimately outlast the whole turn it belongs to,
+    which is how a node configured for 600s ended up inside a 240s budget and
+    nobody could tell which number was in charge.
+    """
+
+    def remaining_budget() -> int:
+        configured = int(node_config["timeout_seconds"] or DEFAULT_AGENT_WALL_CLOCK_BUDGET_SECONDS)
+        if started is None or budget_seconds is None:
+            return configured
+        # 至少留 5 秒：给 0 或负数等于让 urlopen 立刻抛，那条错误会盖住
+        # 「其实是预算用完了」这个真正的原因。
+        left = max(5, int(budget_seconds - (time.perf_counter() - started)))
+        return min(configured, left)
 
     def chat(*, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None):
         return call_openai_compatible_chat(
@@ -720,7 +769,7 @@ def _agent_chat_caller(node_config: dict[str, Any]):
             temperature=node_config["temperature"],
             top_p=node_config["top_p"],
             max_tokens=node_config["max_tokens"],
-            timeout_seconds=node_config["timeout_seconds"] or 300,
+            timeout_seconds=remaining_budget(),
             response_format=None if tools else node_config["response_format"],
             tools=tools,
         )
@@ -965,6 +1014,31 @@ def _insert_agent_brief_message(
     )
 
 
+def _timeout_trace_summary(
+    *,
+    budget_seconds: float | None,
+    latency_ms: int,
+    llm_calls: int,
+) -> dict[str, Any]:
+    """What the budget was, what it actually took, and whether it ran out.
+
+    Without this, "这一轮为什么收口得这么早" has no answer after the fact: the
+    early-stop instruction and a model that simply finished look identical in
+    the output. Recording the configured number alongside the measured one also
+    makes the 0819 semantics change auditable — before it, the node said 600
+    while the real budget was a hardcoded 240.
+    """
+    budget = float(budget_seconds or DEFAULT_AGENT_WALL_CLOCK_BUDGET_SECONDS)
+    elapsed_seconds = max(0.0, latency_ms / 1000.0)
+    return {
+        "configured_seconds": budget,
+        "elapsed_seconds": round(elapsed_seconds, 3),
+        "exhausted": elapsed_seconds >= budget,
+        # 超时发生在第几次调用 —— 只有真用完预算时才有意义。
+        "llm_calls_when_exhausted": llm_calls if elapsed_seconds >= budget else None,
+    }
+
+
 def _insert_recommendation_agent_trace(
     db: Session,
     *,
@@ -980,6 +1054,7 @@ def _insert_recommendation_agent_trace(
     intent_snapshot: dict[str, Any] | None = None,
     deep_eval: dict[str, Any] | None = None,
     error_message: str | None = None,
+    budget_seconds: float | None = None,
 ) -> None:
     """One row per agent turn, not per LLM call — same rule as research."""
     usage = loop.usage if loop else None
@@ -1052,6 +1127,11 @@ def _insert_recommendation_agent_trace(
                 "tool_calls_by_name": usage.tool_calls_by_name if usage else {},
                 "intent_parser": _intent_trace_summary(intent_snapshot),
                 "deep_eval": _deep_eval_trace_summary(deep_eval),
+                "timeout": _timeout_trace_summary(
+                    budget_seconds=budget_seconds,
+                    latency_ms=latency_ms,
+                    llm_calls=usage.llm_calls if usage else 0,
+                ),
                 **tools.as_trace_payload(),
             },
         },

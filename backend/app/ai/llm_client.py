@@ -172,6 +172,14 @@ def stream_openai_compatible_chat(
     the protocol; the only turn we stream is the final, tool-free write-up, so
     that work is avoided rather than done. Anything needing tools keeps using
     the buffered call.
+
+    `timeout_seconds` is enforced **twice**, on purpose. `urlopen` applies it
+    per socket operation, which on a stream resets with every token — a node
+    configured for 180 seconds could run for ten minutes as long as the tokens
+    kept dripping. So the loop also measures its own wall clock and hangs up
+    when the node's budget is spent. That is what makes the number an
+    administrator sets mean the whole execution rather than the gap between
+    two packets.
     """
     api_key = _get_api_key(api_key_secret_ref, api_key_encrypted)
     endpoint = base_url.rstrip("/") + "/chat/completions"
@@ -195,6 +203,7 @@ def stream_openai_compatible_chat(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
+    started = time.perf_counter()
     req = request.Request(endpoint, data=body, headers=headers, method="POST")
     try:
         response = request.urlopen(req, timeout=timeout_seconds)
@@ -214,6 +223,12 @@ def stream_openai_compatible_chat(
         # 于是检查点在几微秒之后而不是几百秒之后。
         with interruptible(response):
             for raw_line in response:
+                if time.perf_counter() - started >= timeout_seconds:
+                    # 主动断开：`finally` 里的 close 仍会执行。上游还在滴字，
+                    # 但这个节点的预算已经花完了。
+                    raise LlmCallError(
+                        f"LLM stream exceeded the node budget of {timeout_seconds}s"
+                    )
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line or not line.startswith("data:"):
                     continue

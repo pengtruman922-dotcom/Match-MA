@@ -54,17 +54,14 @@ from backend.app.services.recommendation_flow import (
 DRAFT_FLUSH_INTERVAL_SECONDS = 0.5
 DRAFT_FLUSH_DELTA_COUNT = 20
 
-# Writer 段的兜底墙钟。`stream_openai_compatible_chat` 的 timeout 是单次读取的
-# 超时，一个每 30 秒吐一个字的上游可以永远不触发它。实测 Writer 约 47 秒，
-# 所以节点的 timeout_seconds 足够宽松。
+# Writer 节点没配 timeout 时的兜底。实测 Writer 约 47 秒。
 #
-# 刻意与 AGENT_WALL_CLOCK_BUDGET_SECONDS 分开计时：编排和写作是两段不同的活，
-# 混成一个数就没法回答「到底是哪一段慢」。统一超时语义是第三批的事。
+# 第一批交付时这里还有一套 Writer 自己的墙钟，因为那时 `timeout_seconds` 只是
+# socket 超时，流式每来一个 token 就重置，指望不上。第三批把 deadline 做进
+# `stream_openai_compatible_chat` 之后，那套就是第二个算法了 —— 两个地方各算
+# 一次「超时没有」，迟早对不上，所以只留下面这一个来源：把预算交给流，
+# 由它按同一套规则断开。
 DEFAULT_WRITER_BUDGET_SECONDS = 180
-
-
-class WriterBudgetExceeded(Exception):
-    """The stream outlived the Writer own wall clock; fall back to rules."""
 
 
 @dataclass(frozen=True)
@@ -122,6 +119,7 @@ def run_writer_stage(
         db.commit()
 
     link_map = target_link_map(brief)
+    # 节点配置的 timeout_seconds 就是这一段的整体预算（0819 起的统一语义）。
     budget = budget_seconds
     if budget is None:
         budget = float((node_config or {}).get("timeout_seconds") or DEFAULT_WRITER_BUDGET_SECONDS)
@@ -166,7 +164,8 @@ def run_writer_stage(
                 temperature=node_config["temperature"],
                 top_p=node_config["top_p"],
                 max_tokens=node_config["max_tokens"],
-                timeout_seconds=node_config["timeout_seconds"] or 180,
+                # 预算直接交给流：deadline 由 llm_client 那一处统一执行。
+                timeout_seconds=int(budget),
             ):
                 chunks.append(delta)
                 pending += 1
@@ -177,10 +176,6 @@ def run_writer_stage(
                         return WriterOutcome("aborted", "", "", None, elapsed_ms())
                     pending = 0
                     last_flush = now
-                if now - started >= budget:
-                    raise WriterBudgetExceeded(
-                        f"Writer exceeded its {budget:.0f}s budget after {len(chunks)} chunks."
-                    )
         except WorkerShutdown:
             # worker 要停，不是上游写不出来。什么都不写：这一轮的 job 会被放回
             # 队列重跑，而兜底正文一旦落库就再也换不回真正的正文了。

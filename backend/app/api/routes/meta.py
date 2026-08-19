@@ -224,12 +224,15 @@ def ai_infra_status(db: Session = Depends(get_db)) -> dict[str, Any]:
         enabled=table_checks["model_node_config"],
         params={"node_names": required_node_names},
     )
+    # 查方向深评节点。0819 之前这里硬编码的是那个共用深评节点，而它正要
+    # 被退役停用 —— 不改这一行，一停用系统自检立刻报「未就绪」，
+    # 而真正在跑深评的那个节点好好的。
     default_deep_eval_nodes = _count_by_query(
         db,
         """
         select count(*)
         from model_node_config
-        where node_name = 'recommendation_deep_eval'
+        where node_name = 'recommendation_deep_eval_to_target'
           and node_type = 'llm'
           and is_default = true
           and is_active = true

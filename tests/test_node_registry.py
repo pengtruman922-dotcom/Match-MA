@@ -25,7 +25,6 @@ from backend.app.registry.nodes import (
     active_node_names,
     all_node_names,
     deep_eval_node_by_mode,
-    deep_eval_understudy_node_name,
     must_configure_node_names,
     node_by_name,
     prompt_required_node_names,
@@ -56,11 +55,26 @@ EXPECTED_NODE_NAMES = frozenset({
     "business_update_extractor",
     "embedding_seller_doc",
     "embedding_buyer_intent",
+    # 0819 补回登记：这 4 个在阶段五 5A/5B 被直接删掉了 NodeSpec 定义，
+    # 于是库里的配置行没了对应登记，变成「未登记节点」重新出现在设置页。
+    "recommendation_reranker",
+    "recommendation_report_writer",
+    "recommendation_target_report_writer",
+    "recommendation_buyer_report_writer",
 })
 
 EXPECTED_RETIRED = frozenset({
     "embedding_seller_doc",
     "embedding_buyer_intent",
+    # 0819 退役的 6 个推荐节点。其中 4 个是阶段五 5A/5B **直接删掉定义**的，
+    # 删定义并不能让它们消失 —— 库里的配置行还在，于是变成「未登记节点」
+    # 重新出现在设置页。补回登记并标 retired 才真正不显示。
+    "recommendation_reranker",
+    "recommendation_report_writer",
+    "recommendation_target_report_writer",
+    "recommendation_buyer_report_writer",
+    "recommendation_deep_eval",
+    "recommendation_deep_eval_to_buyer",
 })
 
 
@@ -114,7 +128,7 @@ def test_and_group_is_symmetric() -> None:
 
 
 def test_deep_eval_mode_keys_match_the_runtime_contract() -> None:
-    """方向标识写错会让深评静默退回共用节点 —— 这里把契约钉死。
+    """方向标识写错会让深评取不到节点 —— 这里把契约钉死。
 
     原来读的是 handlers/recommendation.py 的 DEEP_EVAL_NODE_BY_MODE /
     DEEP_EVAL_FALLBACK_NODE 两个模块级常量；阶段五 5B 删掉旧分片深评的最后一个
@@ -122,17 +136,23 @@ def test_deep_eval_mode_keys_match_the_runtime_contract() -> None:
     运行时的真实读者现在是 services/recommendation_deep_eval.py。
     """
     node_by_mode = deep_eval_node_by_mode()
-    fallback_node = deep_eval_understudy_node_name()
     assert set(node_by_mode) == {"buyer_to_target", "target_to_buyer"}
-    directional = {
-        spec.node_name for spec in NODES
-        if spec.understudy_kind == "solo" and spec.understudy == fallback_node
-    }
-    assert directional == set(node_by_mode.values())
-    assert node_by_name(fallback_node) is not None
+    assert all(node_by_name(name) is not None for name in node_by_mode.values())
+
+
+def test_directional_deep_eval_no_longer_falls_back_to_a_shared_node() -> None:
+    """0819 起共用深评退役，方向节点不能再挂代跑指针。
+
+    留着指针会让设置页的「继承提示词」指向一个不再展示的节点；而深评服务本来
+    就明确「取不到就是取不到」，降级由它如实标注，不是靠悄悄换一个提示词。
+    """
     for spec in NODES:
         if spec.recommendation_mode:
-            assert spec.understudy_kind == "solo", "方向节点必须是独立代跑，不是 and 组"
+            assert spec.understudy is None, f"{spec.node_name} 还挂着代跑指针"
+            assert spec.understudy_kind is None
+    for spec in NODES:
+        if spec.understudy:
+            assert node_by_name(spec.understudy) is not None, "代跑指针不能悬空"
 
 
 def test_prompt_variables_have_labels() -> None:
@@ -170,11 +190,13 @@ def test_must_configure_excludes_nodes_that_have_an_understudy() -> None:
     for spec in NODES:
         if spec.understudy is not None:
             assert spec.node_name not in required
-    # 阶段五 5B 删掉三个推荐报告节点（两个在用的是必配），必配总数从 14 降到 12。
+    # 总数仍是 12：0819 退役共用深评（-1），而方向深评摘掉代跑指针后
+    # 自己变成必配（+1）。
     assert len(required) == 12
     assert "buyer_intent_semantic_parser" not in required
-    assert "recommendation_deep_eval_to_target" not in required
-    assert "recommendation_deep_eval" in required
+    # 反过来了：现在没有代跑可依赖，方向深评必须自己配好。
+    assert "recommendation_deep_eval_to_target" in required
+    assert "recommendation_deep_eval" not in required
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +220,9 @@ KNOWN_LITERAL_SITES: dict[str, frozenset[str]] = {
     # [自称] 三处针对单个节点的健康检查（深评 / OCR / 业务更新兜底 prompt）。
     # 原来还有三份清单式的硬编码（必配节点 ×2、退役节点 ×1），已收编进注册表。
     "backend/app/api/routes/meta.py": frozenset({
-        "business_update_extractor", "ocr_attachment_parser", "recommendation_deep_eval",
+        "business_update_extractor", "ocr_attachment_parser",
+        # 0819 从共用深评改成方向深评：共用节点退役后，继续查它会让自检误报未就绪。
+        "recommendation_deep_eval_to_target",
     }),
     # [路由] 业务更新按绑定对象三选一。这三个名字全仓库只出现在这里，
     # 不构成重复的目录知识；换成常量只是多一层间接，不产生保障。
@@ -209,6 +233,8 @@ KNOWN_LITERAL_SITES: dict[str, frozenset[str]] = {
     # 它不是节点引用 —— 换成注册表调用会改变已落库的字符串语义。
     "backend/app/jobs/handlers/buyer_intent_parse.py": frozenset({"buyer_intent_parser"}),
     # [自称] handler / service 引用自己那一个节点
+    # [标签] 历史 job 详情的中文名映射。**故意保留已退役节点** ——
+    # 删掉它，跑过的那些任务在详情页就掉标签，审计追不回来。
     "backend/app/api/routes/background_jobs.py": frozenset({"recommendation_deep_eval"}),
     "backend/app/api/routes/seller_targets.py": frozenset({"seller_target_parser"}),
     "backend/app/jobs/handlers/attachment_ocr.py": frozenset({"ocr_attachment_parser"}),

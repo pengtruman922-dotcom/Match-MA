@@ -207,12 +207,61 @@ def test_unconfigured_writer_still_produces_something_sendable(monkeypatch) -> N
     assert state.answers[0]["model_name"] is None
 
 
-def test_writer_budget_stops_a_stream_that_never_ends(monkeypatch) -> None:
-    """节点 timeout 是单次读取的超时，慢滴流的上游可以永远不触发它。"""
-    outcome, _ = _run(monkeypatch, deltas=["一", "二", "三"], budget_seconds=0.0)
+def test_the_node_budget_is_handed_to_the_stream_not_re_timed_here(monkeypatch) -> None:
+    """只能有一处算 deadline。
+
+    第一批交付时 Writer 自己也掐一遍表，因为那会儿 `timeout_seconds` 只是 socket
+    超时、流式每来一个 token 就重置。第三批把 deadline 做进
+    `stream_openai_compatible_chat` 之后，Writer 再算一次就是第二个算法 ——
+    两处各判一次「超时没有」，迟早对不上。所以这里只验预算被原样交下去。
+    """
+    seen: list[int] = []
+    state = _Harness()
+    state.install(monkeypatch)
+
+    def stream(**kwargs):
+        seen.append(kwargs["timeout_seconds"])
+        yield "正文。"
+
+    writer.run_writer_stage(
+        _FakeDb(),
+        session_id=SESSION_ID,
+        turn_id=TURN_ID,
+        brief=_BRIEF,
+        node_config={**_NODE_CONFIG, "timeout_seconds": 45},
+        render_messages=lambda *_args, **_kwargs: [],
+        is_aborted=lambda: False,
+        stream_fn=stream,
+    )
+
+    assert seen == [45]
+
+
+def test_a_stream_that_hits_its_budget_still_ends_in_a_sendable_answer(monkeypatch) -> None:
+    """超时由流抛 LlmCallError，Writer 照常走规则兜底 —— 用户仍拿得到可发的文本。"""
+    from backend.app.ai.llm_client import LlmCallError
+
+    def blow_up(**_kwargs):
+        raise LlmCallError("LLM stream exceeded the node budget of 45s")
+        yield  # pragma: no cover - 让它是个生成器
+
+    state = _Harness()
+    state.install(monkeypatch)
+
+    outcome = writer.run_writer_stage(
+        _FakeDb(),
+        session_id=SESSION_ID,
+        turn_id=TURN_ID,
+        brief=_BRIEF,
+        node_config=_NODE_CONFIG,
+        render_messages=lambda *_args, **_kwargs: [],
+        is_aborted=lambda: False,
+        stream_fn=blow_up,
+    )
 
     assert outcome.generation_mode == "fallback"
     assert "budget" in (outcome.error_message or "")
+    assert "30 家去重候选" in outcome.markdown
 
 
 def test_empty_model_output_falls_back_instead_of_writing_nothing(monkeypatch) -> None:

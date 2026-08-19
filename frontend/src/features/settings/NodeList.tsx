@@ -229,7 +229,16 @@ function FilterChip({ active, onClick, children }: { active: boolean; onClick: (
 }
 
 /** 「已配置」= 有模型，且（若该节点需要）有已发布的 Prompt。与运行时口径一致。 */
+/**
+ * 「已配置」的四个条件，缺一不可。
+ *
+ * `is_active` 是 0819 补的：少了它，一个被停用的配置行照样显示成「已配置」，
+ * 于是设置页宣布一切就绪，而那个节点其实根本不会被调用。这一批停用了 4 个退役
+ * 节点的配置行，正好会踩中它。
+ */
 function isReady(node: ModelNodeConfig): boolean {
   if (!node.configured) return false;
+  if (!node.is_active) return false;
+  if (!node.model_name) return false;
   return node.prompt_required ? Boolean(node.default_prompt) : true;
 }
