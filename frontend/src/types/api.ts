@@ -1794,51 +1794,12 @@ export interface RecommendationCandidate {
   buyer_intent_operation_allowed?: boolean;
 }
 
-export interface RecommendationConditionAction {
-  op:
-    | 'remove_field'
-    | 'disable_field'
-    | 'remove_exclusion'
-    | 'remove_preference'
-    | 'clear_all'
-    | 'disable_scenario'
-    | 'enable_scenario';
-  field?: string;
-  value?: string;
-  scenario_id?: string;
-  label?: string;
-}
-
 export interface RecommendationConditionOverrides {
   fields: Record<string, unknown>;
   removed_fields: string[];
   extra_excluded_industries: string[];
   semantic_preferences: string[];
   disabled_scenarios?: string[];
-}
-
-export interface RecommendationConversation {
-  route: 'refilter' | 're_evaluate' | 'display' | 'question' | 'noop';
-  parsed_ops: Array<{ op: string; field: string; value: unknown }>;
-  new_semantic_preferences: string[];
-  display_ops: Array<{ type: 'only_grade' | 'top_n'; value: string | number }>;
-  question: string | null;
-  parser_status: 'ok' | 'fallback' | null;
-  applied_conditions: Record<string, unknown>;
-  system_reply: string;
-}
-
-export interface RecommendationCandidateRequest {
-  mode: 'buyer_to_target' | 'target_to_buyer';
-  buyer_intent_id?: string;
-  seller_target_id?: string;
-  /** One-off request without a persisted buyer intent or seller target. */
-  temporary_input?: string;
-  limit?: number;
-  create_session?: boolean;
-  user_message?: string;
-  session_id?: string;
-  condition_actions?: RecommendationConditionAction[];
 }
 
 export interface RecommendationSessionSummary {
@@ -1865,22 +1826,6 @@ export interface RecommendationPage {
   polling_hint: Record<string, unknown>;
 }
 
-export interface RecommendationFunnel {
-  scenario_count?: number;
-  eligible_by_scenario?: Record<string, number>;
-  scan_count: number;
-  excluded_count: number;
-  conflict_count: number;
-  eligible_count: number;
-  deep_eval_count: number;
-  display_count: number;
-}
-
-export interface RecommendationScenarioRef {
-  id: string;
-  label: string;
-}
-
 export interface BuyerIntentScenario {
   id: string;
   buyer_intent_id: string;
@@ -1902,16 +1847,6 @@ export interface BuyerIntentScenarioWrite {
   fields_json: Record<string, unknown>;
   needs_confirmation_json?: BuyerIntentConfirmationItem[];
   condition_effects_json?: Record<string, ConditionEffect>;
-}
-
-export interface RecommendationCandidateResponse {
-  session_id: string | null;
-  mode: 'buyer_to_target' | 'target_to_buyer';
-  candidates: RecommendationCandidate[];
-  conversation?: RecommendationConversation;
-  funnel?: RecommendationFunnel | null;
-  scenarios?: RecommendationScenarioRef[];
-  debug: Record<string, unknown>;
 }
 
 export interface RecommendationSession {

@@ -64,8 +64,6 @@ import type {
   RelationEvent,
   RelationMeta,
   RelationCreateResult,
-  RecommendationCandidateRequest,
-  RecommendationCandidateResponse,
   RecommendationMessage,
   RecommendationMessageCreate,
   RecommendationPage,
@@ -801,11 +799,6 @@ export const recommendations = {
       `/recommendations/sessions/${sessionId}/turns/${turnId}/abort`,
       { method: 'POST' },
     ),
-  candidates: (data: RecommendationCandidateRequest) =>
-    apiRequest<RecommendationCandidateResponse>('/recommendations/candidates', {
-      method: 'POST',
-      body: JSON.stringify(data),
-    }),
   sessions: (params?: {
     mode?: 'buyer_to_target' | 'target_to_buyer';
     buyer_intent_id?: string;

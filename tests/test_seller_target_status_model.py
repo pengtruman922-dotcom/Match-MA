@@ -60,11 +60,15 @@ def test_registry_no_longer_declares_recommendation_status() -> None:
     assert "recommendation_status" not in {ind.column for ind in SELLER_TARGET_INDICATORS}
 
 
-def test_recommendation_screening_uses_grade_only() -> None:
+def test_recommendation_flow_never_reads_the_retired_status_columns() -> None:
+    """阶段五 5B 把召回 SQL 从 recommendation_flow 搬走后剩下的那半条守卫。
+
+    正向的 `target_grade <> 'E'` 闸门现在只活在 agent 工具与 screening_sql 里
+    （见下一条用例）；本文件仍然会 join seller_target / buyer_intent 做会话概览，
+    所以「不许退回读交易状态」这半条必须留着 —— 任何一处退回读它，E 之外的语义
+    就又分叉了。
+    """
     source = RECOMMENDATION_FLOW.read_text(encoding="utf-8")
-    assert "st.target_grade <> 'E'" in source
-    assert "bi.intent_grade <> 'E'" in source
-    # 闸门只认级别：任何一处退回读交易状态，E 之外的语义就又分叉了。
     assert "lifecycle_status" not in source
     assert "recommendation_status" not in source
 

@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response, StreamingResponse
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
@@ -32,23 +32,7 @@ from backend.app.api.routes.utils import (
 )
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db, session_scope
-from backend.app.services.recommendation_conditions import (
-    apply_condition_actions,
-    apply_overrides_to_anchor,
-    conditions_snapshot,
-    derive_route,
-    describe_condition_ops,
-    merge_condition_overrides,
-    parse_recommendation_message,
-    persist_session_overrides,
-)
 from backend.app.services.recommendation_flow import (  # noqa: F401 - re-exported for compatibility
-    CANDIDATE_STATE_COMPATIBLE,
-    CANDIDATE_STATE_CONFLICT,
-    CANDIDATE_STATE_POSSIBLE,
-    DEEP_EVAL_CANDIDATE_LIMIT,
-    REGION_GROUPS,
-    _annotate_candidate_ownership,
     _build_recommendation_activity,
     _build_recommendation_report_status,
     _build_recommendation_selected_status,
@@ -57,10 +41,8 @@ from backend.app.services.recommendation_flow import (  # noqa: F401 - re-export
     _build_recommendation_agent_status,
     _candidate_display_badges,
     _candidate_display_meta,
-    _candidate_intents_for_target,
     _candidate_pair_key,
     _candidate_score_breakdown,
-    _candidate_targets_for_intent,
     _compact_background_job,
     _compact_recommendation_message,
     _compact_recommendation_report,
@@ -76,23 +58,18 @@ from backend.app.services.recommendation_flow import (  # noqa: F401 - re-export
     insert_agent_answer_message,
     _enqueue_recommendation_agent_job,
     _enqueue_recommendation_report_job,
-    _enrich_candidates_for_frontend,
     _enrich_candidates_with_selection,
     _ensure_recommendation_report_visible,
-    _excluded_industry_hit,
     _extract_recommendation_candidate_sets,
     _filter_recommendation_session_summaries,
     _get_active_selected_item_for_pair,
-    _get_buyer_intent_anchor,
     _get_buyer_party_id_for_intent,
     _get_recommendation_report_jobs,
     _get_recommendation_session_or_404,
     _get_recommendation_session_overview_or_404,
     _get_selected_item_or_404,
-    _get_seller_target_anchor,
     _infer_recommendation_candidate_message_type,
     _insert_recommendation_message,
-    _intent_industry_list,
     _join_display_parts,
     _json_dumps,
     _json_loads,
@@ -118,17 +95,14 @@ from backend.app.services.recommendation_flow import (  # noqa: F401 - re-export
     _recommendation_session_polling_hint,
     _refresh_session_report_count,
     _refresh_session_selected_count,
-    _region_scope_matches,
     _report_returning_statement,
     _report_select_columns,
-    _score_target_against_intent,
     _selected_item_returning_statement,
     _selected_item_select_columns,
     _session_overview_select_columns,
     _session_returning_statement,
     _session_select_columns,
     _string_or_none,
-    _strip_region_suffix,
     _summary_text,
     _touch_recommendation_session,
     _with_frontend_candidate_fields,
@@ -166,89 +140,11 @@ _SSE_HEADERS = {
 }
 
 
-class RecommendationCandidateRequest(BaseModel):
-    mode: str = Field(pattern="^(buyer_to_target|target_to_buyer)$")
-    buyer_intent_id: UUID | None = None
-    seller_target_id: UUID | None = None
-    # A one-off request is deliberately not persisted as a fake buyer intent or
-    # seller target.  The text is kept only in the recommendation session
-    # snapshot and drives a read-only temporary-filter session.
-    temporary_input: str | None = Field(default=None, max_length=AGENT_INPUT_MAX_CHARS)
-    limit: int = Field(default=20, ge=1, le=50)
-    create_session: bool = True
-    user_message: str | None = None
-    # Continue an existing session (multi-round chat): append the user message
-    # and a new candidate round instead of creating a new session.
-    session_id: UUID | None = None
-    # Deterministic condition-panel actions (chip removal / clear-all); applied
-    # without the LLM parser: [{"op": "remove_field", "field": ...},
-    # {"op": "remove_preference", "value": ...}, {"op": "clear_all"}]
-    condition_actions: list[dict[str, Any]] | None = None
-
-    @model_validator(mode="after")
-    def validate_anchor(self) -> "RecommendationCandidateRequest":
-        has_temporary_input = bool((self.temporary_input or "").strip())
-        if has_temporary_input and (self.buyer_intent_id is not None or self.seller_target_id is not None):
-            raise ValueError("temporary_input cannot be combined with an existing recommendation anchor.")
-        if has_temporary_input and (self.user_message or "").strip():
-            raise ValueError("temporary_input is the initial request; send follow-up requirements in user_message.")
-        # A continuation obtains its anchor from the persisted session.  The
-        # endpoint then verifies that the supplied anchor still matches it.
-        if self.session_id is not None:
-            return self
-        if self.mode == "buyer_to_target" and self.buyer_intent_id is None and not has_temporary_input:
-            raise ValueError("buyer_intent_id is required for buyer_to_target.")
-        if self.mode == "target_to_buyer" and self.seller_target_id is None and not has_temporary_input:
-            raise ValueError("seller_target_id is required for target_to_buyer.")
-        return self
-
-
 TEMPORARY_FILTER_METADATA_KEY = "temporary_filter"
 
 
 def _is_temporary_filter_session(session: dict[str, Any]) -> bool:
     return bool((session.get("metadata_json") or {}).get(TEMPORARY_FILTER_METADATA_KEY))
-
-
-def _build_temporary_anchor(mode: str, temporary_input: str) -> dict[str, Any]:
-    """Build an in-memory scoring anchor for a one-off filter.
-
-    The object intentionally has no id.  That is the guardrail which prevents
-    a temporary result from becoming a buyer-target relation by accident.
-    """
-    if mode == "buyer_to_target":
-        return {
-            "id": None,
-            "buyer_party_id": None,
-            "buyer_name": None,
-            "intent_name": "临时买家需求",
-            "raw_requirement_text": temporary_input,
-            "intent_summary": temporary_input,
-            "industries_json": [],
-            "excluded_industries_json": [],
-        }
-    return {
-        "id": None,
-        "target_name": "临时标的画像",
-        "business_summary": temporary_input,
-        "transaction_summary": temporary_input,
-        "risk_summary": None,
-        "gap_summary": None,
-        "industry_pairs_json": [],
-    }
-
-
-def _temporary_anchor_from_session(session: dict[str, Any]) -> dict[str, Any]:
-    snapshot = session.get("initial_condition_snapshot_json")
-    if isinstance(snapshot, dict) and snapshot:
-        return dict(snapshot)
-    # Sessions are only created through the candidate endpoint, but keep a
-    # defensive fallback so an old manually-created anonymous session returns
-    # a useful validation error rather than operating on an empty dict.
-    raw_input = str(session.get("anonymous_input_snapshot") or "").strip()
-    if not raw_input:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Temporary recommendation session has no input.")
-    return _build_temporary_anchor(str(session["mode"]), raw_input)
 
 
 class RecommendationCandidateOut(BaseModel):
@@ -300,13 +196,6 @@ class RecommendationCandidateOut(BaseModel):
     buyer_intent_owner_name: str | None = None
     buyer_intent_owned_by_current_user: bool = False
     buyer_intent_operation_allowed: bool = False
-
-
-class RecommendationCandidateResponse(BaseModel):
-    session_id: UUID | None
-    mode: str
-    candidates: list[RecommendationCandidateOut]
-    debug: dict[str, Any]
 
 
 class RecommendationSessionCreate(BaseModel):
@@ -475,349 +364,6 @@ class RecommendationSessionPageStateOut(BaseModel):
     summary: RecommendationSessionSummaryOut
     bundle: RecommendationSessionBundleOut
     polling_hint: dict[str, Any]
-
-
-@router.post("/candidates", response_model=RecommendationCandidateResponse)
-def generate_recommendation_candidates(
-    payload: RecommendationCandidateRequest,
-    current_user: CurrentUser,
-    db: Session = Depends(get_db),
-) -> dict[str, Any]:
-    existing_session = None
-    temporary_input = (payload.temporary_input or "").strip()
-    is_temporary_filter = bool(temporary_input)
-    if payload.session_id is not None:
-        ensure_recommendation_session_visible(db, current_user, payload.session_id)
-        existing_session = _get_recommendation_session_or_404(db, payload.session_id)
-        if existing_session["mode"] != payload.mode:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Session mode does not match the request mode.",
-            )
-        is_temporary_filter = _is_temporary_filter_session(existing_session)
-        if temporary_input:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="A temporary session already has its initial request; use user_message to refine it.",
-            )
-
-    if is_temporary_filter:
-        if payload.buyer_intent_id is not None or payload.seller_target_id is not None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Temporary filtering cannot be combined with an existing recommendation anchor.",
-            )
-        anchor = (
-            _temporary_anchor_from_session(existing_session)
-            if existing_session is not None
-            else _build_temporary_anchor(payload.mode, temporary_input)
-        )
-        session_anchor = {
-            "buyer_intent_id": None,
-            "buyer_party_id": None,
-            "seller_target_id": None,
-        }
-    elif payload.mode == "buyer_to_target":
-        if payload.buyer_intent_id is None:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Buyer intent anchor is required for this session.")
-        ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=payload.buyer_intent_id)
-        anchor = _get_buyer_intent_anchor(db, payload.buyer_intent_id)
-        session_anchor = {
-            "buyer_intent_id": payload.buyer_intent_id,
-            "buyer_party_id": anchor.get("buyer_party_id"),
-            "seller_target_id": None,
-        }
-    else:
-        if payload.seller_target_id is None:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Seller target anchor is required for this session.")
-        ensure_entity_writable(db, current_user, entity_type="seller_target", entity_id=payload.seller_target_id)
-        anchor = _get_seller_target_anchor(db, payload.seller_target_id)
-        session_anchor = {
-            "buyer_intent_id": None,
-            "buyer_party_id": None,
-            "seller_target_id": payload.seller_target_id,
-        }
-
-    overrides: dict[str, Any] = {}
-    if existing_session is not None:
-        session_anchor_matches = (
-            str(existing_session.get("buyer_intent_id") or "") == str(payload.buyer_intent_id or "")
-            and str(existing_session.get("seller_target_id") or "") == str(payload.seller_target_id or "")
-        )
-        if not session_anchor_matches:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Session anchor does not match the requested intent/target.",
-            )
-        overrides = existing_session.get("condition_overrides_json") or {}
-
-    # Condition-panel actions bypass the LLM parser entirely.
-    panel_summary = None
-    if payload.condition_actions and existing_session is not None:
-        overrides, panel_summary = apply_condition_actions(overrides, payload.condition_actions)
-
-    # Chat message -> structured extraction; routing is derived in code.
-    parse_result = None
-    user_message = (payload.user_message or "").strip()
-    parser_input = user_message or temporary_input
-    if parser_input:
-        parse_result = parse_recommendation_message(
-            db,
-            mode=payload.mode,
-            user_message=parser_input,
-            current_conditions=conditions_snapshot(anchor, overrides) if payload.mode == "buyer_to_target" else {},
-        )
-        if payload.mode == "target_to_buyer" and parse_result["condition_ops"]:
-            # v1 only supports structured overrides on the buyer_to_target flow;
-            # keep the intent as a semantic preference so deep eval still sees it.
-            described = describe_condition_ops(parse_result["condition_ops"])
-            if described and described not in parse_result["semantic_preferences"]:
-                parse_result["semantic_preferences"].append(described)
-            parse_result["condition_ops"] = []
-        overrides = merge_condition_overrides(overrides, parse_result)
-
-    route = derive_route(parse_result)
-    if panel_summary is not None:
-        route = "refilter"  # panel actions always re-run the filter
-    if existing_session is None:
-        route = "refilter"  # first round always generates candidates
-
-    effective_anchor = (
-        apply_overrides_to_anchor(anchor, overrides) if payload.mode == "buyer_to_target" else anchor
-    )
-    semantic_preferences = list(overrides.get("semantic_preferences") or [])
-    extra_query_lines = [line for line in [*semantic_preferences, parser_input or None] if line]
-
-    disabled_scenarios = set(overrides.get("disabled_scenarios") or [])
-
-    def run_filter() -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
-        result = (
-            _candidate_targets_for_intent(
-                db,
-                effective_anchor,
-                payload.limit,
-                disabled_scenarios,
-                semantic_query_lines=extra_query_lines,
-            )
-            if payload.mode == "buyer_to_target"
-            else _candidate_intents_for_target(
-                db,
-                effective_anchor,
-                payload.limit,
-                semantic_query_lines=extra_query_lines,
-            )
-        )
-        return result["candidates"], result["funnel"], result.get("scenarios") or []
-
-    candidates: list[dict[str, Any]] = []
-    funnel: dict[str, Any] | None = None
-    scenarios: list[dict[str, Any]] = []
-    new_round = route in {"refilter", "re_evaluate"}
-    if route == "refilter":
-        candidates, funnel, scenarios = run_filter()
-    elif route == "re_evaluate" and existing_session is not None:
-        messages = _list_recommendation_messages(db, session_id=payload.session_id, limit=500, offset=0)
-        candidates = _extract_recommendation_candidate_sets(messages)["initial_candidates"]
-        if not candidates:
-            candidates, funnel, scenarios = run_filter()
-    elif existing_session is not None:
-        # display / question / noop keep the current round; return it for context.
-        messages = _list_recommendation_messages(db, session_id=payload.session_id, limit=500, offset=0)
-        sets = _extract_recommendation_candidate_sets(messages)
-        candidates = sets["reranked_candidates"] or sets["initial_candidates"]
-    candidates = _enrich_candidates_for_frontend(candidates)
-    candidates = _annotate_candidate_ownership(
-        db,
-        {"candidates": candidates},
-        mode=payload.mode,
-        current_user=current_user,
-    )["candidates"]
-
-    conversation = _build_conversation_payload(
-        route=route,
-        parse_result=parse_result,
-        overrides=overrides,
-        anchor=anchor,
-        mode=payload.mode,
-        candidate_count=len(candidates),
-        panel_summary=panel_summary,
-        funnel=funnel,
-    )
-
-    session_id = None
-    message_metadata = {"message_type": "initial_candidates"}
-    if parse_result is not None:
-        message_metadata["conversation"] = {
-            "route": route,
-            "parsed_ops": parse_result["condition_ops"],
-            "semantic_preferences": parse_result["semantic_preferences"],
-            "parser_status": parse_result["parser_status"],
-        }
-
-    if existing_session is not None:
-        session_id = payload.session_id
-        if user_message:
-            _insert_recommendation_message(
-                db,
-                session_id=session_id,
-                role="user",
-                content_type="text",
-                content=user_message,
-                metadata_json=message_metadata.get("conversation") or {},
-                created_by=current_user.user_id,
-            )
-        if new_round:
-            _insert_recommendation_message(
-                db,
-                session_id=session_id,
-                role="tool",
-                content_type="json",
-                content={
-                    "message_type": "initial_candidates",
-                    "mode": payload.mode,
-                    "candidate_count": len(candidates),
-                    "candidates": candidates,
-                    "funnel": funnel,
-                    "scenarios": scenarios,
-                },
-                metadata_json=message_metadata,
-                created_by=current_user.user_id,
-            )
-        if parse_result is not None or panel_summary is not None:
-            # Persist the reply so restoring the session replays the whole chat.
-            _insert_recommendation_message(
-                db,
-                session_id=session_id,
-                role="assistant",
-                content_type="text",
-                content=conversation["system_reply"],
-                metadata_json={"message_type": "system_reply", "route": route},
-                created_by=current_user.user_id,
-            )
-        persist_session_overrides(db, session_id, overrides)
-        _touch_recommendation_session(db, session_id)
-        db.commit()
-    elif payload.create_session:
-        session_id = _create_recommendation_session(
-            db,
-            mode=payload.mode,
-            user_message=parser_input,
-            initial_snapshot=anchor,
-            candidates=candidates,
-            created_by=current_user.user_id,
-            is_temporary_filter=is_temporary_filter,
-            **session_anchor,
-        )
-        _insert_recommendation_message(
-            db,
-            session_id=session_id,
-            role="tool",
-            content_type="json",
-            content={
-                "message_type": "initial_candidates",
-                "mode": payload.mode,
-                "candidate_count": len(candidates),
-                "candidates": candidates,
-                "funnel": funnel,
-                "scenarios": scenarios,
-            },
-            metadata_json=message_metadata,
-            created_by=current_user.user_id,
-        )
-        if parse_result is not None:
-            _insert_recommendation_message(
-                db,
-                session_id=session_id,
-                role="assistant",
-                content_type="text",
-                content=conversation["system_reply"],
-                metadata_json={"message_type": "system_reply", "route": route},
-                created_by=current_user.user_id,
-            )
-        if overrides != {} and any(overrides.get(key) for key in ("fields", "removed_fields", "extra_excluded_industries", "semantic_preferences")):
-            persist_session_overrides(db, session_id, overrides)
-        db.commit()
-
-    return {
-        "session_id": session_id,
-        "mode": payload.mode,
-        "candidates": candidates,
-        "conversation": conversation,
-        "funnel": funnel,
-        "scenarios": scenarios,
-        "debug": {
-            "engine": "rule_v3",
-            "route": route,
-            "embedding_similarity": False,
-            "funnel": funnel,
-            "notes": [
-                "Full-library scan with three-state screening; conflicts drop out, missing data never does.",
-                "LLM deep eval runs asynchronously over the head of the optimistic ranking.",
-            ],
-        },
-    }
-
-
-def _describe_funnel(funnel: dict[str, int] | None, candidate_count: int) -> str:
-    """Never let the deep-eval budget truncate silently: say what was left out."""
-    if not funnel:
-        return f"筛出 {candidate_count} 个候选。"
-    eligible = funnel.get("eligible_count", candidate_count)
-    deep_eval = funnel.get("deep_eval_count", candidate_count)
-    text_value = f"全库扫描 {funnel.get('scan_count', 0)} 个，符合基础条件 {eligible} 个。"
-    if eligible > deep_eval:
-        text_value += f"本轮仅对前 {deep_eval} 个做 AI 深度评估，建议补充结构化条件以缩小范围。"
-    return text_value
-
-
-def _build_conversation_payload(
-    *,
-    route: str,
-    parse_result: dict[str, Any] | None,
-    overrides: dict[str, Any],
-    anchor: dict[str, Any],
-    mode: str,
-    candidate_count: int,
-    panel_summary: str | None = None,
-    funnel: dict[str, int] | None = None,
-) -> dict[str, Any]:
-    parsed_ops = parse_result["condition_ops"] if parse_result else []
-    new_preferences = parse_result["semantic_preferences"] if parse_result else []
-    display_ops = parse_result["display_ops"] if parse_result else []
-
-    if route == "refilter":
-        parts = []
-        if panel_summary:
-            parts.append(f"已{panel_summary}。")
-        if parsed_ops:
-            parts.append(f"已更新条件：{describe_condition_ops(parsed_ops)}。")
-        if new_preferences:
-            parts.append(f"已记录偏好：{'；'.join(new_preferences)}。")
-        parts.append(_describe_funnel(funnel, candidate_count))
-        system_reply = "".join(parts)
-    elif route == "re_evaluate":
-        system_reply = (
-            f"已记录偏好：{'；'.join(new_preferences) or '（无新增）'}。候选保持不变。"
-        )
-    elif route == "display":
-        system_reply = "已按要求调整当前展示。"
-    elif route == "question":
-        system_reply = "候选对比问答暂未上线：请结合卡片上的评级、AI 理由与详情链接查看；也可以继续补充筛选条件。"
-    else:
-        system_reply = "这句话里没有识别出可执行的筛选条件，已原样记录；可以说明行业、地区、利润等具体要求。"
-
-    return {
-        "route": route,
-        "parsed_ops": parsed_ops,
-        "new_semantic_preferences": new_preferences,
-        "display_ops": display_ops,
-        "question": parse_result.get("question") if parse_result else None,
-        "parser_status": parse_result.get("parser_status") if parse_result else None,
-        "applied_conditions": conditions_snapshot(anchor, overrides) if mode == "buyer_to_target" else {
-            "semantic_preferences": list(overrides.get("semantic_preferences") or []),
-        },
-        "system_reply": system_reply,
-    }
 
 
 @router.post("/sessions", response_model=RecommendationSessionOut, status_code=status.HTTP_201_CREATED)
