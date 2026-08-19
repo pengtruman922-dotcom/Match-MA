@@ -1820,6 +1820,8 @@ export interface RecommendationAgentTurn {
   turn_id: string;
   job_id: string;
   queue_name: string;
+  /** 这一轮在重试哪一轮；不是重试时为 null。 */
+  retry_of_turn_id: string | null;
 }
 
 /** 轮询消息表看不出「还在想」和「已经死了」的区别，这个端点补上这一半。 */
@@ -1833,6 +1835,20 @@ export interface RecommendationAgentTurnStatus {
   error_message: string | null;
   /** 原始异常，只有管理员拿得到。 */
   error_detail: string | null;
+}
+
+/**
+ * 一次轮询要的东西，一个请求给全。
+ *
+ * 以前每 tick 并发拉「整份消息表」和「任务状态」两条 —— 单看消息表分不出
+ * 「还在想」和「已经死了」（任务挂掉时一条消息都不会写）。合并之后请求量减半，
+ * 更重要的是消掉了两次读取相隔一瞬而互相矛盾的窗口。
+ */
+export interface RecommendationAgentTurnProgress extends RecommendationAgentTurnStatus {
+  has_brief: boolean;
+  has_answer: boolean;
+  has_question: boolean;
+  messages: RecommendationMessage[];
 }
 
 /** 一次筛选调用的记录。过程行直接渲染它，让用户看见 Agent 做了什么决定。 */

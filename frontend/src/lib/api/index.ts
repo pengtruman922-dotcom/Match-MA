@@ -3,7 +3,7 @@ import type {
   AttachmentOcrStatus,
   AttachmentUploadResult,
   RecommendationAgentTurn,
-  RecommendationAgentTurnStatus,
+  RecommendationAgentTurnProgress,
   SearchConfigOverview,
   SearchProviderTestResult,
   OcrConfigOverview,
@@ -764,7 +764,7 @@ export const debugApi = {
     apiRequest<DebugEntity>(`/debug/entities/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}`),
 };
 
-// 推荐链路的客户端。阶段五 5B 后只剩下推荐页真正在用的 7 个方法：
+// 推荐链路的客户端。阶段五 5B 后只留推荐页真正在用的方法：
 // 旧的候选生成、选中、推荐报告 / docx、会话读写入口连同后端路由一起删掉了。
 export const recommendations = {
   agentTurn: (data: {
@@ -772,6 +772,8 @@ export const recommendations = {
     session_id?: string;
     user_message: string;
     attachment_ids?: string[];
+    /** 重试哪一轮。可选：不传时后端行为与从前完全一致。 */
+    retry_of_turn_id?: string;
   }) =>
     apiRequest<RecommendationAgentTurn>('/recommendations/agent-turn', {
       method: 'POST',
@@ -782,9 +784,12 @@ export const recommendations = {
       `/recommendations/sessions/${sessionId}/turns/${turnId}/answer-stream`,
       options,
     ),
-  turnStatus: (sessionId: string, turnId: string) =>
-    apiRequest<RecommendationAgentTurnStatus>(
-      `/recommendations/sessions/${sessionId}/turns/${turnId}/status`,
+  // turnStatus（/status）不在这里：轮询已经改用下面的 /progress，一次拿全。
+  // 后端那个端点仍然保留，只是页面不再有第二个调用点。
+  /** 轮询用这一个；job 状态 + 该轮消息合并成一次请求。 */
+  turnProgress: (sessionId: string, turnId: string) =>
+    apiRequest<RecommendationAgentTurnProgress>(
+      `/recommendations/sessions/${sessionId}/turns/${turnId}/progress`,
     ),
   abortTurn: (sessionId: string, turnId: string) =>
     apiRequest<{ session_id: string; turn_id: string; aborted: boolean }>(

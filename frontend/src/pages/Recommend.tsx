@@ -6,6 +6,7 @@ import type {
   RecommendationAgentBrief,
   RecommendationAgentQuestion,
   RecommendationAgentSearchStep,
+  RecommendationAgentTurnProgress,
   RecommendationMessage,
 } from '../types/api';
 import { formatBytes } from '../lib/format';
@@ -14,10 +15,12 @@ import AgentTurnView, { type AgentTurnState } from '../features/recommend/AgentT
 import IntentPicker from '../features/recommend/IntentPicker';
 import SessionPicker from '../features/recommend/SessionPicker';
 import { intentToRequirementText } from '../features/recommend/intentSummary';
+import {
+  countRetryAttempts,
+  POLL_UNREACHABLE_AFTER,
+  pollDelayMs,
+} from '../features/recommend/turnPolling';
 
-const POLL_INTERVAL_MS = 1200;
-// Agent 的墙钟预算是 240s；这里留到 6 分钟，够覆盖排队等待再判失败。
-const POLL_MAX_ATTEMPTS = 300;
 const OCR_POLL_INTERVAL_MS = 2500;
 const OCR_POLL_MAX_ATTEMPTS = 60;
 /** 后端 AGENT_MAX_IMAGE_ATTACHMENTS 的镜像。 */
@@ -57,7 +60,13 @@ export default function Recommend() {
   const [stopping, setStopping] = useState(false);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
-  const pollRef = useRef<number | null>(null);
+  const pollTimerRef = useRef<number | null>(null);
+  // 单飞的取消令牌。清掉 setTimeout 还不够：一次请求可能正在途中，
+  // 它回来之后不能再排下一次。
+  const pollTokenRef = useRef(0);
+  // 秒表独立于轮询：轮询最慢到 30 秒一次，计时显示不能跟着一跳一跳。
+  // 它只改本地数字，不发请求。
+  const elapsedTimerRef = useRef<number | null>(null);
   const writerTimerRef = useRef<number | null>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
   const bootstrappedRef = useRef(false);
@@ -68,9 +77,14 @@ export default function Recommend() {
   );
 
   const stopPolling = useCallback(() => {
-    if (pollRef.current) {
-      window.clearInterval(pollRef.current);
-      pollRef.current = null;
+    pollTokenRef.current += 1;
+    if (pollTimerRef.current) {
+      window.clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+    if (elapsedTimerRef.current) {
+      window.clearInterval(elapsedTimerRef.current);
+      elapsedTimerRef.current = null;
     }
   }, []);
 
@@ -209,72 +223,123 @@ export default function Recommend() {
     };
   }, []);
 
+  /**
+   * Follow one turn until the backend says it ended.
+   *
+   * Single-flight: the next poll is scheduled only after the previous one has
+   * come back, so requests can never overlap however slow the API is.
+   *
+   * The page is deliberately **not** allowed to decide that a turn failed. It
+   * used to, at tick 301 (~361s) — and a real production turn took 376.8s and
+   * was killed by exactly that. Worse, the false failure offered a retry
+   * button, so the user would start a second billed agent run next to the
+   * first one that was still working. Only `progress.failed` ends a turn now.
+   */
   const startPolling = useCallback((activeSessionId: string, turnId: string) => {
     stopPolling();
-    let attempts = 0;
+    const token = pollTokenRef.current;
     const startedAt = Date.now();
-    pollRef.current = window.setInterval(async () => {
-      attempts += 1;
+    let unreachableStreak = 0;
+    elapsedTimerRef.current = window.setInterval(() => {
       patchTurn(turnId, { elapsedMs: Date.now() - startedAt });
-      if (attempts > POLL_MAX_ATTEMPTS) {
-        stopPolling();
-        patchTurn(turnId, { failed: '这一轮超时了。可以重试，或换个更具体的说法。' });
-        return;
-      }
+    }, 1000);
+
+    const tick = async () => {
+      if (pollTokenRef.current !== token) return;
+      patchTurn(turnId, { elapsedMs: Date.now() - startedAt });
+
+      let progress: RecommendationAgentTurnProgress | null = null;
       try {
-        // 任务状态和消息一起看：任务挂掉时一条消息都不会写，光看消息表只会
-        // 一直转到自己的超时，用户永远不知道为什么。
-        const [messages, status] = await Promise.all([
-          recommendations.messages(activeSessionId, { limit: 500 }),
-          recommendations.turnStatus(activeSessionId, turnId).catch(() => null),
-        ]);
+        progress = await recommendations.turnProgress(activeSessionId, turnId);
+        unreachableStreak = 0;
+        patchTurn(turnId, { unreachable: false });
+      } catch {
+        // 「暂时联系不上后端」和「后端说这一轮失败了」是两回事，这里是本批
+        // 最核心的语义分界。网络问题只能提示，绝不标失败、绝不引导重试。
+        unreachableStreak += 1;
+        if (unreachableStreak >= POLL_UNREACHABLE_AFTER) {
+          patchTurn(turnId, { unreachable: true });
+        }
+      }
+      if (pollTokenRef.current !== token) return;
+
+      if (progress) {
         const {
           steps,
           question,
           brief,
-          aborted,
           understandingDurationMs,
           deepEvalDurationMs,
           briefDurationMs,
-        } = applyMessages(turnId, messages);
+        } = applyMessages(turnId, progress.messages);
         patchTurn(turnId, {
           steps,
           understandingDurationMs,
           deepEvalDurationMs,
           briefDurationMs,
         });
-        if (status?.failed && !aborted) {
-          stopPolling();
-          patchTurn(turnId, {
-            failed: status.error_message || '这一轮没能跑完。',
-            answerDone: true,
-            streaming: false,
-          });
-          return;
-        }
-        if (aborted) {
+
+        if (progress.aborted) {
           // 另一个页签把这一轮停了。
           stopPolling();
-          patchTurn(turnId, { aborted: true, answerDone: true, streaming: false });
+          patchTurn(turnId, { aborted: true, answerDone: true, streaming: false, unreachable: false });
+          return;
+        }
+        if (progress.failed) {
+          stopPolling();
+          patchTurn(turnId, {
+            failed: progress.error_message || '这一轮没能跑完。',
+            answerDone: true,
+            streaming: false,
+            unreachable: false,
+          });
           return;
         }
         if (question) {
           stopPolling();
-          patchTurn(turnId, { question, answerDone: true });
+          patchTurn(turnId, { question, answerDone: true, unreachable: false });
           return;
         }
         if (brief) {
+          // 正文由 worker 写、由 answer-stream 订阅回放（第一批）。这里只是
+          // 把流接上，接晚了也不丢字：订阅端会把已经写好的草稿一次补齐。
           stopPolling();
-          patchTurn(turnId, { followUps: normalizeBriefFollowUps(brief.follow_up_suggestions) });
+          patchTurn(turnId, {
+            followUps: normalizeBriefFollowUps(brief.follow_up_suggestions),
+            unreachable: false,
+          });
           void streamAnswer(activeSessionId, turnId);
+          return;
         }
-      } catch {
-        // 轮询期间的网络抖动不该终止整轮，由 attempts 上限兜底。
+        if (progress.job_status === 'succeeded' || progress.job_status === 'missing') {
+          // 任务收尾了却什么都没留下。如实说，别一直轮询下去 —— 后端读任务
+          // 状态在读消息之前，所以这里不会撞上「正文刚写完还没读到」那一瞬。
+          stopPolling();
+          patchTurn(turnId, {
+            failed: '这一轮没有跑完。',
+            answerDone: true,
+            streaming: false,
+            unreachable: false,
+          });
+          return;
+        }
       }
-    }, POLL_INTERVAL_MS);
+
+      pollTimerRef.current = window.setTimeout(
+        () => void tick(),
+        pollDelayMs(Date.now() - startedAt),
+      );
+    };
+
+    // 发起后立刻问一次，别让用户先盯着一个空壳等三秒。
+    void tick();
   }, [applyMessages, patchTurn, stopPolling, streamAnswer]);
 
-  const send = useCallback(async (message: string, attachmentIds: string[] = []) => {
+  const send = useCallback(async (
+    message: string,
+    attachmentIds: string[] = [],
+    retryOfTurnId?: string,
+  ) => {
     setError(null);
     try {
       const turn = await recommendations.agentTurn({
@@ -282,6 +347,7 @@ export default function Recommend() {
         session_id: sessionId || undefined,
         user_message: message,
         attachment_ids: attachmentIds,
+        retry_of_turn_id: retryOfTurnId,
       });
       if (!sessionId) {
         setSessionId(turn.session_id);
@@ -290,9 +356,15 @@ export default function Recommend() {
         setSearchParams(next, { replace: true });
       }
       setAttachments([]);
-      setTurns((prev) => [
-        ...prev,
-        {
+      setTurns((prev) => {
+        // 被重试的那一轮折叠成一行，但**不隐藏** —— 完全藏掉会让用户不知道
+        // 自己发过，转头在别处重复发一遍。
+        const marked = prev.map((item) =>
+          retryOfTurnId && item.turnId === retryOfTurnId
+            ? { ...item, supersededBy: turn.turn_id }
+            : item,
+        );
+        const created: AgentTurnState = {
           turnId: turn.turn_id,
           userMessage: message,
           steps: [],
@@ -302,15 +374,22 @@ export default function Recommend() {
           answerDone: false,
           streaming: false,
           failed: null,
+          unreachable: false,
           aborted: false,
+          retryOfTurnId: turn.retry_of_turn_id,
+          supersededBy: null,
           elapsedMs: 0,
           understandingDurationMs: null,
           deepEvalDurationMs: null,
           briefDurationMs: null,
           writerDurationMs: null,
           writerElapsedMs: 0,
-        },
-      ]);
+        };
+        // 重试出现在它所替代的那一轮**原来的位置**，不是被冲到对话最底下。
+        const at = retryOfTurnId ? marked.findIndex((item) => item.turnId === retryOfTurnId) : -1;
+        if (at < 0) return [...marked, created];
+        return [...marked.slice(0, at + 1), created, ...marked.slice(at + 1)];
+      });
       startPolling(turn.session_id, turn.turn_id);
     } catch (sendError) {
       setError(sendError instanceof Error ? sendError.message : '发送失败');
@@ -466,23 +545,54 @@ export default function Recommend() {
 
   const restoreSession = useCallback(async (restoreId: string) => {
     let resumeTurnIds: string[] = [];
+    let unresolvedTurnIds: string[] = [];
     try {
       const messages = await recommendations.messages(restoreId, { limit: 500 });
       const rebuilt = rebuildTurns(messages);
       resumeTurnIds = rebuilt.resumeTurnIds;
+      unresolvedTurnIds = rebuilt.unresolvedTurnIds;
       setSessionId(restoreId);
       setTurns(rebuilt.turns);
     } catch {
       setError('恢复对话失败，可能已被删除');
       return;
     }
-    // 正文只在 SSE 的 done 事件里落库，所以关页签会留下「素材齐了、正文没写」
-    // 的轮次。端点在首次连接时就会生成并落库，补连一次即可收尾——不补的话
-    // 那一轮永远是个空气泡。
+
+    // 什么终态都没有的轮次：问后端到底还在不在跑。仍在跑就接着轮询，
+    // 别再像从前那样一律标成「这一轮没有跑完」—— 那是重开一个正常运行中的
+    // 会话就会看到的假失败。
+    let liveTurnId: string | null = null;
+    for (const turnId of unresolvedTurnIds) {
+      let progress;
+      try {
+        progress = await recommendations.turnProgress(restoreId, turnId);
+      } catch {
+        patchTurn(turnId, { unreachable: true });
+        continue;
+      }
+      if (progress.aborted) {
+        patchTurn(turnId, { aborted: true, answerDone: true });
+      } else if (progress.failed) {
+        patchTurn(turnId, { failed: progress.error_message || '这一轮没能跑完。', answerDone: true });
+      } else if (progress.job_status === 'queued' || progress.job_status === 'retry_waiting'
+                 || progress.job_status === 'running') {
+        liveTurnId = turnId;
+      } else {
+        // 任务已经收尾却什么都没留下。说清楚，别装作还在跑。
+        patchTurn(turnId, { failed: '这一轮没有跑完。', answerDone: true });
+      }
+    }
+    // 只有一个轮询器，所以只跟最后那一轮 —— 那是用户正在等的那一轮。
+    // 正常情况下也只可能有一轮在跑：输入框在忙的时候是锁住的。
+    if (liveTurnId) startPolling(restoreId, liveTurnId);
+
+    // 第一批之前，正文只在 SSE 的 done 事件里落库，所以关页签会留下「素材齐了、
+    // 正文没写」的轮次。现在正文归 worker 写，补连一次拿到的是回放而不是重新
+    // 生成；worker 还在写时则是接着往下流。
     for (const turnId of resumeTurnIds) {
       await streamAnswer(restoreId, turnId);
     }
-  }, [streamAnswer]);
+  }, [patchTurn, startPolling, streamAnswer]);
 
   /**
    * `?intentId=` comes from the buyer-intent list's 「推荐标的」 button.
@@ -552,6 +662,7 @@ export default function Recommend() {
   };
 
   const empty = turns.length === 0;
+  const attemptNumbers = countRetryAttempts(turns);
   const accept = [...DOCUMENT_EXTENSIONS, ...IMAGE_EXTENSIONS].join(',');
   const policyHint = uploadPolicy
     ? `单文件 ${uploadPolicy.max_upload_mb} MB 以内；文档读正文，图片直接给模型看`
@@ -592,8 +703,9 @@ export default function Recommend() {
           <AgentTurnView
             key={turn.turnId}
             turn={turn}
+            attempt={attemptNumbers.get(turn.turnId)}
             onSendSuggestion={(text) => void send(text)}
-            onRetry={() => void send(turn.userMessage)}
+            onRetry={() => void send(turn.userMessage, [], turn.turnId)}
           />
         ))}
         <div ref={bottomRef} />
@@ -632,6 +744,12 @@ interface RebuiltConversation {
   turns: AgentTurnState[];
   /** 素材齐了但正文没落库的轮次，交给调用方补连一次 SSE。 */
   resumeTurnIds: string[];
+  /**
+   * 什么终态都没有的轮次。**光看消息表分不出「还在跑」和「已经死了」** ——
+   * 任务挂掉时一条消息都不会写。以前这里直接判「这一轮没有跑完」，于是重开
+   * 一个后端仍在跑的会话就会看到一个假失败。交给调用方问后端。
+   */
+  unresolvedTurnIds: string[];
 }
 
 /**
@@ -658,7 +776,10 @@ function rebuildTurns(messages: RecommendationMessage[]): RebuiltConversation {
       answerDone: true,
       streaming: false,
       failed: null,
+      unreachable: false,
       aborted: false,
+      retryOfTurnId: null,
+      supersededBy: null,
       elapsedMs: 0,
       understandingDurationMs: null,
       deepEvalDurationMs: null,
@@ -676,7 +797,15 @@ function rebuildTurns(messages: RecommendationMessage[]): RebuiltConversation {
     const metadata = (message.metadata_json || {}) as Record<string, unknown>;
     const turnId = String(metadata.turn_id || '');
     if (message.role === 'user') {
-      pendingUserMessage = message.content;
+      if (turnId) {
+        // 用户消息自己就带 turn_id，直接建轮：一轮如果还没写出任何过程消息
+        // （刚入队、或正在跑第一次模型调用），也必须能被还原和继续轮询。
+        const turn = ensure(turnId);
+        turn.userMessage = message.content;
+        turn.retryOfTurnId = String(metadata.retry_of_turn_id || '') || null;
+      } else {
+        pendingUserMessage = message.content;
+      }
       continue;
     }
     if (!turnId || message.content_type !== 'json') continue;
@@ -724,7 +853,15 @@ function rebuildTurns(messages: RecommendationMessage[]): RebuiltConversation {
   }
 
   const turns = [...byTurn.values()];
+  // 重试过的轮次折叠到新尝试底下 —— 折叠，不是隐藏。
+  for (const turn of turns) {
+    if (!turn.retryOfTurnId) continue;
+    const original = byTurn.get(turn.retryOfTurnId);
+    if (original) original.supersededBy = turn.turnId;
+  }
+
   const resumeTurnIds: string[] = [];
+  const unresolvedTurnIds: string[] = [];
   for (const turn of turns) {
     const flags = landed.get(turn.turnId) || { brief: false, answer: false };
     // 中止是终态：不续接、不报失败、不重试。素材落没落库都不再往下走。
@@ -735,9 +872,11 @@ function rebuildTurns(messages: RecommendationMessage[]): RebuiltConversation {
       resumeTurnIds.push(turn.turnId);
       continue;
     }
-    turn.failed = '这一轮没有跑完。';
+    // 不在这里判失败：后端说了才算。
+    turn.answerDone = false;
+    unresolvedTurnIds.push(turn.turnId);
   }
-  return { turns, resumeTurnIds };
+  return { turns, resumeTurnIds, unresolvedTurnIds };
 }
 
 /** The backend is authoritative; this is the display boundary for old stored briefs. */

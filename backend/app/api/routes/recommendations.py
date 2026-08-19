@@ -195,6 +195,10 @@ class RecommendationAgentTurnRequest(BaseModel):
     user_message: str = Field(min_length=1, max_length=AGENT_INPUT_MAX_CHARS)
     # 图片没有正文可以先取出来给用户看，所以只传 id，由 worker 交给多模态模型直读。
     attachment_ids: list[UUID] = Field(default_factory=list, max_length=AGENT_MAX_IMAGE_ATTACHMENTS)
+    # 这一轮是在重试哪一轮。可选：不传时行为与从前完全一致。
+    # 只用于展示层把失败的那一轮折叠到新尝试底下 —— 模型上下文本来就不重复
+    # （`_agent_history_turns` 只收同时有 user 与 agent_answer 的完整轮）。
+    retry_of_turn_id: str | None = Field(default=None, max_length=64)
 
 
 class RecommendationAgentTurnOut(BaseModel):
@@ -202,6 +206,7 @@ class RecommendationAgentTurnOut(BaseModel):
     turn_id: str
     job_id: UUID
     queue_name: str
+    retry_of_turn_id: str | None = None
 
 
 @router.post(
@@ -224,6 +229,11 @@ def create_recommendation_agent_turn(
     user_message = payload.user_message.strip()
     if not user_message:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="user_message is required.")
+    if payload.retry_of_turn_id and payload.session_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="retry_of_turn_id requires the session it belongs to.",
+        )
 
     if payload.session_id is not None:
         ensure_recommendation_session_visible(db, current_user, payload.session_id)
@@ -234,6 +244,8 @@ def create_recommendation_agent_turn(
                 detail="Session mode does not match the request mode.",
             )
         session_id = payload.session_id
+        if payload.retry_of_turn_id:
+            _reject_retry_of_a_live_turn(db, session_id, payload.retry_of_turn_id)
     else:
         session_id = _create_recommendation_session(
             db,
@@ -256,13 +268,16 @@ def create_recommendation_agent_turn(
     # 「中止的轮次不进上下文」也才有得判断。
     turn_id = uuid4().hex
     history_context = agent_history_context(db, session_id)
+    turn_metadata: dict[str, Any] = {"message_type": "agent_user_message", "turn_id": turn_id}
+    if payload.retry_of_turn_id:
+        turn_metadata["retry_of_turn_id"] = payload.retry_of_turn_id
     _insert_recommendation_message(
         db,
         session_id=session_id,
         role="user",
         content_type="text",
         content=user_message,
-        metadata_json={"message_type": "agent_user_message", "turn_id": turn_id},
+        metadata_json=turn_metadata,
         created_by=current_user.user_id,
     )
     job_id = _enqueue_recommendation_agent_job(
@@ -282,7 +297,28 @@ def create_recommendation_agent_turn(
         "turn_id": turn_id,
         "job_id": job_id,
         "queue_name": "llm",
+        "retry_of_turn_id": payload.retry_of_turn_id,
     }
+
+
+def _reject_retry_of_a_live_turn(db: Session, session_id: UUID, retry_of_turn_id: str) -> None:
+    """Only a turn that actually ended may be retried.
+
+    The retry button exists because a turn failed. If the original is still
+    queued or running, the button was pressed against a stale screen — and
+    honouring it would start a second billed agent run alongside the first,
+    which is the exact chain (false failure → user retries → two paid jobs)
+    this batch exists to break.
+    """
+    if agent_turn_aborted(db, session_id, retry_of_turn_id):
+        return
+    job = find_agent_turn_job(db, session_id, retry_of_turn_id)
+    job_status = str((job or {}).get("status") or "missing")
+    if job_status in {"queued", "retry_waiting", "running"}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"That turn is still {job_status}; wait for it instead of retrying.",
+        )
 
 
 JOB_STATUS_MESSAGES = {
@@ -328,6 +364,70 @@ def get_recommendation_agent_turn_status(
         "error_detail": str((job or {}).get("error_message") or "") or None
         if failed and current_user.is_admin
         else None,
+    }
+
+
+@router.get("/sessions/{session_id}/turns/{turn_id}/progress")
+def get_recommendation_agent_turn_progress(
+    session_id: UUID,
+    turn_id: str,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Everything one poll of one turn needs, in one request.
+
+    The page used to fire two requests per tick — the whole message list plus
+    the job status — because neither alone can tell "thinking" from "dead": a
+    job that fails writes no message, so watching only messages spins until the
+    page gives up on itself. Merging them halves the traffic and, more
+    importantly, removes the window where the two answers disagree because they
+    were read a moment apart.
+
+    Scoped to one `session_id + turn_id` on purpose. This is not a batch
+    endpoint for several conversations: those have different visibility and
+    would turn one slow session into everyone's slow session.
+    """
+    ensure_recommendation_session_visible(db, current_user, session_id)
+    _get_recommendation_session_or_404(db, session_id)
+
+    # 顺序与 answer-stream 的订阅一致：先读任务状态再读消息。worker 是「先提交
+    # 消息、再标记成功」，倒过来读会看到「已成功但什么都没写」这种不存在的状态。
+    job = find_agent_turn_job(db, session_id, turn_id)
+    job_status = str((job or {}).get("status") or "missing")
+    messages = _list_recommendation_messages(db, session_id=session_id, limit=500, offset=0)
+    turn_messages = [
+        message
+        for message in messages
+        if str((message.get("metadata_json") or {}).get("turn_id") or "") == turn_id
+    ]
+    kinds = {
+        str((message.get("metadata_json") or {}).get("message_type") or "")
+        for message in turn_messages
+    }
+    failed = job_status in {"failed", "cancelled"}
+    error_code = str((job or {}).get("error_code") or "") or None
+    return {
+        "session_id": str(session_id),
+        "turn_id": turn_id,
+        "job_status": job_status,
+        # 终态失败只由后端说了算。前端永远不是这个判断的来源 —— 它自己判超时
+        # 的那一版把一轮真实耗时 376.8 秒的推荐在 361 秒时误杀了。
+        "failed": failed,
+        "aborted": "agent_aborted" in kinds,
+        "has_brief": "agent_brief" in kinds,
+        "has_answer": "agent_answer" in kinds,
+        "has_question": "agent_question" in kinds,
+        "error_code": error_code,
+        "error_message": (
+            JOB_STATUS_MESSAGES.get(error_code or "", DEFAULT_TURN_FAILURE_MESSAGE)
+            if failed
+            else None
+        ),
+        # 原始错误只给管理员：顾问看到的是上面那句人话。
+        "error_detail": str((job or {}).get("error_message") or "") or None
+        if failed and current_user.is_admin
+        else None,
+        "messages": turn_messages,
     }
 
 
