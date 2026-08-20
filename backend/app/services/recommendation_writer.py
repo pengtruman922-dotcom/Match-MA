@@ -32,6 +32,10 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from backend.app.ai.llm_client import stream_openai_compatible_chat
+from backend.app.services.recommendation_trace import (
+    RecommendationTraceContext,
+    insert_recommendation_node_trace,
+)
 from backend.app.shutdown import WorkerShutdown
 from backend.app.services.recommendation_answer import (
     backfill_target_links,
@@ -94,6 +98,7 @@ def run_writer_stage(
     is_aborted: Callable[[], bool],
     checkpoint: Callable[[], None] | None = None,
     stream_fn: Callable[..., Iterator[str]] = stream_openai_compatible_chat,
+    trace_context: RecommendationTraceContext | None = None,
     budget_seconds: float | None = None,
     flush_interval_seconds: float = DRAFT_FLUSH_INTERVAL_SECONDS,
     flush_delta_count: int = DRAFT_FLUSH_DELTA_COUNT,
@@ -131,11 +136,14 @@ def run_writer_stage(
         return WriterOutcome("aborted", "", "", None, elapsed_ms())
 
     error_message: str | None = None
+    # 提到分支外：收尾要拿它们写 trace，而「模型到底吐了什么」正是撰写节点出问题时
+    # 唯一有用的证据 —— 落库的 markdown 已经过消毒和链接回填，不是原始输出。
+    chunks: list[str] = []
+    prompt_messages: list[dict[str, Any]] = []
     if node_config is None:
         markdown = backfill_target_links(fallback_answer_markdown(brief), link_map)
         generation_mode = "fallback"
     else:
-        chunks: list[str] = []
         pending = 0
         last_flush = time.perf_counter()
 
@@ -154,13 +162,14 @@ def run_writer_stage(
             db.commit()
             return True
 
+        prompt_messages = render_messages(node_config, build_answer_prompt_variables(brief))
         try:
             for delta in stream_fn(
                 base_url=node_config["base_url"],
                 api_key_secret_ref=node_config["api_key_secret_ref"],
                 api_key_encrypted=node_config.get("api_key_encrypted"),
                 model_name=node_config["model_name"],
-                messages=render_messages(node_config, build_answer_prompt_variables(brief)),
+                messages=prompt_messages,
                 temperature=node_config["temperature"],
                 top_p=node_config["top_p"],
                 max_tokens=node_config["max_tokens"],
@@ -207,6 +216,31 @@ def run_writer_stage(
     if checkpoint is not None:
         checkpoint()
     duration_ms = elapsed_ms()
+    if node_config is not None:
+        # 没配节点的那条分支不写：那一轮**根本没有调用过模型**，记一行「调用」
+        # 只会让设置页显示成节点已经在跑。中止路径同理，在这行之前就 return 了。
+        insert_recommendation_node_trace(
+            db,
+            context=trace_context,
+            node_name=str(node_config.get("node_name") or ""),
+            node_config=node_config,
+            status="succeeded" if generation_mode == "llm" else "failed",
+            input_json={
+                "mode": brief.get("mode"),
+                "recommended_count": len(brief.get("recommended") or []),
+                "runner_up_count": len(brief.get("runner_ups") or []),
+                "deep_eval_status": brief.get("deep_eval_status"),
+            },
+            prompt_messages=prompt_messages,
+            raw_output_text="".join(chunks),
+            latency_ms=duration_ms,
+            error_message=error_message,
+            metadata={
+                "generation_mode": generation_mode,
+                "budget_seconds": float(budget),
+                "streamed_chars": len("".join(chunks)),
+            },
+        )
     write = insert_agent_answer_message(
         db,
         session_id=session_id,

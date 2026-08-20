@@ -33,6 +33,10 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
+from backend.app.services.recommendation_trace import (
+    RecommendationTraceContext,
+    insert_recommendation_node_trace,
+)
 from backend.app.ai.prompting import render_template
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.registry.nodes import deep_eval_node_by_mode
@@ -115,9 +119,12 @@ def _get_deep_eval_node_config(db: Session, mode: str) -> dict[str, Any]:
         text(
             """
             select
+              node.id as node_config_id,
               node.node_name, node.model_name, node.temperature, node.top_p,
               node.max_tokens, node.timeout_seconds, node.response_format,
+              provider.id as provider_config_id, provider.provider_name,
               provider.base_url, provider.api_key_secret_ref, provider.api_key_encrypted,
+              prompt.id as prompt_template_id,
               prompt.version as prompt_version,
               prompt.system_prompt, prompt.user_prompt_template
             from model_node_config node
@@ -537,6 +544,7 @@ def run_recommendation_deep_eval(
     intent_snapshot: dict[str, Any],
     candidates_by_id: dict[str, dict[str, Any]],
     buyer_party_id: Any = None,
+    trace_context: RecommendationTraceContext | None = None,
 ) -> dict[str, Any]:
     """跑一次深评节点，产出这一轮的定性判定与排序。
 
@@ -554,6 +562,16 @@ def run_recommendation_deep_eval(
         if str(value or "").strip()
     ]
     started = time.perf_counter()
+    node: dict[str, Any] | None = None
+    messages: list[dict[str, str]] = []
+    # 节点名只能来自注册表。这里写字面量会绕过 `test_node_name_literals_do_not_spread`
+    # 想守住的那条线：目录之外再没有第二处「节点叫什么」的定义。
+    node_name = deep_eval_node_by_mode().get(mode) or ""
+    trace_input = {
+        "mode": mode,
+        "candidate_count": len(candidates_by_id),
+        "qualitative_requirements": qualitative,
+    }
     try:
         node = _get_deep_eval_node_config(db, mode)
         items = build_deep_eval_candidates(db, mode=mode, candidates_by_id=candidates_by_id)
@@ -568,7 +586,6 @@ def run_recommendation_deep_eval(
             "candidates_json": json.dumps(items, ensure_ascii=False, default=str),
             "qualitative_requirements_json": json.dumps(qualitative, ensure_ascii=False),
         }
-        messages: list[dict[str, str]] = []
         system_prompt = render_template(node.get("system_prompt"), variables)
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -587,6 +604,18 @@ def run_recommendation_deep_eval(
         )
         raw_output = llm_result.parsed_output_json
     except (LlmCallError, ValueError, KeyError) as exc:
+        insert_recommendation_node_trace(
+            db,
+            context=trace_context,
+            node_name=str((node or {}).get("node_name") or node_name),
+            node_config=node,
+            status="failed",
+            input_json=trace_input,
+            prompt_messages=messages,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            error_message=str(exc),
+            metadata={"deep_eval_status": "unavailable"},
+        )
         return {
             **unavailable_deep_eval_result(f"深评节点未产出结果：{exc}"),
             "mode": mode,
@@ -618,6 +647,27 @@ def run_recommendation_deep_eval(
             "latency_ms": int((time.perf_counter() - started) * 1000),
             "total_tokens": llm_result.total_tokens,
         }
+    )
+    deep_status = str(result.get("deep_eval_status") or "")
+    insert_recommendation_node_trace(
+        db,
+        context=trace_context,
+        node_name=str(node.get("node_name") or node_name),
+        node_config=node,
+        status="succeeded" if deep_status == "ok" else "failed",
+        input_json=trace_input,
+        prompt_messages=messages,
+        raw_output_text=llm_result.raw_output_text,
+        parsed_output_json=raw_output if isinstance(raw_output, dict) else None,
+        latency_ms=int(llm_result.latency_ms or 0),
+        prompt_tokens=llm_result.prompt_tokens,
+        completion_tokens=llm_result.completion_tokens,
+        total_tokens=llm_result.total_tokens,
+        metadata={
+            "deep_eval_status": deep_status,
+            "ranked_count": len(result.get("ranked") or []),
+            "dropped_count": len(result.get("dropped") or []),
+        },
     )
     return result
 

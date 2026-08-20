@@ -252,6 +252,9 @@ def test_the_agent_turn_checkpoint_raises_instead_of_reporting_an_abort(monkeypa
     request_shutdown("SIGTERM")
     job = SimpleNamespace(
         id=uuid4(),
+        # 真的 JobClaim 有这个字段。替身缺字段 = 把「调用方读了个不存在的属性」
+        # 这种错误推迟到生产才发现。
+        correlation_id=uuid4(),
         job_type="recommendation_agent",
         payload_json={
             "mode": "buyer_to_target",

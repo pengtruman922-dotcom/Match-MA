@@ -15,6 +15,7 @@ they stay deterministic and testable.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 from sqlalchemy import bindparam, text
@@ -31,6 +32,10 @@ from backend.app.services.industry_taxonomy import (
     industry_l2_prompt_list,
     list_l1_terms,
     list_l2_terms,
+)
+from backend.app.services.recommendation_trace import (
+    RecommendationTraceContext,
+    insert_recommendation_node_trace,
 )
 from backend.app.services.screening_schema import SCREENING_FIELDS, normalize_conditions
 
@@ -137,9 +142,12 @@ def _get_query_parser_node_config(db: Session) -> dict[str, Any]:
         text(
             """
             select
+              node.id as node_config_id,
               node.model_name, node.temperature, node.top_p, node.max_tokens,
               node.timeout_seconds, node.response_format,
+              provider.id as provider_config_id, provider.provider_name,
               provider.base_url, provider.api_key_secret_ref, provider.api_key_encrypted,
+              prompt.id as prompt_template_id,
               prompt.version as prompt_version,
               prompt.system_prompt, prompt.user_prompt_template
             from model_node_config node
@@ -517,6 +525,7 @@ def parse_recommendation_intent(
     mode: str,
     user_message: str,
     history_context: str = "",
+    trace_context: RecommendationTraceContext | None = None,
 ) -> dict[str, Any]:
     """跑一次需求解析节点，产出用户经过本轮表达后的完整当前需求快照。
 
@@ -527,6 +536,14 @@ def parse_recommendation_intent(
     把它也包进去的话，归一化里的一个 bug 会被记成 `fallback`，看起来像模型不
     稳定，实际是代码坏了 —— 那正是这个阶段要消灭的那类静默失败。
     """
+    node: dict[str, Any] | None = None
+    messages: list[dict[str, str]] = []
+    trace_input = {
+        "mode": mode,
+        "user_message": user_message,
+        "history_context": history_context or "",
+    }
+    started = time.perf_counter()
     try:
         node = _get_query_parser_node_config(db)
         industry_l1_terms = list_l1_terms(db)
@@ -539,7 +556,6 @@ def parse_recommendation_intent(
             "industry_l2_list": industry_l2_prompt_list(db),
             "screening_fields_json": screening_fields_prompt_json(),
         }
-        messages: list[dict[str, str]] = []
         system_prompt = render_template(node.get("system_prompt"), variables)
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -558,6 +574,20 @@ def parse_recommendation_intent(
         )
         raw_output = llm_result.parsed_output_json
     except (LlmCallError, ValueError, KeyError) as exc:
+        # 降级也要留一行 trace。「节点根本没被调用」和「调了但超时降级了」在设置页
+        # 上都显示成一片空白，可这两件事的排查方向完全相反。
+        insert_recommendation_node_trace(
+            db,
+            context=trace_context,
+            node_name=QUERY_PARSER_NODE_NAME,
+            node_config=node,
+            status="failed",
+            input_json=trace_input,
+            prompt_messages=messages,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            error_message=str(exc),
+            metadata={"parser_status": "fallback"},
+        )
         return fallback_intent_parse_result(user_message, note=f"解析节点未产出结果：{exc}")
 
     result = normalize_intent_parse_result(
@@ -568,6 +598,28 @@ def parse_recommendation_intent(
     )
     # 哪一版提示词产出的这份快照，写进结果一起落库：失配要响，得先能指认。
     result["prompt_version"] = str(node.get("prompt_version") or "")
+    parser_status = str(result.get("parser_status") or "")
+    insert_recommendation_node_trace(
+        db,
+        context=trace_context,
+        node_name=QUERY_PARSER_NODE_NAME,
+        node_config=node,
+        # schema_mismatch 记成 failed：模型是回了话，但回的东西这一版代码用不了，
+        # 对管理员来说和调不通同样需要处理。
+        status="succeeded" if parser_status == "ok" else "failed",
+        input_json=trace_input,
+        prompt_messages=messages,
+        raw_output_text=llm_result.raw_output_text,
+        parsed_output_json=raw_output if isinstance(raw_output, dict) else None,
+        latency_ms=int(llm_result.latency_ms or 0),
+        prompt_tokens=llm_result.prompt_tokens,
+        completion_tokens=llm_result.completion_tokens,
+        total_tokens=llm_result.total_tokens,
+        metadata={
+            "parser_status": parser_status,
+            "condition_group_count": len(result.get("condition_groups") or []),
+        },
+    )
     return result
 
 

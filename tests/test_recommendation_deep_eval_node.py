@@ -326,9 +326,19 @@ _CANDIDATES: dict[str, dict[str, Any]] = {
 
 
 class _LlmResult:
+    """字段跟着真的 `ChatCompletionResult` 走 —— 缺字段的替身只会把
+    「调用方读了一个不存在的属性」这种错误藏到生产里。"""
+
     def __init__(self, parsed: Any, total_tokens: int | None = 1234) -> None:
         self.parsed_output_json = parsed
+        self.raw_output_text = "" if parsed is None else json.dumps(parsed, ensure_ascii=False)
+        self.prompt_tokens = 1000
+        self.completion_tokens = 234
         self.total_tokens = total_tokens
+        self.latency_ms = 4321
+        self.tool_calls = ()
+        self.finish_reason = "stop"
+        self.assistant_message = None
 
 
 def _fake_chat(captured: dict[str, Any], parsed: Any):

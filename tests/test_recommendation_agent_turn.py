@@ -415,6 +415,9 @@ def test_abort_after_parsing_persists_understanding_but_never_enters_the_tool_lo
     session_id = uuid4()
     job = SimpleNamespace(
         id=uuid4(),
+        # 真的 JobClaim 有这个字段。替身缺字段 = 把「调用方读了个不存在的属性」
+        # 这种错误推迟到生产才发现。
+        correlation_id=uuid4(),
         job_type="recommendation_agent",
         payload_json={
             "mode": "buyer_to_target",
@@ -664,6 +667,9 @@ def _exercise_handler_4b(
     db = Db()
     job = SimpleNamespace(
         id=uuid4(),
+        # 真的 JobClaim 有这个字段。替身缺字段 = 把「调用方读了个不存在的属性」
+        # 这种错误推迟到生产才发现。
+        correlation_id=uuid4(),
         job_type="recommendation_agent",
         payload_json={
             "mode": "buyer_to_target",
@@ -810,12 +816,20 @@ def test_each_request_gets_the_smaller_of_node_timeout_and_time_left() -> None:
             "temperature": 0, "top_p": 1, "max_tokens": 10,
             "timeout_seconds": 300, "response_format": None,
         }
-        # 一轮总预算 300，已经跑了 250 秒 → 这次调用最多还剩 50 秒。
+        # 一轮总预算 300，已经跑了 250 秒。剩余 50 秒低于收尾额度，取额度本身 ——
+        # 剩余时间见底的那次调用恰恰就是收尾调用，按剩余时间给等于保证它超时。
         chat = _agent_chat_caller(
             config, started=time.perf_counter() - 250, budget_seconds=300.0
         )
         chat(messages=[], tools=None)
-        assert 40 <= seen[-1] <= 55
+        assert seen[-1] == 60
+
+        # 预算还很宽裕：取节点配置值本身，收尾额度不参与。
+        chat = _agent_chat_caller(
+            config, started=time.perf_counter() - 100, budget_seconds=300.0
+        )
+        chat(messages=[], tools=None)
+        assert 190 <= seen[-1] <= 200
 
         # 预算充裕时，取节点配置值本身。
         chat = _agent_chat_caller(
@@ -824,13 +838,73 @@ def test_each_request_gets_the_smaller_of_node_timeout_and_time_left() -> None:
         chat(messages=[], tools=None)
         assert seen[-1] == 300
 
-        # 预算已经花光也不能传 0：那会让 urlopen 立刻抛，
-        # 真正的原因（预算用完）就被一条网络错误盖住了。
+        # 节点本身配得比收尾额度还小时，下限跟着节点走 ——
+        # 单次调用永远不许超过管理员配的那个数。
         chat = _agent_chat_caller(
-            config, started=time.perf_counter() - 9999, budget_seconds=300.0
+            {**config, "timeout_seconds": 30},
+            started=time.perf_counter() - 9999,
+            budget_seconds=300.0,
         )
         chat(messages=[], tools=None)
-        assert seen[-1] >= 5
+        assert seen[-1] == 30
+    finally:
+        handler.call_openai_compatible_chat = original
+
+
+def test_the_wrapup_call_is_never_starved_by_the_budget_that_triggered_it() -> None:
+    """0820 生产事故：预算耗尽后的收尾调用只拿到 5 秒，必然超时，整轮硬失败。
+
+    收尾调用是 early stop 的产物 —— 它出现的**前提**就是预算已经见底。用同一份
+    见底的预算去算它的超时，得到的必然是下限；下限当时是 5 秒，于是这条路径在
+    生产上 100% 失败，报的还是 `timed out after 5s`，把真正的原因盖住。矿业那个
+    多组需求连挂两轮，两轮都是这条路。
+
+    所以带工具的阶段必须提前收手，把收尾额度留出来。
+    """
+    import time
+
+    from backend.app.jobs.handlers.recommendation import (
+        _agent_chat_caller,
+        _agent_early_stop,
+        _agent_tool_phase_deadline,
+    )
+    import backend.app.jobs.handlers.recommendation as handler
+
+    budget = 300.0
+    tools = _tools_with({})
+    # 工具阶段的截止线严格早于整轮预算，差值就是留给收尾的时间。
+    deadline = _agent_tool_phase_deadline(budget)
+    assert deadline == 240.0
+
+    # 刚过截止线：early stop 发出收尾指令。
+    started = time.perf_counter() - (deadline + 1)
+    assert "时间已用尽" in _agent_early_stop(tools, started, budget)
+
+    seen: list[int] = []
+
+    def fake_call(**kwargs):
+        seen.append(kwargs["timeout_seconds"])
+        return None
+
+    original = handler.call_openai_compatible_chat
+    handler.call_openai_compatible_chat = fake_call
+    try:
+        config = {
+            "base_url": "", "api_key_secret_ref": "", "model_name": "m",
+            "temperature": 0, "top_p": 1, "max_tokens": 10,
+            "timeout_seconds": 300, "response_format": None,
+        }
+        # 就是这一刻发出的收尾调用：必须拿到一个真能跑完的秒数。
+        _agent_chat_caller(config, started=started, budget_seconds=budget)(
+            messages=[], tools=None
+        )
+        assert seen[-1] == 60
+
+        # 最后一次工具（生产上是深评，实测 200~250 秒）把预算冲爆之后同理。
+        _agent_chat_caller(
+            config, started=time.perf_counter() - 9999, budget_seconds=budget
+        )(messages=[], tools=None)
+        assert seen[-1] == 60
     finally:
         handler.call_openai_compatible_chat = original
 
@@ -917,3 +991,65 @@ def test_agent_prompt_v020_same_version_conflict_exits_nonzero(monkeypatch) -> N
     monkeypatch.setattr(sys, "argv", ["publish_recommendation_agent_v020_prompt.py", "--dry-run"])
 
     assert prompt.main() != 0
+
+
+def test_a_turn_with_candidates_is_forced_closed_instead_of_failing() -> None:
+    """「完全无结果才失败」这条降级口径以前只写在文档里，代码从来没实现。
+
+    `LlmCallError` 一路抛到 worker，把已经跑完的初筛、深评连同用户等的几分钟
+    一起扔掉，页面只剩一句「这一轮没能跑完」。而最终名单本来就不依赖模型的收尾
+    JSON —— 深评正常时来自 ranked，否则来自初筛顺序，都是代码持有的数据。
+    """
+    from backend.app.jobs.handlers.recommendation import _degraded_loop_from_candidates
+
+    tools = _tools_with({"t-1": _CANDIDATE})
+    loop = _degraded_loop_from_candidates(tools, [{"role": "user", "content": "找标的"}])
+
+    assert loop is not None
+    # 模型的收尾 JSON 就是没有 —— 这正是要证明的：没有它也能成篇。
+    assert loop.result.parsed_output_json is None
+    brief = _build_answer_brief(loop.result.parsed_output_json, tools=tools, mode="buyer_to_target")
+    assert [item["id"] for item in brief["recommended"]] == ["t-1"]
+    assert brief["deep_eval_status"] == "ok"
+
+
+def test_forced_close_needs_something_to_close_with() -> None:
+    """没有候选就是真的失败，不许拿一份空名单冒充答案。"""
+    from backend.app.jobs.handlers.recommendation import _degraded_loop_from_candidates
+
+    empty = RecommendationAgentTools(db=None, target_facts_fn=dict, screen_targets_fn=lambda *_, **__: None)
+    assert _degraded_loop_from_candidates(empty, []) is None
+
+    # 已经决定向用户提问：本轮的产出是问题，不是名单，也不该被收口成名单。
+    asking = _tools_with({"t-1": _CANDIDATE})
+    asking.ask_user_payload = {"questions": []}
+    assert _degraded_loop_from_candidates(asking, []) is None
+
+
+def test_timeout_trace_measures_wall_clock_not_the_sum_of_model_latencies() -> None:
+    """预算是墙钟，比对它的那个数也必须是墙钟。
+
+    成功路径传进来的 latency_ms 是**各次模型调用耗时之和**，不含工具执行。拿它
+    去比预算，一轮真跑了 7 分钟、模型只占 30 秒的编排会报「没超预算」——
+    而那一轮恰恰是被强制收口的。
+    """
+    from backend.app.jobs.handlers.recommendation import _timeout_trace_summary
+
+    summary = _timeout_trace_summary(
+        budget_seconds=300.0,
+        elapsed_seconds=427.2,
+        latency_ms=30_000,
+        llm_calls=5,
+    )
+    assert summary["elapsed_seconds"] == 427.2
+    assert summary["llm_seconds"] == 30.0
+    assert summary["exhausted"] is True
+    assert summary["llm_calls_when_exhausted"] == 5
+    assert summary["wrapup_reserve_seconds"] == 60.0
+
+    # 工具阶段截止线之前收工的一轮，不算用尽。
+    healthy = _timeout_trace_summary(
+        budget_seconds=300.0, elapsed_seconds=120.0, latency_ms=90_000, llm_calls=3
+    )
+    assert healthy["exhausted"] is False
+    assert healthy["llm_calls_when_exhausted"] is None

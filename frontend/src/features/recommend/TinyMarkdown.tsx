@@ -155,7 +155,10 @@ function renderInline(text: string): ReactNode {
   if (parts.length === 1) return text;
   return parts.map((part, index) => {
     if (part.startsWith('**') && part.endsWith('**')) {
-      return <strong key={index} className="font-semibold text-gray-900">{part.slice(2, -2)}</strong>;
+      // 加粗内容必须再走一遍，否则它就是这一段的终点。正文里标的名的实际形态是
+      // `**1. [名称](/targets/id)项目**` —— 回填链接的是后端，加粗是模型自己写的，
+      // 两者天然会套在一起；不递归的话每一个标的链接都会退化成一串字面量。
+      return <strong key={index} className="font-semibold text-gray-900">{renderInline(part.slice(2, -2))}</strong>;
     }
     const link = /^\[([^\]]+)\]\((\/[^)\s]*)\)$/.exec(part);
     if (link) {

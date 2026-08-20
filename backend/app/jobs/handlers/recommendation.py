@@ -11,8 +11,17 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
-from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
-from backend.app.ai.tool_loop import ToolLoopAborted, run_tool_loop
+from backend.app.ai.llm_client import (
+    ChatCompletionResult,
+    LlmCallError,
+    call_openai_compatible_chat,
+)
+from backend.app.ai.tool_loop import (
+    ToolLoopAborted,
+    ToolLoopResult,
+    ToolLoopUsage,
+    run_tool_loop,
+)
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
 from backend.app.config import get_settings
 from backend.app.jobs.handlers.common import (
@@ -56,6 +65,7 @@ from backend.app.services.recommendation_flow import (
     agent_turn_aborted,
     target_facts_for_agent,
 )
+from backend.app.services.recommendation_trace import RecommendationTraceContext
 from backend.app.services.recommendation_writer import run_writer_stage
 
 
@@ -76,6 +86,18 @@ AGENT_MAX_ITERATIONS = 12
 # 它同时是对 worker stale 窗口（1800s）的第二道保险：迭代上限管不住单次调用
 # 很慢的情况，墙钟能。
 DEFAULT_AGENT_WALL_CLOCK_BUDGET_SECONDS = 240
+
+# 收尾那一次调用的专用额度。
+#
+# 收尾调用是「预算已经用完」这件事的**产物**：early stop 正是在预算见底时才发出
+# 「别再调工具了，拿现有候选给最终 JSON」。再拿同一份已经见底的预算去限制它，
+# 剩余时间必然接近 0，于是它拿到下限（曾经是 5 秒）、必然超时、整轮硬失败 ——
+# 用户看到的就是「这一轮没能跑完」，而报错写的是 `timed out after 5s`，
+# 把真正的原因盖得严严实实。0820 生产实测：矿业那个多组需求连挂两轮，都是这条路。
+#
+# 所以带工具的编排提前 RESERVE 秒收手，这段时间只留给收尾。整轮上限因此是
+# 「预算 + 一次收尾」，仍然有界。
+AGENT_WRAPUP_RESERVE_SECONDS = 60
 
 
 def _build_recommendation_agent_context(
@@ -174,6 +196,15 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
     history_context = str(payload.get("history_context") or "")
 
     heartbeat = JobHeartbeat(db, job.id)
+    # 这一轮里四个 AI 节点共用的 trace 归属。以前只有编排 Agent 写 trace，
+    # 另外三个节点在设置页上「最近生产调用」永远是空的 —— 管理员没法确认自己
+    # 配的模型和提示词到底有没有生效。
+    trace_context = RecommendationTraceContext(
+        session_id=session_id,
+        job_id=job.id,
+        correlation_id=job.correlation_id,
+        turn_id=turn_id,
+    )
 
     def turn_stopped() -> bool:
         """Abort check that also honours a shutdown request, as two verdicts.
@@ -202,6 +233,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
     parser_started = time.perf_counter()
     intent_snapshot = parse_recommendation_intent(
         db,
+        trace_context=trace_context,
         mode=mode,
         user_message=user_message,
         history_context=history_context,
@@ -272,9 +304,12 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             mode=mode,
             intent_snapshot={**intent_snapshot, **agent_context["intent_snapshot"]},
             candidates_by_id=candidates_by_id,
+            trace_context=trace_context,
         ),
     )
     started = time.perf_counter()
+    # 非空表示这一轮是被强制收口的：模型不再应答，名单只来自代码手上的数据。
+    agent_degraded_reason: str | None = None
     # 整轮编排的总预算 = 这个节点配置的 timeout_seconds。
     agent_budget_seconds = float(
         node_config.get("timeout_seconds") or DEFAULT_AGENT_WALL_CLOCK_BUDGET_SECONDS
@@ -306,6 +341,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             conversation=aborted.messages,
             loop=None,
             latency_ms=int((time.perf_counter() - started) * 1000),
+            elapsed_seconds=time.perf_counter() - started,
             tools=tools,
             intent_snapshot=intent_snapshot,
             deep_eval=tools.deep_eval_result,
@@ -324,24 +360,29 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             "recommended_count": 0,
         }
     except LlmCallError as exc:
-        _insert_recommendation_agent_trace(
-            db,
-            job=job,
-            session_id=session_id,
-            node_config=node_config,
-            status="failed",
-            input_json=agent_context,
-            conversation=messages,
-            loop=None,
-            latency_ms=int((time.perf_counter() - started) * 1000),
-            tools=tools,
-            intent_snapshot=intent_snapshot,
-            deep_eval=tools.deep_eval_result,
-            budget_seconds=agent_budget_seconds,
-            error_message=str(exc),
-        )
-        db.commit()
-        raise
+        degraded_loop = _degraded_loop_from_candidates(tools, messages)
+        if degraded_loop is None:
+            _insert_recommendation_agent_trace(
+                db,
+                job=job,
+                session_id=session_id,
+                node_config=node_config,
+                status="failed",
+                input_json=agent_context,
+                conversation=messages,
+                loop=None,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                elapsed_seconds=time.perf_counter() - started,
+                tools=tools,
+                intent_snapshot=intent_snapshot,
+                deep_eval=tools.deep_eval_result,
+                budget_seconds=agent_budget_seconds,
+                error_message=str(exc),
+            )
+            db.commit()
+            raise
+        loop = degraded_loop
+        agent_degraded_reason = str(exc)
 
     if turn_stopped():
         # 停止发生在最后一次模型调用期间：素材不落库，否则页面会在「任务已停止」
@@ -356,6 +397,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             conversation=loop.messages,
             loop=loop,
             latency_ms=loop.usage.latency_ms,
+            elapsed_seconds=time.perf_counter() - started,
             tools=tools,
             intent_snapshot=intent_snapshot,
             deep_eval=tools.deep_eval_result,
@@ -383,6 +425,9 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
         tools.ask_user_payload is None
         and tools.candidate_pool().candidate_ids
         and not tools.deep_eval_called
+        # 强制收口时不补跑深评：走到那条路正是因为模型调不动了，深评又是本轮最长的
+        # 一次模型调用（生产实测 200~250 秒），补跑只会把已经超时的一轮拖得更久。
+        and agent_degraded_reason is None
     ):
         if turn_stopped():
             return _finish_aborted_agent_turn(
@@ -461,6 +506,12 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
         brief = None
     else:
         brief = _build_answer_brief(loop.result.parsed_output_json, tools=tools, mode=mode)
+        if agent_degraded_reason is not None:
+            # 名单是真的（初筛与深评都跑完了），挑选环节是代码补的。写进 brief 而不是
+            # 只写日志：事后回看这一轮时，「为什么排序看起来没有 Agent 的判断」必须
+            # 有答案，否则只能怀疑模型质量。
+            brief["agent_status"] = "degraded_forced_wrapup"
+            brief["agent_degraded_reason"] = agent_degraded_reason
         _insert_agent_brief_message(
             db,
             session_id=session_id,
@@ -481,10 +532,12 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
         conversation=loop.messages + [{"role": "assistant", "content": loop.result.raw_output_text}],
         loop=loop,
         latency_ms=loop.usage.latency_ms,
+        elapsed_seconds=time.perf_counter() - started,
         tools=tools,
         intent_snapshot=intent_snapshot,
         deep_eval=deep_eval,
         budget_seconds=agent_budget_seconds,
+        degraded_reason=agent_degraded_reason,
     )
     # 提交在写正文之前，不是之后：brief 一落库前端就能看到进度并连上订阅，
     # 正文开始流的时候读者已经在那里了。
@@ -499,6 +552,7 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             brief=brief,
             is_aborted=turn_stopped,
             heartbeat=heartbeat,
+            trace_context=trace_context,
         )
 
     return {
@@ -523,6 +577,7 @@ def _write_turn_answer(
     brief: dict[str, Any],
     is_aborted: Callable[[], bool],
     heartbeat: JobHeartbeat,
+    trace_context: RecommendationTraceContext | None = None,
 ) -> tuple[str, dict[str, object]]:
     """Run the Writer for this turn and report how it ended.
 
@@ -549,6 +604,7 @@ def _write_turn_answer(
         render_messages=_render_prompt_messages,
         is_aborted=is_aborted,
         checkpoint=checkpoint,
+        trace_context=trace_context,
     )
     if outcome.status == "aborted":
         return "aborted", {"answer_generation_mode": None}
@@ -717,6 +773,56 @@ def _agent_image_inputs(db: Session, attachment_ids: list[str]) -> tuple[list[di
     return images, summaries
 
 
+def _degraded_loop_from_candidates(
+    tools: RecommendationAgentTools,
+    conversation: list[dict[str, Any]],
+) -> ToolLoopResult | None:
+    """模型这一轮彻底不应答时，用手上已有的候选强制收口；没有候选才返回 None。
+
+    「完全无结果才失败」是这个链路一开始就写下的降级口径，但代码里从来没有实现 ——
+    `LlmCallError` 一路抛到 worker，把已经跑完的初筛、深评连同用户等的那几分钟
+    一起扔掉，页面只剩一句「这一轮没能跑完」。而最终名单**本来就不依赖**模型的
+    收尾 JSON：深评正常时来自 ranked，否则来自初筛顺序，两条都是代码持有的数据；
+    模型的收尾 JSON 只是在这份可选集里挑几个。少了它，`build_answer_brief_v2`
+    自己就会退到 `screening_fallback`，这正是它存在的意义。
+
+    刻意**不**在这里再发起任何模型调用。已经问过一次不应答了。
+    """
+    if tools.ask_user_payload is not None:
+        # 已经决定向用户提问：这一轮的产出是问题，不是名单。没有候选可收口。
+        return None
+    if not tools.candidate_pool().candidate_ids:
+        return None
+    return ToolLoopResult(
+        result=ChatCompletionResult(
+            raw_output_text="",
+            parsed_output_json=None,
+            prompt_tokens=None,
+            completion_tokens=None,
+            total_tokens=None,
+            latency_ms=0,
+        ),
+        messages=list(conversation),
+        usage=ToolLoopUsage(),
+        hit_iteration_limit=False,
+        json_finalization_attempted=False,
+    )
+
+
+def _agent_wrapup_reserve(budget_seconds: float) -> float:
+    """留给收尾调用的秒数，永远小于整轮预算本身。
+
+    预算配得比 RESERVE 还小时（测试里常见），对半分 —— 否则工具阶段的截止线
+    会落到负数，一进循环就触发 early stop，等于这个节点根本不许调工具。
+    """
+    return min(float(AGENT_WRAPUP_RESERVE_SECONDS), budget_seconds / 2)
+
+
+def _agent_tool_phase_deadline(budget_seconds: float) -> float:
+    """带工具的编排必须在这条线之前停手；线之后的时间属于收尾调用。"""
+    return max(0.0, budget_seconds - _agent_wrapup_reserve(budget_seconds))
+
+
 def _agent_early_stop(
     tools: RecommendationAgentTools,
     started: float,
@@ -728,7 +834,7 @@ def _agent_early_stop(
             "已向用户提问，本轮到此结束。请只输出一个 JSON 对象，"
             '形如 {"asked_user": true}，不要再调用任何工具。'
         )
-    if time.perf_counter() - started >= budget_seconds:
+    if time.perf_counter() - started >= _agent_tool_phase_deadline(budget_seconds):
         return (
             "本轮编排时间已用尽。请立即基于已获得的候选给出最终 JSON 结果，"
             "不要再调用任何工具。"
@@ -754,10 +860,11 @@ def _agent_chat_caller(
         configured = int(node_config["timeout_seconds"] or DEFAULT_AGENT_WALL_CLOCK_BUDGET_SECONDS)
         if started is None or budget_seconds is None:
             return configured
-        # 至少留 5 秒：给 0 或负数等于让 urlopen 立刻抛，那条错误会盖住
-        # 「其实是预算用完了」这个真正的原因。
-        left = max(5, int(budget_seconds - (time.perf_counter() - started)))
-        return min(configured, left)
+        # 下限是收尾额度，不是一个象征性的小数字。走到剩余时间见底的那一次调用，
+        # 就是 early stop 发出的收尾调用；给它「刚好不够」的秒数 = 保证它超时。
+        floor = min(configured, max(1, int(_agent_wrapup_reserve(budget_seconds))))
+        left = int(budget_seconds - (time.perf_counter() - started))
+        return max(floor, min(configured, left))
 
     def chat(*, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None):
         return call_openai_compatible_chat(
@@ -1017,6 +1124,7 @@ def _insert_agent_brief_message(
 def _timeout_trace_summary(
     *,
     budget_seconds: float | None,
+    elapsed_seconds: float | None,
     latency_ms: int,
     llm_calls: int,
 ) -> dict[str, Any]:
@@ -1027,15 +1135,24 @@ def _timeout_trace_summary(
     the output. Recording the configured number alongside the measured one also
     makes the 0819 semantics change auditable — before it, the node said 600
     while the real budget was a hardcoded 240.
+
+    `elapsed_seconds` 必须是墙钟。成功路径传进来的 `latency_ms` 是**各次模型调用
+    的耗时之和**，不含工具执行 —— 而预算是墙钟。拿它去比，一轮真正跑了 7 分钟的
+    编排会因为模型只占 30 秒而报「没超预算」，这条记录就废了。缺省回落到
+    latency_ms 只是为了老调用点不炸，新代码一律显式传。
     """
     budget = float(budget_seconds or DEFAULT_AGENT_WALL_CLOCK_BUDGET_SECONDS)
-    elapsed_seconds = max(0.0, latency_ms / 1000.0)
+    wall_clock = max(0.0, elapsed_seconds if elapsed_seconds is not None else latency_ms / 1000.0)
+    tool_phase_deadline = _agent_tool_phase_deadline(budget)
+    exhausted = wall_clock >= tool_phase_deadline
     return {
         "configured_seconds": budget,
-        "elapsed_seconds": round(elapsed_seconds, 3),
-        "exhausted": elapsed_seconds >= budget,
+        "wrapup_reserve_seconds": round(_agent_wrapup_reserve(budget), 3),
+        "elapsed_seconds": round(wall_clock, 3),
+        "llm_seconds": round(max(0.0, latency_ms / 1000.0), 3),
+        "exhausted": exhausted,
         # 超时发生在第几次调用 —— 只有真用完预算时才有意义。
-        "llm_calls_when_exhausted": llm_calls if elapsed_seconds >= budget else None,
+        "llm_calls_when_exhausted": llm_calls if exhausted else None,
     }
 
 
@@ -1055,6 +1172,8 @@ def _insert_recommendation_agent_trace(
     deep_eval: dict[str, Any] | None = None,
     error_message: str | None = None,
     budget_seconds: float | None = None,
+    elapsed_seconds: float | None = None,
+    degraded_reason: str | None = None,
 ) -> None:
     """One row per agent turn, not per LLM call — same rule as research."""
     usage = loop.usage if loop else None
@@ -1129,9 +1248,11 @@ def _insert_recommendation_agent_trace(
                 "deep_eval": _deep_eval_trace_summary(deep_eval),
                 "timeout": _timeout_trace_summary(
                     budget_seconds=budget_seconds,
+                    elapsed_seconds=elapsed_seconds,
                     latency_ms=latency_ms,
                     llm_calls=usage.llm_calls if usage else 0,
                 ),
+                "degraded_reason": degraded_reason,
                 **tools.as_trace_payload(),
             },
         },
