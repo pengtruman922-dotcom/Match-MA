@@ -1,4 +1,5 @@
 import { Loader2, Trash2 } from 'lucide-react';
+import type { ReactNode } from 'react';
 import { isAdmin } from '../lib/auth';
 import type { AppUserOption } from '../types/api';
 
@@ -13,6 +14,7 @@ export default function BulkActionBar({
   onAssignValueChange,
   onAssign,
   assigning,
+  extraActions,
 }: {
   count: number;
   label: string;
@@ -24,6 +26,8 @@ export default function BulkActionBar({
   onAssignValueChange?: (value: string) => void;
   onAssign?: () => void;
   assigning?: boolean;
+  /** 列表特有的批量动作（如买家侧的「AI 补全信息」），放在指派与删除之前。 */
+  extraActions?: ReactNode;
 }) {
   const admin = isAdmin();
   return (
@@ -31,6 +35,7 @@ export default function BulkActionBar({
       <span className="text-amber-800">已选择 {count} 个{label}</span>
       <div className="flex items-center gap-2">
         <button onClick={onClear} className="px-3 py-1.5 text-xs text-amber-700 hover:text-amber-900">取消选择</button>
+        {extraActions}
         {admin && assignOptions && onAssign && (
           <>
             <select

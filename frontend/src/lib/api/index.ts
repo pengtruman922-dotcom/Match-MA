@@ -49,10 +49,14 @@ import type {
   BuyerIntentParseJob,
   BuyerIntentParseStatus,
   BuyerParty,
+  BuyerPartyBatchParseResponse,
   BuyerPartyCreate,
   BuyerPartyDedupCheck,
   BuyerPartyFilterOptions,
+  BuyerPartyIngestJob,
+  BuyerPartyIngestStatus,
   BuyerPartyListResponse,
+  BuyerPartyMaterialUploadResponse,
   BuyerPartySearchField,
   BuyerPartySuggestion,
   BuyerSellerRelation,
@@ -201,6 +205,38 @@ export const buyerParties = {
       body: JSON.stringify({ ids, owner_user_id: ownerUserId }),
     }),
   intents: (id: string) => apiRequest<BuyerIntent[]>(`/buyer-parties/${id}/intents`),
+  /** 材料文件先挂到主体上：走不走 OCR 由服务端按类型决定（图片不走）。 */
+  uploadMaterials: (id: string, files: File[]) => {
+    const formData = new FormData();
+    files.forEach((file) => formData.append('files', file));
+    return apiRequest<BuyerPartyMaterialUploadResponse>(`/buyer-parties/${id}/materials`, {
+      method: 'POST',
+      body: formData,
+    });
+  },
+  /** 触发「AI 补全买家信息」。调研可能跑十分钟，所以调用方点完就该走。 */
+  parse: (
+    id: string,
+    data?: {
+      raw_text?: string | null;
+      attachment_ids?: string[];
+      enable_research?: boolean;
+      mode?: 'fill' | 'refresh';
+      refresh_fields?: string[];
+      force?: boolean;
+    },
+  ) =>
+    apiRequest<BuyerPartyIngestJob>(`/buyer-parties/${id}/parse`, {
+      method: 'POST',
+      body: JSON.stringify(data || {}),
+    }),
+  batchParse: (ids: string[], data?: { enable_research?: boolean; mode?: 'fill' | 'refresh' }) =>
+    apiRequest<BuyerPartyBatchParseResponse>('/buyer-parties/batch-parse', {
+      method: 'POST',
+      body: JSON.stringify({ buyer_party_ids: ids, ...(data || {}) }),
+    }),
+  parseStatus: (id: string) =>
+    apiRequest<BuyerPartyIngestStatus>(`/buyer-parties/${id}/parse-status`),
 };
 
 export const buyerIntents = {
@@ -500,9 +536,13 @@ export const research = {
     apiRequest<SellerResearchStatus>(`/research/seller-targets/${sellerTargetId}/status`),
   report: (jobId: string) =>
     apiRequest<ResearchReport>(`/research/jobs/${jobId}/report`),
-  proposals: (entityId: string, reviewStatus?: string) =>
+  proposals: (
+    entityId: string,
+    reviewStatus?: string,
+    entityType: 'seller_target' | 'buyer_party' = 'seller_target',
+  ) =>
     apiRequest<ResearchProposal[]>(`/research/proposals${buildQuery({
-      entity_type: 'seller_target',
+      entity_type: entityType,
       entity_id: entityId,
       review_status: reviewStatus,
     })}`),

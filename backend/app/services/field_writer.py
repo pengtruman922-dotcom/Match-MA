@@ -1,4 +1,4 @@
-"""One write channel for seller_target structured facts.
+"""One write channel for structured facts on seller targets and buyer parties.
 
 Parse-apply and research-apply each carried their own copy of the same
 mechanics — load the current value, diff, UPDATE the column, write the audit
@@ -35,6 +35,10 @@ from backend.app.api.routes.utils import (
 )
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.registry.indicators import Indicator, indicator_by_column, indicators_for
+from backend.app.services.buyer_party_name import (
+    BuyerPartyNameChangeRequiresReview,
+    plan_buyer_party_rename,
+)
 from backend.app.services.entity_grade import SELLER_GRADE, resolve_grade_pair
 from backend.app.services.industry_taxonomy import normalize_industry_pairs, normalize_l2_values, resolve_l1
 from backend.app.services.region_dictionary import NORMALIZERS as REGION_NORMALIZERS
@@ -93,12 +97,19 @@ _TEXT_LIMITS = {
     "asking_price_date": 80,
 }
 _REQUIRED_SELLER_TARGET_FIELDS = {"target_name", "target_type", "listed_status"}
+_ISO_DATE_COLUMNS = frozenset({"financial_period_end_date", "market_cap_as_of"})
 
 
-def _normalize_value(db: Session, indicator: Indicator, value: Any) -> Any:
+def _normalize_value(
+    db: Session,
+    indicator: Indicator,
+    value: Any,
+    *,
+    required_columns: frozenset[str] = frozenset(_REQUIRED_SELLER_TARGET_FIELDS),
+) -> Any:
     """Validate values at the only structured-fact write boundary."""
     if value is None:
-        if indicator.column in _REQUIRED_SELLER_TARGET_FIELDS:
+        if indicator.column in required_columns:
             raise FieldWriteError(f"{indicator.column} may not be empty.")
         return None
     if indicator.column == "industry_l1":
@@ -120,11 +131,14 @@ def _normalize_value(db: Session, indicator: Indicator, value: Any) -> Any:
         # Province is spelled one way for everyone, so cascading filters match
         # regardless of whether a value came from the picker or from an LLM.
         return REGION_NORMALIZERS[indicator.column](value)
-    if indicator.column == "financial_period_end_date":
+    # 只有这两列真的是 date 列。**不要**改成按 indicator.kind == "date" 泛化：
+    # seller_target.valuation_date / asking_price_date 在注册表里也标 date，
+    # 但 DDL 是 text，存的是「2025年一季度」这种中文标签。
+    if indicator.column in _ISO_DATE_COLUMNS:
         try:
-            return value if isinstance(value, date) else date.fromisoformat(str(value))
+            return value if isinstance(value, date) else date.fromisoformat(str(value)[:10])
         except (TypeError, ValueError) as exc:
-            raise FieldWriteError("financial_period_end_date must be an ISO date.") from exc
+            raise FieldWriteError(f"{indicator.column} must be an ISO date.") from exc
     if indicator.kind == "enum":
         if not isinstance(value, str):
             raise FieldWriteError(f"{indicator.column} must be an enum value.")
@@ -172,21 +186,39 @@ def _normalize_value(db: Session, indicator: Indicator, value: Any) -> Any:
 
 
 def _load_current(db: Session, seller_target_id: UUID, columns: list[str]) -> dict[str, Any]:
-    # columns are registry-validated indicator names, safe to interpolate.
+    return _load_current_row(
+        db,
+        table="seller_target",
+        entity_id=seller_target_id,
+        columns=columns,
+        missing_message=f"Seller target not found: {seller_target_id}",
+    )
+
+
+def _load_current_row(
+    db: Session,
+    *,
+    table: str,
+    entity_id: UUID,
+    columns: list[str],
+    missing_message: str,
+) -> dict[str, Any]:
+    # Table names are module constants and columns are registry-validated
+    # indicator names, so both are safe to interpolate.
     projection = ", ".join(columns)
     row = db.execute(
         text(
             f"""
             select {projection}
-            from seller_target
+            from {table}
             where id = :id and team_id = :team_id and workspace_id = :workspace_id
               and deleted_at is null
             """
         ),
-        {"id": seller_target_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
+        {"id": entity_id, "team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
     ).mappings().one_or_none()
     if row is None:
-        raise FieldWriteError(f"Seller target not found: {seller_target_id}")
+        raise FieldWriteError(missing_message)
     return dict(row)
 
 
@@ -355,3 +387,228 @@ def write_seller_target_fields(
         source=search_doc_source,
     )
     return list(diff)
+
+
+_REQUIRED_BUYER_PARTY_FIELDS = frozenset({"buyer_name", "ownership_type", "listed_status"})
+
+# 财务数字必须带时间一起落库：没有时间的财务数字是不可用的。
+# 一个数字对应哪一格时间由列决定，不由模型说，所以映射写在代码里。
+BUYER_PARTY_FINANCIAL_TIME_COLUMNS: dict[str, str] = {
+    "market_cap_yuan": "market_cap_as_of",
+    "valuation_yuan": "valuation_date",
+    "current_revenue_yuan": "financial_period_label",
+    "current_operating_cash_flow_yuan": "financial_period_label",
+}
+
+
+def _buyer_party_columns() -> set[str]:
+    return {ind.column for ind in indicators_for("buyer_party")}
+
+
+def write_buyer_party_fields(
+    db: Session,
+    buyer_party_id: UUID,
+    changes: dict[str, Any],
+    *,
+    provenance: WriteProvenance,
+    rejected_fields: dict[str, str] | None = None,
+) -> list[str]:
+    """Apply normalized field changes to a buyer_party, audited and sourced.
+
+    Same contract as ``write_seller_target_fields`` — registry-validated columns,
+    per-source write authority, one audit log and one field-value source per
+    changed column — minus the three seller-only pieces: the grade pair, the
+    industry compatibility projection, and the search-doc rebuild (buyer parties
+    have no search document).
+
+    改名仍然是特例：旧名自动进 aliases_json，而非人工来源的改名必须已经被人
+    确认过。改错名字影响该主体的所有关联需求、撮合关系和搜索，**而且不会报错**，
+    只会让人找不到东西。
+    """
+    if not changes:
+        return []
+
+    def _reject(column: str, reason: str) -> None:
+        if rejected_fields is None:
+            raise FieldWriteError(reason)
+        rejected_fields[column] = reason
+
+    writer = _writer_from_provenance(provenance)
+    if not writer:
+        raise FieldWriteError(f"Unknown field writer for source: {provenance.source_type}")
+
+    known_columns = _buyer_party_columns()
+    normalized_changes: dict[str, Any] = {}
+    for column, value in changes.items():
+        if column not in known_columns:
+            _reject(column, f"Not writable buyer_party indicators: {[column]}")
+            continue
+        indicator = indicator_by_column("buyer_party", column)
+        if writer not in indicator.writable_by:
+            _reject(column, f"{writer} may not write buyer_party.{column}")
+            continue
+        try:
+            normalized_changes[column] = _normalize_value(
+                db,
+                indicator,
+                value,
+                required_columns=_REQUIRED_BUYER_PARTY_FIELDS,
+            )
+        except FieldWriteError as exc:
+            _reject(column, str(exc))
+
+    if not normalized_changes:
+        return []
+
+    current = _load_buyer_party_current(
+        db,
+        buyer_party_id,
+        [*normalized_changes, "buyer_name", "aliases_json"],
+    )
+    if "buyer_name" in normalized_changes:
+        try:
+            renamed, aliases = _plan_buyer_party_name_write(
+                current=current,
+                new_name=str(normalized_changes["buyer_name"]),
+                writer=writer,
+                provenance=provenance,
+            )
+        except FieldWriteError as exc:
+            _reject("buyer_name", str(exc))
+            normalized_changes.pop("buyer_name", None)
+        else:
+            normalized_changes["buyer_name"] = renamed
+            if aliases != [str(alias) for alias in (current.get("aliases_json") or [])]:
+                normalized_changes["aliases_json"] = aliases
+        if not normalized_changes:
+            return []
+
+    original = {column: current.get(column) for column in normalized_changes}
+    diff = diff_payload(original, normalized_changes)
+    if not diff:
+        if provenance.write_field_source and provenance.write_unchanged_field_source:
+            unchanged = {
+                column: (original.get(column), normalized_changes[column])
+                for column in normalized_changes
+            }
+            write_field_value_sources_for_diff(
+                db,
+                entity_type="buyer_party",
+                entity_id=buyer_party_id,
+                changes=normalized_changes,
+                diff=unchanged,
+                source_type=provenance.source_type,
+                source_id=provenance.source_id,
+                evidence_id=provenance.evidence_id,
+                source_label=provenance.field_source_label,
+                confidence=provenance.confidence,
+                review_status=provenance.review_status,
+                source_context=provenance.source_context,
+                created_by=provenance.actor_user_id,
+            )
+        return []
+
+    set_clauses = [f"{column} = :{column}" for column in diff]
+    set_clauses.extend(["updated_at = now()", "updated_by = :updated_by"])
+    assignments = ", ".join(set_clauses)
+    statement = text(
+        f"""
+        update buyer_party
+        set {assignments}
+        where id = :buyer_party_id
+          and team_id = :team_id
+          and workspace_id = :workspace_id
+          and deleted_at is null
+        """
+    )
+    # 每个 jsonb 列都要显式绑定类型，否则驱动会把 Python list 当成数组字面量适配，
+    # 落库不是 jsonb。aliases_json 不是注册表指标，所以要单独列出来。
+    json_bindings = [
+        bindparam(column, type_=JSONB)
+        for column in diff
+        if column == "aliases_json" or indicator_by_column("buyer_party", column).kind == "json"
+    ]
+    if json_bindings:
+        statement = statement.bindparams(*json_bindings)
+    db.execute(
+        statement,
+        {
+            **{column: normalized_changes[column] for column in diff},
+            "updated_by": provenance.actor_user_id,
+            "buyer_party_id": buyer_party_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )
+
+    write_action_logs_for_diff(
+        db,
+        entity_type="buyer_party",
+        entity_id=buyer_party_id,
+        diff=diff,
+        source_type=provenance.source_type,
+        source_id=provenance.source_id,
+        evidence_id=provenance.evidence_id,
+        business_update_id=provenance.business_update_id,
+        extracted_action_id=provenance.extracted_action_id,
+        metadata_json=provenance.log_metadata,
+        applied_by=provenance.actor_user_id,
+    )
+    if provenance.write_field_source:
+        write_field_value_sources_for_diff(
+            db,
+            entity_type="buyer_party",
+            entity_id=buyer_party_id,
+            changes=normalized_changes,
+            diff=diff,
+            source_type=provenance.source_type,
+            source_id=provenance.source_id,
+            evidence_id=provenance.evidence_id,
+            source_label=provenance.field_source_label,
+            confidence=provenance.confidence,
+            review_status=provenance.review_status,
+            source_context=provenance.source_context,
+            created_by=provenance.actor_user_id,
+        )
+    return list(diff)
+
+
+def _load_buyer_party_current(
+    db: Session,
+    buyer_party_id: UUID,
+    columns: list[str],
+) -> dict[str, Any]:
+    return _load_current_row(
+        db,
+        table="buyer_party",
+        entity_id=buyer_party_id,
+        columns=list(dict.fromkeys(columns)),
+        missing_message=f"Buyer party not found: {buyer_party_id}",
+    )
+
+
+def _plan_buyer_party_name_write(
+    *,
+    current: dict[str, Any],
+    new_name: str,
+    writer: str,
+    provenance: WriteProvenance,
+) -> tuple[str, list[str]]:
+    """人工保存即确认；解析/调研改名必须已经被人在复核里点过采纳。
+
+    ``review_status`` 是这条判断的唯一依据：``auto_accepted`` 表示没人看过，
+    那正是不能静默覆盖名称的情况。
+    """
+    confirmed = writer == "manual" or provenance.review_status == "accepted"
+    try:
+        return plan_buyer_party_rename(
+            current_name=str(current.get("buyer_name") or ""),
+            current_aliases=[str(alias) for alias in (current.get("aliases_json") or [])],
+            new_name=new_name,
+            source=writer,
+            confirmed=confirmed,
+        )
+    except BuyerPartyNameChangeRequiresReview as exc:
+        raise FieldWriteError(str(exc)) from exc
+    except ValueError as exc:
+        raise FieldWriteError(str(exc)) from exc

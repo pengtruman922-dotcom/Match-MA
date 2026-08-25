@@ -27,7 +27,9 @@ from backend.app.services.relation_flow import ensure_ai_followup_event
 ATTACHMENT_VISIBILITY_VALUES = {"workspace", "team", "private"}
 
 
-ATTACHMENT_PARSE_ENTITY_TYPES = {"seller_target", "buyer_intent"}
+# OCR 跑完可以自动接哪些实体的解析链。buyer_party 0825 加入：附件挂在买家主体上
+# 时，读出来的文本直接进 buyer_party_parse。
+ATTACHMENT_PARSE_ENTITY_TYPES = {"seller_target", "buyer_intent", "buyer_party"}
 
 
 BUSINESS_UPDATE_INPUT_TYPES = {"text", "screenshot", "attachment", "mixed"}

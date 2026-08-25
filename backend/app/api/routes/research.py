@@ -309,7 +309,9 @@ def _research_report_output(row: dict[str, Any]) -> dict[str, Any]:
 def list_research_proposals(
     current_user: CurrentUser,
     db: Session = Depends(get_db),
-    entity_type: Literal["seller_target"] = "seller_target",
+    # 0825 起买家主体的解析与调研提案也落这张表（source_type 区分 material / web），
+    # 所以复核接口按实体开放，而不是再建一套一模一样的端点。
+    entity_type: Literal["seller_target", "buyer_party"] = "seller_target",
     entity_id: UUID = Query(...),
     review_status: str | None = None,
     limit: int = Query(default=100, ge=1, le=200),
@@ -606,6 +608,9 @@ def _proposal_output(row: Any, *, db: Session | None = None) -> dict[str, Any]:
                 str(result.get("field_path") or ""),
                 effective_value,
                 source_excerpt=result.get("source_excerpt"),
+                # 按提案自己的实体归一：拿标的的指标表去解释买家主体的字段，
+                # 数值会静默按错误的 kind 处理（金额当文本、枚举不校验）。
+                entity=str(result.get("entity_type") or "seller_target"),
             )
             result["normalized_proposed_value"] = _json_safe_value(normalized_value)
         except ResearchApplyError as exc:

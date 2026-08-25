@@ -36,6 +36,7 @@ from backend.app.services.attachment_status import (
     attachment_content_extraction_status,
     attachment_extraction_strategy,
 )
+from backend.app.services.business_update_flow import ATTACHMENT_PARSE_ENTITY_TYPES
 from backend.app.services.attachment_storage import (
     TEXT_FILE_EXTENSIONS,
     TEXT_MIME_PREFIXES,
@@ -938,8 +939,9 @@ def _validate_attachment_payload(payload: AttachmentCreate) -> None:
 
 
 def _validate_parse_entity_types(parse_entity_types: list[str]) -> None:
-    supported = {"seller_target", "buyer_intent"}
-    invalid = [item for item in parse_entity_types if item not in supported]
+    # 白名单只维护在 business_update_flow 一处。这里原来是手写的第二份，
+    # 加一个实体时漏改的表现是「参数收下了、扇出却静默不做」。
+    invalid = [item for item in parse_entity_types if item not in ATTACHMENT_PARSE_ENTITY_TYPES]
     if invalid:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

@@ -347,10 +347,12 @@ def test_compact_sample_run_marks_skipped_attachment_as_attention() -> None:
 
 
 def test_validate_parse_entity_types_rejects_unsupported_values() -> None:
-    _validate_parse_entity_types(["seller_target", "buyer_intent"])
+    # buyer_party 0825 起是合法的扇出目标（它有了自己的解析链）。
+    # 仍然要拒绝的是没有解析链的实体 —— 收下参数却什么都不做是最难查的那种错。
+    _validate_parse_entity_types(["seller_target", "buyer_intent", "buyer_party"])
 
     with pytest.raises(HTTPException) as exc_info:
-        _validate_parse_entity_types(["buyer_party"])
+        _validate_parse_entity_types(["buyer_seller_relation"])
 
     assert exc_info.value.status_code == 422
 

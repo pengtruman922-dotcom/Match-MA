@@ -44,6 +44,10 @@ EXPECTED_NODE_NAMES = frozenset({
     "buyer_intent_semantic_parser",
     "buyer_intent_normalizer",
     "buyer_intent_update_parser",
+    # 0825 买家主体灌入链：解析 / 调研 / 规范化。与买家需求解析是两条链。
+    "buyer_party_parser",
+    "buyer_party_researcher",
+    "buyer_party_normalizer",
     "recommendation_deep_eval",
     "recommendation_deep_eval_to_target",
     "recommendation_deep_eval_to_buyer",
@@ -190,9 +194,9 @@ def test_must_configure_excludes_nodes_that_have_an_understudy() -> None:
     for spec in NODES:
         if spec.understudy is not None:
             assert spec.node_name not in required
-    # 总数仍是 12：0819 退役共用深评（-1），而方向深评摘掉代跑指针后
-    # 自己变成必配（+1）。
-    assert len(required) == 12
+    # 12 → 15：0825 加入买家主体灌入链的三个节点。它们没有代跑，
+    # 缺配置就是这条链跑不起来，所以都算必配。
+    assert len(required) == 15
     assert "buyer_intent_semantic_parser" not in required
     # 反过来了：现在没有代跑可依赖，方向深评必须自己配好。
     assert "recommendation_deep_eval_to_target" in required

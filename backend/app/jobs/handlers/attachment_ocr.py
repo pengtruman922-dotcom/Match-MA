@@ -20,7 +20,10 @@ from backend.app.services.attachment_storage import (
 from backend.app.services.attachment_status import attachment_waits_for_text_extraction
 from backend.app.services.office_inspection import inspect_office_text, office_document_kind
 from backend.app.services.pdf_inspection import extract_pdf_text, inspect_pdf_text_layer
-from backend.app.services.business_update_flow import _enqueue_business_update_process_job
+from backend.app.services.business_update_flow import (
+    ATTACHMENT_PARSE_ENTITY_TYPES,
+    _enqueue_business_update_process_job,
+)
 
 from backend.app.jobs.handlers.business_update import (
     _build_business_update_attachment_context,
@@ -1437,6 +1440,11 @@ def _enqueue_linked_parse_jobs_after_ocr(
         elif entity_type == "buyer_intent":
             raw_text_key = "raw_requirement_text"
             job_type = "buyer_intent_parse"
+        elif entity_type == "buyer_party":
+            # 文本已经在这里拼好了，所以直接交给解析节点当材料，
+            # 解析 handler 不必再回头读附件（它也支持 attachment_ids 那条路）。
+            raw_text_key = "material_text"
+            job_type = "buyer_party_parse"
         else:
             continue
 
@@ -1512,7 +1520,7 @@ def _enqueue_linked_parse_jobs_after_ocr(
     return child_jobs
 
 def _parse_requested_entity_types(value: Any) -> set[str]:
-    supported = {"seller_target", "buyer_intent"}
+    supported = set(ATTACHMENT_PARSE_ENTITY_TYPES)
     if not isinstance(value, list) or not value:
         return supported
     requested = {str(item) for item in value if str(item) in supported}

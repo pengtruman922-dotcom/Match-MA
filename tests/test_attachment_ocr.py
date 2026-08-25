@@ -36,6 +36,7 @@ from backend.app.jobs.handlers.business_update import (
     _verified_document_excerpt,
 )
 from backend.app.jobs.queue import JobClaim
+from backend.app.services.business_update_flow import ATTACHMENT_PARSE_ENTITY_TYPES
 from backend.app.services.attachment_storage import (
     decode_text_bytes,
     is_text_upload,
@@ -483,8 +484,11 @@ def test_parse_source_context_carries_attachment_evidence() -> None:
 
 
 def test_parse_requested_entity_types_defaults_to_supported_objects() -> None:
-    assert _parse_requested_entity_types([]) == {"seller_target", "buyer_intent"}
+    # 0825 起 buyer_party 也在扇出白名单里：附件挂在买家主体上时，OCR 读出来的
+    # 文本直接进 buyer_party_parse。清单只维护在 ATTACHMENT_PARSE_ENTITY_TYPES 一处。
+    assert _parse_requested_entity_types([]) == ATTACHMENT_PARSE_ENTITY_TYPES
     assert _parse_requested_entity_types(["seller_target", "unsupported"]) == {"seller_target"}
+    assert _parse_requested_entity_types(["buyer_party"]) == {"buyer_party"}
 
 
 def test_business_update_image_context_omits_null_trigger_uuid_predicate() -> None:

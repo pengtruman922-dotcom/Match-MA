@@ -1,4 +1,4 @@
-"""The unified seller_target write channel: validation, diff, no-op.
+"""The unified write channel for seller targets and buyer parties: validation, diff, no-op.
 
 The audit/field-source/search-doc helpers it calls are covered by their own
 paths' tests; here we pin the writer's own logic — that it rejects non-registry
@@ -14,6 +14,7 @@ import backend.app.services.field_writer as fw
 from backend.app.services.field_writer import (
     FieldWriteError,
     WriteProvenance,
+    write_buyer_party_fields,
     write_seller_target_fields,
 )
 
@@ -236,3 +237,152 @@ def test_all_fields_rejected_writes_nothing(recorded) -> None:
 
     assert applied == []
     assert set(rejected) == {"current_debt_ratio"}
+
+
+# ---------------------------------------------------------------------------
+# 买家主体写入通道（0825）。与标的侧共用归一化与审计，差别在三处：
+# 没有级别配对、没有行业兼容投影、没有检索文档重建（买家主体没有检索文档）。
+# 外加一处只属于它的保护：改名。
+# ---------------------------------------------------------------------------
+
+
+class _PartyDb:
+    """回答写入端的当前值 SELECT，其余只记录。"""
+
+    def __init__(self, current: dict):
+        self._current = current
+        self.updates: list[str] = []
+
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        if "from buyer_party" in sql and "update" not in sql.lower():
+            return _Result(dict(self._current))
+        self.updates.append(sql)
+        return _Result(None)
+
+
+@pytest.fixture
+def party_recorded(monkeypatch):
+    calls = {"logs": None, "sources": None, "search": None}
+
+    def _logs(db, **kwargs):
+        calls["logs"] = kwargs
+
+    def _sources(db, **kwargs):
+        calls["sources"] = kwargs
+
+    def _search(db, **kwargs):
+        calls["search"] = kwargs
+        raise AssertionError("买家主体没有检索文档，不该排重建任务")
+
+    monkeypatch.setattr(fw, "write_action_logs_for_diff", _logs)
+    monkeypatch.setattr(fw, "write_field_value_sources_for_diff", _sources)
+    monkeypatch.setattr(fw, "create_search_doc_rebuild_job", _search)
+    return calls
+
+
+def _party_prov(**overrides):
+    params = {
+        "source_type": "research_proposal",
+        "actor_user_id": uuid4(),
+        "writer": "research",
+    }
+    params.update(overrides)
+    return WriteProvenance(**params)
+
+
+def test_buyer_party_column_outside_the_registry_is_rejected() -> None:
+    class _Boom:
+        def execute(self, *a, **k):
+            raise AssertionError("must reject before touching the db")
+
+    with pytest.raises(FieldWriteError) as exc:
+        write_buyer_party_fields(_Boom(), uuid4(), {"not_a_column": "x"}, provenance=_party_prov())
+    assert "not_a_column" in str(exc.value)
+
+
+def test_research_may_not_write_buyer_party_contacts() -> None:
+    """联系人只能来自非公开渠道 —— 这条业务规则编码在注册表的 writable_by 里。"""
+    rejected: dict[str, str] = {}
+    db = _PartyDb({"contact_name": None, "buyer_name": "北控", "aliases_json": []})
+
+    applied = write_buyer_party_fields(
+        db,
+        uuid4(),
+        {"contact_name": "张三"},
+        provenance=_party_prov(),
+        rejected_fields=rejected,
+    )
+
+    assert applied == []
+    assert "contact_name" in rejected
+    assert not db.updates
+
+
+def test_a_financial_fact_writes_its_time_alongside_the_number(party_recorded) -> None:
+    db = _PartyDb(
+        {
+            "market_cap_yuan": None,
+            "market_cap_as_of": None,
+            "buyer_name": "北控",
+            "aliases_json": [],
+        }
+    )
+
+    applied = write_buyer_party_fields(
+        db,
+        uuid4(),
+        {"market_cap_yuan": 18_000_000_000, "market_cap_as_of": "2026-08-22"},
+        provenance=_party_prov(),
+    )
+
+    assert set(applied) == {"market_cap_yuan", "market_cap_as_of"}
+    assert set(party_recorded["logs"]["diff"]) == {"market_cap_yuan", "market_cap_as_of"}
+    assert party_recorded["logs"]["entity_type"] == "buyer_party"
+
+
+def test_a_rename_nobody_looked_at_is_refused(party_recorded) -> None:
+    """``auto_accepted`` 表示没人看过。改错名字不报错，只会让人找不到东西。"""
+    rejected: dict[str, str] = {}
+    db = _PartyDb({"buyer_name": "北控", "aliases_json": []})
+
+    applied = write_buyer_party_fields(
+        db,
+        uuid4(),
+        {"buyer_name": "北京控股集团有限公司"},
+        provenance=_party_prov(review_status="auto_accepted"),
+        rejected_fields=rejected,
+    )
+
+    assert applied == []
+    assert "buyer_name" in rejected
+    assert not db.updates
+
+
+def test_an_accepted_rename_keeps_the_old_name_as_an_alias(party_recorded) -> None:
+    """顾问输入「北控」，AI 改成全称 —— 旧名不留，下次搜「北控」就搜不到。"""
+    db = _PartyDb({"buyer_name": "北控", "aliases_json": []})
+
+    applied = write_buyer_party_fields(
+        db,
+        uuid4(),
+        {"buyer_name": "北京控股集团有限公司"},
+        provenance=_party_prov(review_status="accepted"),
+    )
+
+    assert set(applied) == {"buyer_name", "aliases_json"}
+    assert party_recorded["logs"]["diff"]["aliases_json"][1] == ["北控"]
+
+
+def test_a_manual_rename_needs_no_extra_confirmation(party_recorded) -> None:
+    db = _PartyDb({"buyer_name": "北控", "aliases_json": ["BEHL"]})
+
+    applied = write_buyer_party_fields(
+        db,
+        uuid4(),
+        {"buyer_name": "北京控股集团有限公司"},
+        provenance=WriteProvenance(source_type="manual_edit", actor_user_id=uuid4()),
+    )
+
+    assert set(applied) == {"buyer_name", "aliases_json"}
+    assert party_recorded["logs"]["diff"]["aliases_json"][1] == ["BEHL", "北控"]

@@ -223,6 +223,103 @@ export interface BuyerParty {
   updated_at: string;
 }
 
+export interface BuyerPartyMaterialAttachment {
+  attachment_id: string;
+  file_name: string;
+  file_type: string | null;
+  file_size: number | null;
+  /** auto_ocr | multimodal_image_only | skip_ocr —— 图片不进 OCR，直读多模态。 */
+  ocr_policy: string;
+  is_image: boolean;
+  ocr_job_id: string | null;
+}
+
+export interface BuyerPartyMaterialUploadResponse {
+  buyer_party_id: string;
+  attachments: BuyerPartyMaterialAttachment[];
+  attachment_ids: string[];
+  image_attachment_ids: string[];
+  image_constraints: Record<string, unknown>;
+}
+
+export type BuyerPartyIngestStage =
+  | 'attachment_extraction'
+  | 'parsing'
+  | 'researching'
+  | 'normalizing'
+  | 'completed';
+
+export type BuyerPartyIngestStageStatus =
+  | 'not_started'
+  | 'queued'
+  | 'processing'
+  | 'succeeded'
+  | 'failed'
+  | 'skipped';
+
+export interface BuyerPartyIngestStageState {
+  status: BuyerPartyIngestStageStatus;
+  job_id: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  error_code?: string | null;
+  error_message?: string | null;
+}
+
+/** 三个 job 派生出来的一条进度。后端不存状态列，所以这里没有「僵死态」。 */
+export interface BuyerPartyIngestState {
+  buyer_party_id: string;
+  correlation_id: string | null;
+  overall_status: 'not_started' | 'processing' | 'succeeded' | 'failed';
+  current_stage: BuyerPartyIngestStage | null;
+  status_label: string;
+  stage_label: string | null;
+  stages: Record<'parse' | 'research' | 'normalize', BuyerPartyIngestStageState>;
+  mode: 'fill' | 'refresh';
+  research_enabled: boolean;
+  research_outcome: string | null;
+  research_outcome_label: string | null;
+  information_gaps: Array<{ field?: string; reason?: string }>;
+  /** 图片上限 5 张，超出的被静默截断且不报错 —— 所以要一路带回界面。 */
+  skipped_images: Array<{ attachment_id?: string; file_name?: string; reason?: string }>;
+  material_text_truncated: boolean;
+  waiting_attachment_ids: string[];
+  auto_accepted_count: number | null;
+  pending_review_count: number | null;
+  apply_errors: string[];
+  pending_proposal_count: number;
+  stale_financial_fields: string[];
+  latest_job_id: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  recoverable: boolean;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface BuyerPartyIngestStatus {
+  buyer_party_id: string;
+  state: BuyerPartyIngestState;
+  nodes_ready: { parser: boolean; researcher: boolean; normalizer: boolean };
+  search_provider_ready: boolean;
+}
+
+export interface BuyerPartyIngestJob {
+  job_id: string;
+  job_type: string;
+  status: string;
+  queue_name: string;
+  buyer_party_id: string;
+  correlation_id: string;
+  reused_existing: boolean;
+}
+
+export interface BuyerPartyBatchParseResponse {
+  jobs: BuyerPartyIngestJob[];
+  queued_count: number;
+  reused_count: number;
+}
+
 export interface BuyerPartyListResponse {
   items: BuyerParty[];
   total: number;
@@ -2056,7 +2153,8 @@ export interface ResearchReport {
 
 export interface ResearchProposal {
   id: string;
-  entity_type: 'seller_target';
+  /** 0825 起买家主体的解析与调研提案也落这张表，用 source_type 区分 material / web。 */
+  entity_type: 'seller_target' | 'buyer_party';
   entity_id: string;
   job_id: string | null;
   proposal_kind: 'profile_section' | 'structured_fact';

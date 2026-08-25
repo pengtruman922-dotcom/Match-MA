@@ -18,8 +18,10 @@ from sqlalchemy.orm import Session
 
 from backend.app.registry.indicators import Indicator, indicators_for, writable_columns
 from backend.app.services.field_writer import (
+    BUYER_PARTY_FINANCIAL_TIME_COLUMNS,
     FieldWriteError,
     WriteProvenance,
+    write_buyer_party_fields,
     write_seller_target_fields,
 )
 from backend.app.services.industry_taxonomy import normalize_industry_pairs, normalize_l2_values, resolve_l1
@@ -38,6 +40,31 @@ LISTED_STATUS_VALUES = {"listed", "unlisted", "pre_ipo", "unknown"}
 RESEARCH_INTERNAL_FIELDS = {"financial_period_end_date", "financial_period_label"}
 RESEARCH_STRUCTURED_FIELDS = writable_columns("research")
 RESEARCH_AGENT_STRUCTURED_FIELDS = RESEARCH_STRUCTURED_FIELDS - RESEARCH_INTERNAL_FIELDS
+
+# 买家主体的两个来源各有自己的白名单，都从注册表派生。material 来自顾问粘贴的
+# 材料与附件（parse），web 来自联网调研（research）—— 后者刻意不含
+# contact_name / contact_info_json / our_contact_name：那三项只能来自非公开
+# 渠道，不该出现在调研目标里（规则编码在注册表的 writable_by 里）。
+BUYER_PARTY_PARSE_FIELDS = writable_columns("parse", "buyer_party")
+BUYER_PARTY_RESEARCH_FIELDS = writable_columns("research", "buyer_party")
+BUYER_PARTY_WRITABLE_FIELDS = BUYER_PARTY_PARSE_FIELDS | BUYER_PARTY_RESEARCH_FIELDS
+
+# 时间伴生列由代码从事实自己的期间元数据派生（市值配行情日期，营收与现金流共用
+# 报告期标签，估值配估值时点）。列进「你可以写的字段」，模型就会把它们当普通字段
+# 单独输出，于是同一份财务快照出现两条可能互相矛盾的提案 —— 标的侧的
+# RESEARCH_INTERNAL_FIELDS 是同一个道理。
+BUYER_PARTY_TIME_COMPANION_FIELDS = frozenset(BUYER_PARTY_FINANCIAL_TIME_COLUMNS.values())
+BUYER_PARTY_MODEL_PARSE_FIELDS = BUYER_PARTY_PARSE_FIELDS - BUYER_PARTY_TIME_COMPANION_FIELDS
+BUYER_PARTY_MODEL_RESEARCH_FIELDS = BUYER_PARTY_RESEARCH_FIELDS - BUYER_PARTY_TIME_COMPANION_FIELDS
+BUYER_PARTY_MODEL_FIELDS = BUYER_PARTY_WRITABLE_FIELDS - BUYER_PARTY_TIME_COMPANION_FIELDS
+
+# material / web —— 提案是哪一段产出的。写入权限按它选，不看 source_url 有没有：
+# 材料来源永远没有 URL，拿 URL 判来源会把解析结果全部当成调研结果。
+PROPOSAL_SOURCE_WRITERS = {"material": "parse", "web": "research"}
+
+# 存对象而不是数组的 json 列。清单很短，写死比猜形状可靠：
+# 猜错的表现是一条合法建议被「需要数组」拦下来。
+OBJECT_JSON_FIELDS = frozenset({"contact_info_json"})
 
 CORE_FINANCIAL_FIELDS = {
     "current_revenue_yuan",
@@ -66,10 +93,119 @@ def apply_research_proposal(
     user_id: UUID,
     review_status: str = "accepted",
 ) -> None:
+    """Write one accepted proposal back to its entity.
+
+    ``entity_type`` decides the write path, not the caller: the same review
+    endpoint serves seller-target research and buyer-party ingest, and a
+    proposal that reached the wrong table would be a silent cross-entity write.
+    """
+    entity_type = str(proposal.get("entity_type") or "seller_target")
+    if entity_type == "buyer_party":
+        _apply_buyer_party_proposal(db, proposal, user_id=user_id, review_status=review_status)
+        return
+    if entity_type != "seller_target":
+        raise ResearchApplyError(f"不支持对 {entity_type} 应用调研建议。")
     if proposal["proposal_kind"] == "profile_section":
         _apply_profile_proposal(db, proposal, user_id=user_id, review_status=review_status)
         return
     _apply_structured_fact_proposal(db, proposal, user_id=user_id, review_status=review_status)
+
+
+def _apply_buyer_party_proposal(
+    db: Session,
+    proposal: dict[str, Any],
+    *,
+    user_id: UUID,
+    review_status: str,
+) -> None:
+    """买家主体只有字段事实，没有画像栏 —— 两个业务字段就是全部。
+
+    财务数字连着它的时间一起写：市值配行情日期，营收与经营现金流共用报告期
+    标签，估值配估值时点。没有时间的财务数字是不可用的，所以时间不是可选项。
+    """
+    if proposal["proposal_kind"] != "structured_fact":
+        raise ResearchApplyError("买家主体不设画像栏，只接受字段事实建议。")
+    field_path = str(proposal.get("field_path") or "")
+    if field_path not in BUYER_PARTY_MODEL_FIELDS:
+        raise ResearchApplyError("不支持该买家主体字段。")
+    source_type = str(proposal.get("source_type") or "")
+    writer = PROPOSAL_SOURCE_WRITERS.get(source_type)
+    if writer is None:
+        raise ResearchApplyError(f"无法判断建议来源：{source_type or '（空）'}")
+
+    proposed_value = proposal.get("proposed_value_json") or {}
+    raw_value = (
+        proposed_value["reviewed_value"]
+        if "reviewed_value" in proposed_value
+        else proposed_value.get("value")
+    )
+    new_value = normalize_structured_fact(
+        db,
+        field_path,
+        raw_value,
+        source_excerpt=proposal.get("source_excerpt"),
+        entity="buyer_party",
+    )
+    changes: dict[str, Any] = {field_path: new_value}
+    time_column = BUYER_PARTY_FINANCIAL_TIME_COLUMNS.get(field_path)
+    if time_column:
+        time_value = _buyer_party_time_value(time_column, proposal)
+        if time_value is None:
+            raise ResearchApplyError(f"{field_path} 缺少期间或行情日期，财务数字不能不带时间入库。")
+        changes[time_column] = time_value
+
+    try:
+        write_buyer_party_fields(
+            db,
+            proposal["entity_id"],
+            changes,
+            provenance=WriteProvenance(
+                source_type="research_proposal",
+                writer=writer,
+                actor_user_id=user_id,
+                source_id=proposal["id"],
+                field_source_label=str(
+                    proposal.get("source_title")
+                    or proposal.get("source_url")
+                    or ("材料解析" if writer == "parse" else "公开调研")
+                ),
+                review_status=review_status,
+                source_context={
+                    "source_type": source_type,
+                    "source_url": proposal.get("source_url"),
+                    "source_excerpt": proposal.get("source_excerpt"),
+                    "source_title": proposal.get("source_title"),
+                    "period_label": proposal.get("period_label"),
+                    "as_of_date": str(proposal.get("as_of_date") or "") or None,
+                    "job_id": str(proposal.get("job_id") or "") or None,
+                },
+                log_metadata={
+                    "source_type": source_type,
+                    "source_url": proposal.get("source_url"),
+                    "source_title": proposal.get("source_title"),
+                    "conflict_kind": proposal.get("conflict_kind"),
+                    "auto_accepted": review_status == "auto_accepted",
+                    "user_modified": "reviewed_value" in proposed_value,
+                },
+                write_unchanged_field_source=proposal.get("conflict_kind") == "consistent",
+            ),
+        )
+    except FieldWriteError as exc:
+        raise ResearchApplyError(str(exc)) from exc
+
+
+def _buyer_party_time_value(time_column: str, proposal: dict[str, Any]) -> Any:
+    """市值要机器日期，营收/估值要人写的期间标签。两者不能互相顶替。"""
+    if time_column == "market_cap_as_of":
+        raw = proposal.get("as_of_date")
+        if isinstance(raw, date):
+            return raw
+        try:
+            return date.fromisoformat(str(raw or "")[:10])
+        except ValueError:
+            return None
+    label = str(proposal.get("period_label") or "").strip()
+    return label or None
 
 
 def _apply_profile_proposal(
@@ -224,9 +360,9 @@ MONEY_UNIT_MULTIPLIERS: dict[str, Decimal] = {
 }
 
 
-def _indicator(field_path: str) -> Indicator | None:
+def _indicator(field_path: str, entity: str = "seller_target") -> Indicator | None:
     return next(
-        (item for item in indicators_for("seller_target") if item.column == field_path),
+        (item for item in indicators_for(entity) if item.column == field_path),
         None,
     )
 
@@ -270,6 +406,7 @@ def normalize_structured_fact(
     value: Any,
     *,
     source_excerpt: Any = None,
+    entity: str = "seller_target",
 ) -> Any:
     """Turn one proposed fact into something the field writer will accept.
 
@@ -287,7 +424,7 @@ def normalize_structured_fact(
             raise ResearchApplyError(f"行业不在字典中：{notes[0] if notes else '空值'}")
         return pairs
 
-    indicator = _indicator(field_path)
+    indicator = _indicator(field_path, entity)
     if indicator is not None and indicator.kind == "yuan":
         if field_path == "current_operating_cash_flow_yuan":
             unit = str(value.get("unit") or "") if isinstance(value, dict) else ""
@@ -301,6 +438,15 @@ def normalize_structured_fact(
     if indicator is not None and indicator.kind == "ratio":
         return _ratio_value(field_path, value)
     if indicator is not None and indicator.kind == "json":
+        # 注册表里的 json 列几乎都存数组，只有联系方式存对象
+        # （{"text": "..."} 或 {"phone": ..., "email": ...}）。不分开的话，
+        # 一条联系方式建议会被下面的「需要数组」拦死，而它本来是合法的。
+        if field_path in OBJECT_JSON_FIELDS:
+            if isinstance(value, str) and value.strip():
+                return {"text": value.strip()}
+            if isinstance(value, dict) and value:
+                return value
+            raise ResearchApplyError(f"{field_path} 需要对象。")
         # 闭集多值列的建议值是数组。不接住的话下面的 str() 会把它压成
         # "['litigation']"，写入端再以「must be a JSON object or array」拒绝——
         # 报错位置离病因很远。取值合法性仍由 field_writer 从同一份注册表判定。

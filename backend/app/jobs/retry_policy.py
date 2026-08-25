@@ -13,7 +13,15 @@ from urllib import error
 
 from backend.app.jobs.queue import JobClaim
 
-RESEARCH_JOB_TYPES = frozenset({"seller_target_research", "seller_target_research_map"})
+# 重放整轮很贵的任务。买家主体的调研与规范化和标的侧同理：调研一次是好几次
+# 搜索加多轮模型调用，而规范化重跑会再插一份提案 —— 两者都只该在「大概会自己
+# 好起来」的失败上重试。
+RESEARCH_JOB_TYPES = frozenset({
+    "seller_target_research",
+    "seller_target_research_map",
+    "buyer_party_research",
+    "buyer_party_normalize",
+})
 _TRANSIENT_HTTP_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
 _TRANSIENT_MARKERS = (
     "timed out",

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
+  AlertTriangle,
   Check,
   Download,
   FileText,
@@ -8,22 +9,34 @@ import {
   Pencil,
   RefreshCw,
   Search,
+  Sparkles,
   X,
 } from 'lucide-react';
-import { attachments, buyerParties, indicatorRegistry } from '../lib/api';
+import { attachments, buyerParties, indicatorRegistry, research } from '../lib/api';
 import type {
   AttachmentItem,
   BuyerIntent,
   BuyerIntentParseStatus,
   BuyerParty,
   BuyerPartyCreate,
+  BuyerPartyIngestStatus,
   IndicatorRegistryResponse,
+  ResearchProposal,
 } from '../types/api';
 import UpdateHistory from './UpdateHistory';
 import ProgressPanel from '../features/relations/ProgressPanel';
 import BuyerIntentRequirements from './BuyerIntentRequirements';
 import AdministrativeAreaPicker, { type AdministrativeAreaValue } from './AdministrativeAreaPicker';
 import { partyLocationText, partyMarketValue, partyMarketValueField, parseYuanInput } from '../features/buyers/presentation';
+import BuyerPartyIngestDialog from '../features/buyers/BuyerPartyIngestDialog';
+import PartyProposalCard from '../features/buyers/PartyProposalCard';
+import {
+  INGEST_STATUS_CLASSES,
+  ingestProgressText,
+  ingestTruncationWarning,
+  isIngestActive,
+  staleFieldsText,
+} from '../features/buyers/buyerPartyIngest';
 import { formatYuan } from '../lib/format';
 import { gradeClass, intentGrade, intentGradeLabel } from '../lib/entityGrade';
 
@@ -138,6 +151,38 @@ type BuyerInfoField =
   | 'supplementary_summary'
   | 'notes';
 
+/**
+ * 提案挂到哪个可编辑位。
+ *
+ * 一个「位」可能对应多列（上市状态三列、市值/估值四列、营收与现金流三列），
+ * 所以不能直接用 field_path 当键。标的侧用注册表的 fold_into 做这件事，买家
+ * 信息页的位是手工组合的，所以映射也写在这里 —— 漏一列的表现是那条建议掉进
+ * 页面底部的「其他」块，不会丢。
+ */
+const PROPOSAL_SLOT_BY_COLUMN: Record<string, BuyerInfoField> = {
+  buyer_name: 'buyer_name',
+  location_province: 'location',
+  location_city: 'location',
+  location_district: 'location',
+  ownership_type: 'ownership_type',
+  listed_status: 'listing',
+  listing_exchange: 'listing',
+  stock_code: 'listing',
+  contact_name: 'contact_name',
+  contact_info_json: 'contact_info',
+  our_contact_name: 'our_contact_name',
+  business_tags_json: 'business_tags',
+  business_summary: 'business_summary',
+  market_cap_yuan: 'market_value',
+  market_cap_as_of: 'market_value',
+  valuation_yuan: 'market_value',
+  valuation_date: 'market_value',
+  current_revenue_yuan: 'operating',
+  current_operating_cash_flow_yuan: 'operating',
+  financial_period_label: 'operating',
+  supplementary_summary: 'supplementary_summary',
+};
+
 /** 上市信息是一行三个字段：状态决定后两个有没有意义。 */
 type ListingDraft = { listed_status: string; listing_exchange: string; stock_code: string };
 /** 市值与估值是一个展示位，编辑态也是一个位置：各自的数字与时间成对出现。 */
@@ -160,6 +205,11 @@ export function BuyerInfo({
   const [operatingDraft, setOperatingDraft] = useState<OperatingDraft>({ revenue: '', cash_flow: '', period: '' });
   // 枚举中文名与字段中文名都从指标注册表下发：注册表改一处，界面跟着变。
   const [registry, setRegistry] = useState<IndicatorRegistryResponse | null>(null);
+  const [ingestStatus, setIngestStatus] = useState<BuyerPartyIngestStatus | null>(null);
+  const [proposals, setProposals] = useState<ResearchProposal[]>([]);
+  const [reviewingId, setReviewingId] = useState<string | null>(null);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -167,6 +217,81 @@ export function BuyerInfo({
     return () => { cancelled = true; };
   }, []);
   useEffect(() => setEditingField(null), [party.id]);
+
+  const loadIngest = useCallback(async () => {
+    const [status, pending] = await Promise.all([
+      buyerParties.parseStatus(party.id).catch(() => null),
+      research.proposals(party.id, 'pending_review', 'buyer_party').catch(() => [] as ResearchProposal[]),
+    ]);
+    setIngestStatus(status);
+    setProposals(pending);
+    return status;
+  }, [party.id]);
+
+  useEffect(() => { void loadIngest(); }, [loadIngest]);
+  useEffect(() => {
+    // 只在真的有任务在跑时轮询。三段合起来可能十分钟，所以间隔放宽到 5 秒。
+    if (!isIngestActive(ingestStatus?.state ?? null)) return;
+    const timer = window.setInterval(() => {
+      void loadIngest().then((next) => {
+        if (next && next.state.overall_status === 'succeeded') {
+          void buyerParties.get(party.id).then((fresh) => onPartySaved?.(fresh)).catch(() => {});
+        }
+      });
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [ingestStatus, loadIngest, onPartySaved, party.id]);
+
+  const reviewProposal = async (
+    proposalId: string,
+    decision: 'accept' | 'reject',
+    reviewedValue?: unknown,
+  ) => {
+    setReviewingId(proposalId);
+    try {
+      if (decision === 'accept') await research.acceptProposal(proposalId, reviewedValue);
+      else await research.rejectProposal(proposalId);
+      const [fresh] = await Promise.all([buyerParties.get(party.id), loadIngest()]);
+      onPartySaved?.(fresh);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : '处理建议失败');
+    } finally {
+      setReviewingId(null);
+    }
+  };
+
+  const startRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await buyerParties.parse(party.id, { mode: 'refresh', enable_research: true });
+      await loadIngest();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : '发起刷新失败');
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const proposalsBySlot = new Map<BuyerInfoField, ResearchProposal[]>();
+  const unplacedProposals: ResearchProposal[] = [];
+  for (const proposal of proposals) {
+    const slot = PROPOSAL_SLOT_BY_COLUMN[proposal.field_path || ''];
+    if (!slot) {
+      unplacedProposals.push(proposal);
+      continue;
+    }
+    proposalsBySlot.set(slot, [...(proposalsBySlot.get(slot) || []), proposal]);
+  }
+  const proposalCards = (slot: BuyerInfoField) =>
+    (proposalsBySlot.get(slot) || []).map((proposal) => (
+      <PartyProposalCard
+        key={proposal.id}
+        proposal={proposal}
+        registry={registry}
+        busy={reviewingId === proposal.id}
+        onReview={reviewProposal}
+      />
+    ));
 
   const label = (column: string, fallback: string) =>
     registry?.indicators.find((item) => item.column === column)?.label || fallback;
@@ -213,13 +338,72 @@ export function BuyerInfo({
     }
   };
 
-  const rowProps = { editingField, saving, onEdit: startEditing, onSave: saveField, onCancel: () => setEditingField(null) };
+  const rowProps = {
+    editingField,
+    saving,
+    onEdit: startEditing,
+    onSave: saveField,
+    onCancel: () => setEditingField(null),
+    renderProposals: proposalCards,
+  };
   const marketValue = partyMarketValue(party);
   const marketMode = partyMarketValueField(party);
 
+  const state = ingestStatus?.state ?? null;
+  const truncationWarning = state ? ingestTruncationWarning(state) : null;
+  const staleText = staleFieldsText(state);
+
   return (
     <div>
-      <p className="mb-3 text-xs text-gray-500">以下均为买家主体资料，描述的是这家买家自己。编辑后会同步到同一买家的所有需求；本次收购需求的行业和目标地区在“需求信息”中维护。</p>
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+        <p className="max-w-2xl text-xs text-gray-500">以下均为买家主体资料，描述的是这家买家自己。编辑后会同步到同一买家的所有需求；本次收购需求的行业和目标地区在“需求信息”中维护。</p>
+        <div className="flex shrink-0 items-center gap-2">
+          {state && state.overall_status !== 'not_started' ? (
+            <span className={`px-2 py-0.5 text-xs ${INGEST_STATUS_CLASSES[state.overall_status]}`}>
+              {ingestProgressText(state)}
+            </span>
+          ) : null}
+          {staleText ? (
+            <button
+              type="button"
+              onClick={() => void startRefresh()}
+              disabled={refreshing || isIngestActive(state)}
+              title={`${staleText}已过期，联网刷新一次`}
+              className="inline-flex items-center gap-1.5 border border-gray-200 px-2.5 py-1.5 text-xs text-gray-600 hover:border-brand-500 hover:text-brand-700 disabled:opacity-50"
+            >
+              {refreshing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+              刷新财务数据
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => setDialogOpen(true)}
+            disabled={isIngestActive(state)}
+            className="inline-flex items-center gap-1.5 bg-brand-600 px-2.5 py-1.5 text-xs text-white hover:bg-brand-700 disabled:opacity-50"
+          >
+            <Sparkles className="h-3.5 w-3.5" />
+            AI 补全信息
+          </button>
+        </div>
+      </div>
+
+      {state?.overall_status === 'failed' && state.error_message ? (
+        <p className="mb-3 border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+          {state.stage_label || '补全失败'}：{state.error_message}
+        </p>
+      ) : null}
+      {truncationWarning ? (
+        <p className="mb-3 flex items-start gap-1.5 border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          {truncationWarning}
+        </p>
+      ) : null}
+      {state?.research_outcome === 'subject_unresolved' ? (
+        <p className="mb-3 border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          联网调研没能确认这家公司（可能是脱敏名、重名或查无此公司）。补一个更完整的正式名称后再试。
+        </p>
+      ) : null}
+
       <div className="space-y-5">
         <BuyerInfoGroup title="基本信息">
           <BuyerInfoRow label={label('buyer_name', '买家名称')} value={party.buyer_name} field="buyer_name" {...rowProps}>
@@ -309,6 +493,40 @@ export function BuyerInfo({
           </BuyerInfoRow>
         </BuyerInfoGroup>
       </div>
+
+      {unplacedProposals.length ? (
+        <section className="mt-4 border border-amber-200 bg-amber-50/60 px-3 py-2">
+          <p className="text-xs font-medium text-amber-800">其他待确认建议（{unplacedProposals.length}）</p>
+          {unplacedProposals.map((proposal) => (
+            <PartyProposalCard
+              key={proposal.id}
+              proposal={proposal}
+              registry={registry}
+              busy={reviewingId === proposal.id}
+              onReview={reviewProposal}
+            />
+          ))}
+        </section>
+      ) : null}
+
+      {state?.information_gaps?.length ? (
+        <p className="mt-3 text-xs text-gray-400">
+          材料与调研都没覆盖的字段：
+          {state.information_gaps
+            .map((gap) => label(String(gap.field || ''), String(gap.field || '')))
+            .filter(Boolean)
+            .join('、')}
+        </p>
+      ) : null}
+
+      {dialogOpen ? (
+        <BuyerPartyIngestDialog
+          party={party}
+          status={ingestStatus}
+          onClose={() => setDialogOpen(false)}
+          onStarted={() => void loadIngest()}
+        />
+      ) : null}
     </div>
   );
 }
@@ -420,6 +638,7 @@ function BuyerInfoRow({
   onEdit,
   onSave,
   onCancel,
+  renderProposals,
   children,
 }: {
   label: string;
@@ -431,6 +650,8 @@ function BuyerInfoRow({
   onEdit: (field: BuyerInfoField) => void;
   onSave: () => Promise<void>;
   onCancel: () => void;
+  /** 待确认建议就挂在这一行下面 —— 顾问看的就是这张页，不再另开一个复核页。 */
+  renderProposals?: (field: BuyerInfoField) => ReactNode;
   children: ReactNode;
 }) {
   const editing = editingField === field;
@@ -452,6 +673,7 @@ function BuyerInfoRow({
           <button type="button" title={`编辑${label}`} disabled={disabled} onClick={() => onEdit(field)} className="p-1.5 text-gray-400 hover:bg-gray-100 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-30"><Pencil className="h-3.5 w-3.5" /></button>
         </div>
       )}
+      {renderProposals?.(field)}
     </div>
   );
 }

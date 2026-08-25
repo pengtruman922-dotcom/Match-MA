@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { Loader2, Trash2 } from 'lucide-react';
+import { Loader2, Sparkles, Trash2 } from 'lucide-react';
 import { buyerParties, users } from '../../lib/api';
 import { canManageOwnedEntity, isAdmin } from '../../lib/auth';
 import type {
@@ -13,6 +13,7 @@ import BulkActionBar from '../../components/BulkActionBar';
 import PaginationFooter from '../../components/PaginationFooter';
 import ListToolbar from './ListToolbar';
 import CreatePartyModal from './CreatePartyModal';
+import BatchPartyIngestDialog from './BatchPartyIngestDialog';
 import {
   EMPTY_PARTY_FILTER_OPTIONS,
   PAGE_SIZE,
@@ -53,6 +54,8 @@ export default function PartiesList({
   const [ownerOptions, setOwnerOptions] = useState<AppUserOption[]>([]);
   const [assignOwnerId, setAssignOwnerId] = useState('');
   const [assigning, setAssigning] = useState(false);
+  const [ingestDialogOpen, setIngestDialogOpen] = useState(false);
+  const [ingestSubmitting, setIngestSubmitting] = useState(false);
 
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const visibleIds = useMemo(() => items.map((item) => item.id), [items]);
@@ -211,6 +214,28 @@ export default function PartiesList({
     }
   };
 
+  const handleBatchIngest = async (ids: string[], mode: 'fill' | 'refresh') => {
+    if (!ids.length) return;
+    setIngestSubmitting(true);
+    try {
+      const response = await buyerParties.batchParse(ids, { mode, enable_research: true });
+      setIngestDialogOpen(false);
+      setSelectedIds(new Set());
+      // 已经在跑的那些会被复用而不是排第二遍，这件事要说出来 ——
+      // 静默少跑是标的侧改掉过的老毛病。
+      alert(
+        response.reused_count
+          ? `已提交 ${response.queued_count} 个任务；另有 ${response.reused_count} 个买家已经在处理中，本次复用原任务。`
+          : `已提交 ${response.queued_count} 个任务，在后台运行。`,
+      );
+      fetchData();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '批量补全失败');
+    } finally {
+      setIngestSubmitting(false);
+    }
+  };
+
   const clearFilters = () => {
     setSearchQuery('');
     updateFilters({ q: '', searchField: undefined, ownershipType: '', businessTag: '', region: '', status: '', owner: '', page: 1 });
@@ -255,6 +280,16 @@ export default function PartiesList({
           onAssignValueChange={setAssignOwnerId}
           onAssign={handleBatchAssign}
           assigning={assigning}
+          extraActions={(
+            <button
+              type="button"
+              onClick={() => setIngestDialogOpen(true)}
+              className="inline-flex items-center gap-1.5 border border-amber-300 bg-white px-3 py-1.5 text-xs text-amber-800 hover:border-brand-500 hover:text-brand-700"
+            >
+              <Sparkles className="h-3 w-3" />
+              AI 补全信息
+            </button>
+          )}
         />
       )}
 
@@ -295,6 +330,15 @@ export default function PartiesList({
       <PaginationFooter page={filters.page} pageCount={pageCount} pageSize={PAGE_SIZE} loading={loading} onPageChange={(page) => updateFilters({ page })} />
 
       {externalShowCreate && <CreatePartyModal onClose={onExternalCreateClose} onCreated={() => { onExternalCreateClose(); onCreated(); fetchData(); }} />}
+
+      {ingestDialogOpen && (
+        <BatchPartyIngestDialog
+          parties={items.filter((item) => selectedIds.has(item.id))}
+          submitting={ingestSubmitting}
+          onCancel={() => setIngestDialogOpen(false)}
+          onConfirm={(ids, mode) => void handleBatchIngest(ids, mode)}
+        />
+      )}
     </>
   );
 }

@@ -17,6 +17,14 @@ from backend.app.jobs.handlers.business_update import (
 from backend.app.jobs.handlers.buyer_intent_parse import (
     _handle_buyer_intent_parse,
 )
+from backend.app.jobs.handlers.buyer_party_ingest import (
+    NORMALIZE_JOB_TYPE as BUYER_PARTY_NORMALIZE_JOB_TYPE,
+    PARSE_JOB_TYPE as BUYER_PARTY_PARSE_JOB_TYPE,
+    RESEARCH_JOB_TYPE as BUYER_PARTY_RESEARCH_JOB_TYPE,
+    _handle_buyer_party_normalize,
+    _handle_buyer_party_parse,
+    _handle_buyer_party_research,
+)
 from backend.app.jobs.handlers.model_node_test import (
     _handle_model_node_test,
 )
@@ -66,6 +74,13 @@ def execute_job(db: Session, job: JobClaim) -> dict[str, object]:
             raise
     if job.job_type == "buyer_intent_parse":
         return _handle_buyer_intent_parse(db, job)
+    # 买家主体灌入链。三段各自记 trace、各自存报告，失败不会静默吞掉前一段的成果。
+    if job.job_type == BUYER_PARTY_PARSE_JOB_TYPE:
+        return _handle_buyer_party_parse(db, job)
+    if job.job_type == BUYER_PARTY_RESEARCH_JOB_TYPE:
+        return _handle_buyer_party_research(db, job)
+    if job.job_type == BUYER_PARTY_NORMALIZE_JOB_TYPE:
+        return _handle_buyer_party_normalize(db, job)
     if job.job_type == "attachment_ocr_parse":
         return _handle_attachment_ocr_parse(db, job)
     if job.job_type == "attachment_ocr_poll":

@@ -186,6 +186,51 @@ NODES: tuple[NodeSpec, ...] = (
         default_timeout_seconds=300,
         sort_order=80,
     ),
+    # 买家主体（买家自己是谁）的三段式灌入链。与上面的需求解析是**两条链**：
+    # 那条读需求原文写 buyer_intent，这条读材料写 buyer_party。
+    NodeSpec(
+        node_name="buyer_party_parser",
+        label="买家主体解析",
+        domain="buyer",
+        node_type="llm",
+        description="从材料中抽取买家主体自身的事实，并标出材料未覆盖的信息缺口。",
+        runtime_inputs=("材料全文（含附件 OCR 文本与图片）", "买家主体当前快照", "字段契约"),
+        prompt_variables=(
+            "material_text",
+            "party_snapshot_json",
+            "field_contract_json",
+            "enum_contract_json",
+        ),
+        default_timeout_seconds=300,
+        sort_order=82,
+    ),
+    NodeSpec(
+        node_name="buyer_party_researcher",
+        label="买家主体 AI 调研",
+        domain="buyer",
+        node_type="research",
+        description="联网补全买家主体的公开信息，或刷新过期的财务快照，产出带来源的发现报告。",
+        runtime_inputs=("调研上下文（锚点 + 已知字段 + 缺口清单）",),
+        prompt_variables=("research_context_json",),
+        # 一次调研是 5~15 分钟的多轮工具调用，与标的调研同一个量级。
+        default_timeout_seconds=900,
+        sort_order=84,
+    ),
+    NodeSpec(
+        node_name="buyer_party_normalizer",
+        label="买家主体信息规范化",
+        domain="buyer",
+        node_type="parser",
+        description=(
+            "把解析产出与调研报告一起翻译成本系统的写入契约，并显式标出两边的冲突。"
+            "解析与调研共用这一个归一节点：各自产出提案就没有任何地方会去调和它们。"
+        ),
+        runtime_inputs=("解析产出", "调研报告", "可写字段与枚举契约（运行时从库里取）"),
+        prompt_variables=("normalization_context_json",),
+        default_temperature=0.0,
+        default_timeout_seconds=180,
+        sort_order=86,
+    ),
     # ---- 推荐 ----------------------------------------------------------
     NodeSpec(
         node_name="recommendation_deep_eval",
@@ -462,7 +507,11 @@ PROMPT_VARIABLE_LABELS: dict[str, str] = {
     "raw_requirement_text": "买家需求原文",
     "buyer_profile_json": "买家画像 JSON",
     "semantic_parse_json": "语义解析阶段输出 JSON",
-    "field_contract_json": "买家需求统一字段契约 JSON",
+    "material_text": "材料全文（粘贴文本 + 附件读取文本，图片另以多模态附加）",
+    "party_snapshot_json": "买家主体当前字段快照 JSON",
+    "normalization_context_json": "买家主体归一化上下文 JSON（解析产出 + 调研报告 + 可写字段契约）",
+    # 契约按节点所属实体生成：买家需求节点拿到的是需求字段，买家主体节点拿到的是主体字段。
+    "field_contract_json": "统一字段契约 JSON（可写字段、类型与枚举）",
     "enum_contract_json": "结构化字段候选值规则 JSON",
     "screening_fields_json": "可筛字段清单 JSON（由指标注册表生成，渲染时自动注入）",
     "industry_l1_list": "一级行业字典（渲染时自动注入当前启用清单）",
@@ -575,6 +624,16 @@ def buyer_intent_legacy_node_name() -> str:
     if len(understudies) != 1:
         raise ValueError(f"买家两阶段的代跑节点必须唯一，实际为 {sorted(understudies)}")
     return understudies.pop()
+
+
+def buyer_party_ingest_node_names() -> tuple[str, str, str]:
+    """买家主体灌入链的三个节点，顺序即执行顺序（解析 → 调研 → 规范化）。
+
+    handler 和路由都从这里取名字，所以节点名字面量不必在目录之外再出现一次
+    （见 tests/test_node_registry.py 的字面量棘轮）。调研是可选的一段：
+    没有材料时跳过解析直接调研，不勾选联网时跳过调研直接规范化。
+    """
+    return ("buyer_party_parser", "buyer_party_researcher", "buyer_party_normalizer")
 
 
 def buyer_parse_node_names() -> tuple[str, ...]:

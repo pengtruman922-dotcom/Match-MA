@@ -7,6 +7,7 @@ from backend.app.api.routes import (
     business_updates,
     buyer_intents,
     buyer_parties,
+    buyer_party_ingest,
     data_dictionaries,
     debug,
     extracted_actions,
@@ -37,6 +38,8 @@ api_router.include_router(background_jobs.router)
 api_router.include_router(attachments.router)
 api_router.include_router(seller_targets.router)
 api_router.include_router(buyer_parties.router)
+# 挂在 buyer_parties 之后：它的路径都比 /{buyer_party_id} 多一段，不会被吃掉。
+api_router.include_router(buyer_party_ingest.router)
 api_router.include_router(buyer_intents.router)
 api_router.include_router(data_dictionaries.router)
 api_router.include_router(profile_sections.router)
