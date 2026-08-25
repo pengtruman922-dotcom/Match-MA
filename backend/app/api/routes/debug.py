@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from backend.app.api.authn import CurrentUser, require_admin
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
+from backend.app.registry.indicators import buyer_party_fact_columns
 
 router = APIRouter(prefix="/debug", tags=["debug"])
 
@@ -571,11 +572,11 @@ BUSINESS_OBJECT_SELECTS = {
           and workspace_id = :workspace_id
           and deleted_at is null
     """,
-    "buyer_party": """
+    "buyer_party": f"""
         select
-          id, buyer_name as name, buyer_name as title, aliases_json, industries_json,
-          industry_l2_json, status, region_province, region_city, contact_name,
-          contact_info_json, notes, created_at::text as created_at,
+          id, buyer_name as name, buyer_name as title, aliases_json, status, notes,
+          {', '.join(buyer_party_fact_columns())},
+          created_at::text as created_at,
           updated_at::text as updated_at, metadata_json
         from buyer_party
         where id = :entity_id

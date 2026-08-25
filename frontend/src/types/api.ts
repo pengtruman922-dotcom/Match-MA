@@ -189,12 +189,32 @@ export interface BuyerParty {
   id: string;
   buyer_name: string;
   aliases_json: string[];
-  industries_json: string[];
-  industry_l2_json: string[];
-  region_province: string | null;
-  region_city: string | null;
+  /** 基本信息 */
+  location_province: string | null;
+  location_city: string | null;
+  location_district: string | null;
+  /** not null default 'unknown'：unknown 不是 null，判断「有没有值」时两者等价。 */
+  ownership_type: string;
+  listed_status: string;
+  stock_code: string | null;
+  listing_exchange: string | null;
   contact_name: string | null;
   contact_info_json: Record<string, unknown>;
+  our_contact_name: string | null;
+  /** 业务信息：产业协同度这一维的全部依据。 */
+  business_tags_json: string[];
+  business_summary: string | null;
+  /** 财务信息。市值日期是真日期，估值时点是中文标签（「2025年一季度」）。 */
+  market_cap_yuan: string | number | null;
+  market_cap_as_of: string | null;
+  valuation_yuan: string | number | null;
+  valuation_date: string | null;
+  current_revenue_yuan: string | number | null;
+  current_operating_cash_flow_yuan: string | number | null;
+  financial_period_label: string | null;
+  /** 风险或其他可能影响并购的重要信息，进推荐上下文。 */
+  supplementary_summary: string | null;
+  /** 运营备注，不进任何推荐上下文。与 supplementary_summary 不要合并。 */
   notes: string | null;
   status: string;
   owner_user_id?: string | null;
@@ -219,7 +239,8 @@ export interface BuyerFilterOption {
 }
 
 export interface BuyerPartyFilterOptions {
-  industries: BuyerFilterOption[];
+  ownership_types: BuyerFilterOption[];
+  business_tags: BuyerFilterOption[];
   regions: BuyerFilterOption[];
   statuses: BuyerFilterOption[];
   owners?: BuyerFilterOption[];
@@ -259,12 +280,26 @@ export interface BuyerBulkDeleteResponse {
 export interface BuyerPartyCreate {
   buyer_name: string;
   aliases_json?: string[];
-  industries_json?: string[];
-  industry_l2_json?: string[];
-  region_province?: string | null;
-  region_city?: string | null;
+  location_province?: string | null;
+  location_city?: string | null;
+  location_district?: string | null;
+  ownership_type?: string;
+  listed_status?: string;
+  stock_code?: string | null;
+  listing_exchange?: string | null;
   contact_name?: string | null;
   contact_info_json?: Record<string, unknown>;
+  our_contact_name?: string | null;
+  business_tags_json?: string[];
+  business_summary?: string | null;
+  market_cap_yuan?: string | number | null;
+  market_cap_as_of?: string | null;
+  valuation_yuan?: string | number | null;
+  valuation_date?: string | null;
+  current_revenue_yuan?: string | number | null;
+  current_operating_cash_flow_yuan?: string | number | null;
+  financial_period_label?: string | null;
+  supplementary_summary?: string | null;
   notes?: string | null;
   owner_user_id?: string | null;
 }

@@ -15,7 +15,7 @@ from backend.app.api.routes.utils import (
 )
 from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
-from backend.app.registry.indicators import seller_target_fact_columns
+from backend.app.registry.indicators import buyer_party_fact_columns, seller_target_fact_columns
 from backend.app.services.attachment_storage import (
     AttachmentStorageError,
     AttachmentTooLargeError,
@@ -1205,10 +1205,10 @@ def _buyer_parties_by_ids(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
         return []
     rows = db.execute(
         text(
-            """
+            f"""
             select
-              id, buyer_name, aliases_json, industries_json, industry_l2_json,
-              region_province, region_city, contact_name, contact_info_json, notes, status,
+              id, aliases_json, notes, status,
+              {', '.join(buyer_party_fact_columns())},
               updated_at::text as updated_at
             from buyer_party
             where team_id = :team_id

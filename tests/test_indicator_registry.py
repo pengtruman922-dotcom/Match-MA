@@ -19,8 +19,11 @@ from backend.app.jobs.handlers.common import (
 )
 from backend.app.registry.indicators import (
     BUYER_INTENT_INDICATORS,
+    BUYER_PARTY_INDICATORS,
     SELLER_TARGET_INDICATORS,
     GROUPS,
+    buyer_party_fact_columns,
+    groups_for,
     indicators_for,
     multi_value_enum_values,
     screening_columns,
@@ -42,6 +45,8 @@ BUYER_CONTRACT_MIGRATION = REPO / "database/migrations/011_buyer_intent_conditio
 TARGET_FACTS_MIGRATION = REPO / "database/migrations/015_target_risk_and_structure_facts.sql"
 GRADE_MIGRATION = REPO / "database/migrations/017_entity_grade.sql"
 BUYER_CLOSED_SETS_MIGRATION = REPO / "database/migrations/018_buyer_condition_closed_sets.sql"
+BUYER_PARTY_PROFILE_MIGRATION = REPO / "database/migrations/013_buyer_party_profile.sql"
+BUYER_PARTY_FACTS_MIGRATION = REPO / "database/migrations/020_buyer_party_facts.sql"
 
 
 def test_consumers_derive_from_the_registry() -> None:
@@ -127,7 +132,7 @@ def _db_accepts(column: str, values: set[str]) -> bool | None:
 
 def test_registry_enum_values_valid_for_both_entities() -> None:
     # 注册表声明的枚举取值必须能被对应 DB check 约束接受，否则写入会被 DB 拒。
-    for entity in ("seller_target", "buyer_intent"):
+    for entity in ("seller_target", "buyer_intent", "buyer_party"):
         for column, values in writable_enum_values(entity).items():
             accepted = _db_accepts(column, values)
             if accepted is None:
@@ -239,9 +244,101 @@ def test_fact_projection_is_derived_everywhere_it_is_read() -> None:
 
 
 def test_every_indicator_group_key_is_declared() -> None:
-    group_keys = {group.key for group in GROUPS}
-    used = {ind.group for ind in SELLER_TARGET_INDICATORS if ind.group is not None}
-    assert used <= group_keys, f"指标引用了未声明的分组：{sorted(used - group_keys)}"
+    for entity in ("seller_target", "buyer_intent", "buyer_party"):
+        group_keys = {group.key for group in groups_for(entity)}
+        used = {ind.group for ind in indicators_for(entity) if ind.group is not None}
+        assert used <= group_keys, f"{entity} 指标引用了未声明的分组：{sorted(used - group_keys)}"
+
+
+# -- 0824：买家主体第一次进注册表。它没有对手方（不是「需求 → 标的」的比对
+#    契约的一侧），所以守卫的重点不是配对，而是「列真的存在」「闭集不许有
+#    第二份」「调研白名单不许把联系人放进去」。
+
+
+def test_every_buyer_party_indicator_is_a_real_column() -> None:
+    """注册表是写入白名单的事实源：引用不存在的列 = 允许写一个写不进去的列。"""
+    baseline = BASELINE.read_text(encoding="utf-8")
+    body = re.search(r"create table buyer_party \((.*?)\n\);", baseline, re.S)
+    assert body, "baseline 未找到 buyer_party 建表块"
+    columns = set(re.findall(r"^\s+([a-z_0-9]+)\s", body.group(1), re.M))
+    for path in (BUYER_PARTY_PROFILE_MIGRATION, BUYER_PARTY_FACTS_MIGRATION):
+        sql = path.read_text(encoding="utf-8")
+        columns |= set(re.findall(r"add column if not exists ([a-z_0-9]+)", sql))
+        columns -= set(re.findall(r"drop column if exists ([a-z_0-9]+)", sql))
+
+    missing = {ind.column for ind in BUYER_PARTY_INDICATORS} - columns
+    assert not missing, f"注册表引用了 buyer_party 不存在的列：{sorted(missing)}"
+
+    # 判死的列不能还留在注册表里 —— 留着等于允许写。
+    facts_sql = BUYER_PARTY_FACTS_MIGRATION.read_text(encoding="utf-8")
+    registry_columns = {ind.column for ind in BUYER_PARTY_INDICATORS}
+    for retired in ("industries_json", "industry_l2_json", "region_country", "region_province", "region_city", "long_term_preference_json"):
+        assert f"drop column if exists {retired}" in facts_sql
+        assert retired not in registry_columns
+    assert indicators_for("buyer_party") is BUYER_PARTY_INDICATORS
+
+
+def test_buyer_party_reuses_the_seller_side_closed_sets() -> None:
+    """上市状态与上市地不许出现第二份闭集。
+
+    同一个闭集写两份必然漂，而漂了不报错 —— 一侧加了取值，另一侧的写入
+    在最后一刻被 DB check 打回。所以直接比对身份：两侧必须是同一个常量。
+    """
+    party = {ind.column: ind for ind in BUYER_PARTY_INDICATORS}
+    seller = {ind.column: ind for ind in SELLER_TARGET_INDICATORS}
+    assert party["listed_status"].enum_options is seller["listed_status"].enum_options
+    assert party["listing_exchange"].enum_options is seller["listing_market_region"].enum_options
+    # 列名不继承标的侧那个名不副实的 listing_market_region（闭集其实是交易所）。
+    assert "listing_market_region" not in party
+
+
+def test_research_cannot_write_buyer_party_contacts() -> None:
+    """联系人 / 联系方式 / 我方对接人只能来自非公开渠道，不是买家调研的目标。
+
+    这条业务规则的落点就是 writable_by：下一单的调研节点直接用
+    writable_columns("research", "buyer_party") 取白名单，不需要另写一份
+    手工排除清单（手写清单必然漂）。
+    """
+    research = writable_columns("research", "buyer_party")
+    for column in ("contact_name", "contact_info_json", "our_contact_name"):
+        assert column not in research, f"{column} 不该出现在买家调研的可写字段里"
+        assert column in writable_columns("parse", "buyer_party")
+        assert column in writable_columns("manual", "buyer_party")
+    # 业务与财务字段调研补得了，这是本单建这些列的理由之一。
+    assert {"business_tags_json", "business_summary", "market_cap_yuan", "stock_code"} <= research
+
+
+def test_buyer_party_facts_do_not_join_screening_or_the_comparison_contract() -> None:
+    """买家主体字段不参与推荐初筛，也没有对手方。
+
+    列表页筛选是另一回事，由 API 的 where 直接实现，不经过 screening 这个
+    角色维；给主体字段填 target_column/operator 会让它被当成买家条件读。
+    """
+    for indicator in BUYER_PARTY_INDICATORS:
+        assert not indicator.screening, f"{indicator.column} 不该进初筛"
+        assert indicator.target_column is None, f"{indicator.column} 没有对手方"
+        assert indicator.operator is None
+        assert indicator.default_effect is None
+
+
+def test_buyer_party_projection_is_derived_everywhere_it_is_read() -> None:
+    """买家主体事实列的 SELECT 投影只能有一份。
+
+    0824 之前是五处手写，删两列当场打断了其中四处（深评上下文、买家解析
+    上下文、业务更新、调试对象）—— 表现是部署后运行时报错。
+    """
+    projection = buyer_party_fact_columns()
+    assert set(projection) == {ind.column for ind in BUYER_PARTY_INDICATORS}
+    assert len(projection) == len(set(projection)), "投影里有重复列名"
+    for relative in (
+        "backend/app/api/routes/buyer_parties.py",
+        "backend/app/api/routes/debug.py",
+        "backend/app/jobs/handlers/buyer_intent_parse.py",
+        "backend/app/jobs/handlers/common.py",
+        "backend/app/services/business_update_flow.py",
+    ):
+        source = (REPO / relative).read_text(encoding="utf-8")
+        assert "buyer_party_fact_columns" in source, f"{relative} 没有走派生投影"
 
 
 def test_supplement_block_is_titled_by_what_belongs_in_it() -> None:

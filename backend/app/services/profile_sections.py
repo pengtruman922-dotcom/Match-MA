@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.api.routes.utils import write_action_log
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+from backend.app.registry.indicators import indicator_by_column
 
 # 更新记录里画像字段的前缀。画像不是实体的列，靠这个前缀和普通字段区分，
 # 回滚时据此走 entity_profile_section 的版本恢复而不是 update 某一列。
@@ -292,14 +293,23 @@ def buyer_party_fact_block(db: Session, buyer_party_id: Any) -> str:
     Requirements like 北控's "与现有业务有关联性" or 北京工控's "强链补链" cannot be
     judged without knowing what the buyer already does. Identity fields are left
     out — the block exists to support the judgement, not to name the buyer.
+
+    联系人 / 联系方式 / notes 都**不进**这个块：前两者是通讯录，后者是运营
+    备注。这个块是给模型判断产业协同、财务赋能与决策效率用的，买家自己的
+    「风险或其他可能影响并购的重要信息」由 supplementary_summary 承担。
     """
     if not buyer_party_id:
         return ""
     row = db.execute(
         text(
             """
-            select industries_json, industry_l2_json, region_province, region_city,
-                   contact_name, contact_info_json, notes
+            select business_tags_json, business_summary, ownership_type,
+                   listed_status, listing_exchange, stock_code,
+                   location_province, location_city, location_district,
+                   market_cap_yuan, market_cap_as_of,
+                   valuation_yuan, valuation_date,
+                   current_revenue_yuan, current_operating_cash_flow_yuan,
+                   financial_period_label, supplementary_summary
             from buyer_party
             where id = :buyer_party_id
               and team_id = :team_id
@@ -315,15 +325,90 @@ def buyer_party_fact_block(db: Session, buyer_party_id: Any) -> str:
     ).mappings().one_or_none()
     if row is None:
         return ""
+    location = " ".join(
+        value
+        for value in (row["location_province"], row["location_city"], row["location_district"])
+        if value
+    )
+    ownership = _buyer_party_enum_label("ownership_type", row["ownership_type"])
+    listing = _listed_status_line(row)
     lines = [
-        f"所属行业：{'、'.join(row['industry_l2_json'] or row['industries_json'] or [])}" if (row["industry_l2_json"] or row["industries_json"]) else None,
-        f"所在地区：{' '.join(value for value in (row['region_province'], row['region_city']) if value)}" if (row["region_province"] or row["region_city"]) else None,
-        f"联系人：{row['contact_name']}" if row["contact_name"] else None,
-        f"联系方式：{row['contact_info_json'].get('text') or row['contact_info_json']}" if row["contact_info_json"] else None,
-        f"其他：{row['notes']}" if row["notes"] else None,
+        f"主营业务：{'、'.join(row['business_tags_json'] or [])}" if row["business_tags_json"] else None,
+        f"业务说明：{row['business_summary']}" if row["business_summary"] else None,
+        f"企业性质：{ownership}" if ownership else None,
+        f"上市状态：{listing}" if listing else None,
+        f"所在地区：{location}" if location else None,
+        _market_value_line(row),
+        _operating_line(row),
+        f"补充信息：{row['supplementary_summary']}" if row["supplementary_summary"] else None,
     ]
     body = "\n".join(line for line in lines if line)
     return f"【买方自身情况（供协同性判断）】\n{body}" if body else ""
+
+
+def _buyer_party_enum_label(column: str, value: Any) -> str | None:
+    """枚举中文名来自指标注册表，unknown 与 NULL 一样当没填。
+
+    unknown 不是 null，但对「这里有没有信息」这个问题两者等价 ——
+    往深评上下文里塞一行「企业性质：未知」只会占预算。
+    """
+    if not value or value == "unknown":
+        return None
+    options = dict(indicator_by_column("buyer_party", column).enum_options or ())
+    return options.get(str(value), str(value))
+
+
+def _listed_status_line(row: Any) -> str | None:
+    listed = _buyer_party_enum_label("listed_status", row["listed_status"])
+    if not listed:
+        return None
+    exchange = _buyer_party_enum_label("listing_exchange", row["listing_exchange"])
+    suffix = "".join(part for part in (exchange, row["stock_code"]) if part)
+    return f"{listed}（{suffix}）" if suffix else listed
+
+
+def _market_value_line(row: Any) -> str | None:
+    """市值与估值是一个展示位：上市看市值，非上市/拟上市看估值。
+
+    数字必须带时间一起给模型 —— 一个不知道哪天的市值判断不了「买得起吗」。
+    """
+    if row["listed_status"] == "listed" and row["market_cap_yuan"] is not None:
+        as_of = f"，{row['market_cap_as_of']}" if row["market_cap_as_of"] else ""
+        return f"市值：{_yuan_text(row['market_cap_yuan'])}{as_of}"
+    if row["valuation_yuan"] is not None:
+        as_of = f"，{row['valuation_date']}" if row["valuation_date"] else ""
+        return f"估值：{_yuan_text(row['valuation_yuan'])}{as_of}"
+    if row["market_cap_yuan"] is not None:
+        as_of = f"，{row['market_cap_as_of']}" if row["market_cap_as_of"] else ""
+        return f"市值：{_yuan_text(row['market_cap_yuan'])}{as_of}"
+    return None
+
+
+def _operating_line(row: Any) -> str | None:
+    """营收与经营现金流共用一个期间标签：它们来自同一份定期报告。"""
+    parts = [
+        f"营收 {_yuan_text(row['current_revenue_yuan'])}" if row["current_revenue_yuan"] is not None else None,
+        (
+            f"经营现金流 {_yuan_text(row['current_operating_cash_flow_yuan'])}"
+            if row["current_operating_cash_flow_yuan"] is not None
+            else None
+        ),
+    ]
+    body = "，".join(part for part in parts if part)
+    if not body:
+        return None
+    period = f"（{row['financial_period_label']}）" if row["financial_period_label"] else ""
+    return f"经营情况：{body}{period}"
+
+
+def _yuan_text(value: Any) -> str:
+    """人民币元 → 亿/万。深评读的是量级，不是小数位。"""
+    amount = float(value)
+    if abs(amount) >= 100_000_000:
+        return f"{amount / 100_000_000:.2f}".rstrip("0").rstrip(".") + "亿元"
+    if abs(amount) >= 10_000:
+        return f"{amount / 10_000:.2f}".rstrip("0").rstrip(".") + "万元"
+    return f"{amount:.2f}".rstrip("0").rstrip(".") + "元"
 
 
 def upsert_profile_section(

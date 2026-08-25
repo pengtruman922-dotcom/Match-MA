@@ -362,9 +362,81 @@ BUYER_INTENT_INDICATORS: tuple[Indicator, ...] = (
     Indicator("pause_reason", "暂停原因", None, "text", writable_by=_BI_PARSE),
 )
 
+# 买家主体（0824 建）。它回答的是「这家买家自己是做什么的」，与 buyer_intent
+# 的「这次想买什么」严格分开：主体资料在同一买家的所有需求间共享。
+#
+# section_code 与 key 同名只是占位：主体没有 entity_profile_section 补充栏
+# （那张表只服务标的与买家需求），买家信息 tab 也不渲染补充栏。
+BUYER_PARTY_GROUPS: tuple[IndicatorGroup, ...] = (
+    IndicatorGroup("party_identity", "基本信息", "party_identity"),
+    IndicatorGroup("party_business", "业务信息", "party_business"),
+    IndicatorGroup("party_financial", "财务信息", "party_financial"),
+    IndicatorGroup("party_other", "其他", "party_other"),
+)
+
+# 企业性质。央企与地方国企**合并为一档**（用户 0824 决定）：两者的区别落到
+# business_summary 表达，不值得为它开一个取值。基金 / PE 也不设独立取值，
+# 按其出资方性质选 —— 国资背景基金选国企，市场化基金选私企。
+_OWNERSHIP_TYPE = (
+    ("state_owned", "国企"),
+    ("private", "私企"),
+    ("foreign", "外企"),
+    ("other", "其他"),
+    ("unknown", "未知"),
+)
+
+# 联系人三列只能来自非公开渠道，**不含 research 是业务规则不是笔误**：
+# 联系人、联系方式、我方对接人不该出现在买家调研的目标信息里。规则编码进
+# writable_by 之后，调研节点直接用 writable_columns("research", "buyer_party")
+# 就拿到正确的白名单，不需要另写一份手工排除清单（手写清单必然漂）。
+_BP_CONTACT = _PARSE_MANUAL
+
+BUYER_PARTY_INDICATORS: tuple[Indicator, ...] = (
+    # 基本信息
+    # AI 可以改名，但更新接口要走复核、旧名要进别名：改错了影响所有关联需求、
+    # 撮合关系和搜索，**而且不会报错**，只会让人找不到东西（buyer_parties.py）。
+    Indicator("buyer_name", "买家名称", "party_identity", "text", writable_by=_ALL),
+    Indicator("location_province", "所在地", "party_identity", "text", writable_by=_ALL),
+    Indicator("location_city", "所在市", "party_identity", "text", writable_by=_ALL, fold_into="location_province"),
+    Indicator("location_district", "所在区", "party_identity", "text", writable_by=_ALL, fold_into="location_province"),
+    Indicator("ownership_type", "企业性质", "party_identity", "enum", writable_by=_ALL, enum_options=_OWNERSHIP_TYPE),
+    # 与标的侧共用同一个 _LISTED_STATUS / _LISTING_EXCHANGE，不要复制一份闭集。
+    # 新列名叫 listing_exchange 不叫 listing_market_region：标的侧那个列名名不副实
+    # （闭集其实是交易所），改名要动 25 处所以没改，新建的不继承这个债。
+    Indicator("listed_status", "上市状态", "party_identity", "enum", writable_by=_ALL, enum_options=_LISTED_STATUS),
+    # 需求原文里基本不会有股票代码，它是自动刷新的锚点，由调研补。
+    Indicator("stock_code", "股票代码", "party_identity", "text", writable_by=_MANUAL | _RESEARCH),
+    Indicator("listing_exchange", "上市地", "party_identity", "enum", writable_by=_MANUAL | _RESEARCH, enum_options=_LISTING_EXCHANGE),
+    Indicator("contact_name", "联系人", "party_identity", "text", writable_by=_BP_CONTACT),
+    Indicator("contact_info_json", "联系方式", "party_identity", "json", writable_by=_BP_CONTACT, editor="textarea"),
+    # 我方对接人。用 text 不用外键：对接人可能没有系统账号。
+    Indicator("our_contact_name", "我方对接人", "party_identity", "text", writable_by=_BP_CONTACT),
+    # 业务信息 —— 产业协同度这一维的全部依据。
+    Indicator("business_tags_json", "业务标签", "party_business", "json", writable_by=_ALL, editor="tags"),
+    Indicator("business_summary", "业务说明", "party_business", "text", writable_by=_ALL, editor="textarea"),
+    # 财务信息。四个列名与标的侧一字不差是刻意的：MONEY_YUAN_FIELDS 的万元/亿元
+    # 归一、以及「核心财务事实必须带期间」的守卫都能直接复用。**不要改名。**
+    Indicator("market_cap_yuan", "市值", "party_financial", "yuan", writable_by=_ALL),
+    # 行情日期是机器给的确定日子，所以是 date；估值时点是人写的中文标签
+    # （「2025年一季度」），所以是 text。只有 date 才能判断「这个市值过没过 7 天」，
+    # 而自动刷新要靠这个判断。这个差异是刻意的，不要为了「统一」把它改成 text。
+    Indicator("market_cap_as_of", "市值日期", "party_financial", "date", writable_by=_ALL, fold_into="market_cap_yuan"),
+    Indicator("valuation_yuan", "估值", "party_financial", "yuan", writable_by=_ALL),
+    Indicator("valuation_date", "估值时点", "party_financial", "text", writable_by=_ALL, fold_into="valuation_yuan"),
+    Indicator("current_revenue_yuan", "营收", "party_financial", "yuan", writable_by=_ALL),
+    Indicator("current_operating_cash_flow_yuan", "经营现金流", "party_financial", "yuan", writable_by=_ALL),
+    # 营收与现金流共用一个期间标签：它们来自同一份定期报告。
+    Indicator("financial_period_label", "财务期间", "party_financial", "text", writable_by=_ALL, fold_into="current_revenue_yuan"),
+    # 风险或其他可能影响并购的企业重要信息，**进推荐上下文**。
+    # 与 notes 的分工：notes 是运营备注，不进任何推荐上下文，保持原义不变。
+    # 两者不要合并，否则运营备注会被送进 LLM。
+    Indicator("supplementary_summary", "补充信息", "party_other", "text", writable_by=_ALL, editor="textarea"),
+)
+
 _BY_ENTITY: dict[str, tuple[Indicator, ...]] = {
     "seller_target": SELLER_TARGET_INDICATORS,
     "buyer_intent": BUYER_INTENT_INDICATORS,
+    "buyer_party": BUYER_PARTY_INDICATORS,
 }
 
 
@@ -380,6 +452,8 @@ def groups_for(entity: str = "seller_target") -> tuple[IndicatorGroup, ...]:
         return GROUPS
     if entity == "buyer_intent":
         return BUYER_GROUPS
+    if entity == "buyer_party":
+        return BUYER_PARTY_GROUPS
     raise ValueError(f"registry does not cover entity {entity!r}")
 
 
@@ -444,3 +518,17 @@ def seller_target_fact_columns() -> list[str]:
     return [indicator.column for indicator in SELLER_TARGET_INDICATORS] + list(
         _SELLER_TARGET_EXTRA_FACT_COLUMNS
     )
+
+
+def buyer_party_fact_columns() -> list[str]:
+    """买家主体事实列的唯一清单，给各处 SELECT 拼投影用。
+
+    同 seller_target_fact_columns 的道理：详情页、列表、深评上下文、买家解析
+    上下文、业务更新各读一次主体，手写投影时加一列漏改一处的表现是
+    「字段存进去了但某条链路看不见」。0824 之前正是这样漏的 —— 删两列
+    打断了四处手写 SELECT。
+
+    只含注册表声明的列。id、aliases_json、notes、status、时间戳这类系统列
+    由调用方自己加，因为每处要的不一样。
+    """
+    return [indicator.column for indicator in BUYER_PARTY_INDICATORS]

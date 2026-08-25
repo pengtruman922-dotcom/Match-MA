@@ -39,7 +39,11 @@ from backend.app.jobs.handlers.traces import (
     _insert_buyer_intent_parse_trace,
 )
 from backend.app.jobs.queue import JobClaim
-from backend.app.registry.indicators import indicator_by_column, indicators_for
+from backend.app.registry.indicators import (
+    buyer_party_fact_columns,
+    indicator_by_column,
+    indicators_for,
+)
 from backend.app.registry.nodes import buyer_intent_legacy_node_name, buyer_intent_two_stage_node_names
 from backend.app.services.buyer_intent_industry import normalize_buyer_intent_industry_changes
 from backend.app.services.buyer_risk_tolerance import normalize_unacceptable_risk_flags
@@ -1002,10 +1006,10 @@ def _get_buyer_intent_for_parse(db: Session, buyer_intent_id: UUID) -> dict[str,
 def _get_buyer_party(db: Session, buyer_party_id: UUID) -> dict[str, Any] | None:
     row = db.execute(
         text(
-            """
+            f"""
             select
-              id, buyer_name, aliases_json, industries_json, industry_l2_json,
-              region_province, region_city, contact_name, contact_info_json, notes, status
+              id, aliases_json, notes, status,
+              {', '.join(buyer_party_fact_columns())}
             from buyer_party
             where id = :buyer_party_id
               and team_id = :team_id

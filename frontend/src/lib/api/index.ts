@@ -171,7 +171,8 @@ export const buyerParties = {
   list: (params?: {
     q?: string;
     search_field?: BuyerPartySearchField;
-    industry?: string;
+    ownership_type?: string;
+    business_tag?: string;
     region?: string;
     status?: string;
     owner?: string;

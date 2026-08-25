@@ -139,7 +139,7 @@ def platform_overview(current_user: CurrentUser, db: Session = Depends(get_db)) 
             """
             select
               count(*) as total,
-              count(*) filter (where nullif(region_province, '') is null) as province_unknown
+              count(*) filter (where nullif(location_province, '') is null) as province_unknown
             from buyer_party
             where team_id = :team_id
               and workspace_id = :workspace_id
@@ -152,12 +152,12 @@ def platform_overview(current_user: CurrentUser, db: Session = Depends(get_db)) 
     buyer_province_rows = db.execute(
         text(
             """
-            select nullif(region_province, '') as province, count(*) as count
+            select nullif(location_province, '') as province, count(*) as count
             from buyer_party
             where team_id = :team_id
               and workspace_id = :workspace_id
               and deleted_at is null
-              and nullif(region_province, '') is not null
+              and nullif(location_province, '') is not null
             group by province
             order by count desc, province
             """

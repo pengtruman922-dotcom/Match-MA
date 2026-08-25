@@ -141,12 +141,15 @@ def test_buyer_province_panel_reads_the_party_location() -> None:
 
     买家意向的 `region_scope_summary`（想买哪里）是自由文本——生产样本形如
     「优先考虑长三角、珠三角区域具备扩产潜力的项目」——上不了地图；这里明确
-    只用 buyer_party.region_province，避免以后被误当成需求地域图。
+    只用 buyer_party 的所在地列，避免以后被误当成需求地域图。
+
+    列名 0824 从 region_province 换成 location_province，与标的侧同一口径。
     """
     code = _sql_only(_source())
 
     assert "from buyer_party" in code
-    assert "region_province" in code
+    assert "location_province" in code
+    assert "region_province" not in code
     assert "region_scope_summary" not in code
 
 

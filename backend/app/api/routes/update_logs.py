@@ -19,7 +19,11 @@ from backend.app.api.routes.utils import (
 )
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
-from backend.app.registry.indicators import SELLER_TARGET_INDICATORS, seller_target_fact_columns
+from backend.app.registry.indicators import (
+    BUYER_PARTY_INDICATORS,
+    SELLER_TARGET_INDICATORS,
+    seller_target_fact_columns,
+)
 from backend.app.services.attachment_status import (
     attachment_content_extraction_status,
     attachment_extraction_strategy,
@@ -1147,15 +1151,11 @@ ROLLBACK_FIELDS_BY_ENTITY = {
         "unacceptable_risk_flags_json",
         "buyer_industry_advantage_summary",
     },
+    # 买家主体的事实列跟着注册表走（0824 起），加一列不用再想起来补这里；
+    # aliases_json / notes / status 是注册表之外的系统列，仍然手写。
     "buyer_party": {
-        "buyer_name",
+        *(indicator.column for indicator in BUYER_PARTY_INDICATORS),
         "aliases_json",
-        "industries_json",
-        "industry_l2_json",
-        "region_province",
-        "region_city",
-        "contact_name",
-        "contact_info_json",
         "notes",
         "status",
     },
@@ -1170,11 +1170,16 @@ ROLLBACK_FIELDS_BY_ENTITY = {
 }
 
 JSONB_ROLLBACK_FIELDS = {
-    # 标的侧的 jsonb 列跟着注册表走，加一列不用再想起来补这里；
-    # 买家侧仍是手写（本轮不动买家）。
+    # 标的侧与买家主体的 jsonb 列跟着注册表走，加一列不用再想起来补这里；
+    # 买家需求侧仍是手写（0824 这一轮不动需求）。
     *(
         ("seller_target", indicator.column)
         for indicator in SELLER_TARGET_INDICATORS
+        if indicator.kind == "json"
+    ),
+    *(
+        ("buyer_party", indicator.column)
+        for indicator in BUYER_PARTY_INDICATORS
         if indicator.kind == "json"
     ),
     ("buyer_intent", "contact_info_json"),

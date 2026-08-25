@@ -143,8 +143,8 @@ def _search_buyer_parties(db: Session, params: dict[str, Any], current_user: Any
               'buyer_party' as entity_type,
               id::text as entity_id,
               buyer_name as title,
-              nullif(concat_ws(' · ', region_province, region_city), '') as subtitle,
-              coalesce(contact_name, nullif(contact_info_json::text, '{{}}'), notes) as snippet,
+              nullif(concat_ws(' · ', location_province, location_city), '') as subtitle,
+              coalesce(business_summary, contact_name, nullif(contact_info_json::text, '{{}}'), notes) as snippet,
               '/buyers/' || id::text as route,
               updated_at::text as updated_at,
               case
@@ -155,10 +155,10 @@ def _search_buyer_parties(db: Session, params: dict[str, Any], current_user: Any
               end as match_reason,
               jsonb_build_object(
                 'aliases_json', aliases_json,
-                'industries_json', industries_json,
-                'industry_l2_json', industry_l2_json,
-                'region_province', region_province,
-                'region_city', region_city,
+                'business_tags_json', business_tags_json,
+                'ownership_type', ownership_type,
+                'location_province', location_province,
+                'location_city', location_city,
                 'contact_name', contact_name
               ) as metadata
             from buyer_party
@@ -169,10 +169,10 @@ def _search_buyer_parties(db: Session, params: dict[str, Any], current_user: Any
               and (
                 buyer_name ilike :q
                 or coalesce(aliases_json::text, '') ilike :q
-                or coalesce(industries_json::text, '') ilike :q
-                or coalesce(industry_l2_json::text, '') ilike :q
-                or coalesce(region_province, '') ilike :q
-                or coalesce(region_city, '') ilike :q
+                or coalesce(business_tags_json::text, '') ilike :q
+                or coalesce(business_summary, '') ilike :q
+                or coalesce(location_province, '') ilike :q
+                or coalesce(location_city, '') ilike :q
                 or coalesce(contact_name, '') ilike :q
                 or coalesce(contact_info_json::text, '') ilike :q
                 or coalesce(notes, '') ilike :q

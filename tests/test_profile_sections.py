@@ -70,39 +70,107 @@ def test_render_returns_empty_when_no_sections_exist() -> None:
     assert render_profile_text({}) == ""
 
 
+def _buyer_party_row(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "business_tags_json": ["储能系统", "充电桩"],
+        "business_summary": "省属能源平台，主业为风光电站开发与运营。",
+        "ownership_type": "state_owned",
+        "listed_status": "listed",
+        "listing_exchange": "sse",
+        "stock_code": "600000",
+        "location_province": "湖北省",
+        "location_city": "武汉市",
+        "location_district": None,
+        "market_cap_yuan": 26_000_000_000,
+        "market_cap_as_of": "2026-08-20",
+        "valuation_yuan": None,
+        "valuation_date": None,
+        "current_revenue_yuan": 5_800_000_000,
+        "current_operating_cash_flow_yuan": 420_000_000,
+        "financial_period_label": "2025年度",
+        "supplementary_summary": "存在一宗未决诉讼，金额约 3000 万元。",
+    }
+    row.update(overrides)
+    return row
+
+
+class _Db:
+    statement = ""
+
+    def __init__(self, row: dict[str, object] | None = None) -> None:
+        self.row = row if row is not None else _buyer_party_row()
+
+    def execute(self, statement, params):
+        self.statement = str(statement)
+        outer = self
+
+        class _Result:
+            def mappings(self):
+                return self
+
+            def one_or_none(self):
+                return outer.row
+
+        return _Result()
+
+
 def test_buyer_party_block_carries_business_facts_without_identity() -> None:
-    class _Result:
-        def mappings(self):
-            return self
-
-        def one_or_none(self):
-            return {
-                "industries_json": ["能源"],
-                "industry_l2_json": ["新能源"],
-                "region_province": "湖北省",
-                "region_city": "武汉市",
-                "contact_name": "张经理",
-                "contact_info_json": {"text": "13800000000"},
-                "notes": "关注储能、充电桩",
-            }
-
-    class _Db:
-        statement = ""
-
-        def execute(self, statement, params):
-            self.statement = str(statement)
-            return _Result()
-
     db = _Db()
     block = buyer_party_fact_block(db, "8ff4bc53-047c-47be-b9b8-a3c465a519a1")
 
-    assert "所属行业：新能源" in block
+    assert "主营业务：储能系统、充电桩" in block
+    assert "省属能源平台" in block
+    assert "企业性质：国企" in block
+    assert "上市状态：已上市（上交所600000）" in block
     assert "所在地区：湖北省 武汉市" in block
-    assert "联系人：张经理" in block
-    assert "其他：关注储能、充电桩" in block
+    # 财务数字必须带时间：不知道哪天的市值判断不了「买得起吗」。
+    assert "市值：260亿元，2026-08-20" in block
+    assert "经营情况：营收 58亿元，经营现金流 4.2亿元（2025年度）" in block
+    assert "补充信息：存在一宗未决诉讼" in block
     # 身份字段不进块：它服务于协同性判断，不用于指名买家
     assert "buyer_name" not in db.statement
-    assert "legal_name" not in db.statement
+    # 通讯录与运营备注也不进块：这个块是给模型判断产业协同的，不是通讯录
+    assert "contact_name" not in db.statement
+    assert "contact_info_json" not in db.statement
+    assert "notes" not in db.statement
+
+
+def test_market_value_shows_valuation_for_unlisted_buyers() -> None:
+    """市值与估值是一个展示位：上市看市值，非上市看估值。"""
+    db = _Db(
+        _buyer_party_row(
+            listed_status="unlisted",
+            listing_exchange=None,
+            stock_code=None,
+            market_cap_yuan=None,
+            market_cap_as_of=None,
+            valuation_yuan=1_200_000_000,
+            valuation_date="2025年一季度",
+        )
+    )
+    block = buyer_party_fact_block(db, "8ff4bc53-047c-47be-b9b8-a3c465a519a1")
+
+    assert "估值：12亿元，2025年一季度" in block
+    assert "市值" not in block
+
+
+def test_unknown_enums_are_treated_as_missing() -> None:
+    """unknown 不是 null，但对「这里有没有信息」两者等价：不占深评预算。"""
+    db = _Db(
+        _buyer_party_row(
+            ownership_type="unknown",
+            listed_status="unknown",
+            listing_exchange=None,
+            stock_code=None,
+            market_cap_yuan=None,
+            market_cap_as_of=None,
+        )
+    )
+    block = buyer_party_fact_block(db, "8ff4bc53-047c-47be-b9b8-a3c465a519a1")
+
+    assert "企业性质" not in block
+    assert "上市状态" not in block
+    assert "主营业务：储能系统、充电桩" in block
 
 
 def test_buyer_party_block_is_empty_without_a_party() -> None:

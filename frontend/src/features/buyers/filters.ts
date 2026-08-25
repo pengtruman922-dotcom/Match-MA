@@ -47,10 +47,16 @@ export type BuyerIntentFilters = {
   pageSize: number;
 };
 
+/**
+ * 买家主体的筛选维度。所属行业 0824 退役：生产 39 条主体 0% 填了行业，
+ * 那一栏永远是空的。取代它的是「买家自己是什么」（企业性质）与
+ * 「买家自己做什么」（业务标签）—— 为标的找买家的第一判断依据。
+ */
 export type BuyerPartyFilters = {
   q: string;
   searchField?: BuyerPartySearchField;
-  industry: string;
+  ownershipType: string;
+  businessTag: string;
   region: string;
   status: string;
   owner: string;
@@ -58,7 +64,7 @@ export type BuyerPartyFilters = {
 };
 
 export const INTENT_FILTERS: Array<keyof BuyerIntentFilters> = ['q', 'industry', 'region', 'status', 'listedStatus', 'requiresConsolidation', 'owner'];
-export const PARTY_FILTERS: Array<keyof BuyerPartyFilters> = ['q', 'industry', 'region', 'status', 'owner'];
+export const PARTY_FILTERS: Array<keyof BuyerPartyFilters> = ['q', 'ownershipType', 'businessTag', 'region', 'status', 'owner'];
 
 export const EMPTY_INTENT_FILTER_OPTIONS: BuyerIntentFilterOptions = {
   industries: [],
@@ -69,7 +75,8 @@ export const EMPTY_INTENT_FILTER_OPTIONS: BuyerIntentFilterOptions = {
 };
 
 export const EMPTY_PARTY_FILTER_OPTIONS: BuyerPartyFilterOptions = {
-  industries: [],
+  ownership_types: [],
+  business_tags: [],
   regions: [],
   statuses: [],
 };
@@ -99,7 +106,7 @@ export function readIntentFilters(searchParams: URLSearchParams): BuyerIntentFil
 
 export function readPartyFilters(searchParams: URLSearchParams): BuyerPartyFilters {
   const searchFieldParam = searchParams.get('partySearchField');
-  return { q: searchParams.get('partyQ') || '', searchField: isBuyerPartySearchField(searchFieldParam) ? searchFieldParam : undefined, industry: searchParams.get('partyIndustry') || '', region: searchParams.get('partyRegion') || '', status: searchParams.get('partyStatus') || '', owner: searchParams.get('partyOwner') || '', page: Math.max(1, Number(searchParams.get('partyPage') || '1') || 1) };
+  return { q: searchParams.get('partyQ') || '', searchField: isBuyerPartySearchField(searchFieldParam) ? searchFieldParam : undefined, ownershipType: searchParams.get('partyOwnership') || '', businessTag: searchParams.get('partyTag') || '', region: searchParams.get('partyRegion') || '', status: searchParams.get('partyStatus') || '', owner: searchParams.get('partyOwner') || '', page: Math.max(1, Number(searchParams.get('partyPage') || '1') || 1) };
 }
 
 export function isBuyerIntentSearchField(value: string | null): value is BuyerIntentSearchField { return value === 'intent_name' || value === 'buyer_name' || value === 'raw_requirement_text' || value === 'intent_summary'; }

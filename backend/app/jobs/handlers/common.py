@@ -13,6 +13,7 @@ from backend.app.ai.prompting import render_template
 from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
 from backend.app.registry.indicators import (
+    buyer_party_fact_columns,
     multi_value_enum_values,
     writable_columns,
     writable_enum_values,
@@ -651,10 +652,10 @@ def _fetch_buyer_parties(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
         return []
     rows = db.execute(
         text(
-            """
+            f"""
             select
-              id, buyer_name, aliases_json, industries_json, industry_l2_json,
-              region_province, region_city, contact_name, contact_info_json, notes
+              id, aliases_json, notes,
+              {', '.join(buyer_party_fact_columns())}
             from buyer_party
             where team_id = :team_id
               and workspace_id = :workspace_id

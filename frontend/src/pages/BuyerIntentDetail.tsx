@@ -130,7 +130,7 @@ export default function BuyerIntentDetail() {
             </div>
             <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-500">
               <span>买家：{party?.buyer_name || intent.buyer_name || '未关联买家'}</span>
-              {party?.region_province || party?.region_city ? <span>· {party?.region_province}{party?.region_city}</span> : null}
+              {party?.location_province || party?.location_city ? <span>· {party?.location_province}{party?.location_city}</span> : null}
               <span className="inline-flex items-center gap-1"><UserRound className="h-3 w-3" />负责人：{intent.owner_name || '未指派'}</span>
               <span>· 更新于 {formatDateTime(intent.updated_at)}</span>
             </p>

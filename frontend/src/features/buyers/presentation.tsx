@@ -1,8 +1,8 @@
 import { Loader2 } from 'lucide-react';
-import type { BuyerIntent, BuyerIntentParseStatus, ConditionEffect } from '../../types/api';
+import type { BuyerIntent, BuyerIntentParseStatus, BuyerParty, ConditionEffect } from '../../types/api';
 import { valueLabel } from '../../lib/fieldLabels';
 import { gradeClass, intentGrade, intentGradeLabel } from '../../lib/entityGrade';
-import { formatCompactMoney } from '../../lib/format';
+import { formatCompactMoney, formatYuan } from '../../lib/format';
 
 export function ParseStatusBadge({ item, parseStatus }: { item: BuyerIntent; parseStatus?: BuyerIntentParseStatus }) {
   const state = parseStatus?.processing_state || item.processing_state;
@@ -87,6 +87,53 @@ export function dedupMatchLabel(value: string): string {
   if (value === 'buyer_name') return '买家名称';
   if (value === 'alias') return '别名';
   return value;
+}
+
+/** 三级地区，与标的侧同一口径；缺失的层级留空而不是补占位。 */
+export function partyLocationText(party: BuyerParty): string {
+  return [party.location_province, party.location_city, party.location_district].filter(Boolean).join(' / ');
+}
+
+/**
+ * 市值与估值是**一个展示位**：数据层是两列，用户看到的是一个位置。
+ * 上市看市值，非上市/拟上市看估值，unknown 有哪个显示哪个。
+ *
+ * 数字必须带时间一起给：没有时间的财务数字是不可用的，
+ * 不要为了版面把 as_of / 时点藏起来。
+ */
+export function partyMarketValue(party: BuyerParty): { label: string; value: string; asOf: string | null } | null {
+  const marketCap = party.market_cap_yuan === null || party.market_cap_yuan === undefined
+    ? null
+    : { label: '市值', value: formatYuan(party.market_cap_yuan), asOf: party.market_cap_as_of };
+  const valuation = party.valuation_yuan === null || party.valuation_yuan === undefined
+    ? null
+    : { label: '估值', value: formatYuan(party.valuation_yuan), asOf: party.valuation_date };
+  if (party.listed_status === 'listed') return marketCap || valuation;
+  if (party.listed_status === 'unlisted' || party.listed_status === 'pre_ipo') return valuation || marketCap;
+  return marketCap || valuation;
+}
+
+/** 该显示哪一位的中文名，编辑态与展示态共用，避免两处判断漂开。 */
+export function partyMarketValueField(party: BuyerParty): 'market_cap' | 'valuation' | 'both' {
+  if (party.listed_status === 'listed') return 'market_cap';
+  if (party.listed_status === 'unlisted' || party.listed_status === 'pre_ipo') return 'valuation';
+  return 'both';
+}
+
+/**
+ * 顾问录财务数字时写的是「32.6亿」「3260万」，不是 3260000000。
+ * 解析成人民币元；纯数字按元处理；解析不出来返回 null（调用方保留原值不写）。
+ */
+export function parseYuanInput(raw: string): number | null {
+  const text = raw.replace(/[,，\s]/g, '').replace(/元$/, '');
+  if (!text) return null;
+  const match = /^(-?\d+(?:\.\d+)?)(亿|万)?$/.exec(text);
+  if (!match) return null;
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount)) return null;
+  if (match[2] === '亿') return amount * 100000000;
+  if (match[2] === '万') return amount * 10000;
+  return amount;
 }
 
 export type RequirementChip = { key: string; label: string; effect: ConditionEffect; title: string };

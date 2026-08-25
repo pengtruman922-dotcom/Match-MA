@@ -53,15 +53,32 @@ const SELLER_TARGET_FIELD_LABELS: Record<string, string> = {
   deleted_at: '删除时间',
 };
 
+// 与 backend/app/registry/indicators.py 的 BUYER_PARTY_INDICATORS 同源。
+// 这张表只服务更新记录（那里只有列名，拿不到注册表）；买家信息 tab 的
+// 中文名走 /meta/indicators?entity=buyer_party，注册表改一处界面跟着变。
 const BUYER_PARTY_FIELD_LABELS: Record<string, string> = {
   buyer_name: '买家名称',
   aliases_json: '别名',
-  industries_json: '所属行业',
-  industry_l2_json: '所属细分行业',
-  region_province: '所在省份',
-  region_city: '所在城市',
+  location_province: '所在省',
+  location_city: '所在市',
+  location_district: '所在区',
+  ownership_type: '企业性质',
+  listed_status: '上市状态',
+  stock_code: '股票代码',
+  listing_exchange: '上市地',
   contact_name: '联系人',
   contact_info_json: '联系方式',
+  our_contact_name: '我方对接人',
+  business_tags_json: '业务标签',
+  business_summary: '业务说明',
+  market_cap_yuan: '市值',
+  market_cap_as_of: '市值日期',
+  valuation_yuan: '估值',
+  valuation_date: '估值时点',
+  current_revenue_yuan: '营收',
+  current_operating_cash_flow_yuan: '经营现金流',
+  financial_period_label: '财务期间',
+  supplementary_summary: '补充信息',
   notes: '备注',
   status: '状态',
   deleted_at: '删除时间',
@@ -141,20 +158,6 @@ const RELATION_FIELD_LABELS: Record<string, string> = {
 };
 
 
-
-Object.assign(BUYER_PARTY_FIELD_LABELS, {
-  buyer_name: '买家名称',
-  aliases_json: '别名',
-  industries_json: '所属行业',
-  industry_l2_json: '所属细分行业',
-  region_province: '所在省份',
-  region_city: '所在城市',
-  contact_name: '联系人',
-  contact_info_json: '联系方式',
-  notes: '备注',
-  status: '状态',
-  deleted_at: '删除时间',
-});
 
 Object.assign(BUYER_INTENT_FIELD_LABELS, {
   buyer_party_id: '关联买家',
@@ -287,6 +290,27 @@ const VALUE_LABELS: Record<string, Record<string, string>> = {
     hkex: '港交所',
     nyse: '纽交所',
     nasdaq: '纳斯达克',
+    other: '其他',
+    unknown: '未知',
+  },
+  // 买家主体的上市地。列名与标的侧不同（listing_exchange 名副其实），
+  // 闭集是同一个 —— 后端两处都用 _LISTING_EXCHANGE，不要在这里让它们漂开。
+  listing_exchange: {
+    sse: '上交所',
+    szse: '深交所',
+    bse: '北交所',
+    hkex: '港交所',
+    nyse: '纽交所',
+    nasdaq: '纳斯达克',
+    other: '其他',
+    unknown: '未知',
+  },
+  // 企业性质。央企与地方国企合并为一档：区别落到 business_summary 表达。
+  // 基金 / PE 按其出资方性质选（国资背景选国企，市场化选私企）。
+  ownership_type: {
+    state_owned: '国企',
+    private: '私企',
+    foreign: '外企',
     other: '其他',
     unknown: '未知',
   },
