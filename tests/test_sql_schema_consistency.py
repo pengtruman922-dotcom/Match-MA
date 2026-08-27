@@ -155,6 +155,38 @@ def test_date_columns_are_not_declared_as_strings_in_the_response_model() -> Non
     assert not offenders, f"这些列在库里是 date，出参却没声明成 date：{offenders}"
 
 
+def test_route_inserts_declare_every_json_column_as_jsonb() -> None:
+    """路由里手写的 insert 也必须给每个 *_json 列声明 type_=JSONB。
+
+    下面那条只看解析 handler 与 extracted_action_apply 的字段集合，看不到 REST
+    路由手写的 insert —— 而 018 给 buyer_intent 加 unacceptable_risk_flags_json
+    时，params 与插入列都接上了、``bindparam(..., type_=JSONB)`` 漏了。少了类型
+    声明，Python 的 ``[]`` 会被适配成 Postgres 数组而不是 jsonb，写进 jsonb 列
+    直接类型不匹配；而它的默认值恒为 ``[]``，于是「新建买家需求」每一次都 500。
+    导入时看不出来，写库路径又要真数据库才跑得到，所以这里做成静态断言。
+    """
+    pattern = re.compile(r"insert into\s+(\w+)\s*\((.*?)\)\s*values", re.S)
+    bind_pattern = re.compile(r'bindparam\("(\w+)", type_=JSONB\)')
+    problems: list[str] = []
+    for path in sorted((PROJECT_ROOT / "backend/app/api/routes").glob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        for match in pattern.finditer(source):
+            columns = [item.strip() for item in match.group(2).split(",") if item.strip()]
+            json_columns = [item for item in columns if item.endswith("_json")]
+            if not json_columns:
+                continue
+            # 从这条 insert 起、到下一条 insert 之前，就是它自己的 .bindparams(...)。
+            nxt = source.find("insert into", match.end())
+            window = source[match.start() : nxt if nxt != -1 else len(source)]
+            bound = set(bind_pattern.findall(window))
+            problems.extend(
+                f"{path.name}: insert into {match.group(1)} -> {column}"
+                for column in json_columns
+                if column not in bound
+            )
+    assert not problems, "这些 json 列写库时没声明 type_=JSONB：\n  " + "\n  ".join(problems)
+
+
 def test_buyer_intent_json_columns_are_bound_as_jsonb() -> None:
     """A list bound without type_=JSONB fails at write time, not at import."""
     from backend.app.jobs.handlers.buyer_intent_parse import (

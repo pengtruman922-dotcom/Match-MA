@@ -491,6 +491,10 @@ def create_buyer_intent(
             bindparam("acceptable_profitability_status_json", type_=JSONB),
             bindparam("relocation_target_regions_json", type_=JSONB),
             bindparam("needs_confirmation_json", type_=JSONB),
+            # 018 加这一列时只接了 params 与插入列，漏了类型声明。少了 type_=JSONB，
+            # Python 的 [] 会被适配成 Postgres 数组而不是 jsonb，写进 jsonb 列直接
+            # 类型不匹配 —— 而它的默认值恒为 []，所以「新建买家需求」每一次都 500。
+            bindparam("unacceptable_risk_flags_json", type_=JSONB),
         ),
         _buyer_intent_params(payload, current_user, db),
     ).mappings().one()
