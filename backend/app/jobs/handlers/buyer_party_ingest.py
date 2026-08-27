@@ -1397,11 +1397,14 @@ def _collect_information_gaps(
         return gaps
     reported = research_result.get("not_found")
     if isinstance(reported, list) and reported:
-        return [
-            {"field": str(field), "reason": "调研查过，没有可用的公开信息"}
-            for field in reported
-            if str(field).strip()
-        ]
+        # 主体都没认出来时，这些字段其实**没被查过** —— 说成「查过但没有公开信息」
+        # 会让顾问以为这家公司公开信息就是这么少，从而不去补全称。
+        reason = (
+            "主体未确认，还没能针对这个字段检索"
+            if str(research_result.get("research_outcome") or "") == "subject_unresolved"
+            else "调研查过，没有可用的公开信息"
+        )
+        return [{"field": str(field), "reason": reason} for field in reported if str(field).strip()]
     parse_gaps = [item for item in (parse_result.get("information_gaps") or []) if isinstance(item, dict)]
     if parse_gaps:
         return parse_gaps

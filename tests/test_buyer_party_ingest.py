@@ -654,6 +654,22 @@ def test_gaps_survive_a_run_that_found_nothing() -> None:
     assert all(item["reason"] for item in gaps)
 
 
+def test_an_unconfirmed_subject_says_the_fields_were_never_searched() -> None:
+    """主体没认出来时这些字段其实没被查过。
+
+    说成「查过但没有公开信息」会让顾问以为这家公司公开信息就是这么少，
+    从而不去补工商全称 —— 而补全称正是这一轮唯一的出路。
+    """
+    gaps = _collect_information_gaps(
+        model_gaps=None,
+        parse_result={},
+        research_result={"not_found": ["market_cap_yuan"], "research_outcome": "subject_unresolved"},
+        party=dict(EMPTY_PARTY),
+    )
+
+    assert "主体未确认" in gaps[0]["reason"]
+
+
 def test_a_run_that_wrote_nothing_does_not_call_itself_complete() -> None:
     """「跑完了」和「补到了」是两件事，绿标说反话比不显示更糟。"""
     assert _status_label(
