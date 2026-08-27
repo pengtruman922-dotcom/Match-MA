@@ -691,12 +691,13 @@ def _handle_buyer_party_research(db: Session, job: JobClaim) -> dict[str, object
     except SearchError as exc:
         raise BuyerPartyIngestError(str(exc)) from exc
 
-    anchor = research_context["anchor"]
-    tools = ResearchTools(
-        provider,
-        api_key,
-        subject_names=[str(anchor.get("resolved_name") or ""), *anchor.get("aliases", [])],
-    )
+    # 「这条结果是不是同一家公司」交给 agent，代码不判（0721 方案 §2.7 / 总纲 §3.2）。
+    # 买家主体的名字是顾问手输的简称，工商全称几乎总是不一样，子串闸门会把这家
+    # 公司自己的页面全判成 miss —— 实测「上海鼎汇实业集团」4 次检索 40 条结果
+    # 命中 0 条，fetch_page 全被拒，agent 一页正文都没读到就被逼着收尾。
+    # 早停也一起去掉：它的收尾指令是标的侧的形状（让模型往 coverage 里塞东西，
+    # 而买家契约里没有这个字段），而且 agent 本来就能随时不调工具直接收尾。
+    tools = ResearchTools(provider, api_key, subject_gate=False)
     started = time.perf_counter()
     try:
         loop = run_tool_loop(
@@ -706,7 +707,6 @@ def _handle_buyer_party_research(db: Session, job: JobClaim) -> dict[str, object
             execute_tool=tools,
             max_iterations=budget,
             tool_result_limit=FETCH_TEXT_LIMIT,
-            early_stop_instruction=tools.stop_instruction,
         )
     except LlmCallError as exc:
         _insert_ingest_trace(
@@ -763,7 +763,7 @@ def _handle_buyer_party_research(db: Session, job: JobClaim) -> dict[str, object
 
     parsed = loop.result.parsed_output_json
     parsed_ok = isinstance(parsed, dict)
-    outcome = _research_outcome(parsed, tools=tools, parsed_ok=parsed_ok)
+    outcome = _research_outcome(parsed, parsed_ok=parsed_ok)
     schema_validation = {
         "valid": parsed_ok,
         "research_outcome": outcome,
@@ -803,43 +803,54 @@ def _handle_buyer_party_research(db: Session, job: JobClaim) -> dict[str, object
         "completion_tokens": loop.usage.completion_tokens,
         "tool_calls": loop.usage.tool_calls_by_name,
         "hit_iteration_limit": loop.hit_iteration_limit,
+        "findings": _research_findings(parsed),
+        "not_found": [str(item) for item in (parsed.get("not_found") or []) if str(item).strip()],
+        "subject": parsed.get("subject") if isinstance(parsed.get("subject"), dict) else {},
     }
-    if outcome == "subject_unresolved" and not parse_output:
-        # 主体都没认出来，而材料侧也什么都没有 —— 没有任何东西需要归一。
-        # 这个终态必须能表达出来，否则 agent 会对同一个买家反复空跑、烧光预算。
-        result_payload["skipped_normalization"] = "subject_unresolved_without_material"
-    else:
-        result_payload["normalize_job_id"] = str(
-            _enqueue_normalize_job(
-                db,
-                job=job,
-                party_id=party_id,
-                parse_job_id=parse_job_id,
-                research_job_id=job.id,
-            )
+    # 收口那一段永远排上：即使主体没认出来、一条发现都没有，agent 报的
+    # not_found 也要落成 information_gaps，否则顾问拿不到「还缺什么」。
+    # 单来源时它不调模型，所以这一步很便宜。
+    result_payload["normalize_job_id"] = str(
+        _enqueue_normalize_job(
+            db,
+            job=job,
+            party_id=party_id,
+            parse_job_id=parse_job_id,
+            research_job_id=job.id,
         )
+    )
     _store_job_result(db, job_id=job.id, result_payload=result_payload)
     db.commit()
     return result_payload
 
 
-def _research_outcome(parsed: Any, *, tools: ResearchTools, parsed_ok: bool) -> str:
+def _research_outcome(parsed: Any, *, parsed_ok: bool) -> str:
+    """终态只读 agent 自己的判断，代码不再从检索命中率反推。
+
+    以前这里有一条「连续未命中且没有发现 → 判定没认出这家公司」的推断。
+    它建立在锚点闸门的命中计数上，而那个计数对买家名字根本不成立 ——
+    真实工商全称与顾问手输的简称不一样时，命中率恒为 0。
+    "查不到公开信息" 和 "没认出这家公司" 的区别是判断题，由 agent 回答。
+    """
     if not parsed_ok:
         return "failed"
     payload = parsed if isinstance(parsed, dict) else {}
-    findings = payload.get("findings") or payload.get("structured_facts") or []
     subject = payload.get("subject") if isinstance(payload.get("subject"), dict) else {}
-    explicitly_unresolved = (
+    if (
         payload.get("subject_resolved") is False
         or str(subject.get("status") or "") in {"unresolved", "not_found", "ambiguous"}
-    )
-    if explicitly_unresolved:
+    ):
         return "subject_unresolved"
-    if not findings:
-        # 连续检索不到准确主体后被刹住，且一条发现都没有 —— 那不是「查不到信息」，
-        # 而是「没认出这家公司」（脱敏名、重名、查无此公司）。两者在界面上必须分开。
-        return "subject_unresolved" if tools.early_stop_reason else "no_public_information"
-    return "found"
+    return "found" if _research_findings(payload) else "no_public_information"
+
+
+def _research_findings(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    values = payload.get("findings")
+    if values is None:
+        values = payload.get("structured_facts")
+    return [item for item in (values or []) if isinstance(item, dict)]
 
 
 def _research_tool_metadata(tools: ResearchTools, *, loop: ToolLoopResult | None) -> dict[str, Any]:
@@ -1017,6 +1028,103 @@ def _handle_buyer_party_normalize(db: Session, job: JobClaim) -> dict[str, objec
     if not parse_output and not (research_report["report_text"] or research_report["agent_output_json"]):
         raise BuyerPartyIngestError("没有解析产出也没有调研报告，无法规范化。")
 
+    # 这个节点真正的职责是**调和两个来源**，「规范化」只是它的副业。
+    # 只有一个来源时没有什么可调和的，再过一次模型就是无损搬运多加一次改写
+    # 机会 —— 多一次失败面、多一份延迟、多一份钱。所以两边都有东西才调它。
+    material_claims = _claims_from_parse_output(parse_output)
+    web_claims = _claims_from_research_result(research_result)
+    if material_claims and web_claims:
+        return _normalize_with_model(
+            db,
+            job=job,
+            party_id=party_id,
+            party=party,
+            parse_job_id=parse_job_id,
+            research_job_id=research_job_id,
+            parse_output=parse_output,
+            parse_result=parse_result,
+            research_result=research_result,
+            research_report=research_report,
+        )
+    return _normalize_in_code(
+        db,
+        job=job,
+        party_id=party_id,
+        party=party,
+        parse_job_id=parse_job_id,
+        research_job_id=research_job_id,
+        claims=material_claims + web_claims,
+        parse_output=parse_output,
+        parse_result=parse_result,
+        research_result=research_result,
+        research_report=research_report,
+    )
+
+
+def _normalize_in_code(
+    db: Session,
+    *,
+    job: JobClaim,
+    party_id: UUID,
+    party: dict[str, Any],
+    parse_job_id: UUID | None,
+    research_job_id: UUID | None,
+    claims: list[dict[str, Any]],
+    parse_output: dict[str, Any],
+    parse_result: dict[str, Any],
+    research_result: dict[str, Any],
+    research_report: dict[str, Any],
+) -> dict[str, object]:
+    """单来源收口：不调模型，直接把产出翻成 claim 落提案。
+
+    这一段没有 ai_trace —— 没有模型调用就不该有模型调用的记录。上游那一段
+    （解析或调研）自己写了 trace，链路仍然可追。
+    """
+    prepared = _reconcile_buyer_party_claims(
+        party=party,
+        claims=claims + _buyer_name_claims(party, parse_output=parse_output, research_result=research_result),
+    )
+    summary = _apply_buyer_party_claims(db, job=job, party_id=party_id, claims=prepared)
+    result_payload = {
+        "handled": True,
+        "job_type": job.job_type,
+        "buyer_party_id": str(party_id),
+        "parse_job_id": str(parse_job_id) if parse_job_id else None,
+        "research_job_id": str(research_job_id) if research_job_id else None,
+        "research_outcome": research_report["research_outcome"],
+        # 只有一个来源，没有可调和的冲突，所以这一段不需要模型。
+        "normalizer_invoked": False,
+        "proposal_count": len(prepared),
+        "auto_accepted_count": summary["auto_accepted_count"],
+        "pending_review_count": summary["pending_review_count"],
+        "ignored_count": summary["ignored_count"],
+        "apply_errors": summary["errors"],
+        "information_gaps": _collect_information_gaps(
+            model_gaps=None,
+            parse_result=parse_result,
+            research_result=research_result,
+            party=party,
+        ),
+        "normalization_notes": [],
+    }
+    _store_job_result(db, job_id=job.id, result_payload=result_payload)
+    db.commit()
+    return result_payload
+
+
+def _normalize_with_model(
+    db: Session,
+    *,
+    job: JobClaim,
+    party_id: UUID,
+    party: dict[str, Any],
+    parse_job_id: UUID | None,
+    research_job_id: UUID | None,
+    parse_output: dict[str, Any],
+    parse_result: dict[str, Any],
+    research_result: dict[str, Any],
+    research_report: dict[str, Any],
+) -> dict[str, object]:
     node_config = _get_default_node_config(db, NORMALIZER_NODE_NAME)
     normalization_context = _build_normalization_context(
         party=party,
@@ -1063,7 +1171,10 @@ def _handle_buyer_party_normalize(db: Session, job: JobClaim) -> dict[str, objec
 
     claims, notes = normalize_buyer_party_output(result.parsed_output_json)
     parsed_ok = isinstance(result.parsed_output_json, dict)
-    prepared = _reconcile_buyer_party_claims(party=party, claims=claims)
+    prepared = _reconcile_buyer_party_claims(
+        party=party,
+        claims=claims + _buyer_name_claims(party, parse_output=parse_output, research_result=research_result),
+    )
     schema_validation = {
         "valid": parsed_ok,
         "claim_count": len(prepared),
@@ -1093,10 +1204,11 @@ def _handle_buyer_party_normalize(db: Session, job: JobClaim) -> dict[str, objec
         raise BuyerPartyIngestError(str(schema_validation["error"]))
 
     summary = _apply_buyer_party_claims(db, job=job, party_id=party_id, claims=prepared)
-    gaps = (
-        [item for item in (result.parsed_output_json.get("information_gaps") or []) if isinstance(item, dict)]
-        or parse_result.get("information_gaps")
-        or []
+    gaps = _collect_information_gaps(
+        model_gaps=result.parsed_output_json.get("information_gaps"),
+        parse_result=parse_result,
+        research_result=research_result,
+        party=party,
     )
     result_payload = {
         "handled": True,
@@ -1105,6 +1217,7 @@ def _handle_buyer_party_normalize(db: Session, job: JobClaim) -> dict[str, objec
         "parse_job_id": str(parse_job_id) if parse_job_id else None,
         "research_job_id": str(research_job_id) if research_job_id else None,
         "research_outcome": research_report["research_outcome"],
+        "normalizer_invoked": True,
         "proposal_count": len(prepared),
         "auto_accepted_count": summary["auto_accepted_count"],
         "pending_review_count": summary["pending_review_count"],
@@ -1120,6 +1233,179 @@ def _handle_buyer_party_normalize(db: Session, job: JobClaim) -> dict[str, objec
     db.commit()
     return result_payload
 
+
+# ---------------------------------------------------------------------------
+# 单来源时由代码直译成 claim
+# ---------------------------------------------------------------------------
+
+
+def _claims_from_research_result(research_result: dict[str, Any]) -> list[dict[str, Any]]:
+    """调研的 findings 本来就是 claim 形状，只差一个来源标记。
+
+    形状是一样的不是巧合：调研提示词的输出契约和归一节点的输出契约按同一份
+    字段契约写。所以单来源时代码接得住，不必再过一次模型。
+    """
+    findings = research_result.get("findings")
+    if not isinstance(findings, list):
+        findings = _research_findings(research_result.get("agent_output_json"))
+    payload = {"structured_facts": [
+        {**item, "source_type": "web"}
+        for item in findings
+        if isinstance(item, dict)
+    ]}
+    claims, _ = normalize_buyer_party_output(payload)
+    return claims
+
+
+def _claims_from_parse_output(parse_output: dict[str, Any]) -> list[dict[str, Any]]:
+    """解析产出的是 fields + evidence 两个块，这里把它们按字段拼回一条条 claim。
+
+    拼不上证据的字段仍然保留 —— 它会带着 validation_error 落成不可自动写入的
+    提案，顾问看得到、可以自己核，而不是被静默丢掉。
+    """
+    fields = parse_output.get("fields")
+    if not isinstance(fields, dict) or not fields:
+        return []
+    quotes: dict[str, str] = {}
+    for item in parse_output.get("evidence") or []:
+        if not isinstance(item, dict):
+            continue
+        field = str(item.get("field") or "").strip()
+        quote = str(item.get("quote") or "").strip()
+        if field and quote and field not in quotes:
+            quotes[field] = quote
+    payload = {"structured_facts": [
+        {
+            "field_path": column,
+            "value": value,
+            "source_type": "material",
+            "period_label": _material_period_label(parse_output, column),
+            "as_of_date": _material_as_of_date(parse_output, column),
+            "sources": [],
+            "source_title": "材料解析",
+            "source_excerpt": quotes.get(column),
+        }
+        for column, value in fields.items()
+    ]}
+    claims, _ = normalize_buyer_party_output(payload)
+    return claims
+
+
+def _material_period_label(parse_output: dict[str, Any], column: str) -> Any:
+    periods = parse_output.get("periods")
+    if isinstance(periods, dict) and isinstance(periods.get(column), dict):
+        return periods[column].get("period_label")
+    fields = parse_output.get("fields") or {}
+    value = fields.get(column)
+    return value.get("period_label") if isinstance(value, dict) else None
+
+
+def _material_as_of_date(parse_output: dict[str, Any], column: str) -> Any:
+    periods = parse_output.get("periods")
+    if isinstance(periods, dict) and isinstance(periods.get(column), dict):
+        return periods[column].get("as_of_date")
+    fields = parse_output.get("fields") or {}
+    value = fields.get(column)
+    return value.get("as_of_date") if isinstance(value, dict) else None
+
+
+def _buyer_name_claims(
+    party: dict[str, Any],
+    *,
+    parse_output: dict[str, Any],
+    research_result: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """改名提案由代码从主体块派生，不由模型在 fields 里再说一遍。
+
+    用户输入的买家名字经常是简称（「上海鼎汇实业集团」），agent 用它去搜、
+    自己判断搜到的公司是不是同一家 —— 认出来了就在同一轮里把工商全称一起交
+    回来，**不需要先改名再跑第二轮**。
+
+    但落库仍然走复核（0824 决定）：改错名字影响该主体的所有关联需求、撮合关系
+    和搜索，**而且不会报错**，只会让人找不到东西。采纳时旧名自动进 aliases_json。
+    """
+    current = str(party.get("buyer_name") or "").strip()
+    subject = research_result.get("subject")
+    if not isinstance(subject, dict):
+        subject = {}
+    identity = parse_output.get("subject_identity")
+    if not isinstance(identity, dict):
+        identity = {}
+
+    candidates: list[dict[str, Any]] = []
+    web_name = str(subject.get("resolved_name") or "").strip()
+    if (
+        web_name
+        and web_name != current
+        and str(subject.get("status") or "confirmed") not in {"unresolved", "not_found", "ambiguous"}
+    ):
+        sources: list[str] = []
+        for finding in _research_findings({"findings": research_result.get("findings")}):
+            for url in finding.get("sources") or []:
+                if isinstance(url, str) and url.startswith(("http://", "https://")) and url not in sources:
+                    sources.append(url)
+        candidates.append(
+            {
+                "field_path": "buyer_name",
+                "value": web_name,
+                "source_type": "web",
+                "period_label": None,
+                "as_of_date": None,
+                "sources": sources[:3],
+                "source_title": "联网调研确认的工商名称",
+                "source_excerpt": _short_text(subject.get("note"), 2000)
+                or f"调研确认该主体的正式名称为「{web_name}」。",
+                "alternative": None,
+                "validation_error": None,
+            }
+        )
+
+    material_name = str(identity.get("resolved_name") or "").strip()
+    if material_name and material_name != current and not candidates:
+        candidates.append(
+            {
+                "field_path": "buyer_name",
+                "value": material_name,
+                "source_type": "material",
+                "period_label": None,
+                "as_of_date": None,
+                "sources": [],
+                "source_title": "材料里的正式名称",
+                "source_excerpt": _short_text(identity.get("note"), 2000)
+                or f"材料里出现的正式名称为「{material_name}」。",
+                "alternative": None,
+                "validation_error": None,
+            }
+        )
+    return candidates
+
+
+def _collect_information_gaps(
+    *,
+    model_gaps: Any,
+    parse_result: dict[str, Any],
+    research_result: dict[str, Any],
+    party: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """「还缺什么」必须落库，即使这一轮什么都没查到。
+
+    以前主体没认出来时整段收口被跳过，agent 明明报了 12 个字段的 not_found，
+    界面上却是空的 —— 而缺口正是「以后一键去补全」的依据。
+    """
+    gaps = [item for item in (model_gaps or []) if isinstance(item, dict)]
+    if gaps:
+        return gaps
+    reported = research_result.get("not_found")
+    if isinstance(reported, list) and reported:
+        return [
+            {"field": str(field), "reason": "调研查过，没有可用的公开信息"}
+            for field in reported
+            if str(field).strip()
+        ]
+    parse_gaps = [item for item in (parse_result.get("information_gaps") or []) if isinstance(item, dict)]
+    if parse_gaps:
+        return parse_gaps
+    return _fill_information_gaps(party, {})
 
 def _build_normalization_context(
     *,

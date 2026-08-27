@@ -42,6 +42,14 @@ STATUS_LABELS = {
     "failed": "补全失败",
 }
 
+# 「跑完了」和「补到了」是两件事。任务成功但一个字段都没写时说「已补全」，
+# 界面就在说反话 —— 顾问看到绿标以为好了，实际上什么都没变。
+SUCCEEDED_WITHOUT_RESULT_LABELS = {
+    "subject_unresolved": "未能确认主体",
+    "no_public_information": "没查到可用信息",
+}
+EMPTY_RESULT_LABEL = "没有可写入的信息"
+
 STAGE_LABELS = {
     "attachment_extraction": "正在读取附件",
     "parsing": "解析材料中",
@@ -127,12 +135,21 @@ def buyer_party_ingest_state(db: Session, buyer_party_id: UUID) -> dict[str, Any
     research_result = (by_stage.get("research") or {}).get("result_json") or {}
     parse_result = (by_stage.get("parse") or {}).get("result_json") or {}
     error_source = _error_source(by_stage, failed_stage)
+    written_count = (normalize_result.get("auto_accepted_count") or 0) + (
+        normalize_result.get("pending_review_count") or 0
+    )
+    status_label = _status_label(
+        overall,
+        research_outcome=str(research_result.get("research_outcome") or ""),
+        written_count=written_count,
+        normalize_finished=stages["normalize"]["status"] == "succeeded",
+    )
     return {
         "buyer_party_id": str(buyer_party_id),
         "correlation_id": str(correlation_id),
         "overall_status": overall,
         "current_stage": current_stage,
-        "status_label": STATUS_LABELS[overall],
+        "status_label": status_label,
         "stage_label": STAGE_LABELS.get(current_stage or ""),
         "stages": stages,
         "mode": str(parse_payload.get("mode") or research_result.get("mode") or "fill"),
@@ -153,6 +170,9 @@ def buyer_party_ingest_state(db: Session, buyer_party_id: UUID) -> dict[str, Any
         "auto_accepted_count": normalize_result.get("auto_accepted_count"),
         "pending_review_count": normalize_result.get("pending_review_count"),
         "apply_errors": normalize_result.get("apply_errors") or [],
+        # 单来源时收口不调模型：没有可调和的冲突，再翻译一次只会多一次改写机会。
+        "normalizer_invoked": normalize_result.get("normalizer_invoked"),
+        "written_count": written_count,
         "pending_proposal_count": pending_proposals,
         "stale_financial_fields": stale_fields,
         "latest_job_id": str(latest["id"]),
@@ -162,6 +182,22 @@ def buyer_party_ingest_state(db: Session, buyer_party_id: UUID) -> dict[str, Any
         "started_at": (by_stage.get("parse") or by_stage.get("research") or {}).get("created_at"),
         "finished_at": (by_stage.get("normalize") or {}).get("finished_at"),
     }
+
+
+def _status_label(
+    overall: str,
+    *,
+    research_outcome: str,
+    written_count: int,
+    normalize_finished: bool,
+) -> str:
+    if overall != "succeeded":
+        return STATUS_LABELS[overall]
+    if written_count:
+        return STATUS_LABELS["succeeded"]
+    if research_outcome in SUCCEEDED_WITHOUT_RESULT_LABELS:
+        return SUCCEEDED_WITHOUT_RESULT_LABELS[research_outcome]
+    return EMPTY_RESULT_LABEL if normalize_finished else STATUS_LABELS["succeeded"]
 
 
 def _empty_state(

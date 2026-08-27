@@ -380,7 +380,10 @@ def _start_ingest(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="尚未配置搜索供应商，请先在设置页配置联网搜索。",
             )
-    _ensure_node_ready(db, NORMALIZER_NODE_NAME, "买家主体信息规范化")
+    if has_material and enable_research:
+        # 归一节点只在「材料 + 联网」两个来源都有时才被调用（它的活是调和）。
+        # 单来源时收口由代码直译，缺它不影响这一轮。
+        _ensure_node_ready(db, NORMALIZER_NODE_NAME, "买家主体信息规范化")
 
     correlation_id = uuid4()
     if has_material:

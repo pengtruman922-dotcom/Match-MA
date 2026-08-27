@@ -54,9 +54,18 @@ BUYER_PARTY_WRITABLE_FIELDS = BUYER_PARTY_PARSE_FIELDS | BUYER_PARTY_RESEARCH_FI
 # 单独输出，于是同一份财务快照出现两条可能互相矛盾的提案 —— 标的侧的
 # RESEARCH_INTERNAL_FIELDS 是同一个道理。
 BUYER_PARTY_TIME_COMPANION_FIELDS = frozenset(BUYER_PARTY_FINANCIAL_TIME_COLUMNS.values())
-BUYER_PARTY_MODEL_PARSE_FIELDS = BUYER_PARTY_PARSE_FIELDS - BUYER_PARTY_TIME_COMPANION_FIELDS
-BUYER_PARTY_MODEL_RESEARCH_FIELDS = BUYER_PARTY_RESEARCH_FIELDS - BUYER_PARTY_TIME_COMPANION_FIELDS
-BUYER_PARTY_MODEL_FIELDS = BUYER_PARTY_WRITABLE_FIELDS - BUYER_PARTY_TIME_COMPANION_FIELDS
+
+# 能成为一条独立提案的字段：时间伴生列不能（它们跟着数字走）。
+BUYER_PARTY_PROPOSABLE_FIELDS = BUYER_PARTY_WRITABLE_FIELDS - BUYER_PARTY_TIME_COMPANION_FIELDS
+
+# 模型可以自己吐出来的字段，比上面少一个 buyer_name。名称由代码从解析的
+# subject_identity / 调研的 subject 派生 —— 两个提示词里都已经有一个专门的主体块
+# 在说这家公司到底叫什么，再让它在 fields 里说一次，就会出现两条可能互相矛盾的
+# 改名提案，而改名是这张表上最不能出错的一格。
+BUYER_PARTY_MODEL_DERIVED_FIELDS = BUYER_PARTY_TIME_COMPANION_FIELDS | {"buyer_name"}
+BUYER_PARTY_MODEL_PARSE_FIELDS = BUYER_PARTY_PARSE_FIELDS - BUYER_PARTY_MODEL_DERIVED_FIELDS
+BUYER_PARTY_MODEL_RESEARCH_FIELDS = BUYER_PARTY_RESEARCH_FIELDS - BUYER_PARTY_MODEL_DERIVED_FIELDS
+BUYER_PARTY_MODEL_FIELDS = BUYER_PARTY_WRITABLE_FIELDS - BUYER_PARTY_MODEL_DERIVED_FIELDS
 
 # material / web —— 提案是哪一段产出的。写入权限按它选，不看 source_url 有没有：
 # 材料来源永远没有 URL，拿 URL 判来源会把解析结果全部当成调研结果。
@@ -126,7 +135,7 @@ def _apply_buyer_party_proposal(
     if proposal["proposal_kind"] != "structured_fact":
         raise ResearchApplyError("买家主体不设画像栏，只接受字段事实建议。")
     field_path = str(proposal.get("field_path") or "")
-    if field_path not in BUYER_PARTY_MODEL_FIELDS:
+    if field_path not in BUYER_PARTY_PROPOSABLE_FIELDS:
         raise ResearchApplyError("不支持该买家主体字段。")
     source_type = str(proposal.get("source_type") or "")
     writer = PROPOSAL_SOURCE_WRITERS.get(source_type)

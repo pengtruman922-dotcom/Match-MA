@@ -46,7 +46,8 @@ export default function BuyerPartyIngestDialog({
     ? [
         !nodesReady.parser && hasMaterial ? '买家主体解析' : null,
         !nodesReady.researcher && researchChecked ? '买家主体 AI 调研' : null,
-        !nodesReady.normalizer ? '买家主体信息规范化' : null,
+        // 归一节点只在「材料 + 联网」两个来源都有时才被调用（它的活是调和冲突）。
+        !nodesReady.normalizer && hasMaterial && researchChecked ? '买家主体信息规范化' : null,
       ].filter(Boolean)
     : [];
   const searchMissing = researchChecked && status ? !status.search_provider_ready : false;

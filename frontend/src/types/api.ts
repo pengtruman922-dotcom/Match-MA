@@ -287,6 +287,10 @@ export interface BuyerPartyIngestState {
   auto_accepted_count: number | null;
   pending_review_count: number | null;
   apply_errors: string[];
+  /** 单来源时收口不调模型：没有可调和的冲突，再翻译一次只会多一次改写机会。 */
+  normalizer_invoked: boolean | null;
+  /** 这一轮到底写出了几条（自动采纳 + 待复核）。0 条时状态文案不会说「已补全」。 */
+  written_count: number;
   pending_proposal_count: number;
   stale_financial_fields: string[];
   latest_job_id: string | null;

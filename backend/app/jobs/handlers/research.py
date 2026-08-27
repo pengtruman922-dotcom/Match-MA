@@ -151,11 +151,26 @@ class ResearchTools:
         api_key: str,
         *,
         subject_names: list[str] | None = None,
+        subject_gate: bool = True,
     ) -> None:
+        """``subject_gate=False`` 交出「这条结果是不是同一家公司」的判断权。
+
+        0721 方案 §2.7 已经论证过这件事：代码只能做子串匹配，而区分两家同名
+        公司需要的信息**常常压根不在那个页面上**，于是严格闸门「拒绝大量有效
+        页面，同时放过真正的同名污染」——实测被迫放宽到 name+region 之后就
+        形同虚设。总纲 §3.2 把结论写成了原则：代码不做规则限制，无锚点闸门。
+
+        买家链路照这条原则关掉它：买家主体的名字是顾问手输的简称
+        （「上海鼎汇实业集团」），工商全称几乎总是不一样，子串闸门会把这家公司
+        自己的页面全判成 miss。关掉后 fetch_page 不再被拒、连续未命中也不再
+        提前收尾，主体判断整个交给 agent，兜底靠审计与人工复核。
+        **成本刹车仍在**：工具预算没变，而 agent 本来就能随时不调工具直接收尾。
+        """
         self._provider = provider
         self._api_key = api_key
+        self._subject_gate = subject_gate
         self._page_text_by_url: dict[str, str] = {}
-        self._subject_anchors = _subject_anchors(subject_names or [])
+        self._subject_anchors = _subject_anchors(subject_names or []) if subject_gate else []
         self._low_relevance_urls: set[str] = set()
         self.searched_queries: list[str] = []
         self.search_observations: list[dict[str, Any]] = []
@@ -263,7 +278,7 @@ class ResearchTools:
         return {"url": url, "text": text_value[:FETCH_TEXT_LIMIT], "source": "direct_fetch"}
 
     def _matches_subject(self, title: str | None, snippet: str | None) -> bool:
-        if not self._subject_anchors:
+        if not self._subject_gate or not self._subject_anchors:
             return True
         haystack = _normalize_subject_text(f"{title or ''} {snippet or ''}")
         return any(anchor in haystack for anchor in self._subject_anchors)

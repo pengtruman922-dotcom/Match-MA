@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import pytest
 
+from backend.app.jobs.handlers.research import ResearchTools
 from backend.app.jobs.handlers.buyer_party_ingest import (
     LLM_QUEUE_NAME,
     NORMALIZE_JOB_TYPE,
@@ -19,19 +20,28 @@ from backend.app.jobs.handlers.buyer_party_ingest import (
     RESEARCH_JOB_TYPE,
     RESEARCH_OUTCOMES,
     RESEARCH_QUEUE_NAME,
+    _buyer_name_claims,
     _buyer_party_field_contract,
+    _claims_from_parse_output,
+    _claims_from_research_result,
+    _collect_information_gaps,
     _is_empty_value,
     _reconcile_buyer_party_claims,
+    _research_outcome,
     _should_auto_accept,
     buyer_party_refresh_targets,
     normalize_buyer_party_output,
 )
 from backend.app.jobs.retry_policy import RESEARCH_JOB_TYPES
-from backend.app.services.buyer_party_processing_state import RESEARCH_OUTCOME_LABELS
+from backend.app.services.buyer_party_processing_state import (
+    RESEARCH_OUTCOME_LABELS,
+    _status_label,
+)
 from backend.app.registry.indicators import writable_columns
 from backend.app.services.research_apply import (
     BUYER_PARTY_MODEL_PARSE_FIELDS,
     BUYER_PARTY_MODEL_RESEARCH_FIELDS,
+    BUYER_PARTY_PROPOSABLE_FIELDS,
     BUYER_PARTY_TIME_COMPANION_FIELDS,
     ResearchApplyError,
     apply_research_proposal,
@@ -509,3 +519,149 @@ def test_every_research_outcome_has_something_to_show_the_consultant() -> None:
     """
     assert RESEARCH_OUTCOMES == set(RESEARCH_OUTCOME_LABELS)
     assert "subject_unresolved" in RESEARCH_OUTCOMES
+
+
+# ---------------------------------------------------------------------------
+# 0827：主体判断交回给 agent，收口按来源数条件启动
+# ---------------------------------------------------------------------------
+
+
+def test_the_buyer_chain_hands_subject_judgement_back_to_the_agent() -> None:
+    """代码不再用子串匹配判断「这条结果是不是同一家公司」。
+
+    0721 方案 §2.7 已经论证过：代码只能做机械匹配，而区分两家同名公司需要的
+    信息常常压根不在那个页面上。买家侧更极端 —— 名字是顾问手输的简称，
+    实测「上海鼎汇实业集团」4 次检索 40 条结果命中 0 条，fetch_page 全被拒。
+    """
+    tools = ResearchTools({}, "key", subject_names=["上海鼎汇实业集团"], subject_gate=False)
+
+    assert tools._subject_anchors == []
+    assert tools._matches_subject("上海鼎汇实业有限公司", "") is True
+    assert tools.early_stop_reason is None
+    # 标的侧不受影响：闸门默认还在，该不该拆是另一单。
+    seller = ResearchTools({}, "key", subject_names=["上海鼎汇实业集团"])
+    assert seller._matches_subject("上海鼎汇实业有限公司", "") is False
+
+
+def test_outcome_reads_the_agents_verdict_not_the_hit_rate() -> None:
+    assert _research_outcome({"subject_resolved": False}, parsed_ok=True) == "subject_unresolved"
+    assert _research_outcome(
+        {"subject": {"status": "ambiguous"}}, parsed_ok=True
+    ) == "subject_unresolved"
+    # 认出了主体但确实没有公开信息 —— 和「没认出这家公司」是两回事。
+    assert _research_outcome({"subject_resolved": True, "findings": []}, parsed_ok=True) == "no_public_information"
+    assert _research_outcome(
+        {"subject_resolved": True, "findings": [{"field_path": "market_cap_yuan"}]}, parsed_ok=True
+    ) == "found"
+    assert _research_outcome(None, parsed_ok=False) == "failed"
+
+
+def test_research_findings_translate_into_claims_without_a_second_model_call() -> None:
+    """调研的 findings 本来就是 claim 形状，单来源时代码直接接住。"""
+    claims = _claims_from_research_result(
+        {
+            "findings": [
+                {
+                    "field_path": "ownership_type",
+                    "value": "state_owned",
+                    "sources": ["https://example.com/a"],
+                    "source_excerpt": "国资委下属企业",
+                },
+                # 没有来源的 web 条目不可追溯，照样丢掉。
+                {"field_path": "business_summary", "value": "医药流通"},
+            ]
+        }
+    )
+
+    assert [item["field_path"] for item in claims] == ["ownership_type"]
+    assert claims[0]["source_type"] == "web"
+
+
+def test_parse_output_translates_into_claims_by_joining_fields_and_evidence() -> None:
+    claims = _claims_from_parse_output(
+        {
+            "fields": {"ownership_type": "private", "business_summary": "做医药流通"},
+            "evidence": [{"field": "ownership_type", "quote": "买家是一家民营企业"}],
+        }
+    )
+
+    by_field = {item["field_path"]: item for item in claims}
+    assert by_field["ownership_type"]["source_excerpt"] == "买家是一家民营企业"
+    assert by_field["ownership_type"]["validation_error"] is None
+    # 拼不上证据的字段仍然保留，只是不可自动写入 —— 顾问看得到、可以自己核。
+    assert by_field["business_summary"]["validation_error"]
+
+
+def test_the_resolved_official_name_becomes_a_rename_proposal_in_the_same_run() -> None:
+    """agent 自己判断搜到的公司是不是同一家，认出来就在同一轮里交回工商全称。
+
+    不需要「先提改名 → 人采纳 → 再跑第二轮」。但落库仍然走复核：
+    改错名字影响所有关联需求、撮合关系和搜索，而且不会报错。
+    """
+    claims = _buyer_name_claims(
+        {"buyer_name": "上海鼎汇实业集团"},
+        parse_output={},
+        research_result={
+            "subject": {"resolved_name": "上海鼎汇实业集团有限公司", "status": "confirmed", "note": "工商登记确认"},
+            "findings": [{"field_path": "ownership_type", "sources": ["https://example.com/a"]}],
+        },
+    )
+
+    assert len(claims) == 1
+    assert claims[0]["field_path"] == "buyer_name"
+    assert claims[0]["value"] == "上海鼎汇实业集团有限公司"
+    assert claims[0]["sources"] == ["https://example.com/a"]
+    prepared = _reconcile_buyer_party_claims(
+        party={**EMPTY_PARTY, "buyer_name": "上海鼎汇实业集团"}, claims=claims
+    )
+    assert _should_auto_accept(prepared[0]) is False
+
+
+def test_an_unconfirmed_subject_never_proposes_a_rename() -> None:
+    assert _buyer_name_claims(
+        {"buyer_name": "上海鼎汇实业集团"},
+        parse_output={},
+        research_result={"subject": {"resolved_name": "上海鼎汇实业有限公司", "status": "unresolved"}},
+    ) == []
+
+
+def test_the_model_may_not_write_the_name_from_the_fields_block() -> None:
+    """名字在主体块里已经说过一次，fields 里再说一次就会出现两条互相矛盾的改名。"""
+    assert "buyer_name" not in BUYER_PARTY_MODEL_PARSE_FIELDS
+    assert "buyer_name" not in BUYER_PARTY_MODEL_RESEARCH_FIELDS
+    # 但它仍然是一条合法提案 —— 只是作者是代码，不是模型。
+    assert "buyer_name" in BUYER_PARTY_PROPOSABLE_FIELDS
+    claims, notes = normalize_buyer_party_output(
+        {"structured_facts": [{"field_path": "buyer_name", "value": "X", "source_type": "material"}]}
+    )
+    assert claims == []
+    assert any("unsupported_field" in note for note in notes)
+
+
+def test_gaps_survive_a_run_that_found_nothing() -> None:
+    """主体没认出来时，agent 报的 not_found 仍然要落成缺口。
+
+    它是「以后一键去补全」的依据；丢掉它，界面上就只剩一句「没查到」。
+    """
+    gaps = _collect_information_gaps(
+        model_gaps=None,
+        parse_result={},
+        research_result={"not_found": ["market_cap_yuan", "current_revenue_yuan"]},
+        party=dict(EMPTY_PARTY),
+    )
+
+    assert [item["field"] for item in gaps] == ["market_cap_yuan", "current_revenue_yuan"]
+    assert all(item["reason"] for item in gaps)
+
+
+def test_a_run_that_wrote_nothing_does_not_call_itself_complete() -> None:
+    """「跑完了」和「补到了」是两件事，绿标说反话比不显示更糟。"""
+    assert _status_label(
+        "succeeded", research_outcome="subject_unresolved", written_count=0, normalize_finished=True
+    ) == "未能确认主体"
+    assert _status_label(
+        "succeeded", research_outcome="no_public_information", written_count=0, normalize_finished=True
+    ) == "没查到可用信息"
+    assert _status_label(
+        "succeeded", research_outcome="found", written_count=4, normalize_finished=True
+    ) == "已补全"
