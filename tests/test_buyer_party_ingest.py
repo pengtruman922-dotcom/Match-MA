@@ -21,6 +21,7 @@ from backend.app.jobs.handlers.buyer_party_ingest import (
     RESEARCH_OUTCOMES,
     RESEARCH_QUEUE_NAME,
     _buyer_name_claims,
+    _build_research_context,
     _buyer_party_field_contract,
     _claims_from_parse_output,
     _claims_from_research_result,
@@ -681,3 +682,33 @@ def test_a_run_that_wrote_nothing_does_not_call_itself_complete() -> None:
     assert _status_label(
         "succeeded", research_outcome="found", written_count=4, normalize_finished=True
     ) == "已补全"
+
+
+def test_the_researcher_is_given_values_not_just_field_names() -> None:
+    """只给字段名，模型只能凭猜写值。
+
+    实测「深圳绿源」那轮 agent 写了 ownership_type="民营企业"、
+    listed_status="未上市"，两条都被枚举校验丢掉。v0.1 时代看不出来 ——
+    归一节点总会跑而它手里有闭集；改成条件启动之后，单来源就没人翻译了。
+    """
+    context = _build_research_context(
+        party={"buyer_name": "X", "aliases_json": [], "listed_status": "unknown"},
+        mode="fill",
+        parse_output={},
+        refresh_fields=None,
+        max_tool_calls=12,
+    )
+
+    fields = {item["field_path"]: item for item in context["writable_fields"]}
+    assert set(fields) == BUYER_PARTY_MODEL_RESEARCH_FIELDS
+    assert [option["value"] for option in fields["ownership_type"]["allowed_values"]] == [
+        "state_owned",
+        "private",
+        "foreign",
+        "other",
+        "unknown",
+    ]
+    # 金额形状与时间伴生列也要跟着字段一起交代，否则财务数字写不进来。
+    assert fields["market_cap_yuan"]["time_companion"] == "market_cap_as_of"
+    assert "亿元" in fields["market_cap_yuan"]["note"]
+    assert set(context["enum_contract"]) == {"ownership_type", "listed_status", "listing_exchange"}

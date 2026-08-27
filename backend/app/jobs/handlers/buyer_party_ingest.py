@@ -898,7 +898,12 @@ def _build_research_context(
             "confidence": identity.get("confidence"),
         },
         "known_fields": known_fields,
-        "allowed_fields": sorted(BUYER_PARTY_MODEL_RESEARCH_FIELDS),
+        # 给完整契约，不是一串裸字段名。只给名字时模型只能凭猜写值 ——
+        # 实测「深圳绿源」那轮 agent 写了 ownership_type="民营企业"、
+        # listed_status="未上市"，两条都被枚举校验丢掉。v0.1 时代看不出来，
+        # 因为归一节点总会跑而它手里有闭集；改成条件启动后单来源就没人翻译了。
+        "writable_fields": _buyer_party_field_contract(BUYER_PARTY_MODEL_RESEARCH_FIELDS),
+        "enum_contract": _buyer_party_enum_contract(),
         "max_tool_calls": max_tool_calls,
         "rules": {
             "subject_first": (

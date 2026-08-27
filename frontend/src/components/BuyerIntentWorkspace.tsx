@@ -398,6 +398,21 @@ export function BuyerInfo({
           {truncationWarning}
         </p>
       ) : null}
+      {state?.apply_errors?.length ? (
+        <div className="mb-3 border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          {/* 被丢掉的字段以前只存在 job 结果里，界面上看不到 —— 于是「信息太少」
+              读起来像个谜，而其实是某几条取值不合法被挡下了。 */}
+          <p className="flex items-start gap-1.5 font-medium">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            有 {state.apply_errors.length} 条结果没能写入
+          </p>
+          <ul className="mt-1 space-y-0.5 pl-5">
+            {state.apply_errors.map((message) => (
+              <li key={message} className="list-disc">{message}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
       {state?.research_outcome === 'subject_unresolved' ? (
         <p className="mb-3 border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
           联网调研没能确认这家公司（可能是脱敏名、重名或查无此公司）。补一个更完整的正式名称后再试。
