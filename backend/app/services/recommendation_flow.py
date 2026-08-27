@@ -688,6 +688,71 @@ def _get_buyer_party_id_for_intent(db: Session, buyer_intent_id: UUID) -> UUID |
     return row["buyer_party_id"] if row else None
 
 
+def session_anchor_buyer_party_id(db: Session, session_id: UUID) -> UUID | None:
+    """这个会话锚在哪个买家主体上；纯对话会话没有锚点，返回 None。
+
+    深评的「买方自身情况」块要靠它才有内容。会话自己的 `buyer_party_id` 优先，
+    没有则顺着 `buyer_intent_id` 取 —— 前端锚定时给的是需求 id，主体是推导出来
+    的，两处都存是为了主体后来被换掉时这条会话仍指向当时那个。
+    """
+    row = db.execute(
+        text(
+            """
+            select coalesce(rs.buyer_party_id, bi.buyer_party_id) as buyer_party_id
+            from recommendation_session rs
+            left join buyer_intent bi
+              on bi.id = rs.buyer_intent_id
+             and bi.deleted_at is null
+            where rs.id = :session_id
+              and rs.team_id = :team_id
+              and rs.workspace_id = :workspace_id
+            """
+        ),
+        {
+            "session_id": session_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().one_or_none()
+    return row["buyer_party_id"] if row else None
+
+
+def attach_session_anchor(
+    db: Session,
+    *,
+    session_id: UUID,
+    buyer_intent_id: UUID,
+    buyer_party_id: UUID | None,
+) -> bool:
+    """把锚点补写到一个还没有锚点的会话上，返回是否真的写了。
+
+    对话可以先聊、后挂需求，所以补写要允许。但**只补空的**：已经锚定的会话
+    换锚点，等于这一轮之前的回答换了买家却不留痕迹。
+    """
+    result = db.execute(
+        text(
+            """
+            update recommendation_session
+            set buyer_intent_id = :buyer_intent_id,
+                buyer_party_id = coalesce(:buyer_party_id, buyer_party_id),
+                updated_at = now()
+            where id = :session_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and buyer_intent_id is null
+            """
+        ),
+        {
+            "session_id": session_id,
+            "buyer_intent_id": buyer_intent_id,
+            "buyer_party_id": buyer_party_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    )
+    return bool(result.rowcount)
+
+
 def _optional_uuid(value: Any) -> UUID | None:
     if not value:
         return None

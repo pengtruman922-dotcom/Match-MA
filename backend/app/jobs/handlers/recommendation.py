@@ -63,6 +63,7 @@ from backend.app.services.recommendation_deep_eval import (
 )
 from backend.app.services.recommendation_flow import (
     agent_turn_aborted,
+    session_anchor_buyer_party_id,
     target_facts_for_agent,
 )
 from backend.app.services.recommendation_trace import RecommendationTraceContext
@@ -195,6 +196,16 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
     node_config = _get_default_node_config(db, node_name)
     history_context = str(payload.get("history_context") or "")
 
+    # 从会话行上读，不从 payload 读：锚点可以在会话开聊之后才挂上，而 payload
+    # 是入队那一刻冻结的。惰性 + 记一次：中止在深评之前的轮次一次都不查，而一轮
+    # 里深评可能跑两次（agent 自己跑，或它忘了由代码补跑），不该查两遍。
+    anchor_cache: list[UUID | None] = []
+
+    def anchor_buyer_party_id() -> UUID | None:
+        if not anchor_cache:
+            anchor_cache.append(session_anchor_buyer_party_id(db, session_id))
+        return anchor_cache[0]
+
     heartbeat = JobHeartbeat(db, job.id)
     # 这一轮里四个 AI 节点共用的 trace 归属。以前只有编排 Agent 写 trace，
     # 另外三个节点在设置页上「最近生产调用」永远是空的 —— 管理员没法确认自己
@@ -304,6 +315,10 @@ def _handle_recommendation_agent(db: Session, job: JobClaim) -> dict[str, object
             mode=mode,
             intent_snapshot={**intent_snapshot, **agent_context["intent_snapshot"]},
             candidates_by_id=candidates_by_id,
+            # 匿名会话这里是 None，深评的买方自身情况块照旧为空；只有从买家需求
+            # 详情页锚定发起的会话拿得到主体，「与现有业务有关联性」这类要求才
+            # 有判断依据。漏传这个参数正是它此前恒为空的原因。
+            buyer_party_id=anchor_buyer_party_id(),
             trace_context=trace_context,
         ),
     )

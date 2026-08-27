@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from backend.app.api.authn import CurrentUser
 from backend.app.services.recommendation_answer_draft import read_answer_draft
 from backend.app.api.routes.utils import (
+    ensure_entity_visible,
     ensure_recommendation_session_visible,
 )
 from backend.app.db import get_db, session_scope
@@ -21,6 +22,8 @@ from backend.app.services.recommendation_flow import (
     find_agent_turn_job,
     insert_agent_aborted_message,
     _create_recommendation_session,
+    _get_buyer_party_id_for_intent,
+    attach_session_anchor,
     find_agent_turn_answer,
     find_agent_turn_brief,
     _enqueue_recommendation_agent_job,
@@ -191,6 +194,11 @@ def get_recommendation_session_status(
 class RecommendationAgentTurnRequest(BaseModel):
     mode: str = Field(pattern="^(buyer_to_target)$")
     session_id: UUID | None = None
+    # 这一轮是给哪条买家需求做的。**可选**：不传时行为与从前完全一致（匿名会话）。
+    # 传了才有买家主体可查，深评的「买方自身情况」块也才有内容 —— 在这之前
+    # `buyer_party_fact_block` 在生产里恒返回空串，「与现有业务有关联性」
+    # 「强链补链」这类要求根本没有判断依据。
+    buyer_intent_id: UUID | None = None
     # 一段需求原文，或后续对话里的补充。上传的需求文件由前端取正文后走同一个字段。
     user_message: str = Field(min_length=1, max_length=AGENT_INPUT_MAX_CHARS)
     # 图片没有正文可以先取出来给用户看，所以只传 id，由 worker 交给多模态模型直读。
@@ -221,10 +229,15 @@ def create_recommendation_agent_turn(
 ) -> dict[str, Any]:
     """Start one agent turn. Returns immediately; progress arrives by polling.
 
-    A session created here has no anchor entity by design — the whole point of
-    the page is that the consultant does not have to create a buyer intent
-    first. The temporary-filter flag rides along so the existing guards keep
-    relations from ever being created out of one.
+    A session created here needs no anchor entity — the whole point of the page
+    is that the consultant does not have to create a buyer intent first. The
+    temporary-filter flag rides along so the existing guards keep relations from
+    ever being created out of one.
+
+    但**可以**锚定：从买家需求详情页点「推荐标的」时带上 `buyer_intent_id`，
+    会话就记住这一轮是给谁做的，深评才拿得到买方自身情况。锚定不改变会话的
+    展示形态（agent 会话在 `_recommendation_session_display` 里先于锚点分支
+    返回），也不解除 temporary_filter 的关系创建保护。
     """
     user_message = payload.user_message.strip()
     if not user_message:
@@ -235,6 +248,15 @@ def create_recommendation_agent_turn(
             detail="retry_of_turn_id requires the session it belongs to.",
         )
 
+    # 锚点的主体是推导出来的，但可见性必须按用户给的那条需求判 —— 否则传一个
+    # 别人的需求 id 就能把别人的买家资料读进自己的这一轮。
+    anchor_buyer_party_id: UUID | None = None
+    if payload.buyer_intent_id is not None:
+        ensure_entity_visible(
+            db, current_user, entity_type="buyer_intent", entity_id=payload.buyer_intent_id
+        )
+        anchor_buyer_party_id = _get_buyer_party_id_for_intent(db, payload.buyer_intent_id)
+
     if payload.session_id is not None:
         ensure_recommendation_session_visible(db, current_user, payload.session_id)
         session = _get_recommendation_session_or_404(db, payload.session_id)
@@ -244,14 +266,22 @@ def create_recommendation_agent_turn(
                 detail="Session mode does not match the request mode.",
             )
         session_id = payload.session_id
+        # 先聊了几轮再挂需求也算数，但只补空的（见 attach_session_anchor）。
+        if payload.buyer_intent_id is not None:
+            attach_session_anchor(
+                db,
+                session_id=session_id,
+                buyer_intent_id=payload.buyer_intent_id,
+                buyer_party_id=anchor_buyer_party_id,
+            )
         if payload.retry_of_turn_id:
             _reject_retry_of_a_live_turn(db, session_id, payload.retry_of_turn_id)
     else:
         session_id = _create_recommendation_session(
             db,
             mode=payload.mode,
-            buyer_intent_id=None,
-            buyer_party_id=None,
+            buyer_intent_id=payload.buyer_intent_id,
+            buyer_party_id=anchor_buyer_party_id,
             seller_target_id=None,
             user_message=None,
             # 开场那句话也落进 anonymous_input_snapshot：会话搜索匹配的就是这一列。

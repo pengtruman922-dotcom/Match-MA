@@ -527,6 +527,11 @@ def _exercise_handler_4b(
         def all(self):
             return []
 
+        def one_or_none(self):
+            # 会话锚点查询走这条路。返回 None 就是「这条会话没锚定买家」，
+            # 也就是纯对话页的常态。
+            return None
+
     class Db:
         commits = 0
 
