@@ -8,6 +8,7 @@ clicking 确认. The route wraps ResearchApplyError back into a 4xx.
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -369,6 +370,29 @@ MONEY_UNIT_MULTIPLIERS: dict[str, Decimal] = {
 }
 
 
+def _decode_serialized(value: Any, opener: str) -> Any:
+    """模型偶尔把数组或金额对象 json.dumps 成字符串再塞进 value 里。
+
+    实测「华润五丰」那一轮同时撞了两处：``business_tags_json`` 收到
+    ``'["供港食品分销","肉类屠宰加工",…]"``，``current_revenue_yuan`` 收到
+    ``'{"value": 129.54, "unit": "亿元"}'``。两处原本都只按裸值处理，
+    结果一个把整串 JSON 变成唯一一个标签（还直接出现在列表页的标签筛选下拉里），
+    一个报出「不是数字」把这条查到的营收整条丢掉。
+
+    只在字符串确实以 ``opener`` 开头时才尝试解码，解不出来就原样返回 ——
+    正常的单值字符串（闭集 code、自由文本标签）不会被这一步碰到。
+    """
+    if not isinstance(value, str):
+        return value
+    text_value = value.strip()
+    if not text_value.startswith(opener):
+        return value
+    try:
+        return json.loads(text_value)
+    except ValueError:
+        return value
+
+
 def _indicator(field_path: str, entity: str = "seller_target") -> Indicator | None:
     return next(
         (item for item in indicators_for(entity) if item.column == field_path),
@@ -379,6 +403,11 @@ def _indicator(field_path: str, entity: str = "seller_target") -> Indicator | No
 def _money_to_yuan(field_path: str, value: Any) -> Decimal:
     """Turn `{"value": 83200, "unit": "万元"}` — or a bare number — into yuan."""
     unit = ""
+    # 先解开被序列化成字符串的金额对象。不解开的话下面的 str() 拿到的是一整串
+    # JSON，而清理千分位的 replace(",", "") 还会顺手吃掉 JSON 的逗号 ——
+    # 报错信息会变成「不是数字：{"value": 129.54 "unit": "亿元"}」，
+    # 看着像模型写坏了 JSON，其实是我们自己删的。
+    value = _decode_serialized(value, "{")
     raw = value
     if isinstance(value, dict):
         raw = value.get("value")
@@ -459,6 +488,7 @@ def normalize_structured_fact(
         # 闭集多值列的建议值是数组。不接住的话下面的 str() 会把它压成
         # "['litigation']"，写入端再以「must be a JSON object or array」拒绝——
         # 报错位置离病因很远。取值合法性仍由 field_writer 从同一份注册表判定。
+        value = _decode_serialized(value, "[")
         if isinstance(value, str):
             value = [value]
         if not isinstance(value, list):

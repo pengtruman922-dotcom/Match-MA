@@ -497,6 +497,49 @@ def test_business_tags_accept_an_array_and_a_bare_string() -> None:
     ) == ["医药流通"]
 
 
+def test_a_tag_array_serialized_into_a_string_is_decoded_not_wrapped() -> None:
+    """实测「华润五丰」那轮 agent 给的是 '["供港食品分销",…]' 这一整串。
+
+    裸包成 [value] 会让整串 JSON 变成唯一一个标签，而这一列没有闭集所以
+    校验挡不住 —— 它直接进了买家列表的标签筛选下拉，显示成一行 JSON。
+    """
+    assert normalize_structured_fact(
+        None,
+        "business_tags_json",
+        '["供港食品分销","肉类屠宰加工","大米加工"]',
+        entity="buyer_party",
+    ) == ["供港食品分销", "肉类屠宰加工", "大米加工"]
+
+
+def test_a_string_that_merely_starts_with_a_bracket_stays_a_single_tag() -> None:
+    """解不出 JSON 就当单值，不能因为多了个方括号就把标签丢掉。"""
+    assert normalize_structured_fact(
+        None, "business_tags_json", "[医药流通", entity="buyer_party"
+    ) == ["[医药流通"]
+
+
+def test_a_money_object_serialized_into_a_string_is_decoded() -> None:
+    """同一轮里 current_revenue_yuan 收到的是 '{"value": 129.54, "unit": "亿元"}'。
+
+    不先解开的话，清理千分位的 replace(",", "") 会吃掉 JSON 的逗号，
+    报错信息变成「不是数字：{"value": 129.54 "unit": "亿元"}」——
+    看着像模型写坏了 JSON，其实是我们自己删的，排查会跑偏。
+    """
+    assert normalize_structured_fact(
+        None,
+        "current_revenue_yuan",
+        '{"value": 129.54, "unit": "亿元"}',
+        entity="buyer_party",
+    ) == 12_954_000_000
+
+
+def test_a_thousands_separator_in_a_bare_number_still_works() -> None:
+    """解序列化不能把原来的千分位处理弄坏。"""
+    assert normalize_structured_fact(
+        None, "market_cap_yuan", {"value": "1,800", "unit": "亿元"}, entity="buyer_party"
+    ) == 180_000_000_000
+
+
 def test_contact_info_is_an_object_column_not_an_array() -> None:
     """注册表里的 json 列几乎都存数组，联系方式是唯一的对象列。"""
     assert normalize_structured_fact(
