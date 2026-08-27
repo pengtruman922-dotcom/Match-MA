@@ -94,6 +94,37 @@ _NAME_KEY_BY_MODE: dict[str, str] = {
     "target_to_buyer": "buyer_intent_name",
 }
 
+# 候选那一句「它自己做什么」从哪张表来。画像（四栏）只有 44% 的标的填了，而
+# `business_summary` 有 92% —— 缺了它，深评对一多半候选只能看到行业与财务数字，
+# 「与买家现有业务有协同」这类诉求就只能判「无法判断」，而买家侧的业务说明
+# 已经在 `buyer_party_fact_block` 里了。反方向对称：候选是买家需求时，这句话
+# 在它的主体上，不在需求上。
+_BUSINESS_SUMMARY_SQL_BY_ENTITY: dict[str, str] = {
+    "seller_target": """
+        select st.id, st.business_summary
+        from seller_target st
+        where st.team_id = :team_id
+          and st.workspace_id = :workspace_id
+          and st.deleted_at is null
+          and st.id = any(:ids)
+    """,
+    "buyer_intent": """
+        select bi.id, bp.business_summary
+        from buyer_intent bi
+        join buyer_party bp
+          on bp.id = bi.buyer_party_id
+         and bp.deleted_at is null
+        where bi.team_id = :team_id
+          and bi.workspace_id = :workspace_id
+          and bi.deleted_at is null
+          and bi.id = any(:ids)
+    """,
+}
+
+# 中位数 38 字、最大 171 字（2026-08-27 实测 50 条标的），所以这个上限只是防御，
+# 正常内容一个字都不会被切。
+BUSINESS_SUMMARY_MAX_CHARS = 300
+
 # 没给 rank 的条目排在给了 rank 的后面，组内保持模型给出的先后顺序。
 _RANK_TAIL = 10**6
 
@@ -183,6 +214,7 @@ def build_deep_eval_candidates(
 
     ids = [key for key in candidates_by_id if str(key or "").strip()]
     sections_by_id = load_profile_sections(db, entity_type=entity_type, entity_ids=ids)
+    summary_by_id = _load_business_summaries(db, entity_type=entity_type, entity_ids=ids)
 
     items: list[dict[str, Any]] = []
     for candidate_id in ids:
@@ -207,10 +239,39 @@ def build_deep_eval_candidates(
                 "search_hit_count": int(candidate.get("search_hit_count") or 0),
                 "screening_hits": hits,
                 "facts": _candidate_facts(candidate.get("facts")),
+                # 与 profile 并列而不是二选一：画像是派生的四栏，这一句是对方
+                # 自己写的一句话，两者都在时也不冗余（这句话很短）。
+                "business_summary": summary_by_id.get(candidate_id) or None,
                 "profile": profile or NO_PROFILE_TEXT,
             }
         )
     return items
+
+
+def _load_business_summaries(
+    db: Session,
+    *,
+    entity_type: str,
+    entity_ids: list[str],
+) -> dict[str, str]:
+    """候选那一句「它自己做什么」。查不到就没有，不编。"""
+    sql = _BUSINESS_SUMMARY_SQL_BY_ENTITY.get(entity_type)
+    if not sql or not entity_ids:
+        return {}
+    rows = db.execute(
+        text(sql),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "ids": list(entity_ids),
+        },
+    ).mappings().all()
+    summaries: dict[str, str] = {}
+    for row in rows:
+        value = str(row["business_summary"] or "").strip()
+        if value:
+            summaries[str(row["id"])] = value[:BUSINESS_SUMMARY_MAX_CHARS]
+    return summaries
 
 
 def build_anchor_context(

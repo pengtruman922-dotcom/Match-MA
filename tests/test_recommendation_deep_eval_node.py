@@ -229,9 +229,11 @@ class _RecordingDb:
         *,
         node_row: dict[str, Any] | None = None,
         profile_rows: list[dict[str, Any]] | None = None,
+        business_summary_rows: list[dict[str, Any]] | None = None,
     ) -> None:
         self.node_row = node_row
         self.profile_rows = profile_rows or []
+        self.business_summary_rows = business_summary_rows or []
         self.queries: list[dict[str, Any]] = []
 
     def execute(self, statement: Any, params: dict[str, Any] | None = None) -> _Rows:
@@ -241,6 +243,8 @@ class _RecordingDb:
             return _Rows([self.node_row] if self.node_row else [])
         if "entity_profile_section" in sql:
             return _Rows(self.profile_rows)
+        if "business_summary" in sql:
+            return _Rows(self.business_summary_rows)
         return _Rows([])
 
     def node_names_queried(self) -> list[str]:
@@ -541,6 +545,52 @@ def test_candidates_without_a_profile_say_so_out_loud() -> None:
     assert [item["id"] for item in items] == [T1, T2]
     assert [item["group_hit_count"] for item in items] == [2, 1]
     assert [item["search_hit_count"] for item in items] == [3, 1]
+
+
+def test_the_candidates_own_one_line_business_summary_reaches_the_model() -> None:
+    """画像只有 44% 的标的填了，`business_summary` 有 92%。
+
+    2026-08-27 生产实测：一轮锚定深评里买方自身情况已经到位，候选侧却只有行业与
+    财务数字，于是「与买家现有业务有协同」判成「无法判断」，理由写的是「画像为空」
+    —— 而那家标的的 `business_summary` 是有内容的，只是没人把它送进来。
+    """
+    db = _RecordingDb(business_summary_rows=[{"id": T1, "business_summary": "汽车线束与高压连接器制造"}])
+
+    items = build_deep_eval_candidates(db, mode="buyer_to_target", candidates_by_id=_CANDIDATES)
+
+    assert items[0]["business_summary"] == "汽车线束与高压连接器制造"
+    # 没有值的候选是 None，不是空串：空串会被模型读成「这家真的什么都不做」。
+    assert items[1]["business_summary"] is None
+
+
+def test_the_summary_comes_from_the_party_when_candidates_are_buyer_intents() -> None:
+    """反方向的候选是买家需求，而「它自己做什么」在它的主体上，不在需求上。"""
+    from backend.app.services.recommendation_deep_eval import _BUSINESS_SUMMARY_SQL_BY_ENTITY
+
+    sql = _BUSINESS_SUMMARY_SQL_BY_ENTITY["buyer_intent"]
+
+    assert "from buyer_intent bi" in sql
+    assert "join buyer_party bp" in sql
+    assert "bp.business_summary" in sql
+
+
+def test_a_very_long_summary_is_capped_rather_than_flooding_the_prompt() -> None:
+    """40 个候选各带一段长文就能把深评的输入挤爆，所以留个防御上限。"""
+    from backend.app.services.recommendation_deep_eval import BUSINESS_SUMMARY_MAX_CHARS
+
+    db = _RecordingDb(business_summary_rows=[{"id": T1, "business_summary": "业" * 5000}])
+
+    items = build_deep_eval_candidates(db, mode="buyer_to_target", candidates_by_id=_CANDIDATES)
+
+    assert len(items[0]["business_summary"]) == BUSINESS_SUMMARY_MAX_CHARS
+
+
+def test_a_blank_summary_is_dropped_instead_of_reaching_the_model_as_whitespace() -> None:
+    db = _RecordingDb(business_summary_rows=[{"id": T1, "business_summary": "   "}])
+
+    items = build_deep_eval_candidates(db, mode="buyer_to_target", candidates_by_id=_CANDIDATES)
+
+    assert items[0]["business_summary"] is None
 
 
 def test_placeholder_fact_fields_do_not_reach_the_model() -> None:
