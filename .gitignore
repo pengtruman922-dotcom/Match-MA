@@ -14,3 +14,11 @@ build/
 node_modules/
 frontend/dist/
 deploy/.env
+
+# skill 目录里的凭证文件（wegent 等无法注入环境变量的运行环境用）。
+# 仓库公开可读，这类文件绝不能提交。
+auth.local.json
+skills/**/auth.local.json
+
+# 评测台的本地配置（含 API Key）。仓库公开，绝不能提交。
+config.local.json
