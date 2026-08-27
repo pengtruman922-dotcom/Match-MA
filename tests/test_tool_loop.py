@@ -280,7 +280,15 @@ def test_empty_reply_with_no_tool_calls_is_still_an_error(monkeypatch) -> None:
         def __exit__(self, *args):
             return False
 
-        def read(self):
+        def __init__(self):
+            self._done = False
+
+        # 真实的 HTTPResponse.read(n) 收块大小，缓冲式调用要靠分块读掐墙钟；
+        # 读到 EOF 必须返回空，否则那个循环永远不结束。
+        def read(self, size=None):
+            if self._done:
+                return b""
+            self._done = True
             return json.dumps({"choices": [{"message": {"role": "assistant", "content": None}}]}).encode()
 
     monkeypatch.setattr(llm_client.request, "urlopen", lambda *args, **kwargs: _Response())
@@ -311,7 +319,13 @@ def test_tools_are_only_sent_when_provided(monkeypatch) -> None:
         def __exit__(self, *args):
             return False
 
-        def read(self):
+        def __init__(self):
+            self._done = False
+
+        def read(self, size=None):
+            if self._done:
+                return b""
+            self._done = True
             return json.dumps(
                 {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
             ).encode()

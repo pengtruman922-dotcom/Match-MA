@@ -40,6 +40,37 @@ class ChatCompletionResult:
     assistant_message: dict[str, Any] | None = None
 
 
+# 分块读的块大小。只影响墙钟的检查粒度，不影响吞吐。
+_READ_CHUNK_BYTES = 65536
+
+
+def _read_within_budget(response: Any, *, timeout_seconds: int, started: float) -> str:
+    """把响应体读完，但整体不超过节点预算。
+
+    `urlopen(timeout=...)` 只约束**单次 socket 操作**，所以一个慢慢吐字节的服务端
+    能让一次调用远远超出预算 —— 流式路径的 docstring 早就写明了这件事并自己量墙钟，
+    但缓冲式这一支一直只有那道 per-op 超时，而所有非流式节点都走它。
+
+    **事故（2026-08-27 生产实测）**：一条 1462 字的买家需求，`buyer_intent_semantic_parser`
+    配的是 300 秒，实际跑了 26 分钟仍未返回，job 一直 running、trace 一条没有（trace 是
+    调用返回后才写的），前端就一直停在「语义解析中」。没有任何报错，因为确实没超时。
+
+    分块读而不是另起看门狗线程：和流式那个循环同一个形状，也不引入新的并发面。
+    """
+    chunks: list[bytes] = []
+    while True:
+        if time.perf_counter() - started >= timeout_seconds:
+            raise LlmCallError(
+                f"LLM response exceeded the node budget of {timeout_seconds}s "
+                f"（已读 {sum(len(chunk) for chunk in chunks)} 字节）"
+            )
+        chunk = response.read(_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks).decode("utf-8")
+
+
 def call_openai_compatible_chat(
     *,
     base_url: str,
@@ -92,7 +123,9 @@ def call_openai_compatible_chat(
             # 否则一次 SIGTERM 要等满整个 timeout_seconds 才轮得到检查点，
             # 而容器只给十几秒。
             with interruptible(response):
-                response_body = response.read().decode("utf-8")
+                response_body = _read_within_budget(
+                    response, timeout_seconds=timeout_seconds, started=started
+                )
     except error.HTTPError as exc:
         raise_if_shutting_down()
         error_body = exc.read().decode("utf-8", errors="replace")
