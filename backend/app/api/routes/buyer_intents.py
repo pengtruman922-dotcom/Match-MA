@@ -30,6 +30,7 @@ from backend.app.services.entity_grade import BUYER_GRADE, resolve_grade_pair
 from backend.app.services.listed_status import legacy_listed_status
 from backend.app.api.routes.buyer_parties import _enum_labels as buyer_party_enum_labels
 from backend.app.services.profile_sections import buyer_party_readiness_sql
+from backend.app.services.region_dictionary import normalize_buyer_region_constraints
 from backend.app.services.recommendation_conditions import normalize_condition_effects, normalize_scenario_fields
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 from backend.app.services.buyer_intent_processing_state import buyer_intent_processing_states
@@ -1184,6 +1185,13 @@ def update_buyer_intent(
         else:
             changes["unacceptable_risk_flags_json"] = normalized_flags
 
+    if "region_constraints_json" in changes:
+        # 与新建同一个理由：不归一就等于让任何形状直接落进初筛要读的那一列。
+        # 归一还会把「长三角」展开成四个省 —— 顾问手改时写的也是城市群。
+        changes["region_constraints_json"] = normalize_buyer_region_constraints(
+            changes["region_constraints_json"]
+        )[0]
+
     if "owner_user_id" in changes:
         require_admin(current_user)
         if changes["owner_user_id"] is not None:
@@ -1541,7 +1549,13 @@ def _buyer_intent_params(payload: BuyerIntentCreate, current_user: AuthContext, 
         "excluded_industries_json": payload.excluded_industries_json or [],
         "industry_focus_tags_json": payload.industry_focus_tags_json or [],
         "region_scope_summary": payload.region_scope_summary,
-        "region_constraints_json": payload.region_constraints_json or [],
+        # 归一放在这里而不是只放在解析 handler 里：REST 写入绕过归一的后果是脏形状
+        # 直接落库。生产里就躺着两条 —— 一条是裸字符串数组 `["四川省","云南省"]`，
+        # 一条是 `{"raw_text":"长三角、珠三角区域","constraint_type":"soft"}`。
+        # 初筛按 `rc->>'province'` 取值，两条都取不出东西：**存了等于没存，且看不出来**。
+        "region_constraints_json": normalize_buyer_region_constraints(
+            payload.region_constraints_json or []
+        )[0],
         "min_revenue_yuan": payload.min_revenue_yuan,
         "min_net_profit_yuan": payload.min_net_profit_yuan,
         "min_total_profit_yuan": payload.min_total_profit_yuan,

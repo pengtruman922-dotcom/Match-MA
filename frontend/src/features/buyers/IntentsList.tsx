@@ -30,6 +30,14 @@ import {
   type BuyerIntentFilters,
 } from './filters';
 import ScenarioBadge from './ScenarioBadge';
+import ColumnManager from './ColumnManager';
+import {
+  readColumnPrefs,
+  resolveColumns,
+  writeColumnPrefs,
+  type IntentColumnDef,
+  type IntentColumnPrefs,
+} from './intentColumns';
 import {
   BuyerEnumCell,
   BuyerTagsCell,
@@ -74,6 +82,19 @@ export default function IntentsList({
   const [assignOwnerId, setAssignOwnerId] = useState('');
   const [assigning, setAssigning] = useState(false);
   const [updateDrawer, setUpdateDrawer] = useState<{ item: BuyerIntent; scope: BusinessUpdateProcessingScope } | null>(null);
+  // 列偏好每人自己一份，存浏览器。19 列谁都不会全都要看，而「看哪几列」因事而异。
+  const [columnPrefs, setColumnPrefs] = useState<IntentColumnPrefs>(() => readColumnPrefs());
+  const columns = useMemo(() => resolveColumns(columnPrefs), [columnPrefs]);
+  // min-w 必须跟着可见列走：写死的话隐藏几列后表格仍撑那么宽，右边空一大条；
+  // 而它同时决定 sticky 偏移准不准（容器窄于 min-w 时列宽才等于声明值）。
+  const tableMinWidth = useMemo(
+    () => 48 + 208 + 176 + columns.reduce((sum, column) => sum + columnWidthPx(column.width), 0),
+    [columns],
+  );
+  const applyColumnPrefs = useCallback((next: IntentColumnPrefs) => {
+    setColumnPrefs(next);
+    writeColumnPrefs(next);
+  }, []);
 
   const pageCount = Math.max(1, Math.ceil(total / filters.pageSize));
   const visibleIds = useMemo(() => items.map((item) => item.id), [items]);
@@ -291,6 +312,7 @@ export default function IntentsList({
         onClear={clearFilters}
         total={total}
         totalLabel="条并购需求"
+        trailing={<ColumnManager prefs={columnPrefs} onChange={applyColumnPrefs} />}
       />
 
       {selectedCount > 0 && (
@@ -318,28 +340,17 @@ export default function IntentsList({
           19 列合计 2088px == min-w，横滚时列宽恰为声明值，冻结列的 sticky 偏移才准
           （左侧 48+208=256px，右侧操作列 176px）。改列宽必须同步改 min-w 和这两个偏移。
         */}
-        <table className="w-full min-w-[2088px] table-fixed text-sm">
+        {/*
+          列宽由列定义给出，min-w 按当前可见列动态算：冻结列 48+208=256px，
+          右冻结操作列 176px，中间列按各自声明宽度累加。写死 min-w 的话
+          隐藏几列之后表格仍然撑那么宽，右边会空出一大条。
+        */}
+        <table className="w-full table-fixed text-sm" style={{ minWidth: `${tableMinWidth}px` }}>
           <colgroup>
-            <col className="w-12" />{/* 勾选 */}
-            <col className="w-52" />{/* 买家名称 */}
-            <col className="w-14" />{/* 级别 */}
-            <col className="w-16" />{/* 处理状态 */}
-            <col className="w-20" />{/* 性质 */}
-            <col className="w-20" />{/* 省份 */}
-            <col className="w-20" />{/* 上市状态 */}
-            <col className="w-20" />{/* 代码 */}
-            <col className="w-40" />{/* 主营业务 */}
-            <col className="w-24" />{/* 市值/估值 */}
-            <col className="w-20" />{/* 营收 */}
-            <col className="w-40" />{/* 关注行业 */}
-            <col className="w-20" />{/* 上市要求 */}
-            <col className="w-24" />{/* 市值/估值要求 */}
-            <col className="w-20" />{/* 营收要求 */}
-            <col className="w-28" />{/* 区域要求 */}
-            <col className="w-[88px]" />{/* 更新时间 */}
-            <col className="w-20" />{/* 负责人 */}
-            <col className="w-20" />{/* 对接人 */}
-            <col className="w-44" />{/* 操作 */}
+            <col className="w-12" />
+            <col className="w-52" />
+            {columns.map((column) => <col key={column.key} className={column.width} />)}
+            <col className="w-44" />
           </colgroup>
           {/*
             z 层级四层，缺一层横滚时表头冻结列会被表体冻结列盖住：
@@ -351,38 +362,28 @@ export default function IntentsList({
             <tr className="bg-gray-50 shadow-[inset_0_-1px_0_rgb(243,244,246)]">
               <th className="sticky left-0 top-0 z-40 bg-gray-50 px-3 py-3 text-left"><input type="checkbox" disabled={visibleIds.length === 0} checked={allVisibleSelected} onChange={toggleSelectAllVisible} aria-label="选择当前页买家意向" className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600" /></th>
               <th className="sticky left-12 top-0 z-40 bg-gray-50 px-3 py-3 text-left font-medium text-gray-600">买家名称</th>
-              <th className="px-2 py-3 text-center font-medium text-gray-600">级别</th>
-              <th className="px-2 py-3 text-center font-medium text-gray-600" title="左点＝买家资料，右点＝需求解析。两点都亮才能进推荐。">状态</th>
-              {/* 买家自身条件 —— 它是谁 */}
-              <th className="px-2 py-3 text-left font-medium text-gray-600">性质</th>
-              <th className="px-2 py-3 text-left font-medium text-gray-600">省份</th>
-              <th className="px-2 py-3 text-left font-medium text-gray-600">上市状态</th>
-              <th className="px-2 py-3 text-left font-medium text-gray-600">代码</th>
-              <th className="px-2 py-3 text-left font-medium text-gray-600">主营业务</th>
-              <th className="px-2 py-3 text-left font-medium text-gray-600">市值/估值</th>
-              <th className="px-2 py-3 text-left font-medium text-gray-600">营收</th>
-              {/* 需求条件 —— 它要买什么 */}
-              <th className="px-2 py-3 text-left font-medium text-brand-700">关注行业</th>
-              <th className="px-2 py-3 text-left font-medium text-brand-700">上市要求</th>
-              <th className="px-2 py-3 text-left font-medium text-brand-700">市值/估值要求</th>
-              <th className="px-2 py-3 text-left font-medium text-brand-700">营收要求</th>
-              <th className="px-2 py-3 text-left font-medium text-brand-700">区域要求</th>
-              <th className="px-2 py-3 text-left font-medium text-gray-600">
-                <button type="button" onClick={() => updateFilters({ sortDir: filters.sortDir === 'desc' ? 'asc' : 'desc', page: 1 })} className="inline-flex items-center gap-0.5 hover:text-brand-600" title={filters.sortDir === 'desc' ? '当前：最近更新在前，点击改为最早在前' : '当前：最早更新在前，点击改为最近在前'}>
-                  更新时间
-                  {filters.sortDir === 'desc' ? <ArrowDown className="h-3 w-3" /> : <ArrowUp className="h-3 w-3" />}
-                </button>
-              </th>
-              <th className="px-2 py-3 text-left font-medium text-gray-600">负责人</th>
-              <th className="px-2 py-3 text-left font-medium text-gray-600" title="买家侧我方对接人">对接人</th>
+              {columns.map((column) => (
+                <th
+                  key={column.key}
+                  title={column.title}
+                  className={`px-2 py-3 font-medium ${column.align === 'center' ? 'text-center' : 'text-left'} ${column.side === 'intent' ? 'text-brand-700' : 'text-gray-600'}`}
+                >
+                  {column.key === 'updatedAt' ? (
+                    <button type="button" onClick={() => updateFilters({ sortDir: filters.sortDir === 'desc' ? 'asc' : 'desc', page: 1 })} className="inline-flex items-center gap-0.5 hover:text-brand-600" title={filters.sortDir === 'desc' ? '当前：最近更新在前，点击改为最早在前' : '当前：最早更新在前，点击改为最近在前'}>
+                      {column.label}
+                      {filters.sortDir === 'desc' ? <ArrowDown className="h-3 w-3" /> : <ArrowUp className="h-3 w-3" />}
+                    </button>
+                  ) : column.label}
+                </th>
+              ))}
               <th className="sticky right-0 top-0 z-40 bg-gray-50 px-2 py-3 text-center font-medium text-gray-600">操作</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {loading ? (
-              <tr><td colSpan={20} className="px-4 py-8 text-center"><div className="w-5 h-5 border-2 border-brand-600 border-t-transparent rounded-full animate-spin mx-auto" /></td></tr>
+              <tr><td colSpan={columns.length + 3} className="px-4 py-8 text-center"><div className="w-5 h-5 border-2 border-brand-600 border-t-transparent rounded-full animate-spin mx-auto" /></td></tr>
             ) : items.length === 0 ? (
-              <tr><td colSpan={20} className="px-4 py-8 text-center text-gray-400">暂无匹配的买家</td></tr>
+              <tr><td colSpan={columns.length + 3} className="px-4 py-8 text-center text-gray-400">暂无匹配的买家</td></tr>
             ) : items.map((item) => (
               <IntentRow
                 key={item.id}
@@ -392,6 +393,7 @@ export default function IntentsList({
                 onRecord={(scope) => setUpdateDrawer({ item, scope })}
                 onDelete={() => handleDelete(item)}
                 deleting={deletingId === item.id}
+                columns={columns}
               />
             ))}
           </tbody>
@@ -429,6 +431,7 @@ function IntentRow({
   onRecord,
   onDelete,
   deleting,
+  columns,
 }: {
   item: BuyerIntent;
   selected: boolean;
@@ -436,6 +439,7 @@ function IntentRow({
   onRecord: (scope: BusinessUpdateProcessingScope) => void;
   onDelete: () => void;
   deleting: boolean;
+  columns: IntentColumnDef[];
 }) {
   const frozen = 'bg-white group-hover:bg-brand-50';
   const canDelete = canManageOwnedEntity(item.owner_user_id);
@@ -449,23 +453,14 @@ function IntentRow({
         </Link>
         <ScenarioBadge intentId={item.id} labels={item.scenario_labels || []} />
       </td>
-      <td className="px-2 py-3 text-center align-middle"><IntentStatusBadge item={item} /></td>
-      <td className="px-2 py-3 text-center align-middle"><ReadinessCell item={item} /></td>
-      <td className="px-2 py-3 align-middle"><BuyerEnumCell value={item.buyer_ownership_type} column="ownership_type" /></td>
-      <td className="px-2 py-3 align-middle"><TextCell value={item.buyer_location_province} /></td>
-      <td className="px-2 py-3 align-middle"><BuyerEnumCell value={item.buyer_listed_status} column="listed_status" /></td>
-      <td className="px-2 py-3 align-middle"><TextCell value={item.buyer_stock_code} className="text-gray-600" /></td>
-      <td className="px-2 py-3 align-middle"><BuyerTagsCell item={item} /></td>
-      <td className="px-2 py-3 align-middle"><BuyerWorthCell item={item} /></td>
-      <td className="px-2 py-3 align-middle"><MoneyCell value={item.buyer_current_revenue_yuan} /></td>
-      <td className="px-2 py-3 align-middle"><IntentIndustriesCell item={item} /></td>
-      <td className="px-2 py-3 align-middle"><ListingWantedCell item={item} /></td>
-      <td className="px-2 py-3 align-middle"><WorthWantedCell item={item} /></td>
-      <td className="px-2 py-3 align-middle"><RevenueWantedCell item={item} /></td>
-      <td className="px-2 py-3 align-middle"><RegionWantedCell item={item} /></td>
-      <td className="whitespace-nowrap px-2 py-3 align-middle text-xs text-gray-500">{formatMonthDayTime(item.updated_at)}</td>
-      <td className="px-2 py-3 align-middle"><TextCell value={item.owner_name} className="text-gray-600" /></td>
-      <td className="px-2 py-3 align-middle"><TextCell value={item.buyer_our_contact_name} className="text-gray-600" /></td>
+      {columns.map((column) => (
+        <td
+          key={column.key}
+          className={`px-2 py-3 align-middle ${column.align === 'center' ? 'text-center' : ''}`}
+        >
+          <IntentCell column={column} item={item} />
+        </td>
+      ))}
       <td className={`sticky right-0 z-20 px-2 py-3 align-middle ${frozen}`}>
         <div className="flex items-center justify-center gap-1 whitespace-nowrap">
           <UpdateEntryMenu compact onSelect={onRecord} />
@@ -486,4 +481,43 @@ function IntentRow({
       </td>
     </tr>
   );
+}
+
+/** 一列一个渲染分支。列定义只说「显示什么」，怎么显示在这里。 */
+function IntentCell({ column, item }: { column: IntentColumnDef; item: BuyerIntent }) {
+  switch (column.key) {
+    case 'grade': return <IntentStatusBadge item={item} />;
+    case 'readiness': return <ReadinessCell item={item} />;
+    case 'ownership': return <BuyerEnumCell value={item.buyer_ownership_type} column="ownership_type" />;
+    case 'province': return <TextCell value={item.buyer_location_province} />;
+    case 'listedStatus': return <BuyerEnumCell value={item.buyer_listed_status} column="listed_status" />;
+    case 'stockCode': return <TextCell value={item.buyer_stock_code} className="text-gray-600" />;
+    case 'businessTags': return <BuyerTagsCell item={item} />;
+    case 'worth': return <BuyerWorthCell item={item} />;
+    case 'revenue': return <MoneyCell value={item.buyer_current_revenue_yuan} />;
+    case 'wantIndustry': return <IntentIndustriesCell item={item} />;
+    case 'wantListing': return <ListingWantedCell item={item} />;
+    case 'wantWorth': return <WorthWantedCell item={item} />;
+    case 'wantRevenue': return <RevenueWantedCell item={item} />;
+    case 'wantRegion': return <RegionWantedCell item={item} />;
+    case 'updatedAt': return <span className="whitespace-nowrap text-xs text-gray-500">{formatMonthDayTime(item.updated_at)}</span>;
+    case 'owner': return <TextCell value={item.owner_name} className="text-gray-600" />;
+    case 'contact': return <TextCell value={item.buyer_our_contact_name} className="text-gray-600" />;
+    default: return null;
+  }
+}
+
+/**
+ * Tailwind 宽度类 → 像素。表格要按可见列算 min-w，而 Tailwind 的类名本身
+ * 不带数值，运行时量不到，所以在这里换算一次。
+ *
+ * `w-N` 是 N × 4px（Tailwind 的 spacing scale），`w-[88px]` 是任意值。
+ */
+function columnWidthPx(width: string): number {
+  const arbitrary = width.match(/^w-\[(\d+)px\]$/);
+  if (arbitrary) return Number(arbitrary[1]);
+  const scale = width.match(/^w-(\d+)$/);
+  if (scale) return Number(scale[1]) * 4;
+  // 认不出来的类名给个中庸值：宽度算错只是横滚多一点，不该让整张表塌掉。
+  return 96;
 }
