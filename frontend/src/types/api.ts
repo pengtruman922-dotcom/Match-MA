@@ -473,6 +473,8 @@ export interface BuyerIntent {
   buyer_market_cap_yuan?: string | number | null;
   buyer_valuation_yuan?: string | number | null;
   buyer_current_revenue_yuan?: string | number | null;
+  /** 我方对接人，来自买家主体 —— 与「负责人」（记录归属，影响可见范围）不是一回事。 */
+  buyer_our_contact_name?: string | null;
   buyer_profile_ready?: boolean;
   intent_name: string;
   // 与标的侧同一套语义：级别是闸门，status 是 E 的细分原因。
@@ -749,11 +751,16 @@ export interface IndustryDictionaryImportResult {
 export type BuyerIntentSearchField = 'intent_name' | 'buyer_name' | 'raw_requirement_text' | 'intent_summary';
 
 export interface BuyerIntentFilterOptions {
+  /** 「它要买什么」那一侧。 */
   industries: BuyerFilterOption[];
   regions: BuyerFilterOption[];
   statuses: BuyerFilterOption[];
   listed_statuses: BuyerFilterOption[];
   consolidation_requirements: BuyerFilterOption[];
+  /** 「它是谁」那一侧，与上面并列而不是替代。 */
+  buyer_business_tags?: BuyerFilterOption[];
+  buyer_listed_statuses?: BuyerFilterOption[];
+  buyer_provinces?: BuyerFilterOption[];
   owners?: BuyerFilterOption[];
 }
 

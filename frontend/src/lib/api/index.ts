@@ -249,6 +249,12 @@ export const buyerIntents = {
     status?: string;
     listed_status?: string;
     requires_consolidation?: string;
+    /** 买家自身条件的筛选，与上面「它要买什么」那批并列。 */
+    buyer_business_tag?: string;
+    buyer_listed_status?: string;
+    buyer_province?: string;
+    /** 更新时间方向，默认 desc（最近在前）。 */
+    sort_dir?: 'desc' | 'asc';
     owner?: string;
     limit?: number;
     offset?: number;

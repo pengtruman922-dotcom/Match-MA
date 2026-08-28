@@ -37,12 +37,19 @@ export const UPLOAD_POLICY_TIMEOUT_MS = 12000;
 export type BuyerIntentFilters = {
   q: string;
   searchField?: BuyerIntentSearchField;
+  /** 「它要买什么」那一侧。 */
   industry: string;
   region: string;
   status: string;
   listedStatus: string;
   requiresConsolidation: string;
+  /** 「它是谁」那一侧。同名维度分两套：同一页既要能问「谁在找建材」，也要能问「哪些国企买家在找东西」。 */
+  buyerBusinessTag: string;
+  buyerListedStatus: string;
+  buyerProvince: string;
   owner: string;
+  /** 更新时间排序方向，默认最近在前。 */
+  sortDir: 'desc' | 'asc';
   page: number;
   pageSize: number;
 };
@@ -63,7 +70,8 @@ export type BuyerPartyFilters = {
   page: number;
 };
 
-export const INTENT_FILTERS: Array<keyof BuyerIntentFilters> = ['q', 'industry', 'region', 'status', 'listedStatus', 'requiresConsolidation', 'owner'];
+// 「清空条件」按钮统计的就是这些；sortDir 不算条件（它永远有值）。
+export const INTENT_FILTERS: Array<keyof BuyerIntentFilters> = ['q', 'industry', 'region', 'status', 'listedStatus', 'buyerBusinessTag', 'buyerListedStatus', 'buyerProvince', 'owner'];
 export const PARTY_FILTERS: Array<keyof BuyerPartyFilters> = ['q', 'ownershipType', 'businessTag', 'region', 'status', 'owner'];
 
 export const EMPTY_INTENT_FILTER_OPTIONS: BuyerIntentFilterOptions = {
@@ -72,6 +80,9 @@ export const EMPTY_INTENT_FILTER_OPTIONS: BuyerIntentFilterOptions = {
   statuses: [],
   listed_statuses: [],
   consolidation_requirements: [],
+  buyer_business_tags: [],
+  buyer_listed_statuses: [],
+  buyer_provinces: [],
 };
 
 export const EMPTY_PARTY_FILTER_OPTIONS: BuyerPartyFilterOptions = {
@@ -101,7 +112,7 @@ export function readIntentFilters(searchParams: URLSearchParams): BuyerIntentFil
   // URL 参数 > localStorage > 默认 20；非法值一律回落到 20。
   const pageSizeParam = Number(searchParams.get('pageSize'));
   const pageSize = PAGE_SIZE_OPTIONS.includes(pageSizeParam) ? pageSizeParam : readStoredPageSize();
-  return { q: searchParams.get('q') || '', searchField: isBuyerIntentSearchField(searchFieldParam) ? searchFieldParam : undefined, industry: searchParams.get('industry') || '', region: searchParams.get('region') || '', status: searchParams.get('status') || '', listedStatus: searchParams.get('listedStatus') || '', requiresConsolidation: searchParams.get('requiresConsolidation') || '', owner: searchParams.get('owner') || '', page: Math.max(1, Number(searchParams.get('page') || '1') || 1), pageSize };
+  return { q: searchParams.get('q') || '', searchField: isBuyerIntentSearchField(searchFieldParam) ? searchFieldParam : undefined, industry: searchParams.get('industry') || '', region: searchParams.get('region') || '', status: searchParams.get('status') || '', listedStatus: searchParams.get('listedStatus') || '', requiresConsolidation: searchParams.get('requiresConsolidation') || '', buyerBusinessTag: searchParams.get('buyerTag') || '', buyerListedStatus: searchParams.get('buyerListed') || '', buyerProvince: searchParams.get('buyerProvince') || '', owner: searchParams.get('owner') || '', sortDir: searchParams.get('sortDir') === 'asc' ? 'asc' : 'desc', page: Math.max(1, Number(searchParams.get('page') || '1') || 1), pageSize };
 }
 
 export function readPartyFilters(searchParams: URLSearchParams): BuyerPartyFilters {

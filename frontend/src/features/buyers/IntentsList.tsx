@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { Loader2, Sparkles, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, Loader2, Sparkles, Trash2 } from 'lucide-react';
 import { buyerIntents, users } from '../../lib/api';
 import { canManageOwnedEntity, isAdmin } from '../../lib/auth';
 import type {
@@ -31,25 +31,19 @@ import {
 } from './filters';
 import ScenarioBadge from './ScenarioBadge';
 import {
-  BuyerFactsCell,
+  BuyerEnumCell,
+  BuyerTagsCell,
+  BuyerWorthCell,
+  IntentIndustriesCell,
   IntentStatusBadge,
+  ListingWantedCell,
+  MoneyCell,
   ReadinessCell,
-  RequirementCell,
+  RegionWantedCell,
+  RevenueWantedCell,
+  TextCell,
+  WorthWantedCell,
 } from './presentation';
-
-/**
- * 需求名里买家名之外的那一截。
- *
- * 一个买家实质只挂一条需求，而 60% 的需求名是自动模板「X-并购需求（YYYY-MM）」。
- * 整串显示等于把买家名写两遍，所以只留后缀；剩不下东西（或与买家名相同）就不显示。
- */
-function intentSuffix(item: BuyerIntent): string {
-  const name = (item.intent_name || '').trim();
-  const buyer = (item.buyer_name || '').trim();
-  const tail = buyer && name.startsWith(buyer) ? name.slice(buyer.length) : name;
-  const cleaned = tail.replace(/^[-—－\s]+/, '').trim();
-  return cleaned === buyer ? '' : cleaned;
-}
 
 export default function IntentsList({
   externalShowCreate,
@@ -100,6 +94,11 @@ export default function IntentsList({
     if ('status' in patch) setOrDelete(next, 'status', patch.status);
     if ('listedStatus' in patch) setOrDelete(next, 'listedStatus', patch.listedStatus);
     if ('requiresConsolidation' in patch) setOrDelete(next, 'requiresConsolidation', patch.requiresConsolidation);
+    if ('buyerBusinessTag' in patch) setOrDelete(next, 'buyerTag', patch.buyerBusinessTag);
+    if ('buyerListedStatus' in patch) setOrDelete(next, 'buyerListed', patch.buyerListedStatus);
+    if ('buyerProvince' in patch) setOrDelete(next, 'buyerProvince', patch.buyerProvince);
+    // desc 是默认，不写进 URL —— 免得每个链接都拖着一个 sortDir=desc。
+    if ('sortDir' in patch) setOrDelete(next, 'sortDir', patch.sortDir === 'asc' ? 'asc' : '');
     if ('owner' in patch) setOrDelete(next, 'owner', patch.owner);
     if (patch.pageSize !== undefined) {
       next.set('pageSize', String(patch.pageSize));
@@ -123,6 +122,10 @@ export default function IntentsList({
         status: filters.status || undefined,
         listed_status: filters.listedStatus || undefined,
         requires_consolidation: filters.requiresConsolidation || undefined,
+        buyer_business_tag: filters.buyerBusinessTag || undefined,
+        buyer_listed_status: filters.buyerListedStatus || undefined,
+        buyer_province: filters.buyerProvince || undefined,
+        sort_dir: filters.sortDir,
         owner: filters.owner || undefined,
         limit: filters.pageSize,
         offset: (filters.page - 1) * filters.pageSize,
@@ -273,11 +276,15 @@ export default function IntentsList({
         onSuggestionSelect={(suggestion) => handleSuggestionSelect(suggestion as BuyerIntentSuggestion)}
         searchFieldBadge={filters.q && filters.searchField ? `按${INTENT_SEARCH_FIELD_LABELS[filters.searchField]}检索：${filters.q}` : ''}
         filters={[
-          { label: '行业', value: filters.industry, options: filterOptions.industries, onChange: (value) => updateFilters({ industry: value, page: 1 }) },
-          { label: '地区', value: filters.region, options: filterOptions.regions, onChange: (value) => updateFilters({ region: value, page: 1 }) },
+          // 前三个问「它是谁」，后三个问「它要买什么」—— 标签刻意区分，
+          // 否则「行业」「上市」「区域」在同一行里各有两个，用户分不清点哪个。
           { label: '级别', value: filters.status, options: filterOptions.statuses, onChange: (value) => updateFilters({ status: value, page: 1 }) },
+          { label: '买家行业', value: filters.buyerBusinessTag, options: filterOptions.buyer_business_tags || [], onChange: (value) => updateFilters({ buyerBusinessTag: value, page: 1 }) },
+          { label: '买家上市', value: filters.buyerListedStatus, options: filterOptions.buyer_listed_statuses || [], onChange: (value) => updateFilters({ buyerListedStatus: value, page: 1 }) },
+          { label: '买家区域', value: filters.buyerProvince, options: filterOptions.buyer_provinces || [], onChange: (value) => updateFilters({ buyerProvince: value, page: 1 }) },
+          { label: '关注行业', value: filters.industry, options: filterOptions.industries, onChange: (value) => updateFilters({ industry: value, page: 1 }) },
+          { label: '关注区域', value: filters.region, options: filterOptions.regions, onChange: (value) => updateFilters({ region: value, page: 1 }) },
           { label: '上市要求', value: filters.listedStatus, options: filterOptions.listed_statuses, onChange: (value) => updateFilters({ listedStatus: value, page: 1 }) },
-          { label: '并表要求', value: filters.requiresConsolidation, options: filterOptions.consolidation_requirements, onChange: (value) => updateFilters({ requiresConsolidation: value, page: 1 }) },
           ...(admin ? [{ label: '负责人', value: filters.owner, options: filterOptions.owners || [], onChange: (value: string) => updateFilters({ owner: value, page: 1 }) }] : []),
         ]}
         activeFilterCount={activeFilterCount}
@@ -308,20 +315,31 @@ export default function IntentsList({
         className="min-h-[320px] overflow-auto border border-gray-200 bg-white"
       >
         {/*
-          colgroup 合计 1368px == min-w，因此发生横向滚动时（容器 < 1368）列宽恰为声明值，
-          冻结列的 sticky 偏移量精确；容器更宽时列会等比放大，但那时没有横滚，sticky 不激活。
+          19 列合计 2088px == min-w，横滚时列宽恰为声明值，冻结列的 sticky 偏移才准
+          （左侧 48+208=256px，右侧操作列 176px）。改列宽必须同步改 min-w 和这两个偏移。
         */}
-        <table className="w-full min-w-[1368px] table-fixed text-sm">
+        <table className="w-full min-w-[2088px] table-fixed text-sm">
           <colgroup>
-            <col className="w-12" />
-            <col className="w-52" />
-            <col className="w-56" />
-            <col className="w-96" />
-            <col className="w-24" />
-            <col className="w-20" />
-            <col className="w-24" />
-            <col className="w-[88px]" />
-            <col className="w-60" />
+            <col className="w-12" />{/* 勾选 */}
+            <col className="w-52" />{/* 买家名称 */}
+            <col className="w-14" />{/* 级别 */}
+            <col className="w-16" />{/* 处理状态 */}
+            <col className="w-20" />{/* 性质 */}
+            <col className="w-20" />{/* 省份 */}
+            <col className="w-20" />{/* 上市状态 */}
+            <col className="w-20" />{/* 代码 */}
+            <col className="w-40" />{/* 主营业务 */}
+            <col className="w-24" />{/* 市值/估值 */}
+            <col className="w-20" />{/* 营收 */}
+            <col className="w-40" />{/* 关注行业 */}
+            <col className="w-20" />{/* 上市要求 */}
+            <col className="w-24" />{/* 市值/估值要求 */}
+            <col className="w-20" />{/* 营收要求 */}
+            <col className="w-28" />{/* 区域要求 */}
+            <col className="w-[88px]" />{/* 更新时间 */}
+            <col className="w-20" />{/* 负责人 */}
+            <col className="w-20" />{/* 对接人 */}
+            <col className="w-44" />{/* 操作 */}
           </colgroup>
           {/*
             z 层级四层，缺一层横滚时表头冻结列会被表体冻结列盖住：
@@ -331,27 +349,40 @@ export default function IntentsList({
           */}
           <thead className="sticky top-0 z-30">
             <tr className="bg-gray-50 shadow-[inset_0_-1px_0_rgb(243,244,246)]">
-              <th className="sticky left-0 top-0 z-40 bg-gray-50 px-4 py-3 text-left"><input type="checkbox" disabled={visibleIds.length === 0} checked={allVisibleSelected} onChange={toggleSelectAllVisible} aria-label="选择当前页买家意向" className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600" /></th>
-              {/*
-                买家名当锚点，需求名降级成它下面的小字。60% 的需求名是自动模板
-                「X-并购需求（YYYY-MM）」，54% 直接以买家名开头 —— 让它占第一冻结列，
-                一半的行第一眼撞到的就是右边那列的重复。
-              */}
-              <th className="sticky left-12 top-0 z-40 bg-gray-50 px-4 py-3 text-left font-medium text-gray-600">买家</th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600">买家自身条件</th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600">它要买什么</th>
-              <th className="text-center px-4 py-3 font-medium text-gray-600" title="左点＝买家资料，右点＝需求解析。两点都亮才能进推荐。">就绪</th>
-              <th className="text-center px-4 py-3 font-medium text-gray-600">级别</th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600">负责人</th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600">更新时间</th>
+              <th className="sticky left-0 top-0 z-40 bg-gray-50 px-3 py-3 text-left"><input type="checkbox" disabled={visibleIds.length === 0} checked={allVisibleSelected} onChange={toggleSelectAllVisible} aria-label="选择当前页买家意向" className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600" /></th>
+              <th className="sticky left-12 top-0 z-40 bg-gray-50 px-3 py-3 text-left font-medium text-gray-600">买家名称</th>
+              <th className="px-2 py-3 text-center font-medium text-gray-600">级别</th>
+              <th className="px-2 py-3 text-center font-medium text-gray-600" title="左点＝买家资料，右点＝需求解析。两点都亮才能进推荐。">状态</th>
+              {/* 买家自身条件 —— 它是谁 */}
+              <th className="px-2 py-3 text-left font-medium text-gray-600">性质</th>
+              <th className="px-2 py-3 text-left font-medium text-gray-600">省份</th>
+              <th className="px-2 py-3 text-left font-medium text-gray-600">上市状态</th>
+              <th className="px-2 py-3 text-left font-medium text-gray-600">代码</th>
+              <th className="px-2 py-3 text-left font-medium text-gray-600">主营业务</th>
+              <th className="px-2 py-3 text-left font-medium text-gray-600">市值/估值</th>
+              <th className="px-2 py-3 text-left font-medium text-gray-600">营收</th>
+              {/* 需求条件 —— 它要买什么 */}
+              <th className="px-2 py-3 text-left font-medium text-brand-700">关注行业</th>
+              <th className="px-2 py-3 text-left font-medium text-brand-700">上市要求</th>
+              <th className="px-2 py-3 text-left font-medium text-brand-700">市值/估值要求</th>
+              <th className="px-2 py-3 text-left font-medium text-brand-700">营收要求</th>
+              <th className="px-2 py-3 text-left font-medium text-brand-700">区域要求</th>
+              <th className="px-2 py-3 text-left font-medium text-gray-600">
+                <button type="button" onClick={() => updateFilters({ sortDir: filters.sortDir === 'desc' ? 'asc' : 'desc', page: 1 })} className="inline-flex items-center gap-0.5 hover:text-brand-600" title={filters.sortDir === 'desc' ? '当前：最近更新在前，点击改为最早在前' : '当前：最早更新在前，点击改为最近在前'}>
+                  更新时间
+                  {filters.sortDir === 'desc' ? <ArrowDown className="h-3 w-3" /> : <ArrowUp className="h-3 w-3" />}
+                </button>
+              </th>
+              <th className="px-2 py-3 text-left font-medium text-gray-600">负责人</th>
+              <th className="px-2 py-3 text-left font-medium text-gray-600" title="买家侧我方对接人">对接人</th>
               <th className="sticky right-0 top-0 z-40 bg-gray-50 px-2 py-3 text-center font-medium text-gray-600">操作</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {loading ? (
-              <tr><td colSpan={9} className="px-4 py-8 text-center"><div className="w-5 h-5 border-2 border-brand-600 border-t-transparent rounded-full animate-spin mx-auto" /></td></tr>
+              <tr><td colSpan={20} className="px-4 py-8 text-center"><div className="w-5 h-5 border-2 border-brand-600 border-t-transparent rounded-full animate-spin mx-auto" /></td></tr>
             ) : items.length === 0 ? (
-              <tr><td colSpan={9} className="px-4 py-8 text-center text-gray-400">暂无匹配的买家</td></tr>
+              <tr><td colSpan={20} className="px-4 py-8 text-center text-gray-400">暂无匹配的买家</td></tr>
             ) : items.map((item) => (
               <IntentRow
                 key={item.id}
@@ -411,20 +442,30 @@ function IntentRow({
   return (
     <tr className="group h-[88px] transition-colors hover:bg-brand-50/30">
       <td className={`sticky left-0 z-20 px-4 py-3 align-middle ${frozen}`}><input type="checkbox" checked={selected} onChange={(event) => onSelectedChange(event.target.checked)} aria-label={`选择${item.intent_name}`} className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600" /></td>
-      <td className={`sticky left-12 z-20 px-4 py-3 align-middle ${frozen}`}>
+      <td className={`sticky left-12 z-20 px-3 py-3 align-middle ${frozen}`}>
+        {/* 只显示买家名称，不再拼需求名 —— 一个买家实质只挂一条需求。 */}
         <Link to={`/buyer-intents/${item.id}`} className="line-clamp-2 font-medium leading-5 text-gray-900 transition-colors hover:text-brand-600" title={item.buyer_name || '未关联买家'}>
           {item.buyer_name || <span className="text-amber-600">未关联买家</span>}
         </Link>
-        {/* 需求名去掉买家名前缀之后剩下的那截才有信息量；剩不下东西就不占地方。 */}
-        {intentSuffix(item) ? <p className="truncate text-[11px] leading-4 text-gray-400" title={item.intent_name}>{intentSuffix(item)}</p> : null}
         <ScenarioBadge intentId={item.id} labels={item.scenario_labels || []} />
       </td>
-      <td className="px-4 py-3 align-middle"><BuyerFactsCell item={item} /></td>
-      <td className="px-4 py-3 align-middle text-gray-600"><RequirementCell item={item} /></td>
-      <td className="px-4 py-3 text-center align-middle"><ReadinessCell item={item} /></td>
-      <td className="px-4 py-3 text-center align-middle"><IntentStatusBadge item={item} /></td>
-      <td className="px-4 py-3 align-middle text-gray-600"><p className="line-clamp-2" title={item.owner_name || '未指派'}>{item.owner_name || <span className="text-gray-300">未指派</span>}</p></td>
-      <td className="whitespace-nowrap px-4 py-3 align-middle text-gray-500">{formatMonthDayTime(item.updated_at)}</td>
+      <td className="px-2 py-3 text-center align-middle"><IntentStatusBadge item={item} /></td>
+      <td className="px-2 py-3 text-center align-middle"><ReadinessCell item={item} /></td>
+      <td className="px-2 py-3 align-middle"><BuyerEnumCell value={item.buyer_ownership_type} column="ownership_type" /></td>
+      <td className="px-2 py-3 align-middle"><TextCell value={item.buyer_location_province} /></td>
+      <td className="px-2 py-3 align-middle"><BuyerEnumCell value={item.buyer_listed_status} column="listed_status" /></td>
+      <td className="px-2 py-3 align-middle"><TextCell value={item.buyer_stock_code} className="text-gray-600" /></td>
+      <td className="px-2 py-3 align-middle"><BuyerTagsCell item={item} /></td>
+      <td className="px-2 py-3 align-middle"><BuyerWorthCell item={item} /></td>
+      <td className="px-2 py-3 align-middle"><MoneyCell value={item.buyer_current_revenue_yuan} /></td>
+      <td className="px-2 py-3 align-middle"><IntentIndustriesCell item={item} /></td>
+      <td className="px-2 py-3 align-middle"><ListingWantedCell item={item} /></td>
+      <td className="px-2 py-3 align-middle"><WorthWantedCell item={item} /></td>
+      <td className="px-2 py-3 align-middle"><RevenueWantedCell item={item} /></td>
+      <td className="px-2 py-3 align-middle"><RegionWantedCell item={item} /></td>
+      <td className="whitespace-nowrap px-2 py-3 align-middle text-xs text-gray-500">{formatMonthDayTime(item.updated_at)}</td>
+      <td className="px-2 py-3 align-middle"><TextCell value={item.owner_name} className="text-gray-600" /></td>
+      <td className="px-2 py-3 align-middle"><TextCell value={item.buyer_our_contact_name} className="text-gray-600" /></td>
       <td className={`sticky right-0 z-20 px-2 py-3 align-middle ${frozen}`}>
         <div className="flex items-center justify-center gap-1 whitespace-nowrap">
           <UpdateEntryMenu compact onSelect={onRecord} />

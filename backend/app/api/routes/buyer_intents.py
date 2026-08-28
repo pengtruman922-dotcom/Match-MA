@@ -28,6 +28,7 @@ from backend.app.db import get_db
 from backend.app.registry.nodes import buyer_parse_node_names
 from backend.app.services.entity_grade import BUYER_GRADE, resolve_grade_pair
 from backend.app.services.listed_status import legacy_listed_status
+from backend.app.api.routes.buyer_parties import _enum_labels as buyer_party_enum_labels
 from backend.app.services.profile_sections import buyer_party_readiness_sql
 from backend.app.services.recommendation_conditions import normalize_condition_effects, normalize_scenario_fields
 from backend.app.services.search_docs import create_search_doc_rebuild_job
@@ -148,6 +149,7 @@ class BuyerIntentOut(BaseModel):
     buyer_market_cap_yuan: Decimal | None = None
     buyer_valuation_yuan: Decimal | None = None
     buyer_current_revenue_yuan: Decimal | None = None
+    buyer_our_contact_name: str | None = None
     buyer_profile_ready: bool = False
     intent_name: str
     intent_grade: str
@@ -340,6 +342,10 @@ class BuyerIntentFilterOptionsOut(BaseModel):
     statuses: list[BuyerIntentFilterOptionOut]
     listed_statuses: list[BuyerIntentFilterOptionOut]
     consolidation_requirements: list[BuyerIntentFilterOptionOut]
+    # 买家自身条件那一侧的下拉，与上面「它要买什么」那批并列。
+    buyer_business_tags: list[BuyerIntentFilterOptionOut] = []
+    buyer_listed_statuses: list[BuyerIntentFilterOptionOut] = []
+    buyer_provinces: list[BuyerIntentFilterOptionOut] = []
     owners: list[BuyerIntentFilterOptionOut] = []
 
 
@@ -386,6 +392,7 @@ BUYER_PARTY_SUMMARY_COLUMNS = f"""
               bp.market_cap_yuan as buyer_market_cap_yuan,
               bp.valuation_yuan as buyer_valuation_yuan,
               bp.current_revenue_yuan as buyer_current_revenue_yuan,
+              bp.our_contact_name as buyer_our_contact_name,
               ({buyer_party_readiness_sql("bp")}) as buyer_profile_ready
 """
 
@@ -563,6 +570,13 @@ def list_buyer_intents(
     listed_status: str | None = Query(default=None, max_length=80),
     requires_consolidation: Literal["yes", "no", "likely", "unknown"] | None = Query(default=None),
     owner: str | None = Query(default=None, max_length=50),
+    # 买家自身条件的筛选。与上面那三个「需求要什么」的同名参数是两回事：
+    # `industry`/`region`/`listed_status` 问的是「它要买什么」，这三个问的是「它是谁」。
+    buyer_business_tag: str | None = Query(default=None, max_length=80),
+    buyer_listed_status: str | None = Query(default=None, max_length=40),
+    buyer_province: str | None = Query(default=None, max_length=80),
+    # 默认最近更新在最前 —— 顾问打开列表找的是「今天动过的那条」。
+    sort_dir: Literal["desc", "asc"] = Query(default="desc"),
 ) -> dict[str, Any]:
     where = ["bi.team_id = :team_id", "bi.workspace_id = :workspace_id", "bi.deleted_at is null"]
     params: dict[str, Any] = {
@@ -619,6 +633,15 @@ def list_buyer_intents(
     if requires_consolidation:
         where.append("bi.requires_consolidation = :requires_consolidation")
         params["requires_consolidation"] = requires_consolidation
+    if buyer_business_tag:
+        where.append("bp.business_tags_json ? :buyer_business_tag")
+        params["buyer_business_tag"] = buyer_business_tag
+    if buyer_listed_status:
+        where.append("bp.listed_status = :buyer_listed_status")
+        params["buyer_listed_status"] = buyer_listed_status
+    if buyer_province:
+        where.append("bp.location_province = :buyer_province")
+        params["buyer_province"] = buyer_province
 
     where_sql = " and ".join(where)
     total = db.execute(
@@ -645,7 +668,8 @@ def list_buyer_intents(
               on bp.id = bi.buyer_party_id
              and bp.deleted_at is null
             where {where_sql}
-            order by bi.updated_at desc
+            -- 方向来自 Literal["desc","asc"]，不是拼进来的用户输入。
+            order by bi.updated_at {"asc" if sort_dir == "asc" else "desc"}
             limit :limit offset :offset
             """
         ),
@@ -755,6 +779,62 @@ def buyer_intent_filter_options(current_user: CurrentUser, db: Session = Depends
         params,
         labels={"yes": "需要并表", "likely": "可能需要", "no": "不需要并表", "unknown": "未知"},
     )
+    # 买家自身条件的三个下拉。与上面那批「它要买什么」是两套：同一页里既要能问
+    # 「谁在找建材标的」，也要能问「哪些国企买家在找东西」。
+    buyer_business_tags = _filter_options(
+        db,
+        f"""
+        select tag.value as value, count(distinct bi.id) as count
+        from buyer_intent bi
+        join buyer_party bp on bp.id = bi.buyer_party_id and bp.deleted_at is null
+        cross join lateral jsonb_array_elements_text({_JSONB_ARRAY.format(column="bp.business_tags_json")}) as tag(value)
+        where bi.team_id = :team_id
+          and bi.workspace_id = :workspace_id
+          and bi.deleted_at is null
+          {scope_clause_bi}
+          and nullif(tag.value, '') is not null
+        group by tag.value
+        order by count desc, value asc
+        limit 80
+        """,
+        params,
+    )
+    buyer_listed_statuses = _filter_options(
+        db,
+        f"""
+        select bp.listed_status as value, count(distinct bi.id) as count
+        from buyer_intent bi
+        join buyer_party bp on bp.id = bi.buyer_party_id and bp.deleted_at is null
+        where bi.team_id = :team_id
+          and bi.workspace_id = :workspace_id
+          and bi.deleted_at is null
+          {scope_clause_bi}
+          and coalesce(bp.listed_status, 'unknown') <> 'unknown'
+        group by bp.listed_status
+        order by count desc, value asc
+        """,
+        params,
+        # 中文名来自指标注册表，改注册表一处下拉跟着变；这里复用 buyer_parties 那份，
+        # 不再写第二份（写第二份的表现是两个页面的同一个枚举叫法不一样）。
+        labels=buyer_party_enum_labels("listed_status"),
+    )
+    buyer_provinces = _filter_options(
+        db,
+        f"""
+        select bp.location_province as value, count(distinct bi.id) as count
+        from buyer_intent bi
+        join buyer_party bp on bp.id = bi.buyer_party_id and bp.deleted_at is null
+        where bi.team_id = :team_id
+          and bi.workspace_id = :workspace_id
+          and bi.deleted_at is null
+          {scope_clause_bi}
+          and nullif(bp.location_province, '') is not null
+        group by bp.location_province
+        order by count desc, value asc
+        limit 80
+        """,
+        params,
+    )
     owners = [] if owner_scope_required(current_user) else owner_filter_options(db, "buyer_intent", params)
     return {
         "industries": industries,
@@ -762,6 +842,9 @@ def buyer_intent_filter_options(current_user: CurrentUser, db: Session = Depends
         "statuses": statuses,
         "listed_statuses": listed_statuses,
         "consolidation_requirements": consolidation_requirements,
+        "buyer_business_tags": buyer_business_tags,
+        "buyer_listed_statuses": buyer_listed_statuses,
+        "buyer_provinces": buyer_provinces,
         "owners": owners,
     }
 

@@ -69,58 +69,168 @@ export function RequirementCell({ item }: { item: BuyerIntent }) {
   );
 }
 
+/** 空值统一长这样：一个灰破折号，别让空白看着像加载没完。 */
+function Blank() {
+  return <span className="text-gray-300">—</span>;
+}
+
+/** 买家侧的枚举单元（企业性质 / 上市状态）。`unknown` 与空等价，都当没填。 */
+export function BuyerEnumCell({ value, column }: { value?: string | null; column: string }) {
+  if (!value || value === 'unknown') return <Blank />;
+  return <span className="text-xs text-gray-700">{valueLabel(column, value)}</span>;
+}
+
+/** 纯文本单元，过长省略，鼠标停留看全文。 */
+export function TextCell({ value, className = 'text-gray-700' }: { value?: string | null; className?: string }) {
+  const text = (value || '').trim();
+  if (!text) return <Blank />;
+  return <span className={`block truncate text-xs ${className}`} title={text}>{text}</span>;
+}
+
 /**
- * 买家自身条件：它是谁。
+ * 主营业务：买家自己做什么。
  *
- * 判断一个买家能不能匹配标的，要同时看它自身条件和它的要求 —— 这一列是前半边。
- * 它不是装饰：这些字段就是深评「买方自身情况」块的内容，缺了它协同性类诉求
- * （「与现有业务有关联性」「强链补链」）在模型那里只能判「无法判断」。
+ * 标签可能有五六个，列宽放不下 —— 截断显示，`title` 给全量。这不是装饰字段：
+ * 它就是深评「买方自身情况」块里的「主营业务」那一行，协同性判断靠它。
  */
-export function BuyerFactsCell({ item }: { item: BuyerIntent }) {
-  if (!item.buyer_party_id) return <span className="text-xs text-amber-600">未关联买家</span>;
-  if (!item.buyer_profile_ready) {
-    return <span className="text-xs text-gray-400">资料未补全</span>;
-  }
-
-  const ownership = item.buyer_ownership_type && item.buyer_ownership_type !== 'unknown'
-    ? valueLabel('ownership_type', item.buyer_ownership_type)
-    : null;
-  const listing = buyerListingText(item);
-  const region = [item.buyer_location_province, item.buyer_location_city].filter(Boolean).join('');
-  const identity = [ownership, listing, region].filter(Boolean);
-
-  // 市值与估值是一个展示位：上市看市值，非上市看估值 —— 与深评那个块同一规则。
-  const worth = item.buyer_listed_status === 'listed' && item.buyer_market_cap_yuan
-    ? `市值${formatCompactMoney(Number(item.buyer_market_cap_yuan))}`
-    : item.buyer_valuation_yuan
-      ? `估值${formatCompactMoney(Number(item.buyer_valuation_yuan))}`
-      : null;
-  const revenue = item.buyer_current_revenue_yuan
-    ? `营收${formatCompactMoney(Number(item.buyer_current_revenue_yuan))}`
-    : null;
-  const money = [worth, revenue].filter(Boolean);
-  const tags = (item.buyer_business_tags_json || []).map(String).filter(Boolean);
-
+export function BuyerTagsCell({ item }: { item: BuyerIntent }) {
+  const tags = (item.buyer_business_tags_json || []).map(String).map((tag) => tag.trim()).filter(Boolean);
+  if (!tags.length) return <Blank />;
   return (
-    <div className="space-y-0.5 text-xs leading-5" title={tags.length ? `主营：${tags.join('、')}` : undefined}>
-      <p className="truncate text-gray-700">{identity.length ? identity.join(' · ') : <span className="text-gray-300">—</span>}</p>
-      {money.length ? <p className="truncate text-gray-500">{money.join(' · ')}</p> : null}
-      {!money.length && tags.length ? <p className="truncate text-gray-400">{tags.slice(0, 3).join('、')}</p> : null}
-    </div>
+    <span className="block truncate text-xs text-gray-700" title={tags.join('、')}>
+      {tags.join('、')}
+    </span>
   );
 }
 
-function buyerListingText(item: BuyerIntent): string | null {
-  const status = item.buyer_listed_status;
-  if (!status || status === 'unknown') return null;
-  const label = valueLabel('listed_status', status);
-  if (status !== 'listed') return label;
-  // 交易所与代码一起给，只有代码看不出在哪个板 —— 与深评那个块同一拼法。
-  const suffix = [
-    item.buyer_listing_exchange ? valueLabel('listing_exchange', item.buyer_listing_exchange) : null,
-    item.buyer_stock_code,
-  ].filter(Boolean).join('');
-  return suffix ? `${label}${suffix}` : label;
+/**
+ * 市值 / 估值：一个展示位两个来源。
+ *
+ * 上市看市值、非上市看估值 —— 与深评那个块、以及买家详情页同一条规则。分成两列的话
+ * 任何一行都必然有一列是空的。
+ */
+export function BuyerWorthCell({ item }: { item: BuyerIntent }) {
+  if (item.buyer_listed_status === 'listed' && item.buyer_market_cap_yuan) {
+    return <span className="whitespace-nowrap text-xs text-gray-700">{formatCompactMoney(Number(item.buyer_market_cap_yuan))}</span>;
+  }
+  if (item.buyer_valuation_yuan) {
+    return (
+      <span className="whitespace-nowrap text-xs text-gray-700" title="估值">
+        {formatCompactMoney(Number(item.buyer_valuation_yuan))}
+        <span className="ml-0.5 text-[10px] text-gray-400">估</span>
+      </span>
+    );
+  }
+  return <Blank />;
+}
+
+/** 金额单元：营收这类单值。 */
+export function MoneyCell({ value }: { value?: string | number | null }) {
+  if (value === null || value === undefined || value === '') return <Blank />;
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return <Blank />;
+  return <span className="whitespace-nowrap text-xs text-gray-700">{formatCompactMoney(amount)}</span>;
+}
+
+/** 关注行业：需求的可接受行业，一级为主、二级补充。 */
+export function IntentIndustriesCell({ item }: { item: BuyerIntent }) {
+  const primary = (item.industries_json || []).map(String).filter(Boolean);
+  const secondary = (item.industry_l2_json || []).map(String).filter(Boolean);
+  if (!primary.length && !secondary.length) return <Blank />;
+  const all = [...primary, ...secondary];
+  return (
+    <span className="block truncate text-xs text-gray-700" title={all.join('、')}>
+      {primary.length ? primary.join('、') : secondary.join('、')}
+    </span>
+  );
+}
+
+/**
+ * 上市要求：买家想买上市的还是非上市的。
+ *
+ * `preferred` 是倾向、`acceptable` 是可接受集合，两者都在时显示倾向、悬停看全集。
+ * 只显示 acceptable 会把「都可以但偏好上市」压成「都可以」。
+ */
+export function ListingWantedCell({ item }: { item: BuyerIntent }) {
+  const acceptable = (item.acceptable_listed_status_json || []).map(String).filter(Boolean);
+  const preferred = item.preferred_listed_status && item.preferred_listed_status !== 'unknown'
+    ? item.preferred_listed_status
+    : null;
+  if (!preferred && !acceptable.length) return <Blank />;
+  const full = acceptable.map((value) => valueLabel('preferred_listed_status', value)).join('、');
+  if (preferred) {
+    const label = valueLabel('preferred_listed_status', preferred);
+    return (
+      <span className="whitespace-nowrap text-xs text-gray-700" title={full ? `可接受：${full}` : undefined}>
+        {label}
+        {acceptable.length > 1 ? <span className="ml-0.5 text-[10px] text-gray-400">偏好</span> : null}
+      </span>
+    );
+  }
+  return <span className="block truncate text-xs text-gray-700" title={full}>{full}</span>;
+}
+
+/** 市值/估值要求：与买家侧同一个展示位规则，上市看市值区间、非上市看估值区间。 */
+export function WorthWantedCell({ item }: { item: BuyerIntent }) {
+  const wantsListed = item.preferred_listed_status === 'listed'
+    || (item.acceptable_listed_status_json || []).map(String).includes('listed');
+  const marketCap = moneyRange(item.min_market_cap_yuan, item.max_market_cap_yuan);
+  const valuation = moneyRange(item.min_valuation_yuan, item.max_valuation_yuan);
+  // 想买上市的就优先给市值区间；它没填就退回估值区间，而不是留白。
+  const text = (wantsListed ? marketCap || valuation : valuation || marketCap);
+  if (!text) return <Blank />;
+  const isValuation = text === valuation && text !== marketCap;
+  return (
+    <span className="whitespace-nowrap text-xs text-gray-700" title={isValuation ? '估值要求' : '市值要求'}>
+      {text}
+      {isValuation ? <span className="ml-0.5 text-[10px] text-gray-400">估</span> : null}
+    </span>
+  );
+}
+
+function moneyRange(min?: string | number | null, max?: string | number | null): string {
+  const low = min === null || min === undefined || min === '' ? null : Number(min);
+  const high = max === null || max === undefined || max === '' ? null : Number(max);
+  const lowOk = low !== null && Number.isFinite(low);
+  const highOk = high !== null && Number.isFinite(high);
+  if (lowOk && highOk) return `${formatCompactMoney(low)}–${formatCompactMoney(high)}`;
+  if (lowOk) return `≥${formatCompactMoney(low)}`;
+  if (highOk) return `≤${formatCompactMoney(high)}`;
+  return '';
+}
+
+/** 营收要求：需求侧的营收下限。 */
+export function RevenueWantedCell({ item }: { item: BuyerIntent }) {
+  const value = item.min_revenue_yuan;
+  if (value === null || value === undefined || value === '') return <Blank />;
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return <Blank />;
+  return <span className="whitespace-nowrap text-xs text-gray-700">≥{formatCompactMoney(amount)}</span>;
+}
+
+/**
+ * 区域要求：需求侧的省份。
+ *
+ * 结构化的 `region_constraints_json` 只有 12% 有值，而文本摘要 `region_scope_summary`
+ * 有 64% —— 所以结构化没有时退回文本，宁可显示一句话也别让这一列大面积空白。
+ * 退回时标灰，提示它没被结构化（初筛闸门只认结构化的那份）。
+ */
+export function RegionWantedCell({ item }: { item: BuyerIntent }) {
+  const constraints = Array.isArray(item.region_constraints_json) ? item.region_constraints_json : [];
+  const provinces = constraints
+    // 排除项不是「它要哪里」，混进来会把「不要华北」显示成「华北」。
+    .filter((entry) => (entry?.effect || 'preferred') !== 'excluded')
+    .map((entry) => (entry?.province || '').trim())
+    .filter(Boolean);
+  const unique = [...new Set(provinces)];
+  if (unique.length) {
+    return <span className="block truncate text-xs text-gray-700" title={unique.join('、')}>{unique.join('、')}</span>;
+  }
+  const summary = (item.region_scope_summary || '').trim();
+  if (!summary) return <Blank />;
+  return (
+    <span className="block truncate text-xs text-gray-400" title={`未结构化，原文：${summary}`}>{summary}</span>
+  );
 }
 
 /**
