@@ -306,16 +306,20 @@ def test_profile_parser_removes_cross_layer_deal_and_team_noise() -> None:
     assert len([note for note in notes if "removed_cross_layer_noise" in note]) == 2
 
 
-def test_the_readiness_check_covers_every_field_the_block_reads() -> None:
-    """列表那盏「就绪」灯与深评那个块必须同一口径。
+def test_the_readiness_light_is_a_strict_subset_of_what_the_block_reads() -> None:
+    """列表那盏「就绪」灯问的不是「块里有没有字」，而是「够不够判断」。
 
-    灯亮着却什么都没进模型，比灯不亮更坏 —— 前者让顾问以为这个买家已经能匹配了。
-    这里比对的是「判定用的字段集合」与「块真正读的字段集合」：块多读一个字段而判定
-    没跟上，就会出现「有内容但灯不亮」；判定多算一个字段，就是「灯亮但块是空的」。
+    早期把这两个问题混成一个：只要块非空就亮灯。生产实测 32 条亮灯里 19 条只有一个
+    省份，块里就一行「所在地区：上海市」—— 灯说「资料已补全」，模型拿到的却判断不了
+    任何东西。**灯亮着却什么都没进模型，比灯不亮更坏**。
+
+    所以判定是块读取字段的真子集，被排除的必须显式列在 EXCLUDED 里：这样「块新读了
+    一个字段而判定漏接」（bug）和「有意不算」（决定）在这条用例里分得开。
     """
     import re
 
     from backend.app.services.profile_sections import (
+        BUYER_PARTY_READINESS_EXCLUDED,
         BUYER_PARTY_READINESS_SQL_BY_FIELD,
         buyer_party_fact_block,
     )
@@ -323,17 +327,27 @@ def test_the_readiness_check_covers_every_field_the_block_reads() -> None:
     db = _Db()
     buyer_party_fact_block(db, "8ff4bc53-047c-47be-b9b8-a3c465a519a1")
     select_body = db.statement.split("from buyer_party")[0]
-    read_fields = set(re.findall(r"\b([a-z_]+_(?:json|summary|yuan|type|status|province|city|district))\b", select_body))
-    # 这三个只是给上市那行拼后缀 / 只是地区的更细一级，本身不构成「有资料」。
-    decorative = {"listing_exchange", "location_city", "location_district"}
+    read_fields = set(re.findall(r"\b([a-z_]+_(?:json|summary|yuan|type|status|province|city|district|code|exchange))\b", select_body))
     # 时间伴生列不算内容：只有一个日期而没有数字，说明不了任何事。
-    decorative |= {name for name in read_fields if name.endswith("_as_of") or name.endswith("_date")}
+    read_fields -= {name for name in read_fields if name.endswith("_as_of") or name.endswith("_date")}
 
-    assert read_fields - decorative == set(BUYER_PARTY_READINESS_SQL_BY_FIELD), (
-        "「买方自身情况」块读的字段与就绪判定不一致：\n"
-        f"  块读到但判定没算：{sorted(read_fields - decorative - set(BUYER_PARTY_READINESS_SQL_BY_FIELD))}\n"
-        f"  判定算了但块不读：{sorted(set(BUYER_PARTY_READINESS_SQL_BY_FIELD) - read_fields)}"
+    readiness = set(BUYER_PARTY_READINESS_SQL_BY_FIELD)
+    assert readiness <= read_fields, (
+        f"判定算了块根本不读的字段：{sorted(readiness - read_fields)}"
     )
+    unaccounted = read_fields - readiness - BUYER_PARTY_READINESS_EXCLUDED
+    assert not unaccounted, (
+        "块读了这些字段，但既没算进就绪、也没列进 EXCLUDED —— "
+        f"要么接上判定，要么写明为什么不算：{sorted(unaccounted)}"
+    )
+
+
+def test_a_province_alone_never_lights_the_readiness_lamp() -> None:
+    """这是那 19 条的具体形态：只有省份，别的什么都没有。"""
+    from backend.app.services.profile_sections import BUYER_PARTY_READINESS_SQL_BY_FIELD
+
+    assert "location_province" not in BUYER_PARTY_READINESS_SQL_BY_FIELD
+    assert not any("location_" in sql for sql in BUYER_PARTY_READINESS_SQL_BY_FIELD.values())
 
 
 def test_the_readiness_sql_treats_each_empty_shape_correctly() -> None:

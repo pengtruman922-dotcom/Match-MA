@@ -287,17 +287,22 @@ def render_profile_text(
     return "\n".join(parts)
 
 
-# 「买方自身情况」这一块认哪些字段算有内容 —— 买家列表那盏「就绪」灯要和它同一口径。
-# **灯亮着却什么都没进模型，比灯不亮更坏**：前者让人以为这个买家已经能匹配了。
+# 买家列表那盏「就绪」灯认哪些字段。
+#
+# 它问的**不是**「块里有没有字」，而是「够不够判断」—— 这两个问题不一样。早期把它们
+# 混成一个，结果是生产里 32 条亮灯中 19 条只有一个省份，块里就一行「所在地区：上海市」：
+# 灯说「资料已补全」，模型拿到的却判断不了任何东西。**灯亮着却什么都没进模型，比灯不亮
+# 更坏** —— 前者让人以为这个买家已经能匹配了。
+#
+# 所以就绪判定是块读取字段的**真子集**（被排除的见 BUYER_PARTY_READINESS_EXCLUDED）。
+# 留下的每一个都能独立支撑一类判断：做什么、什么性质、多大。
 #
 # 每种类型的「没填」长得不一样，所以判定按列写死在这里，不给调用方留手写第二份的
 # 余地：jsonb 数组的空是 `[]` 不是 null，text 的空可能是 ''，而两个枚举列 not null
 # default 'unknown' —— `unknown` 不是 null，但对「这里有没有信息」两者等价。
-# 与实际读取的一致性由 `test_the_readiness_check_covers_every_field_the_block_reads` 钉住。
 BUYER_PARTY_READINESS_SQL_BY_FIELD: dict[str, str] = {
     "business_tags_json": "jsonb_array_length(coalesce({alias}.business_tags_json, '[]'::jsonb)) > 0",
     "business_summary": "coalesce({alias}.business_summary, '') <> ''",
-    "location_province": "coalesce({alias}.location_province, '') <> ''",
     "supplementary_summary": "coalesce({alias}.supplementary_summary, '') <> ''",
     "market_cap_yuan": "{alias}.market_cap_yuan is not null",
     "valuation_yuan": "{alias}.valuation_yuan is not null",
@@ -306,6 +311,20 @@ BUYER_PARTY_READINESS_SQL_BY_FIELD: dict[str, str] = {
     "ownership_type": "coalesce({alias}.ownership_type, 'unknown') <> 'unknown'",
     "listed_status": "coalesce({alias}.listed_status, 'unknown') <> 'unknown'",
 }
+
+# 块会读、但**刻意不算就绪**的字段。列出来是为了让「漏接一个新字段」和「有意排除」
+# 在测试里分得开：前者是 bug，后者是决定。
+BUYER_PARTY_READINESS_EXCLUDED: frozenset[str] = frozenset(
+    {
+        # 只知道买家在上海，判断不了它和标的有没有产业协同，也判断不了它吃得下多大。
+        "location_province",
+        "location_city",
+        "location_district",
+        # 这两个是「上市状态」那一行的后缀，不独立成立。
+        "listing_exchange",
+        "stock_code",
+    }
+)
 
 
 def buyer_party_readiness_sql(alias: str) -> str:
