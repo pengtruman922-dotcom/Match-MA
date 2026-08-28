@@ -136,18 +136,28 @@ def _clean(value: Any) -> str | None:
 def expand_region_group(value: Any) -> tuple[str, ...]:
     """城市群/大区 → 它覆盖的省份；不是这类说法就返回空。
 
-    容忍后缀：「长三角区域」「华东地区」「珠三角一带」都能命中。
+    **扫整串而不是只看开头**：真实数据里一格常常写着「长三角、珠三角区域」
+    （生产里就有），只按前缀匹配会把珠三角整个丢掉，而丢掉的地区在筛选里
+    表现为「这些标的进不来」，界面上看不出来。
+
+    最长优先并吃掉已匹配的片段：「粤港澳大湾区」要先于「粤港澳」和「大湾区」命中，
+    否则同一段文字会被拆着算两次（结果虽然相同，但换个词典就不一定了）。
     """
     text_value = _clean(value)
     if not text_value:
         return ()
     if text_value in REGION_GROUPS:
         return REGION_GROUPS[text_value]
-    # 最长优先：「粤港澳大湾区」要先于「粤港澳」命中，否则丢掉一段词。
+    provinces: list[str] = []
+    remaining = text_value
     for name in sorted(REGION_GROUPS, key=len, reverse=True):
-        if text_value.startswith(name):
-            return REGION_GROUPS[name]
-    return ()
+        if name not in remaining:
+            continue
+        remaining = remaining.replace(name, "、")
+        for province in REGION_GROUPS[name]:
+            if province not in provinces:
+                provinces.append(province)
+    return tuple(provinces)
 
 
 def normalize_province(value: Any) -> str | None:

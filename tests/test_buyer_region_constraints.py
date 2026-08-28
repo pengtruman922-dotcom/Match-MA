@@ -126,8 +126,11 @@ def test_raw_text_is_used_when_province_is_null() -> None:
         [{"city": None, "province": None, "raw_text": "长三角、珠三角区域", "constraint_type": "soft"}]
     )
 
-    # 「长三角、珠三角区域」按最长前缀命中长三角；珠三角那半截靠提示词分成两条给。
-    assert [item["province"] for item in constraints] == ["上海市", "江苏省", "浙江省", "安徽省"]
+    # 两个城市群都要展开：只认前缀会把珠三角整个丢掉，而丢掉的地区在筛选里表现为
+    # 「这些标的进不来」，界面上看不出来。
+    assert [item["province"] for item in constraints] == [
+        "上海市", "江苏省", "浙江省", "安徽省", "广东省",
+    ]
     assert all(item["effect"] == "preferred" for item in constraints), "soft 应归一成 preferred"
 
 
@@ -161,3 +164,34 @@ def test_the_rest_routes_normalize_regions_too() -> None:
     )
     update = inspect.getsource(module.update_buyer_intent)
     assert "normalize_buyer_region_constraints" in update, "更新路径没归一地域"
+
+
+def test_two_clusters_in_one_string_both_expand() -> None:
+    """真实数据里一格常常写着「长三角、珠三角区域」（生产里就有这一条）。
+
+    只按前缀匹配会把珠三角整个丢掉，而丢掉的地区在筛选里表现为「这些标的进不来」，
+    界面上看不出来 —— 与漏掉一个门槛是同一类静默收窄。
+    """
+    from backend.app.services.region_dictionary import expand_region_group
+
+    provinces = expand_region_group("长三角、珠三角区域")
+
+    assert provinces == ("上海市", "江苏省", "浙江省", "安徽省", "广东省")
+
+
+def test_an_overlapping_cluster_name_is_not_counted_twice() -> None:
+    """「粤港澳大湾区」里含「粤港澳」和「大湾区」，最长优先并吃掉已匹配片段。"""
+    from backend.app.services.region_dictionary import expand_region_group
+
+    provinces = expand_region_group("粤港澳大湾区")
+
+    assert provinces == ("广东省", "香港特别行政区", "澳门特别行政区")
+    assert len(provinces) == len(set(provinces)), "同一个省不该出现两次"
+
+
+def test_a_plain_province_is_not_treated_as_a_cluster() -> None:
+    from backend.app.services.region_dictionary import expand_region_group
+
+    assert expand_region_group("广东省") == ()
+    assert expand_region_group("") == ()
+    assert expand_region_group(None) == ()
