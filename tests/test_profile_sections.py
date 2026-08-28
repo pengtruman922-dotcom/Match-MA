@@ -304,3 +304,65 @@ def test_profile_parser_removes_cross_layer_deal_and_team_noise() -> None:
     assert sections[0]["content_text"] == "产能落地可谈；接受迁址"
     assert sections[1]["content_text"] == "移液技术100%自研；团队来自中航"
     assert len([note for note in notes if "removed_cross_layer_noise" in note]) == 2
+
+
+def test_the_readiness_check_covers_every_field_the_block_reads() -> None:
+    """列表那盏「就绪」灯与深评那个块必须同一口径。
+
+    灯亮着却什么都没进模型，比灯不亮更坏 —— 前者让顾问以为这个买家已经能匹配了。
+    这里比对的是「判定用的字段集合」与「块真正读的字段集合」：块多读一个字段而判定
+    没跟上，就会出现「有内容但灯不亮」；判定多算一个字段，就是「灯亮但块是空的」。
+    """
+    import re
+
+    from backend.app.services.profile_sections import (
+        BUYER_PARTY_READINESS_SQL_BY_FIELD,
+        buyer_party_fact_block,
+    )
+
+    db = _Db()
+    buyer_party_fact_block(db, "8ff4bc53-047c-47be-b9b8-a3c465a519a1")
+    select_body = db.statement.split("from buyer_party")[0]
+    read_fields = set(re.findall(r"\b([a-z_]+_(?:json|summary|yuan|type|status|province|city|district))\b", select_body))
+    # 这三个只是给上市那行拼后缀 / 只是地区的更细一级，本身不构成「有资料」。
+    decorative = {"listing_exchange", "location_city", "location_district"}
+    # 时间伴生列不算内容：只有一个日期而没有数字，说明不了任何事。
+    decorative |= {name for name in read_fields if name.endswith("_as_of") or name.endswith("_date")}
+
+    assert read_fields - decorative == set(BUYER_PARTY_READINESS_SQL_BY_FIELD), (
+        "「买方自身情况」块读的字段与就绪判定不一致：\n"
+        f"  块读到但判定没算：{sorted(read_fields - decorative - set(BUYER_PARTY_READINESS_SQL_BY_FIELD))}\n"
+        f"  判定算了但块不读：{sorted(set(BUYER_PARTY_READINESS_SQL_BY_FIELD) - read_fields)}"
+    )
+
+
+def test_the_readiness_sql_treats_each_empty_shape_correctly() -> None:
+    """每种类型的「没填」长得不一样，一刀切 `is not null` 会把空数组当成有内容。"""
+    from backend.app.services.profile_sections import buyer_party_readiness_sql
+
+    sql = buyer_party_readiness_sql("bp")
+
+    # jsonb 数组的空是 '[]' 不是 null
+    assert "jsonb_array_length(coalesce(bp.business_tags_json, '[]'::jsonb)) > 0" in sql
+    # 两个枚举列 not null default 'unknown'
+    assert "coalesce(bp.ownership_type, 'unknown') <> 'unknown'" in sql
+    assert "coalesce(bp.listed_status, 'unknown') <> 'unknown'" in sql
+    # 数值列 null 就是没填
+    assert "bp.market_cap_yuan is not null" in sql
+    assert "bp.business_tags_json is not null" not in sql
+
+
+def test_the_intent_list_exposes_the_buyer_side_of_the_row() -> None:
+    """买家列表一行要同时显示两个半边，缺哪半也要看得见。"""
+    from backend.app.api.routes.buyer_intents import BUYER_INTENT_OUT_COLUMNS, BuyerIntentOut
+
+    for column in (
+        "buyer_ownership_type",
+        "buyer_listed_status",
+        "buyer_location_province",
+        "buyer_business_tags_json",
+        "buyer_current_revenue_yuan",
+        "buyer_profile_ready",
+    ):
+        assert column in BUYER_INTENT_OUT_COLUMNS, f"列表 SQL 少了 {column}"
+        assert column in BuyerIntentOut.model_fields, f"出参模型少了 {column}"

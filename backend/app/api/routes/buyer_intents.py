@@ -28,6 +28,7 @@ from backend.app.db import get_db
 from backend.app.registry.nodes import buyer_parse_node_names
 from backend.app.services.entity_grade import BUYER_GRADE, resolve_grade_pair
 from backend.app.services.listed_status import legacy_listed_status
+from backend.app.services.profile_sections import buyer_party_readiness_sql
 from backend.app.services.recommendation_conditions import normalize_condition_effects, normalize_scenario_fields
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 from backend.app.services.buyer_intent_processing_state import buyer_intent_processing_states
@@ -135,6 +136,19 @@ class BuyerIntentOut(BaseModel):
     id: UUID
     buyer_party_id: UUID | None
     buyer_name: str | None = None
+    # 买家自身条件：匹配一个买家要同时看它是谁和它要买什么，所以列表一行里两边都得在。
+    # `buyer_profile_ready` 与深评那个「买方自身情况」块同一口径（见 profile_sections）。
+    buyer_ownership_type: str | None = None
+    buyer_listed_status: str | None = None
+    buyer_listing_exchange: str | None = None
+    buyer_stock_code: str | None = None
+    buyer_location_province: str | None = None
+    buyer_location_city: str | None = None
+    buyer_business_tags_json: list[Any] = []
+    buyer_market_cap_yuan: Decimal | None = None
+    buyer_valuation_yuan: Decimal | None = None
+    buyer_current_revenue_yuan: Decimal | None = None
+    buyer_profile_ready: bool = False
     intent_name: str
     intent_grade: str
     status: str
@@ -357,7 +371,27 @@ class BuyerIntentBulkDeleteOut(BaseModel):
 _JSONB_ARRAY = "case when jsonb_typeof({column}) = 'array' then {column} else '[]'::jsonb end"
 
 
-BUYER_INTENT_OUT_COLUMNS = """
+# 买家列表一行要同时显示「它是谁」和「它要买什么」—— 匹配一个买家需要两边都有，
+# 所以两边都得看得见，缺哪半也得看得见（就绪灯）。
+# `buyer_profile_ready` 与 `buyer_party_fact_block` 同一口径：灯亮 = 这个买家的自身
+# 情况确实能进深评。判定字段来自 `BUYER_PARTY_READINESS_FIELDS`，别在这里手写第二份。
+BUYER_PARTY_SUMMARY_COLUMNS = f"""
+              bp.ownership_type as buyer_ownership_type,
+              bp.listed_status as buyer_listed_status,
+              bp.listing_exchange as buyer_listing_exchange,
+              bp.stock_code as buyer_stock_code,
+              bp.location_province as buyer_location_province,
+              bp.location_city as buyer_location_city,
+              bp.business_tags_json as buyer_business_tags_json,
+              bp.market_cap_yuan as buyer_market_cap_yuan,
+              bp.valuation_yuan as buyer_valuation_yuan,
+              bp.current_revenue_yuan as buyer_current_revenue_yuan,
+              ({buyer_party_readiness_sql("bp")}) as buyer_profile_ready
+"""
+
+
+BUYER_INTENT_OUT_COLUMNS = f"""
+              {BUYER_PARTY_SUMMARY_COLUMNS},
               bi.id, bi.buyer_party_id, bp.buyer_name as buyer_name, bi.intent_name,
               bi.intent_grade, bi.status,
               bi.contact_name, bi.contact_info_json,

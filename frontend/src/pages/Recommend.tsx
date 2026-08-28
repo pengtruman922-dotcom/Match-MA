@@ -56,6 +56,14 @@ export default function Recommend() {
   const [turns, setTurns] = useState<AgentTurnState[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  /**
+   * 这一轮锚定的买家需求。带需求进来时才有值。
+   *
+   * 以前 `?intentId=` 只被拿来预填输入框，会话本身是匿名的 —— 于是深评拿不到
+   * 买方自身情况，「与现有业务有关联性」这类要求只能判「无法判断」。现在它跟着
+   * 请求一起走，会话记得住这一轮是给谁做的。
+   */
+  const [anchorIntentId, setAnchorIntentId] = useState<string | null>(null);
   const [uploadPolicy, setUploadPolicy] = useState<AttachmentUploadPolicy | null>(null);
   const [stopping, setStopping] = useState(false);
 
@@ -348,6 +356,7 @@ export default function Recommend() {
         user_message: message,
         attachment_ids: attachmentIds,
         retry_of_turn_id: retryOfTurnId,
+        buyer_intent_id: anchorIntentId || undefined,
       });
       if (!sessionId) {
         setSessionId(turn.session_id);
@@ -394,7 +403,7 @@ export default function Recommend() {
     } catch (sendError) {
       setError(sendError instanceof Error ? sendError.message : '发送失败');
     }
-  }, [searchParams, sessionId, setSearchParams, startPolling]);
+  }, [anchorIntentId, searchParams, sessionId, setSearchParams, startPolling]);
 
   /**
    * Stop the turn in flight.
@@ -453,6 +462,8 @@ export default function Recommend() {
   }, []);
 
   const removeAttachment = useCallback((key: string) => {
+    // 拿掉需求卡片就等于取消锚定，否则界面上看不见它却还在生效。
+    if (key === REQUIREMENT_KEY) setAnchorIntentId(null);
     setAttachments((prev) => prev.filter((item) => item.key !== key));
   }, []);
 
@@ -617,6 +628,7 @@ export default function Recommend() {
       const intent = await buyerIntents.get(intentId);
       const text = intentToRequirementText(intent);
       if (!text.trim()) {
+        setAnchorIntentId(null);
         patchAttachment(REQUIREMENT_KEY, {
           name: intent.intent_name,
           status: 'failed',
@@ -629,7 +641,10 @@ export default function Recommend() {
         status: 'ready',
         text,
       });
+      // 正文进输入框只是让人能改；锚点是给深评用的，两者都要。
+      setAnchorIntentId(intentId);
     } catch {
+      setAnchorIntentId(null);
       patchAttachment(REQUIREMENT_KEY, { status: 'failed', error: '加载失败' });
     }
   }, [patchAttachment]);

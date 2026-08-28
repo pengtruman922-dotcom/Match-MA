@@ -458,6 +458,22 @@ export interface BuyerIntent {
   id: string;
   buyer_party_id: string | null;
   buyer_name?: string | null;
+  /**
+   * 买家自身条件。判断一个买家能不能匹配标的要同时看它是谁和它要买什么，
+   * 所以列表一行里两个半边都在。`buyer_profile_ready` 与深评那个
+   * 「买方自身情况」块同一口径：为 true 才表示这半边真的能进模型。
+   */
+  buyer_ownership_type?: string | null;
+  buyer_listed_status?: string | null;
+  buyer_listing_exchange?: string | null;
+  buyer_stock_code?: string | null;
+  buyer_location_province?: string | null;
+  buyer_location_city?: string | null;
+  buyer_business_tags_json?: unknown[];
+  buyer_market_cap_yuan?: string | number | null;
+  buyer_valuation_yuan?: string | number | null;
+  buyer_current_revenue_yuan?: string | number | null;
+  buyer_profile_ready?: boolean;
   intent_name: string;
   // 与标的侧同一套语义：级别是闸门，status 是 E 的细分原因。
   intent_grade: string;

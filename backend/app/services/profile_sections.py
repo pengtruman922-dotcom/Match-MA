@@ -287,6 +287,34 @@ def render_profile_text(
     return "\n".join(parts)
 
 
+# 「买方自身情况」这一块认哪些字段算有内容 —— 买家列表那盏「就绪」灯要和它同一口径。
+# **灯亮着却什么都没进模型，比灯不亮更坏**：前者让人以为这个买家已经能匹配了。
+#
+# 每种类型的「没填」长得不一样，所以判定按列写死在这里，不给调用方留手写第二份的
+# 余地：jsonb 数组的空是 `[]` 不是 null，text 的空可能是 ''，而两个枚举列 not null
+# default 'unknown' —— `unknown` 不是 null，但对「这里有没有信息」两者等价。
+# 与实际读取的一致性由 `test_the_readiness_check_covers_every_field_the_block_reads` 钉住。
+BUYER_PARTY_READINESS_SQL_BY_FIELD: dict[str, str] = {
+    "business_tags_json": "jsonb_array_length(coalesce({alias}.business_tags_json, '[]'::jsonb)) > 0",
+    "business_summary": "coalesce({alias}.business_summary, '') <> ''",
+    "location_province": "coalesce({alias}.location_province, '') <> ''",
+    "supplementary_summary": "coalesce({alias}.supplementary_summary, '') <> ''",
+    "market_cap_yuan": "{alias}.market_cap_yuan is not null",
+    "valuation_yuan": "{alias}.valuation_yuan is not null",
+    "current_revenue_yuan": "{alias}.current_revenue_yuan is not null",
+    "current_operating_cash_flow_yuan": "{alias}.current_operating_cash_flow_yuan is not null",
+    "ownership_type": "coalesce({alias}.ownership_type, 'unknown') <> 'unknown'",
+    "listed_status": "coalesce({alias}.listed_status, 'unknown') <> 'unknown'",
+}
+
+
+def buyer_party_readiness_sql(alias: str) -> str:
+    """「这个买家的自身情况够不够进深评」的布尔表达式。"""
+    return " or ".join(
+        expression.format(alias=alias) for expression in BUYER_PARTY_READINESS_SQL_BY_FIELD.values()
+    )
+
+
 def buyer_party_fact_block(db: Session, buyer_party_id: Any) -> str:
     """A few lines of the buyer's own business, for synergy questions.
 

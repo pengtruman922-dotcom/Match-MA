@@ -16,7 +16,11 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from backend.app.api.authn import CurrentUser
-from backend.app.api.routes.utils import ensure_entity_visible, ensure_entity_writable
+from backend.app.api.routes.utils import (
+    attachment_visible_sql,
+    ensure_entity_visible,
+    ensure_entity_writable,
+)
 # OCR 入队与附件落库这两件事已经有实现，这里复用而不是抄一份：抄一份的表现是
 # 「另一条上传路径的 ocr_policy 元数据缺失」，而那会让图片被送进 OCR。
 from backend.app.api.routes.attachments import _enqueue_attachment_ocr_job
@@ -288,12 +292,16 @@ def parse_buyer_party(
 ) -> dict[str, Any]:
     _ensure_party_writable(db, current_user, buyer_party_id)
     request = payload or BuyerPartyParseRequest()
+    attachment_ids = list(dict.fromkeys(request.attachment_ids))
+    _link_materials_to_party(
+        db, buyer_party_id=buyer_party_id, current_user=current_user, attachment_ids=attachment_ids
+    )
     job = _start_ingest(
         db,
         party_id=buyer_party_id,
         user_id=current_user.user_id,
         raw_text=request.raw_text,
-        attachment_ids=list(dict.fromkeys(request.attachment_ids)),
+        attachment_ids=attachment_ids,
         enable_research=request.enable_research,
         mode=request.mode,
         refresh_fields=request.refresh_fields,
@@ -301,6 +309,59 @@ def parse_buyer_party(
     )
     db.commit()
     return job
+
+
+def _link_materials_to_party(
+    db: Session,
+    *,
+    buyer_party_id: UUID,
+    current_user: Any,
+    attachment_ids: list[UUID],
+) -> None:
+    """把这次带进来的附件补链到买家主体上。
+
+    一份文件常常两条链都要用（一份材料里既写了这家公司是谁、也写了它要买什么），
+    而附件是独立表、`attachment_link` 是多对多、OCR 按 attachment 入队 —— 所以
+    「都用」的正确形态是**一次上传两条链接**，不是传两遍、OCR 两遍。
+
+    但少了这一步会**静默丢文件**：`_load_material_attachments` 硬要求
+    `entity_type='buyer_party' and entity_id=:party_id`，传一个没链到本主体的
+    attachment_id 进去返回零行、不报错，界面上看不出材料没被读。
+
+    可见性按附件自己的规则判：不加这道检查，猜到一个 attachment_id 就能把别人的
+    文件读进自己的买家资料里。链接本身幂等，重复调用不会长出第二行。
+    """
+    if not attachment_ids:
+        return
+    visible = db.execute(
+        text(
+            f"""
+            select a.id
+            from attachment a
+            where a.team_id = :team_id
+              and a.workspace_id = :workspace_id
+              and a.deleted_at is null
+              and a.id = any(:attachment_ids)
+              and ({attachment_visible_sql("a")})
+            """
+        ),
+        {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "attachment_ids": attachment_ids,
+            "scope_user_id": current_user.user_id,
+        },
+    ).scalars().all()
+    missing = [item for item in attachment_ids if item not in set(visible)]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"这些附件不存在或无权访问：{[str(item) for item in missing]}",
+        )
+    for attachment_id in visible:
+        _link_attachment_if_missing(
+            db, attachment_id, "buyer_party", buyer_party_id, "source_document"
+        )
 
 
 @router.get("/{buyer_party_id}/parse-status", response_model=BuyerPartyIngestStatusOut)

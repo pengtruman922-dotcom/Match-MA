@@ -31,10 +31,25 @@ import {
 } from './filters';
 import ScenarioBadge from './ScenarioBadge';
 import {
+  BuyerFactsCell,
   IntentStatusBadge,
-  ParseStatusBadge,
+  ReadinessCell,
   RequirementCell,
 } from './presentation';
+
+/**
+ * 需求名里买家名之外的那一截。
+ *
+ * 一个买家实质只挂一条需求，而 60% 的需求名是自动模板「X-并购需求（YYYY-MM）」。
+ * 整串显示等于把买家名写两遍，所以只留后缀；剩不下东西（或与买家名相同）就不显示。
+ */
+function intentSuffix(item: BuyerIntent): string {
+  const name = (item.intent_name || '').trim();
+  const buyer = (item.buyer_name || '').trim();
+  const tail = buyer && name.startsWith(buyer) ? name.slice(buyer.length) : name;
+  const cleaned = tail.replace(/^[-—－\s]+/, '').trim();
+  return cleaned === buyer ? '' : cleaned;
+}
 
 export default function IntentsList({
   externalShowCreate,
@@ -299,11 +314,11 @@ export default function IntentsList({
         <table className="w-full min-w-[1368px] table-fixed text-sm">
           <colgroup>
             <col className="w-12" />
-            <col className="w-48" />
-            <col className="w-28" />
+            <col className="w-52" />
+            <col className="w-56" />
             <col className="w-96" />
-            <col className="w-28" />
             <col className="w-24" />
+            <col className="w-20" />
             <col className="w-24" />
             <col className="w-[88px]" />
             <col className="w-60" />
@@ -317,10 +332,15 @@ export default function IntentsList({
           <thead className="sticky top-0 z-30">
             <tr className="bg-gray-50 shadow-[inset_0_-1px_0_rgb(243,244,246)]">
               <th className="sticky left-0 top-0 z-40 bg-gray-50 px-4 py-3 text-left"><input type="checkbox" disabled={visibleIds.length === 0} checked={allVisibleSelected} onChange={toggleSelectAllVisible} aria-label="选择当前页买家意向" className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600" /></th>
-              <th className="sticky left-12 top-0 z-40 bg-gray-50 px-4 py-3 text-left font-medium text-gray-600">需求名称</th>
-              <th className="sticky left-[240px] top-0 z-40 bg-gray-50 px-4 py-3 text-left font-medium text-gray-600">买家名称</th>
-              <th className="text-left px-4 py-3 font-medium text-gray-600">关键需求</th>
-              <th className="text-center px-4 py-3 font-medium text-gray-600">解析状态</th>
+              {/*
+                买家名当锚点，需求名降级成它下面的小字。60% 的需求名是自动模板
+                「X-并购需求（YYYY-MM）」，54% 直接以买家名开头 —— 让它占第一冻结列，
+                一半的行第一眼撞到的就是右边那列的重复。
+              */}
+              <th className="sticky left-12 top-0 z-40 bg-gray-50 px-4 py-3 text-left font-medium text-gray-600">买家</th>
+              <th className="text-left px-4 py-3 font-medium text-gray-600">买家自身条件</th>
+              <th className="text-left px-4 py-3 font-medium text-gray-600">它要买什么</th>
+              <th className="text-center px-4 py-3 font-medium text-gray-600" title="左点＝买家资料，右点＝需求解析。两点都亮才能进推荐。">就绪</th>
               <th className="text-center px-4 py-3 font-medium text-gray-600">级别</th>
               <th className="text-left px-4 py-3 font-medium text-gray-600">负责人</th>
               <th className="text-left px-4 py-3 font-medium text-gray-600">更新时间</th>
@@ -392,12 +412,16 @@ function IntentRow({
     <tr className="group h-[88px] transition-colors hover:bg-brand-50/30">
       <td className={`sticky left-0 z-20 px-4 py-3 align-middle ${frozen}`}><input type="checkbox" checked={selected} onChange={(event) => onSelectedChange(event.target.checked)} aria-label={`选择${item.intent_name}`} className="h-4 w-4 border-gray-300 text-brand-600 focus:ring-brand-600" /></td>
       <td className={`sticky left-12 z-20 px-4 py-3 align-middle ${frozen}`}>
-        <Link to={`/buyer-intents/${item.id}`} className="line-clamp-2 font-medium leading-5 text-gray-900 transition-colors hover:text-brand-600" title={item.intent_name}>{item.intent_name}</Link>
+        <Link to={`/buyer-intents/${item.id}`} className="line-clamp-2 font-medium leading-5 text-gray-900 transition-colors hover:text-brand-600" title={item.buyer_name || '未关联买家'}>
+          {item.buyer_name || <span className="text-amber-600">未关联买家</span>}
+        </Link>
+        {/* 需求名去掉买家名前缀之后剩下的那截才有信息量；剩不下东西就不占地方。 */}
+        {intentSuffix(item) ? <p className="truncate text-[11px] leading-4 text-gray-400" title={item.intent_name}>{intentSuffix(item)}</p> : null}
         <ScenarioBadge intentId={item.id} labels={item.scenario_labels || []} />
       </td>
-      <td className={`sticky left-[240px] z-20 px-4 py-3 align-middle text-gray-700 ${frozen}`}><p className="line-clamp-2 leading-5" title={item.buyer_name || '未关联买家'}>{item.buyer_name || <span className="text-amber-600">未关联买家</span>}</p></td>
+      <td className="px-4 py-3 align-middle"><BuyerFactsCell item={item} /></td>
       <td className="px-4 py-3 align-middle text-gray-600"><RequirementCell item={item} /></td>
-      <td className="px-4 py-3 text-center align-middle"><ParseStatusBadge item={item} /></td>
+      <td className="px-4 py-3 text-center align-middle"><ReadinessCell item={item} /></td>
       <td className="px-4 py-3 text-center align-middle"><IntentStatusBadge item={item} /></td>
       <td className="px-4 py-3 align-middle text-gray-600"><p className="line-clamp-2" title={item.owner_name || '未指派'}>{item.owner_name || <span className="text-gray-300">未指派</span>}</p></td>
       <td className="whitespace-nowrap px-4 py-3 align-middle text-gray-500">{formatMonthDayTime(item.updated_at)}</td>

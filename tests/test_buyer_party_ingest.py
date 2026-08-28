@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from datetime import date
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -755,3 +756,108 @@ def test_the_researcher_is_given_values_not_just_field_names() -> None:
     assert fields["market_cap_yuan"]["time_companion"] == "market_cap_as_of"
     assert "亿元" in fields["market_cap_yuan"]["note"]
     assert set(context["enum_contract"]) == {"ownership_type", "listed_status", "listing_exchange"}
+
+
+# =========================================================================
+# 材料归属：一份文件两条链都用
+# =========================================================================
+
+
+class _LinkRecordingDb:
+    """记下补链时执行了什么。可见性查询返回 `visible` 里的 id。"""
+
+    def __init__(self, visible: list) -> None:
+        self._visible = visible
+        self.statements: list[str] = []
+        self.params: list[dict] = []
+
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        self.statements.append(sql)
+        self.params.append(dict(params or {}))
+        outer = self
+
+        class _Result:
+            def scalars(self):
+                return self
+
+            def all(self):
+                return list(outer._visible)
+
+        return _Result()
+
+
+def test_a_material_can_feed_both_chains_without_being_uploaded_twice() -> None:
+    """「都用」的正确形态是一次上传两条链接。
+
+    附件是独立表、`attachment_link` 是多对多、OCR 按 attachment 入队 —— 所以同一份
+    文件喂两条链只该多一行链接，不该传两遍、也不该 OCR 两遍。
+    """
+    from uuid import uuid4
+
+    from backend.app.api.routes.buyer_party_ingest import _link_materials_to_party
+
+    attachment_id = uuid4()
+    party_id = uuid4()
+    db = _LinkRecordingDb([attachment_id])
+
+    _link_materials_to_party(
+        db,
+        buyer_party_id=party_id,
+        current_user=SimpleNamespace(user_id=uuid4()),
+        attachment_ids=[attachment_id],
+    )
+
+    linked = [sql for sql in db.statements if "insert into attachment_link" in sql]
+    assert len(linked) == 1
+    # 幂等：已经链过就不再插，重复调用不会长出第二行。
+    assert "where not exists" in linked[0]
+
+
+def test_linking_refuses_an_attachment_the_caller_cannot_see() -> None:
+    """猜到一个 attachment_id 就能把别人的文件读进自己的买家资料里 —— 必须先判可见。"""
+    from uuid import uuid4
+
+    from fastapi import HTTPException
+
+    from backend.app.api.routes.buyer_party_ingest import _link_materials_to_party
+
+    db = _LinkRecordingDb([])  # 一个都看不见
+
+    with pytest.raises(HTTPException) as raised:
+        _link_materials_to_party(
+            db,
+            buyer_party_id=uuid4(),
+            current_user=SimpleNamespace(user_id=uuid4()),
+            attachment_ids=[uuid4()],
+        )
+
+    assert raised.value.status_code == 404
+    assert not [sql for sql in db.statements if "insert into attachment_link" in sql]
+
+
+def test_no_attachments_means_no_queries_at_all() -> None:
+    from uuid import uuid4
+
+    from backend.app.api.routes.buyer_party_ingest import _link_materials_to_party
+
+    db = _LinkRecordingDb([])
+    _link_materials_to_party(
+        db, buyer_party_id=uuid4(), current_user=SimpleNamespace(user_id=uuid4()), attachment_ids=[]
+    )
+
+    assert db.statements == []
+
+
+def test_the_parse_route_links_materials_before_enqueuing() -> None:
+    """补链必须发生在入队之前。
+
+    顺序反了的表现是**第一次解析读不到材料**：`_load_material_attachments` 硬要求
+    `entity_type='buyer_party'`，链还没建就查，返回零行且不报错。
+    """
+    import inspect
+
+    from backend.app.api.routes import buyer_party_ingest as module
+
+    source = inspect.getsource(module.parse_buyer_party)
+    assert source.index("_link_materials_to_party") < source.index("_start_ingest")

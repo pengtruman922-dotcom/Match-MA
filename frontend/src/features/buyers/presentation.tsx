@@ -69,6 +69,100 @@ export function RequirementCell({ item }: { item: BuyerIntent }) {
   );
 }
 
+/**
+ * 买家自身条件：它是谁。
+ *
+ * 判断一个买家能不能匹配标的，要同时看它自身条件和它的要求 —— 这一列是前半边。
+ * 它不是装饰：这些字段就是深评「买方自身情况」块的内容，缺了它协同性类诉求
+ * （「与现有业务有关联性」「强链补链」）在模型那里只能判「无法判断」。
+ */
+export function BuyerFactsCell({ item }: { item: BuyerIntent }) {
+  if (!item.buyer_party_id) return <span className="text-xs text-amber-600">未关联买家</span>;
+  if (!item.buyer_profile_ready) {
+    return <span className="text-xs text-gray-400">资料未补全</span>;
+  }
+
+  const ownership = item.buyer_ownership_type && item.buyer_ownership_type !== 'unknown'
+    ? valueLabel('ownership_type', item.buyer_ownership_type)
+    : null;
+  const listing = buyerListingText(item);
+  const region = [item.buyer_location_province, item.buyer_location_city].filter(Boolean).join('');
+  const identity = [ownership, listing, region].filter(Boolean);
+
+  // 市值与估值是一个展示位：上市看市值，非上市看估值 —— 与深评那个块同一规则。
+  const worth = item.buyer_listed_status === 'listed' && item.buyer_market_cap_yuan
+    ? `市值${formatCompactMoney(Number(item.buyer_market_cap_yuan))}`
+    : item.buyer_valuation_yuan
+      ? `估值${formatCompactMoney(Number(item.buyer_valuation_yuan))}`
+      : null;
+  const revenue = item.buyer_current_revenue_yuan
+    ? `营收${formatCompactMoney(Number(item.buyer_current_revenue_yuan))}`
+    : null;
+  const money = [worth, revenue].filter(Boolean);
+  const tags = (item.buyer_business_tags_json || []).map(String).filter(Boolean);
+
+  return (
+    <div className="space-y-0.5 text-xs leading-5" title={tags.length ? `主营：${tags.join('、')}` : undefined}>
+      <p className="truncate text-gray-700">{identity.length ? identity.join(' · ') : <span className="text-gray-300">—</span>}</p>
+      {money.length ? <p className="truncate text-gray-500">{money.join(' · ')}</p> : null}
+      {!money.length && tags.length ? <p className="truncate text-gray-400">{tags.slice(0, 3).join('、')}</p> : null}
+    </div>
+  );
+}
+
+function buyerListingText(item: BuyerIntent): string | null {
+  const status = item.buyer_listed_status;
+  if (!status || status === 'unknown') return null;
+  const label = valueLabel('listed_status', status);
+  if (status !== 'listed') return label;
+  // 交易所与代码一起给，只有代码看不出在哪个板 —— 与深评那个块同一拼法。
+  const suffix = [
+    item.buyer_listing_exchange ? valueLabel('listing_exchange', item.buyer_listing_exchange) : null,
+    item.buyer_stock_code,
+  ].filter(Boolean).join('');
+  return suffix ? `${label}${suffix}` : label;
+}
+
+/**
+ * 两个半边各自的就绪度。
+ *
+ * 匹配要同时用买家自身条件和它的要求，所以「这个买家为什么还进不了推荐」的答案
+ * 只有两种：资料没补，或需求没解析。一列两个点就能回答，不用点进去查。
+ */
+export function ReadinessCell({ item, parseStatus }: { item: BuyerIntent; parseStatus?: BuyerIntentParseStatus }) {
+  const state = parseStatus?.processing_state || item.processing_state;
+  const parseOk = state?.overall_status === 'succeeded';
+  const parseFailed = state?.overall_status === 'failed';
+  const parsing = state?.overall_status === 'processing';
+  const profileOk = Boolean(item.buyer_profile_ready);
+
+  const hint = [
+    profileOk ? '买家资料已补全' : '买家资料未补全，协同性类要求无法判断',
+    parseFailed ? `需求解析失败：${state?.error_message || '未知原因'}`
+      : parsing ? `需求解析中（${state?.stage_label || '进行中'}）`
+      : parseOk ? '需求已解析' : '需求未解析',
+  ].join('\n');
+
+  return (
+    <span className="inline-flex flex-col items-center gap-1" title={hint}>
+      <span className="inline-flex items-center gap-1">
+        <Dot filled={profileOk} label="买家资料" />
+        <Dot filled={parseOk} failed={parseFailed} pending={parsing} label="需求解析" />
+      </span>
+      {parsing ? <span className="whitespace-nowrap text-[11px] text-blue-600">解析中</span> : null}
+      {parseFailed ? <span className="whitespace-nowrap text-[11px] text-red-600">解析失败</span> : null}
+      {parseOk && (state?.needs_confirmation_count || 0) > 0 ? (
+        <span className="whitespace-nowrap bg-amber-50 px-1 text-[11px] text-amber-700">{state?.needs_confirmation_count}项待确认</span>
+      ) : null}
+    </span>
+  );
+}
+
+function Dot({ filled, failed, pending, label }: { filled: boolean; failed?: boolean; pending?: boolean; label: string }) {
+  const color = failed ? 'bg-red-500' : pending ? 'bg-blue-500 animate-pulse' : filled ? 'bg-emerald-500' : 'bg-gray-200';
+  return <span aria-label={label} className={`inline-block h-2.5 w-2.5 rounded-full ${color}`} />;
+}
+
 /** 需求级别，也是推荐初筛的唯一闸门：E 不参与筛选，A-D 都参与。 */
 export function IntentStatusBadge({ item }: { item: BuyerIntent }) {
   return (

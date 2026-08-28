@@ -23,11 +23,23 @@ TABLE_ALIASES = {
     "x": "buyer_intent_target_exclusion",
 }
 
+# 别名是约定不是保证：同一个短名在别处可能指向完全不同的东西。
+# `buyer_intents.py` 里 `st` 是 `jsonb_array_elements_text(...) as st(value)` 的横向
+# 别名，跟 seller_target 无关 —— 不排掉它，这条守卫会拿 `st.value` 去 seller_target
+# 里找列然后报一个假阳性。排除写在这里而不是放宽正则：放宽了别处的真错也就漏了。
+ALIASES_NOT_APPLICABLE: dict[str, set[str]] = {
+    "backend/app/api/routes/buyer_intents.py": {"st"},
+}
+
 CHECKED_SOURCES = (
     "backend/app/services/recommendation_flow.py",
     "backend/app/services/search_docs.py",
     "backend/app/jobs/handlers/recommendation.py",
     "backend/app/services/screening_sql.py",
+    # 买家列表一行要同时显示两个半边，于是这里多了一串 `bp.` 列。拼错一个的表现是
+    # 「买家管理整页 500」—— 裸 SQL 只有请求时才被 Postgres 检查。
+    "backend/app/api/routes/buyer_intents.py",
+    "backend/app/services/profile_sections.py",
 )
 
 # 词边界匹配：`excluded_industries_json` 这类列名以 exclude 开头，
@@ -70,8 +82,11 @@ def test_schema_rebuild_finds_the_core_tables() -> None:
 @pytest.mark.parametrize("source_path", CHECKED_SOURCES)
 def test_aliased_columns_exist_in_the_schema(source_path: str) -> None:
     source = (PROJECT_ROOT / source_path).read_text(encoding="utf-8")
+    skipped = ALIASES_NOT_APPLICABLE.get(source_path, set())
     missing: list[str] = []
     for alias, table in TABLE_ALIASES.items():
+        if alias in skipped:
+            continue
         columns = SCHEMA.get(table, set())
         if not columns:
             continue

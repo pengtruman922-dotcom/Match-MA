@@ -815,6 +815,11 @@ export const recommendations = {
     attachment_ids?: string[];
     /** 重试哪一轮。可选：不传时后端行为与从前完全一致。 */
     retry_of_turn_id?: string;
+    /**
+     * 这一轮是给哪条买家需求做的。可选：不传就是匿名会话，与从前完全一致。
+     * 传了深评才拿得到买方自身情况，「与现有业务有关联性」这类要求才有判断依据。
+     */
+    buyer_intent_id?: string;
   }) =>
     apiRequest<RecommendationAgentTurn>('/recommendations/agent-turn', {
       method: 'POST',
