@@ -929,7 +929,8 @@ def check() -> int:
     print(f"  其中有业务方向    : {with_intent_summary} 条")
     if with_summary * 2 < len(parties):
         print("")
-        print("⚠️ 超过一半的买家没有业务说明。首轮筛只读这一栏，缺它的买家判不出业务匹配 ——")
+        # Keep diagnostics ASCII-safe for Windows consoles using the GBK code page.
+        print("[WARN] 超过一半的买家没有业务说明。首轮筛只读这一栏，缺它的买家判不出业务匹配 ——")
         print("   这种情况下要补的是**数据**，不是提示词。")
     return 0
 
