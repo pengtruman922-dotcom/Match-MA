@@ -20,8 +20,10 @@ from backend.app.api.routes.utils import (
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 from backend.app.registry.indicators import (
+    BUYER_INTENT_INDICATORS,
     BUYER_PARTY_INDICATORS,
     SELLER_TARGET_INDICATORS,
+    buyer_intent_fact_columns,
     seller_target_fact_columns,
 )
 from backend.app.services.attachment_status import (
@@ -1089,67 +1091,16 @@ ROLLBACK_FIELDS_BY_ENTITY = {
     # 新加的列忘了补。派生之后，「历史日志里有但现在没这列」自动落到
     # 「标为不可回滚」而不是「回滚时炸在缺列上」——这正是原来注释想保住的行为。
     "seller_target": set(seller_target_fact_columns()),
+    # 需求侧同样派生（0828 起）。原来是手写的 63 行清单，本轮退役 32 列、
+    # 阶段 B 还要 drop 它们 —— 手写清单在那一轮必然漏，而漏掉的表现是
+    # 「回滚时炸在缺列上」而不是「标为不可回滚」。
+    # 注册表之外的系统列仍然手写。
     "buyer_intent": {
+        *buyer_intent_fact_columns(),
         "intent_name",
-        "intent_grade",
-        "status",
-        "pause_reason",
         "contact_name",
         "contact_info_json",
-        "raw_requirement_text",
-        "intent_summary",
         "parsed_requirement_json",
-        "industry_primary",
-        "industry_secondary",
-        "industries_json",
-        "excluded_industries_json",
-        "industry_focus_tags_json",
-        "region_scope_summary",
-        "region_constraints_json",
-        "min_revenue_yuan",
-        "min_net_profit_yuan",
-        "min_total_profit_yuan",
-        "max_pe",
-        "max_ps",
-        "min_net_margin",
-        "min_gross_margin",
-        "min_valuation_yuan",
-        "max_valuation_yuan",
-        "min_market_cap_yuan",
-        "max_market_cap_yuan",
-        "market_cap_range_summary",
-        "industry_l2_json",
-        "budget_min_yuan",
-        "budget_max_yuan",
-        "acceptable_cash_flow_status_json",
-        "acceptable_profitability_status_json",
-        "requires_relocation",
-        "relocation_target_regions_json",
-        "requires_return_investment",
-        "return_investment_multiple",
-        "requires_team_retention",
-        "earnout_requirement",
-        "listing_market_region",
-        "requires_control",
-        "requires_consolidation",
-        "accepts_minority_investment",
-        "desired_equity_ratio_min",
-        "desired_equity_ratio_max",
-        "equity_ratio_summary",
-        "equity_requirement_type",
-        "acceptable_control_paths_json",
-        "preferred_listed_status",
-        "listing_board_requirement_summary",
-        "financing_stage_requirement_summary",
-        "transaction_type",
-        "transaction_types_json",
-        "premium_tolerance_summary",
-        "max_premium_rate",
-        "max_debt_ratio",
-        "debt_ratio_requirement_summary",
-        "major_risk_tolerance_summary",
-        "unacceptable_risk_flags_json",
-        "buyer_industry_advantage_summary",
     },
     # 买家主体的事实列跟着注册表走（0824 起），加一列不用再想起来补这里；
     # aliases_json / notes / status 是注册表之外的系统列，仍然手写。
@@ -1170,8 +1121,8 @@ ROLLBACK_FIELDS_BY_ENTITY = {
 }
 
 JSONB_ROLLBACK_FIELDS = {
-    # 标的侧与买家主体的 jsonb 列跟着注册表走，加一列不用再想起来补这里；
-    # 买家需求侧仍是手写（0824 这一轮不动需求）。
+    # 三个实体的 jsonb 列全部跟着注册表走（需求侧 0828 补齐），加一列不用再想起来补这里。
+    # jsonb 列漏登记的表现是回滚时把 jsonb 当字符串写回去，值坏掉且不报错。
     *(
         ("seller_target", indicator.column)
         for indicator in SELLER_TARGET_INDICATORS
@@ -1182,18 +1133,13 @@ JSONB_ROLLBACK_FIELDS = {
         for indicator in BUYER_PARTY_INDICATORS
         if indicator.kind == "json"
     ),
+    *(
+        ("buyer_intent", indicator.column)
+        for indicator in BUYER_INTENT_INDICATORS
+        if indicator.kind == "json"
+    ),
     ("buyer_intent", "contact_info_json"),
     ("buyer_intent", "parsed_requirement_json"),
-    ("buyer_intent", "region_constraints_json"),
-    ("buyer_intent", "acceptable_control_paths_json"),
-    ("buyer_intent", "transaction_types_json"),
-    ("buyer_intent", "industries_json"),
-    ("buyer_intent", "excluded_industries_json"),
-    ("buyer_intent", "industry_l2_json"),
-    ("buyer_intent", "acceptable_cash_flow_status_json"),
-    ("buyer_intent", "acceptable_profitability_status_json"),
-    ("buyer_intent", "relocation_target_regions_json"),
-    ("buyer_intent", "industry_focus_tags_json"),
     ("buyer_party", "aliases_json"),
 }
 

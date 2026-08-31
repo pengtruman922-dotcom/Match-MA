@@ -5,12 +5,12 @@ def test_scenario_fields_go_through_the_shared_whitelist() -> None:
         {
             "max_pe": "13",
             "requires_control": "YES",
-            "industries_json": "医药与健康",
+            "intent_business_tags_json": "医药与健康",
             "seller_target_id": "越权字段",
             "min_net_profit_yuan": "not-a-number",
         }
     )
 
-    assert fields == {"max_pe": 13.0, "requires_control": "yes", "industries_json": ["医药与健康"]}
+    assert fields == {"max_pe": 13.0, "requires_control": "yes", "intent_business_tags_json": ["医药与健康"]}
 
 

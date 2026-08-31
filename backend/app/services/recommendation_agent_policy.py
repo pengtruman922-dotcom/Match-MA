@@ -418,12 +418,18 @@ def build_deep_eval_pool(
 
 
 def _compile_exclusions(raw: Any) -> dict[str, Any]:
+    """快照里的排除项 → 每次调用都强制带上的粘性条件。
+
+    **排除行业不再编译成条件**（0828）：行业条件整组退役之后
+    `excluded_industries_json` 不是可筛字段，编译进去只会被 normalize_conditions
+    原样忽略，还会在每次调用的 ignored 里刷一条噪音。排除行业改走文字路径 ——
+    它已经在 `qualitative_requirements` 里渲染成「不接受 X」，主 Agent 读业务
+    摘要判断业务匹配时会看到，与整个方案「业务匹配交给 LLM 读文本」是同一件事。
+    `exclusions["industries"]` 本身仍然保留在快照里，服务展示与 trace。
+    """
     data = raw if isinstance(raw, dict) else {}
     compiled: dict[str, Any] = {}
-    industries = _unique_strings(data.get("industries"))
     risks = _unique_strings(data.get("risk_flags"))
-    if industries:
-        compiled["excluded_industries_json"] = industries
     if risks:
         compiled["unacceptable_risk_flags_json"] = risks
     return compiled

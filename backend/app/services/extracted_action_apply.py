@@ -9,13 +9,19 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
-from backend.app.registry.indicators import seller_target_fact_columns, writable_columns
+from backend.app.registry.indicators import (
+    buyer_intent_fact_columns,
+    indicators_for,
+    seller_target_fact_columns,
+    writable_columns,
+)
+from backend.app.services.business_tags import normalize_business_tags
+from backend.app.services.region_dictionary import normalize_buyer_regions
 from backend.app.api.routes.utils import (
     diff_payload,
     write_action_logs_for_diff,
     write_field_value_sources_for_diff,
 )
-from backend.app.services.buyer_intent_industry import normalize_buyer_intent_industry_changes
 from backend.app.services.entity_grade import BUYER_GRADE, normalize_lifecycle_status, resolve_grade_pair
 from backend.app.services.field_writer import WriteProvenance, write_seller_target_fields
 from backend.app.services.relation_flow import mark_seller_target_sold_for_deal_closed
@@ -152,7 +158,7 @@ def _record_rejected_fields(
     )
 
 
-def _record_industry_notes(db: Session, extracted_action_id: UUID, notes: list[str]) -> None:
+def _record_region_notes(db: Session, extracted_action_id: UUID, notes: list[str]) -> None:
     """把字典对齐时挪走的行业说法挂到 action 上。
 
     值没丢（都进了 industry_focus_tags_json 走深评），但「模型说的是汽车电子零部件、
@@ -203,15 +209,14 @@ def apply_buyer_intent_update_action(
     if not changes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No supported changes to apply.")
 
-    # 行业列是封闭词表的筛选列，只能带着字典写。新建解析那条路一直这么做，
-    # 这条路（带附件时的 business_update_extractor）此前直接写原文，于是
-    # 「汽车电子零部件」这类字典外的说法进了 industries_json —— 页面上看着有
-    # 行业筛选，实际一个标的都匹配不上。字典装不下的说法挪进 focus_tags 走深评。
-    industry_notes = normalize_buyer_intent_industry_changes(db, changes)
+    # 地区两列要过省份词表再落库，与新建解析那条路同一套政策 —— 两边不一致的话，
+    # 「带不带附件」会决定地区要不要归一（2026-08-01 在行业字段上实测过这个问题）。
+    # 行业字典的归一 0828 随字典下线一起去掉了：需求业务标签是自由标签，不过字典。
+    region_notes = _normalize_buyer_intent_regions(changes)
     if not changes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No supported changes to apply after industry normalization.",
+            detail="No supported changes to apply after region normalization.",
         )
 
     buyer_intent_id = action["target_entity_id"]
@@ -243,24 +248,7 @@ def apply_buyer_intent_update_action(
               and deleted_at is null
             """
     )
-    json_fields = {
-        "contact_info_json",
-        "parsed_requirement_json",
-        "region_constraints_json",
-        "acceptable_control_paths_json",
-        "transaction_types_json",
-        "industries_json",
-        "industry_l2_json",
-        "excluded_industries_json",
-        "industry_focus_tags_json",
-        "acceptable_cash_flow_status_json",
-        "acceptable_profitability_status_json",
-        "acceptable_listed_status_json",
-        "unacceptable_risk_flags_json",
-        "condition_effects_json",
-        "relocation_target_regions_json",
-        "needs_confirmation_json",
-    }
+    json_fields = BUYER_INTENT_JSONB_COLUMNS
     bind_params = [bindparam(field, type_=JSONB) for field in diff if field in json_fields]
     if bind_params:
         update_statement = update_statement.bindparams(*bind_params)
@@ -315,8 +303,8 @@ def apply_buyer_intent_update_action(
         entity_id=buyer_intent_id,
         source="buyer_intent_update_apply",
     )
-    if industry_notes:
-        _record_industry_notes(db, action["id"], industry_notes)
+    if region_notes:
+        _record_region_notes(db, action["id"], region_notes)
     _mark_action_applied(db, action["id"], review_status="auto_accepted" if not require_accepted else None)
     _refresh_business_update_status(db, action["business_update_id"])
 
@@ -327,7 +315,7 @@ def apply_buyer_intent_update_action(
         "entity_type": "buyer_intent",
         "entity_id": buyer_intent_id,
         "applied_fields": list(diff.keys()),
-        "industry_normalization_notes": industry_notes,
+        "industry_normalization_notes": region_notes,
     }
 
 
@@ -600,25 +588,10 @@ def _get_seller_target_snapshot_or_404(db: Session, seller_target_id: UUID) -> d
 def _get_buyer_intent_snapshot_or_404(db: Session, buyer_intent_id: UUID) -> dict[str, Any]:
     row = db.execute(
         text(
-            """
+            f"""
             select
-              intent_name, intent_grade, status, pause_reason, contact_name, contact_info_json,
-              raw_requirement_text, intent_summary, parsed_requirement_json,
-              industry_primary, industry_secondary, industries_json,
-              excluded_industries_json, industry_focus_tags_json, region_scope_summary,
-              region_constraints_json, min_revenue_yuan, min_net_profit_yuan,
-              min_total_profit_yuan, max_pe, max_ps, min_net_margin, min_gross_margin,
-              min_valuation_yuan, max_valuation_yuan,
-              min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
-              requires_control, requires_consolidation, accepts_minority_investment,
-              desired_equity_ratio_min, desired_equity_ratio_max, equity_ratio_summary,
-              equity_requirement_type, acceptable_control_paths_json,
-              preferred_listed_status, acceptable_listed_status_json, condition_effects_json,
-              listing_board_requirement_summary,
-              financing_stage_requirement_summary, transaction_type, transaction_types_json,
-              premium_tolerance_summary, max_premium_rate, max_debt_ratio,
-              debt_ratio_requirement_summary, major_risk_tolerance_summary,
-              buyer_industry_advantage_summary
+              intent_name, contact_name, contact_info_json, parsed_requirement_json,
+              {', '.join(buyer_intent_fact_columns())}
             from buyer_intent
             where id = :buyer_intent_id
               and team_id = :team_id
@@ -798,72 +771,67 @@ def _apply_grade_pair(
     changes.update(resolved)
 
 
+# 业务更新采纳白名单 = 注册表里解析可写的列 + 几个系统列（0828 改为派生）。
+#
+# 与解析白名单是同一个派生（总纲 §5 第 3 条），所以退役一个字段只要在注册表里
+# 把 parse 去掉，两条写入路径同时收缩 —— 手抄两份的表现是「新建解析不写了，
+# 但带附件的业务更新还在写」，而那正是 2026-08-01 在行业字段上实测到的问题。
+#
+# 派生列不在里面：preferred_listed_status 由 acceptable_listed_status_json 单向
+# 计算；intent_grade / status / pause_reason 走 _apply_grade_pair，不许各写入方
+# 自己拼组合（两列耦合漂了不会报错，只会让需求静默进出推荐池）。
+_BUYER_INTENT_ADOPT_SYSTEM_FIELDS = {
+    "intent_name",
+    "intent_grade",
+    "status",
+    "pause_reason",
+    "contact_name",
+    "contact_info_json",
+    "parsed_requirement_json",
+}
+
+
+# jsonb 列必须显式绑参，否则会被当字符串写进去 —— 不报错，值坏掉。
+# 从注册表派生，不手抄：本轮退役 32 列、阶段 B 还要 drop 它们，
+# 手抄的清单每一轮都要跟着改，而漏改一处不报错。
+# 提到模块级是为了让 tests/test_sql_schema_consistency.py 直接比对运行时取值，
+# 而不是去源码里正则扒一串字面量（派生之后那种扒法只会扒到空）。
+BUYER_INTENT_JSONB_COLUMNS: frozenset[str] = frozenset(
+    {indicator.column for indicator in indicators_for("buyer_intent") if indicator.kind == "json"}
+    | {"contact_info_json", "parsed_requirement_json", "needs_confirmation_json"}
+)
+
+
 def _allowed_buyer_intent_changes(changes: dict[str, Any]) -> dict[str, Any]:
-    allowed_fields = {
-        "intent_name",
-        "intent_grade",
-        "status",
-        "pause_reason",
-        "contact_name",
-        "contact_info_json",
-        "raw_requirement_text",
-        "intent_summary",
-        "parsed_requirement_json",
-        "industry_primary",
-        "industry_secondary",
-        "industries_json",
-        "excluded_industries_json",
-        "industry_focus_tags_json",
-        "region_scope_summary",
-        "region_constraints_json",
-        "min_revenue_yuan",
-        "min_net_profit_yuan",
-        "min_total_profit_yuan",
-        "max_pe",
-        "max_ps",
-        "min_net_margin",
-        "min_gross_margin",
-        "min_valuation_yuan",
-        "max_valuation_yuan",
-        "min_market_cap_yuan",
-        "max_market_cap_yuan",
-        "market_cap_range_summary",
-        "industry_l2_json",
-        "budget_min_yuan",
-        "budget_max_yuan",
-        "acceptable_cash_flow_status_json",
-        "acceptable_profitability_status_json",
-        "requires_relocation",
-        "relocation_target_regions_json",
-        "requires_return_investment",
-        "return_investment_multiple",
-        "requires_team_retention",
-        "earnout_requirement",
-        "listing_market_region",
-        "requires_control",
-        "requires_consolidation",
-        "accepts_minority_investment",
-        "desired_equity_ratio_min",
-        "desired_equity_ratio_max",
-        "equity_ratio_summary",
-        "equity_requirement_type",
-        "acceptable_control_paths_json",
-        "preferred_listed_status",
-        "acceptable_listed_status_json",
-        "condition_effects_json",
-        "listing_board_requirement_summary",
-        "financing_stage_requirement_summary",
-        "transaction_type",
-        "transaction_types_json",
-        "premium_tolerance_summary",
-        "max_premium_rate",
-        "max_debt_ratio",
-        "debt_ratio_requirement_summary",
-        "major_risk_tolerance_summary",
-        "unacceptable_risk_flags_json",
-        "buyer_industry_advantage_summary",
-    }
+    allowed_fields = writable_columns("parse", "buyer_intent") | _BUYER_INTENT_ADOPT_SYSTEM_FIELDS
     return {key: value for key, value in changes.items() if key in allowed_fields}
+
+
+def _normalize_buyer_intent_regions(changes: dict[str, Any]) -> list[str]:
+    """就地归一业务标签与两个地区数组，返回可读的处理说明。
+
+    归一不出标准省份的条目在这条路上**直接丢弃**并留痕，与解析那条路
+    （转成 needs_confirmation 让人判）不同：业务更新采纳是人点下「采纳」
+    的那一刻，没有第二次复核的机会，留一个筛不到东西的脏值比丢掉更糟。
+    """
+    notes: list[str] = []
+    if "intent_business_tags_json" in changes:
+        tags = normalize_business_tags(changes["intent_business_tags_json"])
+        if tags:
+            changes["intent_business_tags_json"] = tags
+        else:
+            changes.pop("intent_business_tags_json", None)
+    for column in ("acceptable_regions_json", "excluded_regions_json"):
+        if column not in changes:
+            continue
+        regions, pending = normalize_buyer_regions(changes[column], field=column)
+        for item in pending:
+            notes.append(f"region_unmapped:{column}:{str(item.get('reason') or '')[:60]}")
+        if regions:
+            changes[column] = regions
+        else:
+            changes.pop(column, None)
+    return notes
 
 
 def _allowed_relation_changes(changes: dict[str, Any]) -> dict[str, Any]:

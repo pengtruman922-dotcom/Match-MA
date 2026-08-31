@@ -257,6 +257,83 @@ def normalize_buyer_region_constraints(raw: Any) -> tuple[list[dict[str, Any]], 
     return constraints, pending
 
 
+def normalize_buyer_regions(raw: Any, *, field: str) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    """`acceptable_regions_json` / `excluded_regions_json` 的归一（0828 新建）。
+
+    与上面那个 `normalize_buyer_region_constraints` 的差别只有一处：**没有
+    `effect`**。可接受与排除已经拆成两列，语义写在列名里，强弱（「必须在广东」
+    对「优先广东」）交给 `region_scope_summary` 的原话 —— 语气和强度归文本，
+    阈值和枚举归字段。除此之外的每一条规则都必须一致，所以两个函数共用同一套
+    别名表、同一份大区展开表、同一个省份词表。
+
+    **大区展开放在代码里而不是提示词里。** 方案 0828 §八 要求把「长三角 =
+    沪苏浙皖」这类展开表写死进 normalizer 提示词，理由是不展开的话
+    `acceptable_regions_json` 会和今天的 `region_constraints_json`（13% 有值）
+    一样空着。但 `expand_region_group` 早就在做这件事，而且做得更稳：提示词里的
+    表每次调用都要模型重新照抄一遍，改词表要发新版本，而且模型可能漏抄；
+    代码里的表是确定的，改一次全链路生效，`normalize_buyer_region_constraints`
+    与本函数共享它。提示词只需要说「说到大区就原样写大区名」。
+
+    空数组是「不限」不是「没有可接受地区」。「全国 / 不限」这类说法在这里被丢掉
+    是对的：原话留在 `region_scope_summary` 里，筛选行为两者相同。
+    """
+    values = raw if isinstance(raw, list) else ([raw] if isinstance(raw, dict) else [])
+    regions: list[dict[str, str]] = []
+    pending: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def _append(province: str, city: str | None = None, district: str | None = None) -> None:
+        key = (province, city or "", district or "")
+        if key in seen:
+            return
+        seen.add(key)
+        regions.append(
+            {
+                "province": province,
+                **({"city": city} if city else {}),
+                **({"district": district} if district else {}),
+            }
+        )
+
+    for item in values:
+        if isinstance(item, str):
+            item = {"province": item}
+        if not isinstance(item, dict):
+            continue
+        raw_province = _clean(item.get("province") or item.get("province_name"))
+        if not raw_province:
+            raw_province = _clean(item.get("raw_text") or item.get("region") or item.get("area"))
+        if raw_province in UNRESTRICTED_TERMS:
+            continue
+        group = expand_region_group(raw_province)
+        if group:
+            # 大区展开后丢掉市/区：说「长三角的苏州」是自相矛盾的输入，
+            # 把市套到四个省上会造出「上海市苏州市」这种筛不到东西的组合。
+            for member in group:
+                _append(member)
+            continue
+        province = normalize_province(raw_province)
+        city = normalize_city(item.get("city") or item.get("city_name"))
+        district = normalize_district(item.get("district") or item.get("county") or item.get("district_name"))
+        if not province or province not in PROVINCES:
+            pending.append(
+                {
+                    "field": field,
+                    "uncertain_part": "taxonomy_mapping",
+                    "proposed_value": {
+                        "province": province,
+                        **({"city": city} if city else {}),
+                        **({"district": district} if district else {}),
+                    },
+                    "reason": f"地区“{raw_province or city or district or '空值'}”未规范化到标准省份",
+                    **({"evidence": str(item.get("evidence"))[:1000]} if item.get("evidence") else {}),
+                }
+            )
+            continue
+        _append(province, city, district)
+    return regions, pending
+
+
 NORMALIZERS = {
     "location_province": normalize_province,
     "location_city": normalize_city,

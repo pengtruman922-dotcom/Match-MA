@@ -19,9 +19,11 @@ from backend.app.jobs.handlers.common import (
 )
 from backend.app.registry.indicators import (
     BUYER_INTENT_INDICATORS,
+    RETIRED_BUYER_INTENT_COLUMNS,
     BUYER_PARTY_INDICATORS,
     SELLER_TARGET_INDICATORS,
     GROUPS,
+    buyer_intent_fact_columns,
     buyer_party_fact_columns,
     groups_for,
     indicators_for,
@@ -47,6 +49,7 @@ GRADE_MIGRATION = REPO / "database/migrations/017_entity_grade.sql"
 BUYER_CLOSED_SETS_MIGRATION = REPO / "database/migrations/018_buyer_condition_closed_sets.sql"
 BUYER_PARTY_PROFILE_MIGRATION = REPO / "database/migrations/013_buyer_party_profile.sql"
 BUYER_PARTY_FACTS_MIGRATION = REPO / "database/migrations/020_buyer_party_facts.sql"
+BUYER_INTENT_SLIMMING_MIGRATION = REPO / "database/migrations/022_buyer_intent_field_slimming.sql"
 
 
 def test_consumers_derive_from_the_registry() -> None:
@@ -58,28 +61,97 @@ def test_consumers_derive_from_the_registry() -> None:
     assert BUYER_INTENT_ENUM_FIELDS == writable_enum_values("buyer_intent")
 
 
-def test_buyer_intent_indicators_are_real_columns() -> None:
-    sql = BASELINE.read_text(encoding="utf-8")
-    body = re.search(r"create table buyer_intent \((.*?)\n\);", sql, re.S)
+def _buyer_intent_columns() -> set[str]:
+    """buyer_intent 现存的列：baseline 建表块 + 后续迁移的增删，按编号顺序回放。
+
+    原来这里维护着一份手写的 `post_baseline` 字典（列名 → 建它的那个迁移文件），
+    每加一列就要来补一行，而且断言写死了 `jsonb` —— 0828 新建的两个 text 列
+    会让它误报。改成回放全部迁移之后，加列删列都不需要再改这个测试。
+    """
+    baseline = BASELINE.read_text(encoding="utf-8")
+    body = re.search(r"create table buyer_intent \((.*?)\n\);", baseline, re.S)
     assert body, "baseline 未找到 buyer_intent 建表块"
     columns = set(re.findall(r"^\s+([a-z_0-9]+)\s", body.group(1), re.M))
+    for path in sorted(MIGRATIONS.glob("0*.sql")):
+        sql = path.read_text(encoding="utf-8")
+        # 只认 buyer_intent 那几条 alter：同一份迁移里往往还动着别的表，
+        # 不区分的话 buyer_party 的列会被算进来，守卫就形同虚设。
+        for block in re.findall(r"alter table buyer_intent\b(.*?);", sql, re.S):
+            columns |= set(re.findall(r"add column if not exists ([a-z_0-9]+)", block))
+            columns -= set(re.findall(r"drop column if exists ([a-z_0-9]+)", block))
+    return columns
+
+
+def test_buyer_intent_indicators_are_real_columns() -> None:
+    columns = _buyer_intent_columns()
     missing = {ind.column for ind in BUYER_INTENT_INDICATORS} - columns
-    post_baseline = {
-        "acceptable_listed_status_json": BUYER_CONTRACT_MIGRATION,
-        "condition_effects_json": BUYER_CONTRACT_MIGRATION,
-        "unacceptable_risk_flags_json": BUYER_CLOSED_SETS_MIGRATION,
-        "intent_grade": GRADE_MIGRATION,
-    }
-    assert missing <= set(post_baseline), (
-        f"注册表引用了 buyer_intent 不存在的列：{sorted(missing - set(post_baseline))}"
-    )
-    for column in missing - {"intent_grade"}:
-        migration_sql = post_baseline[column].read_text(encoding="utf-8")
-        assert f"add column if not exists {column} jsonb" in migration_sql
-    assert "add column if not exists intent_grade text not null default 'C'" in (
-        GRADE_MIGRATION.read_text(encoding="utf-8")
-    )
+    assert not missing, f"注册表引用了 buyer_intent 不存在的列：{sorted(missing)}"
+
+    # 判死的列不能还留在注册表里 —— 注册表是写入白名单的事实源，留着等于允许写。
+    # 这四个是 0828 的孤儿列：从来没进过注册表，解析却每次都在写它们。
+    registry_columns = {ind.column for ind in BUYER_INTENT_INDICATORS}
+    slimming_sql = BUYER_INTENT_SLIMMING_MIGRATION.read_text(encoding="utf-8")
+    for orphan in (
+        "acceptable_control_paths_json",
+        "budget_min_yuan",
+        "budget_max_yuan",
+        "relocation_target_regions_json",
+    ):
+        assert f"drop column if exists {orphan}" in slimming_sql
+        assert orphan not in registry_columns
+        assert orphan not in columns, f"{orphan} 已 drop，回放结果里不该还有它"
+
     assert indicators_for("buyer_intent") is BUYER_INTENT_INDICATORS
+
+
+def test_retired_buyer_intent_fields_are_fully_switched_off() -> None:
+    """0828 精简的实际动作：改标志位，不是删列。
+
+    「退役」有两个开关，**必须同时拨**：`writable_by` 去掉 parse（字段从
+    field_contract_json 消失，模型再也看不到），`screening` 置 False（不再进
+    初筛 schema）。只拨前一个的表现是：正向 Agent 的工具 schema 里留着一个
+    永远填不出值的参数，而它不会报错。
+
+    列本身还在（阶段 A 一列没删），所以这条守的是「标志位」不是「列」。
+    """
+    retired = set(RETIRED_BUYER_INTENT_COLUMNS)
+    assert len(retired) == 32, f"退役清单应为 32 列，实际 {len(retired)}"
+
+    by_column = {ind.column: ind for ind in BUYER_INTENT_INDICATORS}
+    for column in retired:
+        indicator = by_column[column]
+        assert "parse" not in indicator.writable_by, f"{column} 仍在解析白名单里"
+        assert not indicator.screening, f"{column} 仍在初筛 schema 里"
+        assert not indicator.scenario_allowed, f"{column} 仍能作为方案字段被覆盖"
+        # group=None 有两个必须的作用：需求信息页不再显示它（新旧字段不并排），
+        # 以及 _remove_structured_profile_duplicates 不再拿它的存量值去删
+        # 「其他」里的句子 —— 六段说明文字的内容正是要搬进「其他」的。
+        assert indicator.group is None, f"{column} 还挂在信息页某个模块下"
+
+    # 列还在、数据还在：阶段 A 的全部退役字段仍然由注册表声明，
+    # 所以 buyer_intent_fact_columns() 仍然会把它们读出来。
+    assert retired <= set(buyer_intent_fact_columns())
+
+
+def test_buyer_intent_projection_is_derived_everywhere_it_is_read() -> None:
+    """需求事实列的 SELECT 投影只能有一份。
+
+    这条是**给阶段 B 的保险**：本轮退役的 32 列下一轮要 drop，而 industries_json
+    一列就被 34 个文件引用。手写投影下删列漏改一处的表现是整个需求列表页 500，
+    而且是 preDeploy 迁移跑完之后才炸 —— 那时数据已经没了。
+    """
+    projection = buyer_intent_fact_columns()
+    assert set(projection) == {ind.column for ind in BUYER_INTENT_INDICATORS}
+    assert len(projection) == len(set(projection)), "投影里有重复列名"
+    for relative in (
+        "backend/app/jobs/handlers/buyer_intent_parse.py",
+        "backend/app/services/extracted_action_apply.py",
+        "backend/app/services/business_update_flow.py",
+        "backend/app/services/search_docs.py",
+        "backend/app/api/routes/update_logs.py",
+    ):
+        source = (REPO / relative).read_text(encoding="utf-8")
+        assert "buyer_intent_fact_columns" in source, f"{relative} 没有走派生投影"
 
 
 def _constraint_value_sets(sql: str, column: str) -> list[set[str]]:

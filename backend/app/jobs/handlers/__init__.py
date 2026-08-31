@@ -106,7 +106,6 @@ from backend.app.jobs.handlers.buyer_intent_parse import (
     _get_buyer_intent_for_parse,
     _get_buyer_party,
     _handle_buyer_intent_parse,
-    _normalize_buyer_intent_industry_changes,
     _normalize_buyer_intent_parse_changes,
     _validate_buyer_intent_parse_output,
     _write_buyer_intent_parse_logs,

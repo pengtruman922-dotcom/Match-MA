@@ -14,23 +14,26 @@ SNAPSHOT = {
         {
             "label": "上市制造",
             "conditions": {
-                "industries_json": ["制造与工业"],
+                "min_revenue_yuan": 50_000_000,
                 "min_net_profit_yuan": 10_000_000,
                 "max_pe": 15,
+                "acceptable_listed_status_json": ["listed"],
             },
             "strength": {
-                "industries_json": "required",
+                "min_revenue_yuan": "required",
                 "min_net_profit_yuan": "required",
                 "max_pe": "preferred",
+                "acceptable_listed_status_json": "required",
             },
         },
         {
             "label": "医疗",
             "conditions": {
-                "industries_json": ["医药与健康"],
-                "max_debt_ratio": 60,
+                "min_revenue_yuan": 80_000_000,
+                "min_market_cap_yuan": 100_000_000,
+                "acceptable_listed_status_json": ["unlisted"],
             },
-            "strength": {"max_debt_ratio": "required"},
+            "strength": {"min_market_cap_yuan": "required"},
         },
     ],
     "exclusions": {
@@ -59,10 +62,10 @@ def _real_call(
         "eligible_count": eligible_count,
         "filters": filters
         or {
-            "industries_json": ["制造与工业"],
+            "min_revenue_yuan": 50_000_000,
             "min_net_profit_yuan": 10_000_000,
             "max_pe": 15,
-            "excluded_industries_json": ["房地产与建筑"],
+            "acceptable_listed_status_json": ["listed"],
             "unacceptable_risk_flags_json": ["equity_frozen"],
         },
     }
@@ -82,17 +85,22 @@ def _validate(conditions, *, prior=None, group_id="group-1", count_only=False, *
 def test_group_outside_field_and_cross_group_value_are_rejected() -> None:
     outside = _validate(
         {
-            "industries_json": ["制造与工业"],
+            "min_revenue_yuan": 50_000_000,
             "min_net_profit_yuan": 10_000_000,
             "max_pe": 15,
-            "max_debt_ratio": 60,
+            "acceptable_listed_status_json": ["listed"],
+            # 第二组才有的字段，不许出现在第一组的调用里
+            "min_market_cap_yuan": 100_000_000,
         }
     )
     cross_value = _validate(
         {
-            "industries_json": ["医药与健康"],
+            # 第一组的字段，但取值是第二组的。必须挑一个**非数值**字段：
+            # 数值字段的取值差异会先被「放宽方向」那一关拦下，报的是另一个错。
+            "min_revenue_yuan": 50_000_000,
             "min_net_profit_yuan": 10_000_000,
             "max_pe": 15,
+            "acceptable_listed_status_json": ["unlisted"],
         }
     )
 
@@ -102,7 +110,7 @@ def test_group_outside_field_and_cross_group_value_are_rejected() -> None:
 
 def test_first_real_search_must_use_the_complete_group() -> None:
     plan = _validate(
-        {"industries_json": ["制造与工业"], "min_net_profit_yuan": 10_000_000}
+        {"min_revenue_yuan": 50_000_000, "min_net_profit_yuan": 10_000_000}
     )
 
     assert plan.error_code == "first_real_search_must_be_full"
@@ -110,7 +118,11 @@ def test_first_real_search_must_use_the_complete_group() -> None:
 
 def test_preferred_condition_can_be_removed_with_a_real_basis() -> None:
     plan = _validate(
-        {"industries_json": ["制造与工业"], "min_net_profit_yuan": 10_000_000},
+        {
+            "min_revenue_yuan": 50_000_000,
+            "min_net_profit_yuan": 10_000_000,
+            "acceptable_listed_status_json": ["listed"],
+        },
         prior=[_real_call(eligible_count=20)],
         relaxation_reason="调用1召回20家，但 PE 字段为空者很多，优先移除 preferred",
         based_on_call_index=1,
@@ -124,9 +136,10 @@ def test_preferred_condition_can_be_removed_with_a_real_basis() -> None:
 def test_required_condition_can_relax_after_low_real_recall() -> None:
     plan = _validate(
         {
-            "industries_json": ["制造与工业"],
+            "min_revenue_yuan": 50_000_000,
             "min_net_profit_yuan": 5_000_000,
             "max_pe": 15,
+            "acceptable_listed_status_json": ["listed"],
         },
         prior=[_real_call(eligible_count=2)],
         relaxation_reason="调用1只有2家，净利条件去掉后可多召回",
@@ -141,17 +154,19 @@ def test_required_condition_can_relax_after_low_real_recall() -> None:
 def test_required_relaxation_without_basis_or_low_recall_is_rejected() -> None:
     no_basis = _validate(
         {
-            "industries_json": ["制造与工业"],
+            "min_revenue_yuan": 50_000_000,
             "min_net_profit_yuan": 5_000_000,
             "max_pe": 15,
+            "acceptable_listed_status_json": ["listed"],
         },
         prior=[_real_call(eligible_count=2)],
     )
     enough = _validate(
         {
-            "industries_json": ["制造与工业"],
+            "min_revenue_yuan": 50_000_000,
             "min_net_profit_yuan": 5_000_000,
             "max_pe": 15,
+            "acceptable_listed_status_json": ["listed"],
         },
         prior=[_real_call(eligible_count=6)],
         relaxation_reason="想多找一些",
@@ -165,7 +180,7 @@ def test_required_relaxation_without_basis_or_low_recall_is_rejected() -> None:
 def test_min_only_lowers_and_max_only_rises() -> None:
     min_wrong = _validate(
         {
-            "industries_json": ["制造与工业"],
+            "min_revenue_yuan": 50_000_000,
             "min_net_profit_yuan": 20_000_000,
             "max_pe": 15,
         },
@@ -175,7 +190,7 @@ def test_min_only_lowers_and_max_only_rises() -> None:
     )
     max_wrong = _validate(
         {
-            "industries_json": ["制造与工业"],
+            "min_revenue_yuan": 50_000_000,
             "min_net_profit_yuan": 10_000_000,
             "max_pe": 10,
         },
@@ -185,7 +200,7 @@ def test_min_only_lowers_and_max_only_rises() -> None:
     )
     max_ok = _validate(
         {
-            "industries_json": ["制造与工业"],
+            "min_revenue_yuan": 50_000_000,
             "min_net_profit_yuan": 10_000_000,
             "max_pe": 20,
         },
@@ -202,23 +217,27 @@ def test_min_only_lowers_and_max_only_rises() -> None:
 def test_exclusions_are_injected_and_cannot_be_changed() -> None:
     full = _validate(
         {
-            "industries_json": ["制造与工业"],
+            "min_revenue_yuan": 50_000_000,
             "min_net_profit_yuan": 10_000_000,
             "max_pe": 15,
+            "acceptable_listed_status_json": ["listed"],
         }
     )
     changed = _validate(
         {
-            "industries_json": ["制造与工业"],
+            "min_revenue_yuan": 50_000_000,
             "min_net_profit_yuan": 10_000_000,
             "max_pe": 15,
-            "excluded_industries_json": [],
+            "acceptable_listed_status_json": ["listed"],
+            "unacceptable_risk_flags_json": [],
         }
     )
 
     assert full.valid is True
-    assert full.conditions["excluded_industries_json"] == ["房地产与建筑"]
     assert full.conditions["unacceptable_risk_flags_json"] == ["equity_frozen"]
+    # 排除行业 0828 起不再编译成条件（行业条件整组退役，它已经不是可筛字段），
+    # 但仍如实留在快照里，并已渲染成「不接受 X」进定性诉求由主 Agent 执行。
+    assert "excluded_industries_json" not in full.conditions
     assert changed.error_code == "exclusion_modified"
 
 

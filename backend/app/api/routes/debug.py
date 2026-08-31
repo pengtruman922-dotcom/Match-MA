@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from backend.app.api.authn import CurrentUser, require_admin
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
-from backend.app.registry.indicators import buyer_party_fact_columns
+from backend.app.registry.indicators import buyer_intent_fact_columns, buyer_party_fact_columns
 
 router = APIRouter(prefix="/debug", tags=["debug"])
 
@@ -549,21 +549,11 @@ BUSINESS_OBJECT_SELECTS = {
           and workspace_id = :workspace_id
           and deleted_at is null
     """,
-    "buyer_intent": """
+    "buyer_intent": f"""
         select
-          id, intent_name as name, intent_name as title, status, buyer_party_id,
-          contact_name, raw_requirement_text, intent_summary, parsed_requirement_json,
-          industry_primary, industry_secondary, region_scope_summary,
-          region_constraints_json, min_revenue_yuan, min_net_profit_yuan,
-          min_total_profit_yuan, max_pe, max_valuation_yuan,
-          min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
-          requires_control, requires_consolidation, accepts_minority_investment,
-          desired_equity_ratio_min, desired_equity_ratio_max, equity_ratio_summary,
-          equity_requirement_type, acceptable_control_paths_json, preferred_listed_status,
-          listing_board_requirement_summary, financing_stage_requirement_summary,
-          transaction_type, transaction_types_json, premium_tolerance_summary,
-          max_premium_rate, max_debt_ratio, debt_ratio_requirement_summary,
-          major_risk_tolerance_summary, buyer_industry_advantage_summary,
+          id, intent_name as name, intent_name as title, buyer_party_id,
+          contact_name, parsed_requirement_json,
+          {', '.join(buyer_intent_fact_columns())},
           created_at::text as created_at, updated_at::text as updated_at,
           metadata_json
         from buyer_intent

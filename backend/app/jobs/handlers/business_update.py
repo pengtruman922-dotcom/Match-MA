@@ -60,6 +60,7 @@ from backend.app.jobs.handlers.traces import (
 )
 from backend.app.jobs.queue import JobClaim
 from backend.app.shutdown import WorkerShutdown
+from backend.app.services.business_tags import normalize_business_tags
 from backend.app.services.extracted_action_apply import (
     apply_buyer_intent_target_exclusion_action,
     apply_buyer_intent_update_action,
@@ -801,17 +802,14 @@ def _normalize_buyer_intent_action_changes(changes: dict[str, Any], *, evidence_
             changes.pop(field, None)
             notes.append(f"{field}:dropped_invalid_json")
 
-    tags = changes.get("industry_focus_tags_json")
-    if isinstance(tags, list):
-        cleaned_tags: list[str] = []
-        for value in tags:
-            tag = str(value or "").strip()[:80]
-            if tag and tag not in cleaned_tags:
-                cleaned_tags.append(tag)
+    # 业务标签只做形状归一（去重去空限长），不过行业字典 —— 0828 判决一。
+    # 与新建解析走同一个函数：两处各写一份的表现是「带不带附件」决定要不要去重。
+    if "intent_business_tags_json" in changes:
+        cleaned_tags = normalize_business_tags(changes["intent_business_tags_json"])
         if cleaned_tags:
-            changes["industry_focus_tags_json"] = cleaned_tags
+            changes["intent_business_tags_json"] = cleaned_tags
         else:
-            changes.pop("industry_focus_tags_json", None)
+            changes.pop("intent_business_tags_json", None)
 
     source = evidence_text.lower()
     if ("估值" in evidence_text or "valuation" in source) and not (

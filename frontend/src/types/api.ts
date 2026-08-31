@@ -483,6 +483,18 @@ export interface BuyerIntent {
   contact_name: string | null;
   contact_info_json: Record<string, unknown>;
   raw_requirement_text: string | null;
+  // 0828 新建：需求业务方向。行业字典在需求侧已下线，业务匹配靠这三项的原文。
+  intent_business_tags_json?: string[];
+  intent_business_summary: string | null;
+  excluded_business_text: string | null;
+  // 0828 新建：地区两个平铺数组，省市区三级，空数组 = 不限（不是「没有可接受地区」）。
+  acceptable_regions_json?: BuyerRegionConstraint[];
+  excluded_regions_json?: BuyerRegionConstraint[];
+  region_scope_summary: string | null;
+  parsed_requirement_json?: Record<string, unknown>;
+  // 以下六项 0828 退役：列还在、存量数据还在（阶段 A 一列没删），
+  // 但不再被解析写入、不再进初筛、需求信息页也不再显示它们。
+  // 阶段 B 删列时这一整块跟着删。
   intent_summary: string | null;
   industry_primary: string | null;
   industry_secondary: string | null;
@@ -490,8 +502,6 @@ export interface BuyerIntent {
   industry_l2_json: string[] | null;
   excluded_industries_json?: string[];
   industry_focus_tags_json?: string[];
-  region_scope_summary: string | null;
-  parsed_requirement_json?: Record<string, unknown>;
   region_constraints_json?: BuyerRegionConstraint[];
   min_revenue_yuan: string | null;
   min_net_profit_yuan: string | null;
@@ -514,15 +524,11 @@ export interface BuyerIntent {
   equity_requirement_type: string | null;
   preferred_listed_status: string | null;
   acceptable_listed_status_json?: string[];
-  condition_effects_json?: Record<string, ConditionEffect>;
   listing_board_requirement_summary: string | null;
   financing_stage_requirement_summary: string | null;
-  budget_min_yuan: string | null;
-  budget_max_yuan: string | null;
   acceptable_cash_flow_status_json: string[] | null;
   acceptable_profitability_status_json: string[] | null;
   requires_relocation: string | null;
-  relocation_target_regions_json: string[] | null;
   requires_return_investment: string | null;
   return_investment_multiple: string | null;
   requires_team_retention: string | null;
@@ -540,7 +546,6 @@ export interface BuyerIntent {
   needs_confirmation_json?: BuyerIntentConfirmationItem[];
   reviewed_at?: string | null;
   reviewed_by?: string | null;
-  acceptable_control_paths_json?: string[];
   owner_user_id?: string | null;
   owner_name?: string | null;
   scenario_labels?: string[];
@@ -817,6 +822,11 @@ export interface BuyerIntentCreate {
   contact_name?: string;
   contact_info_json?: Record<string, unknown>;
   raw_requirement_text?: string;
+  intent_business_tags_json?: string[];
+  intent_business_summary?: string;
+  excluded_business_text?: string;
+  acceptable_regions_json?: BuyerRegionConstraint[];
+  excluded_regions_json?: BuyerRegionConstraint[];
   intent_summary?: string;
   industry_primary?: string;
   industries_json?: string[];
@@ -846,15 +856,11 @@ export interface BuyerIntentCreate {
   equity_requirement_type?: string;
   preferred_listed_status?: string;
   acceptable_listed_status_json?: string[];
-  condition_effects_json?: Record<string, ConditionEffect>;
   listing_board_requirement_summary?: string;
   financing_stage_requirement_summary?: string;
-  budget_min_yuan?: number;
-  budget_max_yuan?: number;
   acceptable_cash_flow_status_json?: string[];
   acceptable_profitability_status_json?: string[];
   requires_relocation?: string;
-  relocation_target_regions_json?: string[];
   requires_return_investment?: string;
   return_investment_multiple?: number;
   requires_team_retention?: string;
@@ -915,6 +921,11 @@ export interface BuyerIntentUpdate {
   contact_name?: string | null;
   contact_info_json?: Record<string, unknown>;
   raw_requirement_text?: string | null;
+  intent_business_tags_json?: string[];
+  intent_business_summary?: string | null;
+  excluded_business_text?: string | null;
+  acceptable_regions_json?: BuyerRegionConstraint[];
+  excluded_regions_json?: BuyerRegionConstraint[];
   intent_summary?: string | null;
   industry_primary?: string | null;
   industries_json?: string[];
@@ -944,15 +955,11 @@ export interface BuyerIntentUpdate {
   equity_requirement_type?: string | null;
   preferred_listed_status?: string | null;
   acceptable_listed_status_json?: string[];
-  condition_effects_json?: Record<string, ConditionEffect>;
   listing_board_requirement_summary?: string | null;
   financing_stage_requirement_summary?: string | null;
-  budget_min_yuan?: number | null;
-  budget_max_yuan?: number | null;
   acceptable_cash_flow_status_json?: string[];
   acceptable_profitability_status_json?: string[];
   requires_relocation?: string;
-  relocation_target_regions_json?: string[];
   requires_return_investment?: string;
   return_investment_multiple?: number | null;
   requires_team_retention?: string;
@@ -1931,7 +1938,6 @@ export interface BuyerIntentScenario {
   active: boolean;
   fields_json: Record<string, unknown>;
   needs_confirmation_json: BuyerIntentConfirmationItem[];
-  condition_effects_json: Record<string, ConditionEffect>;
   source: string;
   created_at: string;
   updated_at: string;
@@ -1943,7 +1949,6 @@ export interface BuyerIntentScenarioWrite {
   active: boolean;
   fields_json: Record<string, unknown>;
   needs_confirmation_json?: BuyerIntentConfirmationItem[];
-  condition_effects_json?: Record<string, ConditionEffect>;
 }
 
 export interface RecommendationMessage {

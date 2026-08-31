@@ -541,7 +541,7 @@ def _exercise_handler_4b(
         def execute(self, *_args, **_kwargs):
             return EmptyRows()
 
-    def screen(_db, conditions, *, limit, offset=0, count_only=False):
+    def screen(_db, conditions, *, limit, offset=0, count_only=False, business_scan=False):
         rows = [] if count_only else [{
             "id": "t-1",
             "target_name": "标的一",

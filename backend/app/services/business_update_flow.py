@@ -15,7 +15,11 @@ from backend.app.api.routes.utils import (
 )
 from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
-from backend.app.registry.indicators import buyer_party_fact_columns, seller_target_fact_columns
+from backend.app.registry.indicators import (
+    buyer_intent_fact_columns,
+    buyer_party_fact_columns,
+    seller_target_fact_columns,
+)
 from backend.app.services.attachment_storage import (
     AttachmentStorageError,
     AttachmentTooLargeError,
@@ -1164,29 +1168,15 @@ def _seller_targets_by_ids(db: Session, ids: list[UUID]) -> list[dict[str, Any]]
 def _buyer_intents_by_ids(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
     if not ids:
         return []
+    # 投影从注册表派生（0828）。手写这份清单的代价在阶段 B 会显形：
+    # 本轮退役的 32 列下一轮要 drop，漏改一处的表现是这条路直接 500。
+    buyer_intent_columns = ", ".join(f"bi.{column}" for column in buyer_intent_fact_columns())
     rows = db.execute(
         text(
-            """
+            f"""
             select
-              bi.id, bi.buyer_party_id, bp.buyer_name, bi.intent_name, bi.intent_grade, bi.status,
-              bi.pause_reason, bi.contact_name, bi.raw_requirement_text,
-              bi.intent_summary, bi.industry_primary, bi.industry_secondary,
-              bi.industries_json, bi.industry_l2_json, bi.excluded_industries_json,
-              bi.region_scope_summary, bi.region_constraints_json,
-              bi.min_revenue_yuan, bi.min_net_profit_yuan,
-              bi.min_total_profit_yuan, bi.max_pe, bi.max_valuation_yuan,
-              bi.min_market_cap_yuan, bi.max_market_cap_yuan, bi.market_cap_range_summary,
-              bi.requires_control, bi.requires_consolidation, bi.accepts_minority_investment,
-              bi.desired_equity_ratio_min, bi.desired_equity_ratio_max,
-              bi.equity_ratio_summary, bi.equity_requirement_type,
-              bi.preferred_listed_status, bi.acceptable_listed_status_json, bi.condition_effects_json,
-              bi.requires_relocation, bi.requires_return_investment, bi.requires_team_retention,
-              bi.listing_board_requirement_summary,
-              bi.financing_stage_requirement_summary, bi.transaction_type,
-              bi.transaction_types_json, bi.premium_tolerance_summary, bi.max_premium_rate,
-              bi.max_debt_ratio, bi.debt_ratio_requirement_summary,
-              bi.major_risk_tolerance_summary, bi.unacceptable_risk_flags_json,
-              bi.buyer_industry_advantage_summary,
+              bi.id, bi.buyer_party_id, bp.buyer_name, bi.intent_name, bi.contact_name,
+              {buyer_intent_columns},
               bi.updated_at::text as updated_at
             from buyer_intent bi
             left join buyer_party bp on bp.id = bi.buyer_party_id

@@ -57,6 +57,7 @@ def _fake_screen(count: int = 3, matched: int = 47):
         limit: int,
         offset: int = 0,
         count_only: bool = False,
+        business_scan: bool = False,
     ) -> ScreeningResult:
         rows = [] if count_only else [_row(index) for index in range(min(count, limit))]
         return ScreeningResult(
@@ -68,6 +69,7 @@ def _fake_screen(count: int = 3, matched: int = 47):
             limit=limit,
             offset=offset,
             count_only=count_only,
+            business_scan=business_scan,
         )
 
     return run
@@ -131,18 +133,18 @@ def test_legacy_filters_key_is_still_accepted() -> None:
     """改造前的参数名叫 filters，线上提示词还在用它，不能因为改名就筛空。"""
     tools = _tools(
         intent_snapshot=_snapshot(
-            {"conditions": {"industries_json": ["制造与工业"]}, "strength": {}}
+            {"conditions": {"min_revenue_yuan": 50_000_000}, "strength": {}}
         )
     )
 
     result = tools.execute(
         _call(
             "search_targets",
-            {"group_id": "group-1", "filters": {"industries_json": ["制造与工业"]}},
+            {"group_id": "group-1", "filters": {"min_revenue_yuan": 50_000_000}},
         )
     )
 
-    assert result["conditions"] == {"industries_json": ["制造与工业"]}
+    assert result["conditions"] == {"min_revenue_yuan": 50_000_000}
 
 
 def test_exclusions_stick_to_every_later_call() -> None:
@@ -150,8 +152,8 @@ def test_exclusions_stick_to_every_later_call() -> None:
     tools = _tools(
         intent_snapshot=_snapshot(
             {
-                "conditions": {"industries_json": ["制造与工业"]},
-                "strength": {"industries_json": "preferred"},
+                "conditions": {"min_revenue_yuan": 50_000_000},
+                "strength": {"min_revenue_yuan": "preferred"},
             },
             exclusions={"industries": ["房地产与建筑"], "risk_flags": ["equity_frozen"]},
         )
@@ -160,7 +162,7 @@ def test_exclusions_stick_to_every_later_call() -> None:
     tools.execute(
         _call(
             "search_targets",
-            _search_args({"industries_json": ["制造与工业"]}, group_id="group-1"),
+            _search_args({"min_revenue_yuan": 50_000_000}, group_id="group-1"),
         )
     )
     relaxed = tools.execute(
@@ -168,14 +170,16 @@ def test_exclusions_stick_to_every_later_call() -> None:
             "search_targets",
             _search_args(
                 group_id="group-1",
-                relaxation_reason="调用1显示 preferred 行业条件需要放宽",
+                relaxation_reason="调用1显示 preferred 营收条件需要放宽",
                 based_on_call_index=1,
             ),
         )
     )
 
-    assert relaxed["conditions"]["excluded_industries_json"] == ["房地产与建筑"]
     assert relaxed["conditions"]["unacceptable_risk_flags_json"] == ["equity_frozen"]
+    # 排除行业 0828 起不编译成条件（行业条件整组退役，它已不是可筛字段）。
+    # 它仍在快照里，并已渲染成「不接受 X」进定性诉求，由主 Agent 读业务摘要执行。
+    assert "excluded_industries_json" not in relaxed["conditions"]
 
 
 def test_ask_user_is_capped_at_one_turn_and_stops_the_loop() -> None:
@@ -246,21 +250,21 @@ def test_screened_rows_become_candidates_with_code_held_facts() -> None:
 def test_a_target_hit_by_two_groups_has_two_group_and_search_hits() -> None:
     tools = _tools(
         intent_snapshot=_snapshot(
-            {"conditions": {"industries_json": ["制造与工业"]}},
-            {"conditions": {"industries_json": ["信息技术与通信"]}},
+            {"conditions": {"min_revenue_yuan": 50_000_000}},
+            {"conditions": {"min_revenue_yuan": 20_000_000}},
         )
     )
 
     tools.execute(
         _call(
             "search_targets",
-            _search_args({"industries_json": ["制造与工业"]}, group_id="group-1"),
+            _search_args({"min_revenue_yuan": 50_000_000}, group_id="group-1"),
         )
     )
     tools.execute(
         _call(
             "search_targets",
-            _search_args({"industries_json": ["信息技术与通信"]}, group_id="group-2"),
+            _search_args({"min_revenue_yuan": 20_000_000}, group_id="group-2"),
         )
     )
 

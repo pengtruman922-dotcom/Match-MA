@@ -7,10 +7,8 @@ import { valueLabel } from '../../lib/fieldLabels';
 // 初筛 skill 支持的全部条件。少一个的后果不是报错，是那一条在过程行里**消失**——
 // Agent 自己加的地区条件用户看不见，结果的来路就断了。
 const FILTER_LABELS: Record<string, string> = {
-  industries_json: '行业',
-  industry_l2_json: '二级行业',
-  excluded_industries_json: '排除',
-  region_constraints_json: '地区',
+  acceptable_regions_json: '地区',
+  excluded_regions_json: '排除地区',
   region_scope_summary: '地区',
   min_revenue_yuan: '营收≥',
   min_net_profit_yuan: '净利≥',
@@ -20,9 +18,6 @@ const FILTER_LABELS: Record<string, string> = {
   max_valuation_yuan: '估值≤',
   min_market_cap_yuan: '市值≥',
   max_market_cap_yuan: '市值≤',
-  max_debt_ratio: '负债率≤',
-  acceptable_cash_flow_status_json: '现金流',
-  acceptable_profitability_status_json: '盈利',
   acceptable_listed_status_json: '上市状态',
   listing_market_region: '上市地',
   transaction_types_json: '交易结构',

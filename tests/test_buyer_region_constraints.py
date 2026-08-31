@@ -158,12 +158,12 @@ def test_the_rest_routes_normalize_regions_too() -> None:
 
     # 新建走参数构造器，更新在自己函数里改 changes —— 两条路各自都要过归一。
     created = inspect.getsource(module._buyer_intent_params)
-    assert "normalize_buyer_region_constraints" in created, "新建路径（参数构造器）没归一地域"
+    assert "normalize_buyer_regions" in created, "新建路径（参数构造器）没归一地域"
     assert "_buyer_intent_params" in inspect.getsource(module.create_buyer_intent), (
         "新建不再走参数构造器了，这条断言要跟着改"
     )
     update = inspect.getsource(module.update_buyer_intent)
-    assert "normalize_buyer_region_constraints" in update, "更新路径没归一地域"
+    assert "normalize_buyer_regions" in update, "更新路径没归一地域"
 
 
 def test_two_clusters_in_one_string_both_expand() -> None:
@@ -195,3 +195,80 @@ def test_a_plain_province_is_not_treated_as_a_cluster() -> None:
     assert expand_region_group("广东省") == ()
     assert expand_region_group("") == ()
     assert expand_region_group(None) == ()
+
+
+# -- 0828：两个平铺数组取代 region_constraints_json ------------------------
+
+
+def test_the_flat_regions_carry_no_effect() -> None:
+    """可接受与排除拆成两列之后，语义写在列名里，元素里不再有 effect。
+
+    强弱（「必须在广东」对「优先广东」）交给 region_scope_summary 的原话 ——
+    语气和强度归文本，阈值和枚举归字段。
+    """
+    from backend.app.services.region_dictionary import normalize_buyer_regions
+
+    regions, pending = normalize_buyer_regions(
+        [{"province": "广东省", "effect": "required"}, {"province": "江苏省", "city": "苏州市"}],
+        field="acceptable_regions_json",
+    )
+
+    assert regions == [{"province": "广东省"}, {"province": "江苏省", "city": "苏州市"}]
+    assert all("effect" not in region for region in regions)
+    assert pending == []
+
+
+def test_the_flat_regions_share_the_cluster_table_with_the_old_column() -> None:
+    """大区展开放在代码里而不是提示词里：提示词里的表每次调用都要模型照抄一遍，
+    改词表要发新版本，而且模型可能漏抄。两个归一函数共用同一份 REGION_GROUPS。
+    """
+    from backend.app.services.region_dictionary import normalize_buyer_regions
+
+    regions, _ = normalize_buyer_regions([{"province": "长三角"}], field="acceptable_regions_json")
+
+    assert [region["province"] for region in regions] == ["上海市", "江苏省", "浙江省", "安徽省"]
+
+
+def test_a_cluster_expansion_drops_the_city() -> None:
+    """说「长三角的苏州」是自相矛盾的输入。
+
+    把市套到展开出来的四个省上会造出「上海市苏州市」这种筛不到东西的组合，
+    而且不报错 —— 存了等于没存。
+    """
+    from backend.app.services.region_dictionary import normalize_buyer_regions
+
+    regions, _ = normalize_buyer_regions(
+        [{"province": "长三角", "city": "苏州市"}], field="acceptable_regions_json"
+    )
+
+    assert all("city" not in region for region in regions)
+
+
+def test_an_unmappable_region_goes_to_pending_not_to_the_bin() -> None:
+    """归一不出来的地区**不能直接丢**：丢掉的地区在筛选里表现为
+    「这些标的进不来」，界面上看不出来。所以转成待确认项让人来判。
+    """
+    from backend.app.services.region_dictionary import normalize_buyer_regions
+
+    regions, pending = normalize_buyer_regions(
+        [{"province": "江苏省"}, {"province": "火星"}], field="excluded_regions_json"
+    )
+
+    assert regions == [{"province": "江苏省"}]
+    assert len(pending) == 1
+    assert pending[0]["field"] == "excluded_regions_json"
+
+
+def test_unrestricted_terms_produce_an_empty_array() -> None:
+    """「全国 / 不限」不是一个约束，是**没有**约束 —— 空数组就是它的表达。
+
+    原话仍然留在 region_scope_summary 里给人看，这里丢掉不算信息损失。
+    """
+    from backend.app.services.region_dictionary import normalize_buyer_regions
+
+    regions, pending = normalize_buyer_regions(
+        [{"province": "全国"}, {"province": "不限"}], field="acceptable_regions_json"
+    )
+
+    assert regions == []
+    assert pending == []

@@ -158,14 +158,17 @@ NODES: tuple[NodeSpec, ...] = (
         label="买家需求字段规范化",
         domain="buyer",
         node_type="llm",
-        description="两阶段解析的第二步：结合字段契约、行业字典、行政区划和枚举规则校验标准化。",
-        runtime_inputs=("语义解析阶段输出", "买家画像上下文", "字段契约与枚举规则", "行业字典 / 省级区划（自动注入）"),
+        description="两阶段解析的第二步：结合字段契约、行政区划和枚举规则校验标准化。",
+        runtime_inputs=("语义解析阶段输出", "买家画像上下文", "字段契约与枚举规则", "省级区划（自动注入）"),
+        # industry_l1_list / industry_l2_list 2026-08-28 从契约里移除：买家需求侧的
+        # 行业字典下线，业务方向改走自由标签 + 自由文本，这份提示词不再需要注入
+        # 一百多个二级行业。**handler 仍然照常传这两个变量** —— 线上可能正跑着
+        # 引用它们的旧版本（v0.4.0 就引用），撤掉传参会让那一版渲染成 "null"。
+        # 等新版稳定、确认无回滚需求后，再把 handler 里那两行一起删。
         prompt_variables=(
             "semantic_parse_json",
             "buyer_profile_json",
             "field_contract_json",
-            "industry_l1_list",
-            "industry_l2_list",
             "province_list",
             "enum_contract_json",
         ),

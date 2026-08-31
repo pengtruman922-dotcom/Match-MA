@@ -31,7 +31,6 @@ from sqlalchemy.orm import Session
 
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.registry.indicators import indicator_by_column
-from backend.app.services.industry_taxonomy import list_l1_terms, list_l2_terms
 from backend.app.services.screening_schema import (
     CAPABILITY_VALUES,
     SCREENING_FIELDS,
@@ -43,6 +42,24 @@ from backend.app.services.screening_schema import (
 
 MAX_SCREENING_LIMIT = 20
 DEFAULT_SCREENING_LIMIT = 20
+
+# 业务扫描（business_scan）的上限。**它不是把 limit 调大**，是另一种返回形状：
+# 每条只有名称、级别、地区、业务摘要，没有财务数字、没有淘汰拆分。
+#
+# 为什么需要它：0828 判决一之后正向初筛不再有行业条件，一条只写了
+# 「最低营收 1 亿」的需求会召回接近全库。这不是 bug，是判决一的设计意图 ——
+# 业务匹配整段交给 LLM 读文本。但 20 条的上限会把「接近全库」截成任意 20 家，
+# 于是**该推的标的连被看见的机会都没有**。所以补一条全量薄返回的路径：
+#     SQL 收窄（收不窄也没关系）→ 全量业务摘要给 LLM 首轮筛 → 选出 10-20 家 → 深评
+#
+# 300 是按库规模定的：标的库约 300 家，业务摘要平均 49 字，全量约 1.5 万字，
+# 一次调用装得下。库长到这个数以上时要么收窄条件，要么这条路要重新设计 ——
+# 所以超出时如实报数并提示收窄，不静默截断。
+#
+# ⚠️ 标的侧业务摘要平均只有 49 字，**远薄于买家侧的 259 字**。同一手法在买家侧
+# （skills/buyer-search 接口一）验过好用，不等于在标的侧也够 —— 这一段的效果
+# 必须实测，见方案 0828 §十。
+MAX_BUSINESS_SCAN_LIMIT = 300
 
 # 准入闸门：E 不进推荐，A-D 进。永远生效，不由买家指定，与
 # `recommendation_flow` / `search_docs` 的口径必须一字不差。
@@ -80,6 +97,11 @@ _BASE_ROW_COLUMNS: tuple[str, ...] = (
     "can_control",
     "can_consolidate",
     "management_retention_possible",
+    # 业务扫描（business_scan）读这两列。普通初筛的摘要刻意不带它们
+    # （主 Agent 在那一步只判「够不够、要不要再筛」），但列要在投影里，
+    # 否则 business_scan 拿不到 —— 两种返回形状共用同一条 SQL。
+    "business_summary",
+    "main_products_text",
 )
 
 _PLAIN_OPERATORS = frozenset({"gte", "lte", "in", "eq", "requirement_capability"})
@@ -117,6 +139,7 @@ class ScreeningResult:
     limit: int
     offset: int
     count_only: bool
+    business_scan: bool = False
 
     @property
     def returned_count(self) -> int:
@@ -133,12 +156,19 @@ class ScreeningResult:
         if self.offset:
             payload["offset"] = self.offset
         if not self.count_only:
-            payload["returned"] = [_row_digest(row, self.conditions) for row in self.rows]
+            digest = _business_digest if self.business_scan else _row_digest
+            payload["returned"] = [digest(row, self.conditions) for row in self.rows]
             remaining = self.matched - self.offset - self.returned_count
             if remaining > 0:
                 # 不做字符截断：截断一个 JSON 只会得到半个 JSON，模型解析失败
                 # 还不知道为什么。
                 payload["note"] = f"另有 {remaining} 家未返回，请收窄条件或使用 offset 翻页。"
+        if self.business_scan:
+            payload["scan_note"] = (
+                "这是业务扫描：每条只有业务摘要，没有财务数字，也没有逐条件淘汰拆分。"
+                "请逐条读「业务摘要」判断业务是否真的对口，选出 10-20 家之后再做深评。"
+                "**业务摘要为空的不要从公司名猜业务**，如实说信息不足。"
+            )
         if self.ignored:
             payload["ignored_conditions"] = self.ignored
         return payload
@@ -173,17 +203,11 @@ def _missing_sql(column: str) -> str:
 
 # jsonb 展开前的防御性收敛：列里存了非数组时 jsonb_array_elements 会在运行时报错，
 # 一条脏数据就能把整次筛选打成 500（同 buyer_intents.py 的 _JSONB_ARRAY）。
-_INDUSTRY_PAIRS = (
-    "case when jsonb_typeof(st.industry_pairs_json) = 'array'"
-    " then st.industry_pairs_json else '[]'::jsonb end"
-)
-
-
-def _industry_exists(json_key: str, param: str, index: int) -> str:
-    return (
-        f"exists(select 1 from jsonb_array_elements({_INDUSTRY_PAIRS}) pair_{index}"
-        f" where pair_{index} ->> '{json_key}' = any(:{param}))"
-    )
+#
+# 行业的 exists/missing 两个构造器 2026-08-28 随需求侧行业条件一起删除。
+# 它们打在 seller_target.industry_pairs_json 上，而现在没有任何买家条件指向那一列
+# （注册表里它的 screening 也一并置 False）。留着一个没人调的 SQL 构造器，
+# 下一个人会以为行业还能筛。
 
 
 def _flat_array(column: str) -> str:
@@ -202,14 +226,6 @@ def _flat_array_exists(column: str, param: str, index: int) -> str:
     return (
         f"exists(select 1 from jsonb_array_elements_text({_flat_array(column)}) flat_{index}"
         f" where flat_{index} = any(:{param}))"
-    )
-
-
-def _industry_missing(index: int, keys: tuple[str, ...]) -> str:
-    checks = " or ".join(f"coalesce(pair_m{index} ->> '{key}', '') <> ''" for key in keys)
-    return (
-        f"not exists(select 1 from jsonb_array_elements({_INDUSTRY_PAIRS}) pair_m{index}"
-        f" where {checks})"
     )
 
 
@@ -234,33 +250,23 @@ def build_clause(field: ScreeningField, value: Any, index: int) -> Clause:
                       _missing_sql(field.target_column), {param: list(CAPABILITY_VALUES)})
     if operator in {"overlap", "not_overlap"}:
         return _array_clause(field, value, index, param)
-    if operator == "region_any":
+    if operator in {"region_any", "region_none"}:
         return _region_clause(field, value, index)
     raise ValueError(f"unsupported screening operator {operator!r} on {field.column}")
 
 
 def _array_clause(field: ScreeningField, value: Any, index: int, param: str) -> Clause:
-    """overlap / not_overlap 有两种目标形状，不能都当成行业。
+    """overlap / not_overlap 打在标的侧的**扁平字符串数组**上。
 
-    行业（industry_pairs_json）是 {l1, l2} 对象数组，重大风险与交易结构是扁平
-    字符串数组。原来这两个算子写死了行业路径，于是**扁平数组的字段会静默生成
-    打在 industry_pairs_json 上的 SQL** —— overlap 恒不命中（候选池恒空）、
-    not_overlap 恒命中（条件恒真）。两种都不报错，正是最难查的那一类。
+    以前这里还有一条行业分支（industry_pairs_json 是 {l1, l2} 对象数组），
+    0828 随需求侧行业条件一起删掉了。当时那条分支写死了行业路径，于是
+    **扁平数组的字段会静默生成打在 industry_pairs_json 上的 SQL** ——
+    overlap 恒不命中（候选池恒空）、not_overlap 恒命中（条件恒真）。
+    两种都不报错，正是最难查的那一类，所以这里保留一句提醒：
+    新增 overlap 类条件时，先确认对手方列的形状。
     """
     base = field.target_column.split(".")[0]
     values = {param: list(value)}
-    if base == "industry_pairs_json":
-        # industry_pairs_json 是唯一的行业事实源；industry_l1 / industry_l2 是
-        # 派生展示列，筛选不能用它们（总纲 §2.3）。
-        if field.operator == "overlap":
-            json_key = field.target_column.split(".")[-1]
-            return Clause(field, value, _industry_exists(json_key, param, index),
-                          _industry_missing(index, (json_key,)), values)
-        l1 = _industry_exists("l1", param, index)
-        l2 = _industry_exists("l2", param, index)
-        return Clause(field, value, f"not ({l1} or {l2})",
-                      _industry_missing(index, ("l1", "l2")), values)
-
     hit = _flat_array_exists(base, param, index)
     missing = _missing_sql(base)
     if field.operator == "overlap":
@@ -283,9 +289,14 @@ _LEVEL_BY_COLUMN = {column: level for level, column in _REGION_COLUMNS.items()}
 def _region_clause(field: ScreeningField, constraints: list[dict[str, str]], index: int) -> Clause:
     """每个 constraint 展开成它自己填到的层级的 AND，多个 constraint 之间 OR。
 
-    本阶段只实现 required 语义（命中即通过）。买家侧 region_constraints_json 自带
-    的 preferred / excluded 三态属阶段四，由 agent 决定拆成几次调用，不在 SQL 层
-    自作主张。
+    两个算子共用这段构造，只在最后取反：
+      region_any（acceptable_regions_json）  命中即通过
+      region_none（excluded_regions_json）   命中即出局
+
+    0828 之前买家侧只有一列 region_constraints_json，靠元素里的 effect 三态区分
+    可接受/优先/排除，而 SQL 只实现了 required 那一档 —— 也就是说**排除地区
+    从来没有真的排除过任何标的**。现在拆成两列之后，方向写在列名里，
+    SQL 两条都实现，不再有「存了但不生效」的那一半。
     """
     parts: list[str] = []
     missing_parts: list[str] = []
@@ -309,9 +320,14 @@ def _region_clause(field: ScreeningField, constraints: list[dict[str, str]], ind
         )
         blank = " or ".join(f"coalesce(st.{column}, '') = ''" for column, _ in levels)
         missing_parts.append(f"(({compatible}) and ({blank}))")
-    sql = "(" + " or ".join(parts) + ")" if parts else "false"
+    hit = "(" + " or ".join(parts) + ")" if parts else "false"
     missing = "(" + " or ".join(missing_parts) + ")" if missing_parts else "false"
-    return Clause(field, constraints, sql, missing, params)
+    if field.operator == "region_none":
+        # 排除地区不把「地区没录全」算成缺失：买家说「不要新疆」，一个连省份都
+        # 没录的标的**不该**因此出局 —— 那是数据缺口，不是它在新疆。
+        # 所以命中取反、缺失恒 false（这一条从不贡献缺失统计）。
+        return Clause(field, constraints, f"not {_boolean(hit)}", "false", params)
+    return Clause(field, constraints, hit, missing, params)
 
 
 def _boolean(expression: str) -> str:
@@ -337,15 +353,20 @@ def screen_targets(
     limit: int = DEFAULT_SCREENING_LIMIT,
     offset: int = 0,
     count_only: bool = False,
+    business_scan: bool = False,
 ) -> ScreeningResult:
-    """一组 AND 条件 → 命中数、逐条件淘汰拆分、按级别排序的前 N 条。"""
-    limit = max(1, min(int(limit), MAX_SCREENING_LIMIT))
+    """一组 AND 条件 → 命中数、逐条件淘汰拆分、按级别排序的前 N 条。
+
+    `business_scan=True` 换一种返回形状：上限抬到 300，每条只回业务摘要，
+    供主 Agent 做首轮语义筛。0828 判决一之后正向初筛没有行业条件了，
+    这条路是它的补偿 —— 详见 MAX_BUSINESS_SCAN_LIMIT 的注释。
+    """
+    ceiling = MAX_BUSINESS_SCAN_LIMIT if business_scan else MAX_SCREENING_LIMIT
+    if business_scan:
+        limit = ceiling if limit == DEFAULT_SCREENING_LIMIT else limit
+    limit = max(1, min(int(limit), ceiling))
     offset = max(0, int(offset))
-    conditions, ignored = normalize_conditions(
-        raw_conditions,
-        industry_l1_terms=list_l1_terms(db),
-        industry_l2_terms=list_l2_terms(db),
-    )
+    conditions, ignored = normalize_conditions(raw_conditions)
     clauses = [
         build_clause(SCREENING_FIELDS_BY_COLUMN[column], value, index)
         for index, (column, value) in enumerate(conditions.items())
@@ -376,6 +397,7 @@ def screen_targets(
         limit=limit,
         offset=offset,
         count_only=count_only,
+        business_scan=business_scan,
     )
 
 
@@ -467,6 +489,37 @@ def _industry_text(pairs: Any, limit: int = 3) -> str | None:
         if label and label not in parts:
             parts.append(label)
     return "、".join(parts) or None
+
+
+def _business_digest(row: dict[str, Any], conditions: dict[str, Any]) -> dict[str, Any]:
+    """业务扫描的一条：只回答「这家是做什么的」。
+
+    刻意不带财务数字与条件取值 —— 首轮筛判的是业务匹配，数字那一步已经由 SQL
+    做过了。带上它们只会把 300 条撑成读不完的体积，而模型在这一步也用不上。
+
+    行业**保留**：它不再是筛选维，但仍是判业务方向的辅助信息（总纲 §2.3
+    仍然承认它是唯一的标的行业事实源）。退役的是「能不能筛」，不是「看不看得见」。
+    """
+    province, city = row.get("location_province"), row.get("location_city")
+    # 直辖市的省与市同名，直接拼会变成「北京市北京市」。
+    region = "".join(dict.fromkeys(filter(None, [province, city]))) or None
+    digest: dict[str, Any] = {
+        "id": str(row.get("id") or ""),
+        "name": row.get("target_name"),
+        "grade": row.get("target_grade"),
+    }
+    industry = _industry_text(row.get("industry_pairs_json"))
+    if industry:
+        digest["industry"] = industry
+    if region:
+        digest["region"] = region
+    summary = (row.get("business_summary") or "").strip()
+    if summary:
+        digest["business_summary"] = summary
+    products = (row.get("main_products_text") or "").strip()
+    if products:
+        digest["main_products"] = products
+    return digest
 
 
 def _row_digest(row: dict[str, Any], conditions: dict[str, Any]) -> dict[str, Any]:

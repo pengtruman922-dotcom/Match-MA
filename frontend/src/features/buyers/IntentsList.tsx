@@ -303,7 +303,7 @@ export default function IntentsList({
           { label: '买家行业', value: filters.buyerBusinessTag, options: filterOptions.buyer_business_tags || [], onChange: (value) => updateFilters({ buyerBusinessTag: value, page: 1 }) },
           { label: '买家上市', value: filters.buyerListedStatus, options: filterOptions.buyer_listed_statuses || [], onChange: (value) => updateFilters({ buyerListedStatus: value, page: 1 }) },
           { label: '买家区域', value: filters.buyerProvince, options: filterOptions.buyer_provinces || [], onChange: (value) => updateFilters({ buyerProvince: value, page: 1 }) },
-          { label: '关注行业', value: filters.industry, options: filterOptions.industries, onChange: (value) => updateFilters({ industry: value, page: 1 }) },
+          { label: '关注业务', value: filters.industry, options: filterOptions.industries, onChange: (value) => updateFilters({ industry: value, page: 1 }) },
           { label: '关注区域', value: filters.region, options: filterOptions.regions, onChange: (value) => updateFilters({ region: value, page: 1 }) },
           { label: '上市要求', value: filters.listedStatus, options: filterOptions.listed_statuses, onChange: (value) => updateFilters({ listedStatus: value, page: 1 }) },
           ...(admin ? [{ label: '负责人', value: filters.owner, options: filterOptions.owners || [], onChange: (value: string) => updateFilters({ owner: value, page: 1 }) }] : []),

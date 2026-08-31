@@ -25,13 +25,14 @@ from backend.app.api.routes.utils import (
     write_action_logs_for_diff,
 )
 from backend.app.db import get_db
+from backend.app.registry.indicators import indicators_for
 from backend.app.registry.nodes import buyer_parse_node_names
 from backend.app.services.entity_grade import BUYER_GRADE, resolve_grade_pair
 from backend.app.services.listed_status import legacy_listed_status
 from backend.app.api.routes.buyer_parties import _enum_labels as buyer_party_enum_labels
 from backend.app.services.profile_sections import buyer_party_readiness_sql
-from backend.app.services.region_dictionary import normalize_buyer_region_constraints
-from backend.app.services.recommendation_conditions import normalize_condition_effects, normalize_scenario_fields
+from backend.app.services.region_dictionary import normalize_buyer_regions
+from backend.app.services.recommendation_conditions import normalize_scenario_fields
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 from backend.app.services.buyer_intent_processing_state import buyer_intent_processing_states
 from backend.app.services.buyer_risk_tolerance import normalize_unacceptable_risk_flags
@@ -76,6 +77,11 @@ class BuyerIntentCreate(BaseModel):
     industry_l2_json: list[Any] | None = None
     excluded_industries_json: list[Any] | None = None
     industry_focus_tags_json: list[Any] | None = None
+    intent_business_tags_json: list[Any] | None = None
+    intent_business_summary: str | None = None
+    excluded_business_text: str | None = None
+    acceptable_regions_json: list[Any] | dict[str, Any] | None = None
+    excluded_regions_json: list[Any] | dict[str, Any] | None = None
     region_scope_summary: str | None = None
     parsed_requirement_json: dict[str, Any] | None = None
     region_constraints_json: list[Any] | dict[str, Any] | None = None
@@ -98,10 +104,8 @@ class BuyerIntentCreate(BaseModel):
     desired_equity_ratio_max: Decimal | None = None
     equity_ratio_summary: str | None = None
     equity_requirement_type: EquityRequirementType | None = None
-    acceptable_control_paths_json: list[Any] | dict[str, Any] | None = None
     preferred_listed_status: ListedStatusRequirement | None = "unknown"
     acceptable_listed_status_json: list[Any] | None = None
-    condition_effects_json: dict[str, Any] | None = None
     listing_board_requirement_summary: str | None = None
     financing_stage_requirement_summary: str | None = None
     transaction_type: str | None = None
@@ -116,14 +120,11 @@ class BuyerIntentCreate(BaseModel):
     acceptable_cash_flow_status_json: list[Any] | None = None
     acceptable_profitability_status_json: list[Any] | None = None
     requires_relocation: RequirementStrength = "unknown"
-    relocation_target_regions_json: list[Any] | None = None
     requires_return_investment: RequirementStrength = "unknown"
     return_investment_multiple: Decimal | None = None
     requires_team_retention: RequirementStrength = "unknown"
     earnout_requirement: RequirementStrength = "unknown"
     listing_market_region: ListingMarketRegion | None = None
-    budget_min_yuan: Decimal | None = None
-    budget_max_yuan: Decimal | None = None
     needs_confirmation_json: list[Any] | None = None
 
     @field_validator("equity_requirement_type", "listing_market_region", mode="before")
@@ -165,6 +166,11 @@ class BuyerIntentOut(BaseModel):
     industry_l2_json: list[Any] = []
     excluded_industries_json: list[Any] = []
     industry_focus_tags_json: list[Any] = []
+    intent_business_tags_json: list[Any] = []
+    intent_business_summary: str | None
+    excluded_business_text: str | None
+    acceptable_regions_json: list[Any] | dict[str, Any]
+    excluded_regions_json: list[Any] | dict[str, Any]
     region_scope_summary: str | None
     parsed_requirement_json: dict[str, Any]
     region_constraints_json: list[Any] | dict[str, Any]
@@ -187,10 +193,8 @@ class BuyerIntentOut(BaseModel):
     desired_equity_ratio_max: Decimal | None
     equity_ratio_summary: str | None
     equity_requirement_type: str | None
-    acceptable_control_paths_json: list[Any] | dict[str, Any]
     preferred_listed_status: str | None
     acceptable_listed_status_json: list[Any] = []
-    condition_effects_json: dict[str, Any] = {}
     listing_board_requirement_summary: str | None
     financing_stage_requirement_summary: str | None
     transaction_type: str | None
@@ -205,14 +209,11 @@ class BuyerIntentOut(BaseModel):
     acceptable_cash_flow_status_json: list[Any] = []
     acceptable_profitability_status_json: list[Any] = []
     requires_relocation: str
-    relocation_target_regions_json: list[Any] = []
     requires_return_investment: str
     return_investment_multiple: Decimal | None
     requires_team_retention: str
     earnout_requirement: str
     listing_market_region: str | None
-    budget_min_yuan: Decimal | None
-    budget_max_yuan: Decimal | None
     needs_confirmation_json: list[Any] = []
     reviewed_at: str | None = None
     reviewed_by: UUID | None = None
@@ -246,6 +247,11 @@ class BuyerIntentUpdate(BaseModel):
     industry_l2_json: list[Any] | None = None
     excluded_industries_json: list[Any] | None = None
     industry_focus_tags_json: list[Any] | None = None
+    intent_business_tags_json: list[Any] | None = None
+    intent_business_summary: str | None = None
+    excluded_business_text: str | None = None
+    acceptable_regions_json: list[Any] | dict[str, Any] | None = None
+    excluded_regions_json: list[Any] | dict[str, Any] | None = None
     region_scope_summary: str | None = None
     parsed_requirement_json: dict[str, Any] | None = None
     region_constraints_json: list[Any] | dict[str, Any] | None = None
@@ -268,10 +274,8 @@ class BuyerIntentUpdate(BaseModel):
     desired_equity_ratio_max: Decimal | None = None
     equity_ratio_summary: str | None = None
     equity_requirement_type: EquityRequirementType | None = None
-    acceptable_control_paths_json: list[Any] | dict[str, Any] | None = None
     preferred_listed_status: ListedStatusRequirement | None = None
     acceptable_listed_status_json: list[Any] | None = None
-    condition_effects_json: dict[str, Any] | None = None
     listing_board_requirement_summary: str | None = None
     financing_stage_requirement_summary: str | None = None
     transaction_type: str | None = None
@@ -286,14 +290,11 @@ class BuyerIntentUpdate(BaseModel):
     acceptable_cash_flow_status_json: list[Any] | None = None
     acceptable_profitability_status_json: list[Any] | None = None
     requires_relocation: RequirementStrength | None = None
-    relocation_target_regions_json: list[Any] | None = None
     requires_return_investment: RequirementStrength | None = None
     return_investment_multiple: Decimal | None = None
     requires_team_retention: RequirementStrength | None = None
     earnout_requirement: RequirementStrength | None = None
     listing_market_region: ListingMarketRegion | None = None
-    budget_min_yuan: Decimal | None = None
-    budget_max_yuan: Decimal | None = None
     needs_confirmation_json: list[Any] | None = None
     owner_user_id: UUID | None = None
 
@@ -338,7 +339,11 @@ class BuyerIntentFilterOptionOut(BaseModel):
 
 
 class BuyerIntentFilterOptionsOut(BaseModel):
+    # `industries` 是 `business_tags` 的旧名，两个键返回同一份数据。
+    # 0828 行业字典在需求侧下线之后，这一组的取值来自自由业务标签而不是字典 ——
+    # 保留旧键只为让没同步发版的前端筛选框不至于整个空掉，前端切完就可以删。
     industries: list[BuyerIntentFilterOptionOut]
+    business_tags: list[BuyerIntentFilterOptionOut] = []
     regions: list[BuyerIntentFilterOptionOut]
     statuses: list[BuyerIntentFilterOptionOut]
     listed_statuses: list[BuyerIntentFilterOptionOut]
@@ -407,6 +412,9 @@ BUYER_INTENT_OUT_COLUMNS = f"""
               bi.industry_primary, bi.industry_secondary,
               bi.industries_json, bi.industry_l2_json,
               bi.excluded_industries_json, bi.industry_focus_tags_json,
+              bi.intent_business_tags_json, bi.intent_business_summary,
+              bi.excluded_business_text,
+              bi.acceptable_regions_json, bi.excluded_regions_json,
               bi.region_scope_summary,
               bi.region_constraints_json, bi.min_revenue_yuan, bi.min_net_profit_yuan,
               bi.min_total_profit_yuan, bi.max_pe, bi.max_ps,
@@ -416,18 +424,18 @@ BUYER_INTENT_OUT_COLUMNS = f"""
               bi.requires_control, bi.requires_consolidation,
               bi.accepts_minority_investment, bi.desired_equity_ratio_min,
               bi.desired_equity_ratio_max, bi.equity_ratio_summary, bi.equity_requirement_type,
-              bi.acceptable_control_paths_json, bi.preferred_listed_status,
-              bi.acceptable_listed_status_json, bi.condition_effects_json,
+              bi.preferred_listed_status,
+              bi.acceptable_listed_status_json,
               bi.listing_board_requirement_summary, bi.financing_stage_requirement_summary,
               bi.transaction_type, bi.transaction_types_json, bi.premium_tolerance_summary,
               bi.max_premium_rate, bi.max_debt_ratio, bi.debt_ratio_requirement_summary,
               bi.major_risk_tolerance_summary, bi.unacceptable_risk_flags_json,
               bi.buyer_industry_advantage_summary,
               bi.acceptable_cash_flow_status_json, bi.acceptable_profitability_status_json,
-              bi.requires_relocation, bi.relocation_target_regions_json,
+              bi.requires_relocation,
               bi.requires_return_investment, bi.return_investment_multiple,
               bi.requires_team_retention, bi.earnout_requirement,
-              bi.listing_market_region, bi.budget_min_yuan, bi.budget_max_yuan,
+              bi.listing_market_region,
               bi.needs_confirmation_json, bi.reviewed_at::text as reviewed_at, bi.reviewed_by,
               bi.owner_user_id,
               (select au.name from app_user au where au.id = bi.owner_user_id) as owner_name,
@@ -442,11 +450,14 @@ BUYER_INTENT_OUT_COLUMNS = f"""
 """
 
 
+# 参数名沿用 intent_summary（旧书签与既有链接不破），值指向新旧两列的拼接：
+# 迁移 022 已经把旧摘要并进 intent_business_summary，但阶段 A 两列并存，
+# 只搜新列会让「回填之后又被人工改回旧列」的那种边角情况搜不到。
 BUYER_INTENT_SEARCH_COLUMNS = {
     "intent_name": "bi.intent_name",
     "buyer_name": "bp.buyer_name",
     "raw_requirement_text": "bi.raw_requirement_text",
-    "intent_summary": "bi.intent_summary",
+    "intent_summary": "concat_ws(' ', bi.intent_business_summary, bi.intent_summary)",
 }
 
 
@@ -473,8 +484,8 @@ def create_buyer_intent(
               min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
               requires_control, requires_consolidation, accepts_minority_investment,
               desired_equity_ratio_min, desired_equity_ratio_max, equity_ratio_summary,
-              equity_requirement_type, acceptable_control_paths_json,
-              preferred_listed_status, acceptable_listed_status_json, condition_effects_json,
+              equity_requirement_type,
+              preferred_listed_status, acceptable_listed_status_json,
               listing_board_requirement_summary,
               financing_stage_requirement_summary, transaction_type, transaction_types_json,
               premium_tolerance_summary, max_premium_rate, max_debt_ratio,
@@ -482,10 +493,10 @@ def create_buyer_intent(
               unacceptable_risk_flags_json,
               buyer_industry_advantage_summary,
               acceptable_cash_flow_status_json, acceptable_profitability_status_json,
-              requires_relocation, relocation_target_regions_json,
+              requires_relocation,
               requires_return_investment, return_investment_multiple,
               requires_team_retention, earnout_requirement, listing_market_region,
-              budget_min_yuan, budget_max_yuan, needs_confirmation_json,
+              needs_confirmation_json,
               created_by, updated_by
             )
             values (
@@ -500,8 +511,8 @@ def create_buyer_intent(
               :min_market_cap_yuan, :max_market_cap_yuan, :market_cap_range_summary,
               :requires_control, :requires_consolidation, :accepts_minority_investment,
               :desired_equity_ratio_min, :desired_equity_ratio_max, :equity_ratio_summary,
-              :equity_requirement_type, :acceptable_control_paths_json,
-              :preferred_listed_status, :acceptable_listed_status_json, :condition_effects_json,
+              :equity_requirement_type,
+              :preferred_listed_status, :acceptable_listed_status_json,
               :listing_board_requirement_summary,
               :financing_stage_requirement_summary, :transaction_type, :transaction_types_json,
               :premium_tolerance_summary, :max_premium_rate, :max_debt_ratio,
@@ -509,10 +520,10 @@ def create_buyer_intent(
               :unacceptable_risk_flags_json,
               :buyer_industry_advantage_summary,
               :acceptable_cash_flow_status_json, :acceptable_profitability_status_json,
-              :requires_relocation, :relocation_target_regions_json,
+              :requires_relocation,
               :requires_return_investment, :return_investment_multiple,
               :requires_team_retention, :earnout_requirement, :listing_market_region,
-              :budget_min_yuan, :budget_max_yuan, :needs_confirmation_json,
+              :needs_confirmation_json,
               :created_by, :updated_by
             )
             returning id
@@ -525,13 +536,13 @@ def create_buyer_intent(
             bindparam("excluded_industries_json", type_=JSONB),
             bindparam("industry_focus_tags_json", type_=JSONB),
             bindparam("region_constraints_json", type_=JSONB),
-            bindparam("acceptable_control_paths_json", type_=JSONB),
+            bindparam("intent_business_tags_json", type_=JSONB),
+            bindparam("acceptable_regions_json", type_=JSONB),
+            bindparam("excluded_regions_json", type_=JSONB),
             bindparam("acceptable_listed_status_json", type_=JSONB),
-            bindparam("condition_effects_json", type_=JSONB),
             bindparam("transaction_types_json", type_=JSONB),
             bindparam("acceptable_cash_flow_status_json", type_=JSONB),
             bindparam("acceptable_profitability_status_json", type_=JSONB),
-            bindparam("relocation_target_regions_json", type_=JSONB),
             bindparam("needs_confirmation_json", type_=JSONB),
             # 018 加这一列时只接了 params 与插入列，漏了类型声明。少了 type_=JSONB，
             # Python 的 [] 会被适配成 Postgres 数组而不是 jsonb，写进 jsonb 列直接
@@ -563,6 +574,9 @@ def list_buyer_intents(
         default=None
     ),
     buyer_party_id: UUID | None = None,
+    # 0828：行业字典在需求侧下线，筛选维换成自由业务标签。旧参数名 `industry`
+    # 保留一轮并按标签匹配 —— 旧书签会自然匹配 0 行或少量行，好过 422 被前端吞掉。
+    business_tag: str | None = Query(default=None, max_length=200),
     industry: str | None = Query(default=None, max_length=200),
     region: str | None = Query(default=None, max_length=200),
     # 参数名沿用 status（旧书签与既有链接不破），值域换成级别 A-E。
@@ -603,26 +617,27 @@ def list_buyer_intents(
             where.append(
                 "("
                 "bi.intent_name ilike :q or bp.buyer_name ilike :q or bp.aliases_json::text ilike :q "
-                "or bi.raw_requirement_text ilike :q or bi.intent_summary ilike :q "
-                "or bi.industry_primary ilike :q or bi.industry_secondary ilike :q or bi.region_scope_summary ilike :q"
+                "or bi.raw_requirement_text ilike :q or bi.intent_business_summary ilike :q "
+                "or bi.intent_summary ilike :q or bi.intent_business_tags_json::text ilike :q "
+                "or bi.excluded_business_text ilike :q or bi.region_scope_summary ilike :q"
                 ")"
             )
         params["q"] = f"%{q}%"
     if buyer_party_id:
         where.append("bi.buyer_party_id = :buyer_party_id")
         params["buyer_party_id"] = buyer_party_id
-    if industry:
-        where.append("bi.industries_json ? :industry")
-        params["industry"] = industry
+    tag = business_tag or industry
+    if tag:
+        where.append("bi.intent_business_tags_json ? :business_tag")
+        params["business_tag"] = tag
     if region:
+        # 只按省筛。市/区级筛选由反向检索的 filter_buyers 承担 —— 列表页的下拉
+        # 只有省这一层，给它三级会出现「选了苏州市但列表按省匹配」的错位。
         where.append(
             "exists ("
             "select 1 from jsonb_array_elements("
-            + _JSONB_ARRAY.format(column="bi.region_constraints_json")
-            + ") rc "
-            "where rc->>'province' = :region "
-            "and coalesce(rc->>'effect', 'preferred') <> 'excluded'"
-            ")"
+            + _JSONB_ARRAY.format(column="bi.acceptable_regions_json")
+            + ") r where r->>'province' = :region)"
         )
         params["region"] = region
     if status:
@@ -693,12 +708,12 @@ def buyer_intent_filter_options(current_user: CurrentUser, db: Session = Depends
         params["scope_user_id"] = current_user.user_id
         scope_clause = "and owner_user_id = :scope_user_id"
         scope_clause_bi = "and bi.owner_user_id = :scope_user_id"
-    industries = _filter_options(
+    business_tags = _filter_options(
         db,
         f"""
         select ind.value as value, count(distinct bi.id) as count
         from buyer_intent bi
-        cross join lateral jsonb_array_elements_text({_JSONB_ARRAY.format(column="bi.industries_json")}) as ind(value)
+        cross join lateral jsonb_array_elements_text({_JSONB_ARRAY.format(column="bi.intent_business_tags_json")}) as ind(value)
         where bi.team_id = :team_id
           and bi.workspace_id = :workspace_id
           and bi.deleted_at is null
@@ -715,13 +730,12 @@ def buyer_intent_filter_options(current_user: CurrentUser, db: Session = Depends
         f"""
         select rc.elem->>'province' as value, count(distinct bi.id) as count
         from buyer_intent bi
-        cross join lateral jsonb_array_elements({_JSONB_ARRAY.format(column="bi.region_constraints_json")}) as rc(elem)
+        cross join lateral jsonb_array_elements({_JSONB_ARRAY.format(column="bi.acceptable_regions_json")}) as rc(elem)
         where bi.team_id = :team_id
           and bi.workspace_id = :workspace_id
           and bi.deleted_at is null
           {scope_clause_bi}
           and nullif(rc.elem->>'province', '') is not null
-          and coalesce(rc.elem->>'effect', 'preferred') <> 'excluded'
         group by rc.elem->>'province'
         order by count desc, value asc
         limit 80
@@ -838,7 +852,10 @@ def buyer_intent_filter_options(current_user: CurrentUser, db: Session = Depends
     )
     owners = [] if owner_scope_required(current_user) else owner_filter_options(db, "buyer_intent", params)
     return {
-        "industries": industries,
+        # 旧键名 industries 保留一轮：前端切到 business_tags 之前两边都读得到，
+        # 一次性改名会让没同步发版的前端筛选框整个空掉。
+        "industries": business_tags,
+        "business_tags": business_tags,
         "regions": regions,
         "statuses": statuses,
         "listed_statuses": listed_statuses,
@@ -1174,8 +1191,6 @@ def update_buyer_intent(
         changes["acceptable_listed_status_json"] = _normalize_acceptable_listed_statuses(
             [changes["preferred_listed_status"]]
         )
-    if "condition_effects_json" in changes:
-        changes["condition_effects_json"] = normalize_condition_effects(changes["condition_effects_json"])
     if "unacceptable_risk_flags_json" in changes:
         # 归一化返回 None = 「给了内容但一条也没落进闭集」。那不是「未提及」，
         # 所以不能落成空数组，直接把这一列从本次变更里摘掉。
@@ -1185,12 +1200,13 @@ def update_buyer_intent(
         else:
             changes["unacceptable_risk_flags_json"] = normalized_flags
 
-    if "region_constraints_json" in changes:
-        # 与新建同一个理由：不归一就等于让任何形状直接落进初筛要读的那一列。
-        # 归一还会把「长三角」展开成四个省 —— 顾问手改时写的也是城市群。
-        changes["region_constraints_json"] = normalize_buyer_region_constraints(
-            changes["region_constraints_json"]
-        )[0]
+    for region_column in ("acceptable_regions_json", "excluded_regions_json"):
+        if region_column in changes:
+            # 与新建同一个理由：不归一就等于让任何形状直接落进筛选要读的那一列。
+            # 归一还会把「长三角」展开成四个省 —— 顾问手改时写的也是城市群。
+            changes[region_column] = normalize_buyer_regions(
+                changes[region_column], field=region_column
+            )[0]
 
     if "owner_user_id" in changes:
         require_admin(current_user)
@@ -1243,23 +1259,13 @@ def update_buyer_intent(
         returning id
         """
     )
+    # jsonb 列从注册表派生（0828）。漏登记一列的表现是 jsonb 被当字符串写进去，
+    # 值坏掉而且不报错 —— 阶段 B 删列时手抄的清单必然漏。
     json_fields = {
-        "contact_info_json",
-        "parsed_requirement_json",
-        "region_constraints_json",
-        "acceptable_control_paths_json",
-        "transaction_types_json",
-        "industries_json",
-        "industry_l2_json",
-        "excluded_industries_json",
-        "industry_focus_tags_json",
-        "acceptable_cash_flow_status_json",
-        "acceptable_profitability_status_json",
-        "relocation_target_regions_json",
-        "needs_confirmation_json",
-        "acceptable_listed_status_json",
-        "condition_effects_json",
-    }
+        indicator.column
+        for indicator in indicators_for("buyer_intent")
+        if indicator.kind == "json"
+    } | {"contact_info_json", "parsed_requirement_json", "needs_confirmation_json"}
 
     bind_params = [bindparam(field, type_=JSONB) for field in changes if field in json_fields]
     if bind_params:
@@ -1549,13 +1555,21 @@ def _buyer_intent_params(payload: BuyerIntentCreate, current_user: AuthContext, 
         "excluded_industries_json": payload.excluded_industries_json or [],
         "industry_focus_tags_json": payload.industry_focus_tags_json or [],
         "region_scope_summary": payload.region_scope_summary,
+        "intent_business_tags_json": payload.intent_business_tags_json or [],
+        "intent_business_summary": payload.intent_business_summary,
+        "excluded_business_text": payload.excluded_business_text,
         # 归一放在这里而不是只放在解析 handler 里：REST 写入绕过归一的后果是脏形状
         # 直接落库。生产里就躺着两条 —— 一条是裸字符串数组 `["四川省","云南省"]`，
         # 一条是 `{"raw_text":"长三角、珠三角区域","constraint_type":"soft"}`。
-        # 初筛按 `rc->>'province'` 取值，两条都取不出东西：**存了等于没存，且看不出来**。
-        "region_constraints_json": normalize_buyer_region_constraints(
-            payload.region_constraints_json or []
+        # 筛选按 `->>'province'` 取值，两条都取不出东西：**存了等于没存，且看不出来**。
+        # 归一还会把「长三角」展开成四个省 —— 顾问手填时写的也是城市群。
+        "acceptable_regions_json": normalize_buyer_regions(
+            payload.acceptable_regions_json or [], field="acceptable_regions_json"
         )[0],
+        "excluded_regions_json": normalize_buyer_regions(
+            payload.excluded_regions_json or [], field="excluded_regions_json"
+        )[0],
+        "region_constraints_json": payload.region_constraints_json or [],
         "min_revenue_yuan": payload.min_revenue_yuan,
         "min_net_profit_yuan": payload.min_net_profit_yuan,
         "min_total_profit_yuan": payload.min_total_profit_yuan,
@@ -1575,10 +1589,8 @@ def _buyer_intent_params(payload: BuyerIntentCreate, current_user: AuthContext, 
         "desired_equity_ratio_max": payload.desired_equity_ratio_max,
         "equity_ratio_summary": payload.equity_ratio_summary,
         "equity_requirement_type": payload.equity_requirement_type,
-        "acceptable_control_paths_json": payload.acceptable_control_paths_json or [],
         "preferred_listed_status": _legacy_listed_status(acceptable_listed_statuses),
         "acceptable_listed_status_json": acceptable_listed_statuses,
-        "condition_effects_json": normalize_condition_effects(payload.condition_effects_json),
         "listing_board_requirement_summary": payload.listing_board_requirement_summary,
         "financing_stage_requirement_summary": payload.financing_stage_requirement_summary,
         "transaction_type": payload.transaction_type,
@@ -1597,14 +1609,11 @@ def _buyer_intent_params(payload: BuyerIntentCreate, current_user: AuthContext, 
         "acceptable_cash_flow_status_json": payload.acceptable_cash_flow_status_json or [],
         "acceptable_profitability_status_json": payload.acceptable_profitability_status_json or [],
         "requires_relocation": payload.requires_relocation,
-        "relocation_target_regions_json": payload.relocation_target_regions_json or [],
         "requires_return_investment": payload.requires_return_investment,
         "return_investment_multiple": payload.return_investment_multiple,
         "requires_team_retention": payload.requires_team_retention,
         "earnout_requirement": payload.earnout_requirement,
         "listing_market_region": payload.listing_market_region,
-        "budget_min_yuan": payload.budget_min_yuan,
-        "budget_max_yuan": payload.budget_max_yuan,
         "needs_confirmation_json": payload.needs_confirmation_json or [],
         "created_by": current_user.user_id,
         "updated_by": current_user.user_id,
@@ -1813,7 +1822,6 @@ class BuyerIntentScenarioOut(BaseModel):
     active: bool
     fields_json: dict[str, Any]
     needs_confirmation_json: list[Any] = []
-    condition_effects_json: dict[str, Any] = {}
     source: str
     created_at: str
     updated_at: str
@@ -1826,7 +1834,6 @@ class BuyerIntentScenarioWrite(BaseModel):
     # 只接受条件白名单里的字段；越权字段在 normalize_scenario_fields 中被丢弃。
     fields_json: dict[str, Any] = Field(default_factory=dict)
     needs_confirmation_json: list[Any] = Field(default_factory=list)
-    condition_effects_json: dict[str, Any] = Field(default_factory=dict)
 
 
 @router.get("/{buyer_intent_id}/scenarios", response_model=list[BuyerIntentScenarioOut])
@@ -1842,7 +1849,7 @@ def list_buyer_intent_scenarios(
             """
             select
               id, buyer_intent_id, label, sort_order, active, fields_json,
-              needs_confirmation_json, condition_effects_json, source,
+              needs_confirmation_json, source,
               created_at::text as created_at, updated_at::text as updated_at
             from buyer_intent_scenario
             where buyer_intent_id = :buyer_intent_id
@@ -1879,21 +1886,20 @@ def create_buyer_intent_scenario(
             """
             insert into buyer_intent_scenario (
               team_id, workspace_id, buyer_intent_id, label, sort_order, active,
-              fields_json, needs_confirmation_json, condition_effects_json, source, created_by, updated_by
+              fields_json, needs_confirmation_json, source, created_by, updated_by
             )
             values (
               :team_id, :workspace_id, :buyer_intent_id, :label, :sort_order, :active,
-              :fields_json, :needs_confirmation_json, :condition_effects_json, 'manual', :user_id, :user_id
+              :fields_json, :needs_confirmation_json, 'manual', :user_id, :user_id
             )
             returning
               id, buyer_intent_id, label, sort_order, active, fields_json,
-              needs_confirmation_json, condition_effects_json, source,
+              needs_confirmation_json, source,
               created_at::text as created_at, updated_at::text as updated_at
             """
         ).bindparams(
             bindparam("fields_json", type_=JSONB),
             bindparam("needs_confirmation_json", type_=JSONB),
-            bindparam("condition_effects_json", type_=JSONB),
         ),
         {
             "team_id": DEFAULT_TEAM_ID,
@@ -1904,8 +1910,7 @@ def create_buyer_intent_scenario(
             "active": payload.active,
             "fields_json": normalize_scenario_fields(payload.fields_json),
             "needs_confirmation_json": payload.needs_confirmation_json,
-            "condition_effects_json": normalize_condition_effects(payload.condition_effects_json),
-            "user_id": current_user.user_id,
+                "user_id": current_user.user_id,
         },
     ).mappings().one()
     db.commit()
@@ -1931,7 +1936,6 @@ def update_buyer_intent_scenario(
                 active = :active,
                 fields_json = :fields_json,
                 needs_confirmation_json = :needs_confirmation_json,
-                condition_effects_json = :condition_effects_json,
                 updated_at = now(),
                 updated_by = :user_id
             where id = :scenario_id
@@ -1941,13 +1945,12 @@ def update_buyer_intent_scenario(
               and deleted_at is null
             returning
               id, buyer_intent_id, label, sort_order, active, fields_json,
-              needs_confirmation_json, condition_effects_json, source,
+              needs_confirmation_json, source,
               created_at::text as created_at, updated_at::text as updated_at
             """
         ).bindparams(
             bindparam("fields_json", type_=JSONB),
             bindparam("needs_confirmation_json", type_=JSONB),
-            bindparam("condition_effects_json", type_=JSONB),
         ),
         {
             "scenario_id": scenario_id,
@@ -1959,8 +1962,7 @@ def update_buyer_intent_scenario(
             "active": payload.active,
             "fields_json": normalize_scenario_fields(payload.fields_json),
             "needs_confirmation_json": payload.needs_confirmation_json,
-            "condition_effects_json": normalize_condition_effects(payload.condition_effects_json),
-            "user_id": current_user.user_id,
+                "user_id": current_user.user_id,
         },
     ).mappings().one_or_none()
     if row is None:

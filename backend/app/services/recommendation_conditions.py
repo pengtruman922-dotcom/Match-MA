@@ -30,8 +30,6 @@ from backend.app.services.buyer_risk_tolerance import normalize_unacceptable_ris
 from backend.app.services.industry_taxonomy import (
     industry_l1_prompt_list,
     industry_l2_prompt_list,
-    list_l1_terms,
-    list_l2_terms,
 )
 from backend.app.services.recommendation_trace import (
     RecommendationTraceContext,
@@ -193,10 +191,15 @@ _INTENT_RESULT_KEYS: tuple[str, ...] = (
     "unstructured_notes",
 )
 
-# 这两条是全局粘性的（见 recommendation_agent_tools.STICKY_CONDITIONS 与
-# 排除类条件的语义）：放宽多少次都还是不要。模型有时会把它们写进某一组的
-# conditions 里，那样只有那一组排除、别的组不排除，与用户的意思正好相反。
-# 所以在这里往上提，而不是留在组里。
+# 全局粘性排除（见 recommendation_agent_tools.STICKY_CONDITIONS）：放宽多少次
+# 都还是不要。模型有时会把它写进某一组的 conditions 里，那样只有那一组排除、
+# 别的组不排除，与用户的意思正好相反 —— 所以在这里往上提，而不是留在组里。
+#
+# excluded_industries_json 2026-08-28 起**不再是可筛字段**（行业条件整组退役），
+# 但仍然留在这份清单里，理由变了：现在往上提是为了**把它救下来**。
+# 不提的话它会留在组条件里，被 normalize_conditions 当成「不是可筛字段，已忽略」
+# 丢掉 —— 用户说的「不要房地产」就此消失。提上来之后它进 exclusions.industries，
+# 再渲染成「不接受房地产」进 qualitative_requirements，由主 Agent 读业务摘要时执行。
 _GLOBAL_EXCLUSION_COLUMNS: tuple[str, ...] = (
     "excluded_industries_json",
     "unacceptable_risk_flags_json",
@@ -210,23 +213,22 @@ _OPERATOR_NOTES: dict[str, str] = {
     "overlap": "标的命中数组里任一项即通过",
     "not_overlap": "标的命中数组里任一项即出局",
     "region_any": '数组，每项形如 {"province": "江苏省", "city": "苏州市"}，只填你确定的层级，任一项命中即通过',
+    # 方向必须写反过来：同一个形状（省市区数组）在 region_none 下是「命中即出局」。
+    # 照 region_any 那句写，模型会把「不要新疆」理解成「只要新疆」，而 SQL 照做且不报错。
+    "region_none": '数组，每项形如 {"province": "新疆维吾尔自治区"}，只填你确定的层级，任一项命中即出局',
     "requirement_capability": "布尔。填 true 表示本次要求标的具备该能力；不作要求就不要写这个字段",
-}
-
-_INDUSTRY_VOCABULARY_NOTES: dict[str, str] = {
-    "industry_l1": "只能填一级行业清单里的词",
-    "industry_l2": "只能填二级行业清单里的词",
-    "industry_any": "只能填一级或二级行业清单里的词",
 }
 
 
 def screening_fields_prompt_json() -> str:
-    """24 个可筛字段的说明，注入解析提示词。
+    """可筛字段的说明，注入解析提示词。
 
     从 `SCREENING_FIELDS` 生成，不手写。手写的那份必然与注册表漂移，而漂移
     的方向永远是「提示词里还留着一个已经不能筛的字段」—— 模型照填，代码照
-    丢，用户的话就这么没了。行业闭集不在这里展开：它有自己的两个变量，
-    一百多个二级行业塞进来会把这份说明淹掉。
+    丢，用户的话就这么没了。
+
+    行业词表说明 0828 一并删除：需求侧的行业条件整组退役，这份清单里已经
+    没有任何字段需要外部词表（地区走省份归一，其余都是注册表里的闭集）。
     """
     entries: list[dict[str, Any]] = []
     for field in SCREENING_FIELDS:
@@ -239,14 +241,7 @@ def screening_fields_prompt_json() -> str:
             entry["enum"] = list(field.enum_values)
         if field.unit_hint:
             entry["unit"] = field.unit_hint
-        note = "；".join(
-            part
-            for part in (
-                _OPERATOR_NOTES.get(field.operator, ""),
-                _INDUSTRY_VOCABULARY_NOTES.get(field.value_type, ""),
-            )
-            if part
-        )
+        note = _OPERATOR_NOTES.get(field.operator, "")
         if note:
             entry["note"] = note
         entries.append(entry)
@@ -338,13 +333,7 @@ def _normalize_group_strength(raw: Any, conditions: dict[str, Any]) -> dict[str,
     return strength
 
 
-def normalize_intent_parse_result(
-    raw: Any,
-    *,
-    industry_l1_terms: list[str],
-    industry_l2_terms: list[str],
-    user_message: str,
-) -> dict[str, Any]:
+def normalize_intent_parse_result(raw: Any, *, user_message: str) -> dict[str, Any]:
     """把模型给的需求快照收敛成可执行的形状。纯函数，不碰 DB、不碰 LLM。
 
     双出口是这里的全部要点：能过 `normalize_conditions` 的进 `conditions`，
@@ -395,11 +384,7 @@ def normalize_intent_parse_result(
             bucket = hoisted_industries if column == "excluded_industries_json" else hoisted_risk
             bucket.extend(value if isinstance(value, list) else [value])
 
-        conditions, ignored = normalize_conditions(
-            raw_conditions,
-            industry_l1_terms=industry_l1_terms,
-            industry_l2_terms=industry_l2_terms,
-        )
+        conditions, ignored = normalize_conditions(raw_conditions)
         parser_notes.extend(ignored)
         for phrase in _leftover_requirements(raw_conditions, conditions):
             _append_intent_text(qualitative, phrase)
@@ -417,8 +402,6 @@ def normalize_intent_parse_result(
         data.get("exclusions"),
         hoisted_industries=hoisted_industries,
         hoisted_risk=hoisted_risk,
-        industry_l1_terms=industry_l1_terms,
-        industry_l2_terms=industry_l2_terms,
         qualitative=qualitative,
     )
     parser_notes.extend(exclusion_notes)
@@ -446,14 +429,17 @@ def _normalize_intent_exclusions(
     *,
     hoisted_industries: list[Any],
     hoisted_risk: list[Any],
-    industry_l1_terms: list[str],
-    industry_l2_terms: list[str],
     qualitative: list[str],
 ) -> tuple[dict[str, Any], list[str]]:
-    """排除项归一。落不进闭集的排除词也要留下，但必须**留成否定句**。
+    """排除项归一。排除词必须**留成否定句**。
 
-    这里有个方向陷阱：把没归一上的「房地产」丢进 qualitative_requirements
-    会读成「想要房地产」，与用户的意思正好相反。所以统一渲染成「不接受 X」。
+    这里有个方向陷阱：把「房地产」直接丢进 qualitative_requirements 会读成
+    「想要房地产」，与用户的意思正好相反。所以统一渲染成「不接受 X」。
+
+    0828 起排除行业**没有 SQL 出口了**（行业条件整组退役），所以每一个词都走
+    这条文字路径 —— 以前只有过不了字典的那些才走。`exclusions["industries"]`
+    仍然如实返回，它服务快照展示与 trace，不再编译成筛选条件
+    （见 recommendation_agent_policy._compile_exclusions）。
     """
     data = raw if isinstance(raw, dict) else {}
     notes: list[str] = []
@@ -463,19 +449,9 @@ def _normalize_intent_exclusions(
         term = str(value).strip() if value is not None else ""
         if term and term not in industry_terms:
             industry_terms.append(term)
-    industries: list[str] = []
-    if industry_terms:
-        coerced, ignored = normalize_conditions(
-            {"excluded_industries_json": industry_terms},
-            industry_l1_terms=industry_l1_terms,
-            industry_l2_terms=industry_l2_terms,
-        )
-        notes.extend(ignored)
-        industries = list(coerced.get("excluded_industries_json") or [])
-        survivors = {term.lower() for term in industries}
-        for term in industry_terms:
-            if term.lower() not in survivors:
-                _append_intent_text(qualitative, f"不接受{term}")
+    industries: list[str] = list(industry_terms)
+    for term in industry_terms:
+        _append_intent_text(qualitative, f"不接受{term}")
 
     raw_risk = data.get("risk_flags")
     if raw_risk in (None, [], {}) and hoisted_risk:
@@ -546,8 +522,6 @@ def parse_recommendation_intent(
     started = time.perf_counter()
     try:
         node = _get_query_parser_node_config(db)
-        industry_l1_terms = list_l1_terms(db)
-        industry_l2_terms = list_l2_terms(db)
         variables = {
             "mode": mode,
             "user_message": user_message,
@@ -590,12 +564,7 @@ def parse_recommendation_intent(
         )
         return fallback_intent_parse_result(user_message, note=f"解析节点未产出结果：{exc}")
 
-    result = normalize_intent_parse_result(
-        raw_output,
-        industry_l1_terms=industry_l1_terms,
-        industry_l2_terms=industry_l2_terms,
-        user_message=user_message,
-    )
+    result = normalize_intent_parse_result(raw_output, user_message=user_message)
     # 哪一版提示词产出的这份快照，写进结果一起落库：失配要响，得先能指认。
     result["prompt_version"] = str(node.get("prompt_version") or "")
     parser_status = str(result.get("parser_status") or "")
@@ -664,26 +633,21 @@ def normalize_scenario_fields(raw: Any) -> dict[str, Any]:
     return fields
 
 
-# 规则只有两态：必须（初筛硬门槛）和优先（只影响排序）。
+# 强度只有两态：必须（硬门槛）和优先（只影响排序）。
 # 曾经还有第三个取值 deep_eval，名字骗人 —— 深评上下文是把整个 anchor 打包成
 # 一个 JSON 交给模型的，从来不按字段分流；那个标签实际只让字段跳过规则打分。
-# 现在「不参与规则打分」由 condition_effect 返回 None 表达，不再是可选的规则。
+#
+# 2026-08-28：`buyer_intent.condition_effects_json` 与它的归一函数
+# `normalize_condition_effects` 一起退役（方案 0828 判决三）。那一列的三个消费方
+# （前端角标、深评上下文的「条件作用」、解析写入路径）本轮全部拆掉，
+# 而**筛选**消费方在阶段五 5B 拆旧链路时就已经没了 —— 注册表里那句
+# 「recommendation_flow.py 用它放宽三道硬门槛」是过期注释，grep 过没有这个人。
+#
+# 这个词表本身还有两个真实用户，所以留着：
+#   1. `_normalize_group_strength`：对话链路的条件强度由解析节点输出，
+#      由主 Agent 的调用策略表达，与已退役的那一列是两套东西。
+#   2. `buyer_intent_parse` 的待确认项：一条 needs_confirmation 可以带 effect
+#      说明「这个门槛是硬是软还没定」。
 CONDITION_EFFECTS = {"required", "preferred"}
-
-
-def normalize_condition_effects(raw: Any) -> dict[str, str]:
-    """Keep only editable contract fields and the two supported effects."""
-    if not isinstance(raw, dict):
-        return {}
-    allowed = {
-        indicator.column
-        for indicator in indicators_for("buyer_intent")
-        if indicator.effect_editable or indicator.default_effect is not None
-    }
-    return {
-        str(field): str(effect)
-        for field, effect in raw.items()
-        if str(field) in allowed and str(effect) in CONDITION_EFFECTS
-    }
 
 

@@ -13,10 +13,11 @@ function scenarioSummary(scenario: BuyerIntentScenario): string {
 
   const listed = fields.acceptable_listed_status_json;
   if (Array.isArray(listed) && listed.length) {
-    parts.push(listed.map((value) => valueLabel('preferred_listed_status', String(value))).join('、'));
+    parts.push(listed.map((value) => valueLabel('acceptable_listed_status_json', String(value))).join('、'));
   }
-  const industries = fields.industries_json;
-  if (Array.isArray(industries) && industries.length) parts.push(industries.map(String).join('、'));
+  // 0828：行业字典在需求侧下线，方案里的业务方向来自自由标签。
+  const tags = fields.intent_business_tags_json;
+  if (Array.isArray(tags) && tags.length) parts.push(tags.map(String).join('、'));
   if (fields.min_revenue_yuan) parts.push(`营收≥${formatCompactMoney(Number(fields.min_revenue_yuan))}`);
   if (fields.min_net_profit_yuan) parts.push(`净利≥${formatCompactMoney(Number(fields.min_net_profit_yuan))}`);
   if (fields.max_pe) parts.push(`PE≤${Number(fields.max_pe).toFixed(0)}`);

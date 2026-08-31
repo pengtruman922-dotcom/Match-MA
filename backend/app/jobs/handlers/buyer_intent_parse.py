@@ -40,31 +40,31 @@ from backend.app.jobs.handlers.traces import (
 )
 from backend.app.jobs.queue import JobClaim
 from backend.app.registry.indicators import (
+    buyer_intent_fact_columns,
     buyer_party_fact_columns,
     indicator_by_column,
     indicators_for,
+    writable_columns,
 )
 from backend.app.registry.nodes import buyer_intent_legacy_node_name, buyer_intent_two_stage_node_names
-from backend.app.services.buyer_intent_industry import normalize_buyer_intent_industry_changes
+from backend.app.services.business_tags import normalize_business_tags
 from backend.app.services.buyer_risk_tolerance import normalize_unacceptable_risk_flags
 from backend.app.services.entity_grade import BUYER_GRADE, resolve_grade_pair
 from backend.app.services.listed_status import legacy_listed_status
 from backend.app.services.profile_sections import apply_profile_section, normalize_profile_section_items
+# 行业字典在买家需求侧已于 0828 下线，这里只剩两个**提示词变量**。
+# 留着不是遗漏：prompt_template 是数据库里的版本化资源，部署新代码时线上跑的
+# 仍可能是引用 {industry_l1_list} 的旧版本，变量一撤那一版当场渲染失败。
+# 等新版 buyer_intent_normalizer 发布并确认无回滚需求后，这两行才能删。
 from backend.app.services.industry_taxonomy import (
-    classify_terms,
     industry_l1_prompt_list,
     industry_l2_prompt_list,
-    load_term_levels,
-    normalize_excluded_terms,
-    normalize_l1_values,
-    normalize_l2_values,
 )
 from backend.app.services.recommendation_conditions import (
     CONDITION_EFFECTS,
-    normalize_condition_effects,
     normalize_scenario_fields,
 )
-from backend.app.services.region_dictionary import PROVINCES, normalize_buyer_region_constraints
+from backend.app.services.region_dictionary import PROVINCES, normalize_buyer_regions
 from backend.app.services.search_docs import (
     create_search_doc_rebuild_job,
 )
@@ -163,13 +163,7 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
     _set_buyer_intent_parse_stage(db, job.id, "writing")
     parsed_output_json = _route_scoped_confirmation_items(parsed_output_json)
     changes, normalization_notes = _normalize_buyer_intent_parse_changes(parsed_output_json, raw_requirement_text)
-    normalization_notes.extend(_normalize_buyer_intent_industry_changes(db, changes))
-    if "region_constraints_json" in changes:
-        normalized_regions, region_pending = normalize_buyer_region_constraints(changes["region_constraints_json"])
-        changes["region_constraints_json"] = normalized_regions
-        changes["needs_confirmation_json"] = _merge_confirmation_items(
-            changes.get("needs_confirmation_json"), region_pending
-        )
+    _normalize_buyer_intent_regions(changes)
     changes = _reconcile_buyer_intent_scope(
         db,
         current_fields=buyer_intent,
@@ -492,10 +486,18 @@ def _buyer_intent_field_contract() -> list[dict[str, Any]]:
 
 
 def _buyer_intent_enum_contract() -> dict[str, list[str]]:
+    """模型能写的枚举列的合法取值。
+
+    **必须与 `_buyer_intent_field_contract()` 同口径按 `parse` 过滤。**
+    只按 `enum_options` 过滤的话，退役字段的闭集会继续出现在提示词里 ——
+    模型看到一张它填不进任何东西的取值表，字段表变短了、取值表没变短，
+    而多出来的那些取值每次解析都要占一次注意力。
+    0828 实测：不过滤是 17 项 1385 字符，过滤后 8 项。
+    """
     return {
         indicator.column: [value for value, _ in indicator.enum_options]
         for indicator in indicators_for("buyer_intent")
-        if indicator.enum_options
+        if indicator.enum_options and "parse" in indicator.writable_by
     }
 
 
@@ -615,15 +617,6 @@ def _reconcile_buyer_intent_scope(
             accepted[field] = proposed
             effective[field] = proposed
             continue
-        if field == "condition_effects_json":
-            effects, effect_pending = _reconcile_condition_effects(
-                current_fields.get(field), proposed, scope_label=scope_label
-            )
-            if effects:
-                accepted[field] = effects
-                effective[field] = effects
-            generated_pending.extend(effect_pending)
-            continue
         if not _has_reconciliation_value(proposed):
             normalization_notes.append(f"ignored_empty_parse_value:{scope_label}:{field}")
             continue
@@ -701,34 +694,6 @@ def _reconcile_buyer_intent_scope(
     return accepted
 
 
-def _reconcile_condition_effects(
-    current: Any,
-    proposed: Any,
-    *,
-    scope_label: str,
-) -> tuple[dict[str, str], list[dict[str, Any]]]:
-    current_effects = current if isinstance(current, dict) else {}
-    proposed_effects = proposed if isinstance(proposed, dict) else {}
-    accepted = dict(current_effects)
-    pending: list[dict[str, Any]] = []
-    for field, effect in proposed_effects.items():
-        current_effect = current_effects.get(field)
-        if not current_effect or current_effect == effect:
-            accepted[str(field)] = str(effect)
-            continue
-        pending.append(
-            {
-                "field": str(field),
-                "reason": "新解析的条件作用与当前设置不一致，请确认必须/优先级",
-                "uncertain_part": "effect",
-                "effect": str(effect),
-                "scope": scope_label,
-                "item_key": f"effect-conflict:{_normalized_scope_label(scope_label)}:{field}",
-            }
-        )
-    return accepted, pending
-
-
 def _normalize_confirmation_proposed_value(
     db: Session,
     *,
@@ -746,10 +711,7 @@ def _normalize_confirmation_proposed_value(
         {"fields": {field: value}},
         "",
     )
-    _normalize_buyer_intent_industry_changes(db, normalized)
-    if field == "region_constraints_json" and field in normalized:
-        regions, _ = normalize_buyer_region_constraints(normalized[field])
-        normalized[field] = regions
+    _normalize_buyer_intent_regions(normalized)
     result = normalized.get(field)
     return _has_reconciliation_value(result), result
 
@@ -799,7 +761,7 @@ def _replace_buyer_intent_scenarios(
         for row in existing_rows
         if _normalized_scope_label(row.get("label"))
     }
-    parsed: list[tuple[str, dict[str, Any], list[dict[str, Any]], dict[str, str]]] = []
+    parsed: list[tuple[str, dict[str, Any], list[dict[str, Any]]]] = []
     for index, item in enumerate(raw_scenarios[:MAX_PARSED_SCENARIOS]):
         if not isinstance(item, dict):
             continue
@@ -809,31 +771,22 @@ def _replace_buyer_intent_scenarios(
         label = str(item.get("label") or item.get("name") or f"方案{index + 1}").strip()[:120]
         existing = existing_by_label.get(_normalized_scope_label(label), {})
         current_fields = existing.get("fields_json") if isinstance(existing.get("fields_json"), dict) else {}
-        current_effects = (
-            existing.get("condition_effects_json")
-            if isinstance(existing.get("condition_effects_json"), dict)
-            else {}
-        )
         scenario_notes: list[str] = []
         reconciled = _reconcile_buyer_intent_scope(
             db,
-            current_fields={**current_fields, "condition_effects_json": current_effects},
+            current_fields=current_fields,
             candidate_changes={
-                **_normalize_parsed_scenario_fields(db, raw_fields),
+                **_normalize_parsed_scenario_fields(raw_fields),
                 "needs_confirmation_json": pending,
-                "condition_effects_json": normalize_condition_effects(
-                    item.get("condition_effects") or item.get("effects")
-                ),
             },
             normalization_notes=scenario_notes,
             scope_label=label,
         )
         pending = reconciled.pop("needs_confirmation_json", [])
-        effects = reconciled.pop("condition_effects_json", current_effects)
         fields = {**current_fields, **reconciled}
         if not fields and not pending:
             continue
-        parsed.append((label, fields, pending, effects))
+        parsed.append((label, fields, pending))
 
     # A one-scenario output is the flat/common representation. On a reparse it
     # is not authority to erase two already reviewed scenario scopes.
@@ -858,23 +811,22 @@ def _replace_buyer_intent_scenarios(
             "workspace_id": DEFAULT_WORKSPACE_ID,
         },
     )
-    for sort_order, (label, fields, pending, effects) in enumerate(parsed):
+    for sort_order, (label, fields, pending) in enumerate(parsed):
         db.execute(
             text(
                 """
                 insert into buyer_intent_scenario (
                   team_id, workspace_id, buyer_intent_id, label, sort_order,
-                  fields_json, needs_confirmation_json, condition_effects_json, source, created_by, updated_by
+                  fields_json, needs_confirmation_json, source, created_by, updated_by
                 )
                 values (
                   :team_id, :workspace_id, :buyer_intent_id, :label, :sort_order,
-                  :fields_json, :needs_confirmation_json, :condition_effects_json, 'parser', :user_id, :user_id
+                  :fields_json, :needs_confirmation_json, 'parser', :user_id, :user_id
                 )
                 """
             ).bindparams(
                 bindparam("fields_json", type_=JSONB),
                 bindparam("needs_confirmation_json", type_=JSONB),
-                bindparam("condition_effects_json", type_=JSONB),
             ),
             {
                 "team_id": DEFAULT_TEAM_ID,
@@ -884,7 +836,6 @@ def _replace_buyer_intent_scenarios(
                 "sort_order": sort_order,
                 "fields_json": fields,
                 "needs_confirmation_json": pending,
-                "condition_effects_json": effects,
                 "user_id": SYSTEM_USER_ID,
             },
         )
@@ -896,7 +847,7 @@ def _load_parser_scenarios(db: Session, buyer_intent_id: UUID) -> list[dict[str,
     rows = db.execute(
         text(
             """
-            select label, fields_json, needs_confirmation_json, condition_effects_json
+            select label, fields_json, needs_confirmation_json
             from buyer_intent_scenario
             where buyer_intent_id = :buyer_intent_id
               and team_id = :team_id
@@ -915,8 +866,8 @@ def _load_parser_scenarios(db: Session, buyer_intent_id: UUID) -> list[dict[str,
     return [dict(row) for row in rows]
 
 
-def _normalize_parsed_scenario_fields(db: Session, raw_fields: Any) -> dict[str, Any]:
-    """Apply the same closed-taxonomy policy to fields nested in scenarios."""
+def _normalize_parsed_scenario_fields(raw_fields: Any) -> dict[str, Any]:
+    """方案内嵌字段走与公共条件同一套归一（上市状态闭集 + 地区两列）。"""
     fields = normalize_scenario_fields(raw_fields)
     if "acceptable_listed_status_json" in fields:
         statuses = _normalize_acceptable_listed_statuses(fields["acceptable_listed_status_json"])
@@ -927,65 +878,50 @@ def _normalize_parsed_scenario_fields(db: Session, raw_fields: Any) -> dict[str,
     if "preferred_listed_status" in fields:
         listed_status = _normalize_listed_status(fields["preferred_listed_status"])
         fields["preferred_listed_status"] = "pre_ipo" if listed_status == "preparing_listing" else listed_status
-    if "region_constraints_json" in fields:
-        regions, _ = normalize_buyer_region_constraints(fields["region_constraints_json"])
-        if regions:
-            fields["region_constraints_json"] = regions
+    if "intent_business_tags_json" in fields:
+        tags = normalize_business_tags(fields["intent_business_tags_json"])
+        if tags:
+            fields["intent_business_tags_json"] = tags
         else:
-            fields.pop("region_constraints_json", None)
-    if "industries_json" in fields:
-        normalized_l1, _ = normalize_l1_values(db, fields["industries_json"], fallback_unmapped=False)
-        if normalized_l1:
-            fields["industries_json"] = normalized_l1
-        else:
-            fields.pop("industries_json", None)
-    if "industry_l2_json" in fields:
-        normalized_l2, _ = normalize_l2_values(db, fields["industry_l2_json"])
-        if normalized_l2:
-            fields["industry_l2_json"] = normalized_l2
-        else:
-            fields.pop("industry_l2_json", None)
-    if "excluded_industries_json" in fields:
-        classified = classify_terms(
-            normalize_excluded_terms(fields["excluded_industries_json"]),
-            load_term_levels(db),
-        )
-        effective_exclusions = classified["l1"] + classified["l2"]
-        if effective_exclusions:
-            fields["excluded_industries_json"] = effective_exclusions
-        else:
-            fields.pop("excluded_industries_json", None)
+            fields.pop("intent_business_tags_json", None)
+    for column in ("acceptable_regions_json", "excluded_regions_json"):
+        if column in fields:
+            regions, _ = normalize_buyer_regions(fields[column], field=column)
+            if regions:
+                fields[column] = regions
+            else:
+                fields.pop(column, None)
     return fields
+
+
+def _normalize_buyer_intent_regions(changes: dict[str, Any]) -> None:
+    """就地归一两个地区数组，无法落到标准省份的条目转成待确认项。
+
+    公共条件与「方案」两条路都调它 —— 归一只写一次，否则「带不带方案」会决定
+    地区要不要过省份词表（2026-08-01 在行业字段上实测过同一个问题）。
+
+    ⚠️ 归一不出来的**不能直接丢**：丢掉的地区在筛选里表现为「这些标的进不来」，
+    界面上看不出来。所以走 needs_confirmation_json 让人来判。
+    """
+    for column in ("acceptable_regions_json", "excluded_regions_json"):
+        if column not in changes:
+            continue
+        regions, pending = normalize_buyer_regions(changes[column], field=column)
+        changes[column] = regions
+        if pending:
+            changes["needs_confirmation_json"] = _merge_confirmation_items(
+                changes.get("needs_confirmation_json"), pending
+            )
 
 
 def _get_buyer_intent_for_parse(db: Session, buyer_intent_id: UUID) -> dict[str, Any]:
     row = db.execute(
         text(
-            """
+            f"""
             select
-              id, buyer_party_id, intent_name, intent_grade, status, pause_reason, contact_name,
-              contact_info_json, raw_requirement_text, intent_summary, parsed_requirement_json,
-              industry_primary, industry_secondary, industries_json,
-              excluded_industries_json, industry_l2_json, industry_focus_tags_json,
-              region_scope_summary,
-              region_constraints_json, min_revenue_yuan, min_net_profit_yuan,
-              min_total_profit_yuan, max_pe, max_ps, min_net_margin, min_gross_margin,
-              min_valuation_yuan, max_valuation_yuan, market_cap_range_summary,
-              min_market_cap_yuan, max_market_cap_yuan, budget_min_yuan, budget_max_yuan,
-              requires_control, requires_consolidation, accepts_minority_investment,
-              desired_equity_ratio_min, desired_equity_ratio_max, equity_ratio_summary,
-              equity_requirement_type, acceptable_control_paths_json,
-              preferred_listed_status, acceptable_listed_status_json, condition_effects_json,
-              listing_board_requirement_summary, listing_market_region,
-              acceptable_cash_flow_status_json, acceptable_profitability_status_json,
-              requires_relocation, relocation_target_regions_json,
-              requires_return_investment, return_investment_multiple,
-              requires_team_retention, earnout_requirement,
-              financing_stage_requirement_summary, transaction_type, transaction_types_json,
-              premium_tolerance_summary, max_premium_rate, max_debt_ratio,
-              debt_ratio_requirement_summary, major_risk_tolerance_summary,
-              buyer_industry_advantage_summary,
-              needs_confirmation_json, reviewed_at, reviewed_by
+              id, buyer_party_id, intent_name, contact_name, contact_info_json,
+              parsed_requirement_json, needs_confirmation_json, reviewed_at, reviewed_by,
+              {', '.join(buyer_intent_fact_columns())}
             from buyer_intent
             where id = :buyer_intent_id
               and team_id = :team_id
@@ -1039,104 +975,33 @@ def _build_buyer_profile_context(db: Session, buyer_intent: dict[str, Any]) -> d
         },
     }
 
-BUYER_INTENT_PARSE_FIELDS = {
+# 三份写入白名单从注册表派生（0828 改），不再手抄。
+#
+# 手抄的代价在 0828 这一轮才真正显形：本轮退役 32 列、阶段 B 还要 drop 它们，
+# 手抄清单意味着同一件事要在四个地方各改一遍，而漏掉任何一份都**不报错** ——
+# 漏解析白名单，模型产出被当成 unsupported_field 静默丢掉；漏 JSONB 绑定，
+# jsonb 列被当字符串写进去。tests/test_indicator_registry.py 钉的就是这条线。
+#
+# 三个系统列不在注册表里，所以单独列出来：intent_name 是实体名不是业务事实，
+# parsed_requirement_json 是解析产物存档，needs_confirmation_json 是待确认清单。
+_BUYER_INTENT_PARSE_SYSTEM_FIELDS = {
     "intent_name",
-    "raw_requirement_text",
-    "intent_summary",
     "parsed_requirement_json",
-    "industry_primary",
-    "industry_secondary",
-    "industries_json",
-    "industry_l2_json",
-    "excluded_industries_json",
-    "industry_focus_tags_json",
-    "region_scope_summary",
-    "region_constraints_json",
-    "min_revenue_yuan",
-    "min_net_profit_yuan",
-    "min_total_profit_yuan",
-    "max_pe",
-    "max_ps",
-    "min_net_margin",
-    "min_gross_margin",
-    "min_valuation_yuan",
-    "max_valuation_yuan",
-    "min_market_cap_yuan",
-    "max_market_cap_yuan",
-    "market_cap_range_summary",
-    "budget_min_yuan",
-    "budget_max_yuan",
-    "acceptable_cash_flow_status_json",
-    "acceptable_profitability_status_json",
-    "requires_relocation",
-    "relocation_target_regions_json",
-    "requires_return_investment",
-    "return_investment_multiple",
-    "requires_team_retention",
-    "earnout_requirement",
-    "listing_market_region",
-    "requires_control",
-    "requires_consolidation",
-    "accepts_minority_investment",
-    "desired_equity_ratio_min",
-    "desired_equity_ratio_max",
-    "equity_ratio_summary",
-    "equity_requirement_type",
-    "acceptable_control_paths_json",
-    "preferred_listed_status",
-    "acceptable_listed_status_json",
-    "condition_effects_json",
-    "listing_board_requirement_summary",
-    "financing_stage_requirement_summary",
-    "transaction_type",
-    "transaction_types_json",
-    "premium_tolerance_summary",
-    "max_premium_rate",
-    "max_debt_ratio",
-    "debt_ratio_requirement_summary",
-    "major_risk_tolerance_summary",
-    "unacceptable_risk_flags_json",
-    "buyer_industry_advantage_summary",
     "needs_confirmation_json",
 }
+
+BUYER_INTENT_PARSE_FIELDS = writable_columns("parse", "buyer_intent") | _BUYER_INTENT_PARSE_SYSTEM_FIELDS
 
 BUYER_INTENT_PARSE_JSON_FIELDS = {
-    "parsed_requirement_json",
-    "region_constraints_json",
-    "acceptable_control_paths_json",
-    "transaction_types_json",
-    "industries_json",
-    "industry_l2_json",
-    "excluded_industries_json",
-    "industry_focus_tags_json",
-    "acceptable_cash_flow_status_json",
-    "acceptable_profitability_status_json",
-    "relocation_target_regions_json",
-    "needs_confirmation_json",
-    "acceptable_listed_status_json",
-    "unacceptable_risk_flags_json",
-    "condition_effects_json",
-}
+    indicator.column
+    for indicator in indicators_for("buyer_intent")
+    if indicator.kind == "json" and "parse" in indicator.writable_by
+} | {"parsed_requirement_json", "needs_confirmation_json"}
 
 BUYER_INTENT_PARSE_NUMERIC_FIELDS = {
-    "min_revenue_yuan",
-    "min_net_profit_yuan",
-    "min_total_profit_yuan",
-    "max_pe",
-    "max_ps",
-    "min_net_margin",
-    "min_gross_margin",
-    "min_valuation_yuan",
-    "max_valuation_yuan",
-    "min_market_cap_yuan",
-    "max_market_cap_yuan",
-    "max_premium_rate",
-    "max_debt_ratio",
-    "desired_equity_ratio_min",
-    "desired_equity_ratio_max",
-    "budget_min_yuan",
-    "budget_max_yuan",
-    "return_investment_multiple",
+    indicator.column
+    for indicator in indicators_for("buyer_intent")
+    if indicator.kind in {"yuan", "ratio"} and "parse" in indicator.writable_by
 }
 
 BUYER_INTENT_TEXT_LIMITS = {
@@ -1202,14 +1067,22 @@ def _normalize_buyer_intent_parse_changes(
             changes[key] = normalized_statuses
             changes["preferred_listed_status"] = legacy_listed_status(normalized_statuses)
             continue
-        if key == "condition_effects_json":
-            changes[key] = normalize_condition_effects(value)
             continue
         if key == "equity_requirement_type":
             changes[key] = _normalize_equity_requirement_type(value)
             continue
         if key in REQUIREMENT_STRENGTH_FIELDS:
             changes[key] = _normalize_requirement_strength(value)
+            continue
+        if key == "intent_business_tags_json":
+            # 自由标签，只做形状归一（去空白、去空值、去重、限长），**不过任何词表**——
+            # 过字典正是 0828 判决一要下线的东西。归空了就整列摘掉：
+            # 空数组会被后面的 reconciliation 当成「未提及」，那是对的。
+            tags = normalize_business_tags(value)
+            if tags:
+                changes[key] = tags
+            else:
+                notes.append(f"dropped_{key}:no_usable_tags")
             continue
         if key == "unacceptable_risk_flags_json":
             # 必须排在 CLOSED_LIST 分支**之前**：三态里的「不接受全部」可以是
@@ -1338,7 +1211,6 @@ def _normalize_confirmation_items(raw: Any, allowed_fields: set[str]) -> list[di
 
 # 规则本体搬进了服务层，因为带附件的那条路（extracted_action_apply）也必须走同一套。
 # 这个别名保留原名，handlers 包的 re-export 和现有用例都依赖它。
-_normalize_buyer_intent_industry_changes = normalize_buyer_intent_industry_changes
 
 def _apply_buyer_intent_parse_changes(
     db: Session,

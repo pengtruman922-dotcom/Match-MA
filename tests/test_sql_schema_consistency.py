@@ -213,11 +213,11 @@ def test_buyer_intent_json_columns_are_bound_as_jsonb() -> None:
     unbound = parse_json_fields - BUYER_INTENT_PARSE_JSON_FIELDS
     assert not unbound, f"parser writes these json columns without a JSONB bind: {sorted(unbound)}"
 
-    apply_source = (PROJECT_ROOT / "backend/app/services/extracted_action_apply.py").read_text(encoding="utf-8")
-    apply_json_block = re.search(r"json_fields = \{(.*?)\}", apply_source, re.S)
-    assert apply_json_block is not None
-    apply_bound = set(re.findall(r'"(\w+_json)"', apply_json_block.group(1)))
-    assert parse_json_fields <= apply_bound | {"parsed_requirement_json"}, (
+    # 比对运行时取值而不是去源码里扒字面量：两份清单 0828 起都从注册表派生，
+    # 正则扒法在派生之后只会扒到空集，于是这条守卫会静默通过。
+    from backend.app.services.extracted_action_apply import BUYER_INTENT_JSONB_COLUMNS
+
+    assert parse_json_fields <= BUYER_INTENT_JSONB_COLUMNS, (
         "extracted_action_apply must bind the same json columns the parser writes: "
-        f"{sorted(parse_json_fields - apply_bound)}"
+        f"{sorted(parse_json_fields - BUYER_INTENT_JSONB_COLUMNS)}"
     )

@@ -60,7 +60,7 @@ export const INTENT_COLUMNS: readonly IntentColumnDef[] = [
   { key: 'businessTags', label: '主营业务', side: 'buyer', width: 'w-40' },
   { key: 'worth', label: '市值/估值', side: 'buyer', width: 'w-24' },
   { key: 'revenue', label: '营收', side: 'buyer', width: 'w-20' },
-  { key: 'wantIndustry', label: '关注行业', side: 'intent', width: 'w-40' },
+  { key: 'wantIndustry', label: '关注业务', side: 'intent', width: 'w-40' },
   { key: 'wantListing', label: '上市要求', side: 'intent', width: 'w-20' },
   { key: 'wantWorth', label: '市值/估值要求', side: 'intent', width: 'w-24' },
   { key: 'wantRevenue', label: '营收要求', side: 'intent', width: 'w-20' },

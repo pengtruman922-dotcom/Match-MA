@@ -7,7 +7,6 @@ from backend.app.jobs.handlers import (
     _build_buyer_profile_context,
     _business_update_parser_node_name,
     _normalize_actions,
-    _normalize_buyer_intent_industry_changes,
     _normalize_buyer_intent_parse_changes,
     _normalize_equity_requirement_type,
     _normalize_listed_status,
@@ -76,7 +75,7 @@ def test_pending_confirmation_keeps_typed_candidate_for_final_reconciliation() -
     changes, notes = _normalize_buyer_intent_parse_changes(
         {
             "fields": {
-                "industries_json": ["医药与健康"],
+                "intent_business_tags_json": ["医药与健康"],
                 "min_revenue_yuan": 5_000_000,
             },
             "needs_confirmation": [
@@ -92,7 +91,7 @@ def test_pending_confirmation_keeps_typed_candidate_for_final_reconciliation() -
         "医药与健康，营收至少500",
     )
 
-    assert changes["industries_json"] == ["医药与健康"]
+    assert changes["intent_business_tags_json"] == ["医药与健康"]
     assert changes["min_revenue_yuan"] == 5_000_000
     assert changes["needs_confirmation_json"] == [
         {
@@ -181,14 +180,14 @@ def test_confirmation_reconciliation_marks_invalid_value_non_actionable() -> Non
 def test_confirmation_reconciliation_prefers_typed_field_over_text_placeholder() -> None:
     reconciled = _reconcile_buyer_intent_scope(
         None,
-        current_fields={"premium_tolerance_summary": "适当溢价具体比例"},
+        current_fields={"major_risk_tolerance_summary": "风险容忍具体口径"},
         candidate_changes={
-            "premium_tolerance_summary": "可接受适当溢价，具体视标的情况确定",
+            "major_risk_tolerance_summary": "可接受轻微涉诉，具体视标的情况确定",
             "needs_confirmation_json": [
                 {
-                    "field": "premium_tolerance_summary",
-                    "proposed_value": "适当溢价具体比例",
-                    "reason": "溢价适当的具体范围未明确",
+                    "field": "major_risk_tolerance_summary",
+                    "proposed_value": "风险容忍具体口径",
+                    "reason": "可接受的风险程度未明确",
                 }
             ],
         },
@@ -196,14 +195,14 @@ def test_confirmation_reconciliation_prefers_typed_field_over_text_placeholder()
         scope_label="公共条件",
     )
 
-    assert "premium_tolerance_summary" not in reconciled
-    assert reconciled["needs_confirmation_json"][0]["proposed_value"] == "可接受适当溢价，具体视标的情况确定"
+    assert "major_risk_tolerance_summary" not in reconciled
+    assert reconciled["needs_confirmation_json"][0]["proposed_value"] == "可接受轻微涉诉，具体视标的情况确定"
 
 
 def test_scoped_confirmation_is_routed_out_of_common_layer() -> None:
     routed = _route_scoped_confirmation_items(
         {
-            "fields": {"industries_json": ["医疗健康"]},
+            "fields": {"intent_business_tags_json": ["医疗健康"]},
             "needs_confirmation": [
                 {"field": "max_pe", "proposed_value": 13, "reason": "需确认"}
             ],
@@ -224,12 +223,12 @@ def test_profile_other_removes_structured_field_duplicates() -> None:
         [
             {
                 "section_code": "intent_financial",
-                "content_text": "负债率原则上不超过70%；关注业务稳定性；可接受适当溢价",
+                "content_text": "不接受重大诉讼；关注业务稳定性；浙江本地国资有医药产业资源",
             }
         ],
         structured_fields={
-            "debt_ratio_requirement_summary": "负债率原则上不超过70%",
-            "premium_tolerance_summary": "可接受适当溢价",
+            "major_risk_tolerance_summary": "不接受重大诉讼",
+            "buyer_industry_advantage_summary": "浙江本地国资有医药产业资源",
         },
         normalization_notes=notes,
     )
@@ -239,35 +238,41 @@ def test_profile_other_removes_structured_field_duplicates() -> None:
 
 
 def test_pending_multi_value_items_are_isolated_individually() -> None:
+    """多值列的待确认项逐条隔离，不是整列一起挂起。
+
+    0828 起这条测的是业务标签而不是 industries_json：行业字典在需求侧已下线，
+    标签是自由标签、不过字典，但「模型自己拿不准的那两个」仍然要单独挂起，
+    确定的那个照常落库。
+    """
     changes, _ = _normalize_buyer_intent_parse_changes(
         {
             "fields": {
-                "industries_json": ["医药与健康", "不确定行业A", "不确定行业B"],
+                "intent_business_tags_json": ["医药与健康", "不确定方向A", "不确定方向B"],
             },
             "needs_confirmation": [
                 {
-                    "field": "industries_json",
-                    "item_key": "industry-a",
-                    "proposed_value": "不确定行业A",
-                    "reason": "无法映射行业A",
-                    "evidence": "关注不确定行业",
+                    "field": "intent_business_tags_json",
+                    "item_key": "direction-a",
+                    "proposed_value": "不确定方向A",
+                    "reason": "无法确认方向A",
+                    "evidence": "关注不确定方向",
                 },
                 {
-                    "field": "industries_json",
-                    "item_key": "industry-b",
-                    "proposed_value": "不确定行业B",
-                    "reason": "无法映射行业B",
-                    "evidence": "关注不确定行业",
+                    "field": "intent_business_tags_json",
+                    "item_key": "direction-b",
+                    "proposed_value": "不确定方向B",
+                    "reason": "无法确认方向B",
+                    "evidence": "关注不确定方向",
                 },
             ],
         },
-        "关注医药与健康及两个不确定行业",
+        "关注医药与健康及两个不确定方向",
     )
 
-    assert changes["industries_json"] == ["医药与健康"]
+    assert changes["intent_business_tags_json"] == ["医药与健康"]
     assert [item["item_key"] for item in changes["needs_confirmation_json"]] == [
-        "industry-a",
-        "industry-b",
+        "direction-a",
+        "direction-b",
     ]
 
 
@@ -279,8 +284,6 @@ def test_buyer_intent_parse_changes_normalize_common_enums_and_numbers() -> None
                 "min_net_profit_yuan": "20000000",
                 "requires_consolidation": "需要",
                 "preferred_listed_status": "非上市",
-                "listing_board_requirement_summary": "北交所或创业板均可",
-                "financing_stage_requirement_summary": "pre-IPO",
                 "min_market_cap_yuan": "500000000",
                 "max_market_cap_yuan": "3000000000",
                 # 0817 起这一列是闭集，只认枚举码：结构码留下，另外两个轴
@@ -288,11 +291,16 @@ def test_buyer_intent_parse_changes_normalize_common_enums_and_numbers() -> None
                 # 它们在标的侧没有对手方列，留着只会筛出错误结果。
                 "transaction_types_json": ["equity_transfer", "全现金收购", "控股收购"],
                 "unacceptable_risk_flags_json": "不接受任何重大风险",
-                "max_debt_ratio": "65",
                 "major_risk_tolerance_summary": "不接受重大诉讼、冻结、执行",
                 "buyer_industry_advantage_summary": "浙江本地国资有医药产业资源",
+                "intent_business_summary": "浙江本地医药健康标的",
+                "acceptable_regions_json": [{"province": "浙江省"}],
+                # 0828 退役的四列：模型（旧版提示词）还会吐它们，写入侧必须当成
+                # unsupported 丢掉而不是继续落库 —— 「退役」的落点就在这里。
+                "listing_board_requirement_summary": "北交所或创业板均可",
+                "financing_stage_requirement_summary": "pre-IPO",
+                "max_debt_ratio": "65",
                 "equity_requirement_type": "可并表即可",
-                "region_constraints_json": [{"province": "浙江省", "constraint_type": "hard"}],
                 "unsupported_field": "ignored",
             }
         },
@@ -301,9 +309,6 @@ def test_buyer_intent_parse_changes_normalize_common_enums_and_numbers() -> None
 
     assert changes["min_net_profit_yuan"] == 20000000
     assert changes["requires_consolidation"] == "yes"
-    assert changes["preferred_listed_status"] == "unlisted"
-    assert changes["listing_board_requirement_summary"] == "北交所或创业板均可"
-    assert changes["financing_stage_requirement_summary"] == "pre-IPO"
     assert changes["min_market_cap_yuan"] == 500000000
     assert changes["max_market_cap_yuan"] == 3000000000
     assert changes["transaction_types_json"] == ["equity_transfer"]
@@ -311,12 +316,28 @@ def test_buyer_intent_parse_changes_normalize_common_enums_and_numbers() -> None
     assert changes["unacceptable_risk_flags_json"] == [
         "litigation", "equity_frozen", "enforcement", "violation",
     ]
-    assert changes["max_debt_ratio"] == 65
     assert changes["major_risk_tolerance_summary"] == "不接受重大诉讼、冻结、执行"
     assert changes["buyer_industry_advantage_summary"] == "浙江本地国资有医药产业资源"
-    assert changes["equity_requirement_type"] == "consolidation_required"
-    assert changes["region_constraints_json"][0]["province"] == "浙江省"
-    assert notes == ["ignored_unsupported_field:unsupported_field"]
+    assert changes["intent_business_summary"] == "浙江本地医药健康标的"
+    assert changes["acceptable_regions_json"][0]["province"] == "浙江省"
+    for retired in (
+        "listing_board_requirement_summary",
+        "financing_stage_requirement_summary",
+        "max_debt_ratio",
+        "equity_requirement_type",
+        "preferred_listed_status",
+    ):
+        assert retired not in changes, f"{retired} 已退役，不该再被解析写入"
+    assert sorted(notes) == sorted(
+        [
+            "ignored_unsupported_field:listing_board_requirement_summary",
+            "ignored_unsupported_field:financing_stage_requirement_summary",
+            "ignored_unsupported_field:max_debt_ratio",
+            "ignored_unsupported_field:equity_requirement_type",
+            "ignored_unsupported_field:preferred_listed_status",
+            "ignored_unsupported_field:unsupported_field",
+        ]
+    )
 
 
 def test_buyer_intent_parser_enum_helpers_are_tolerant() -> None:
@@ -330,34 +351,48 @@ def test_buyer_intent_parser_enum_helpers_are_tolerant() -> None:
     assert _normalize_equity_requirement_type("参股也可以") == "minority_acceptable"
 
 
-def test_buyer_intent_parse_separates_valuation_from_market_cap_and_keeps_focus_fields() -> None:
+def test_buyer_intent_parse_separates_valuation_from_market_cap() -> None:
+    """估值与市值是两回事，模型把同一个数同时填进两边时市值必须被丢掉。
+
+    0828 起同一个用例还守着第二件事：**退役字段不再被写入**。
+    PS 上限、净利率、毛利率、市值范围说明、字典外细分方向这五列在库里还在
+    （阶段 A 一列没删），但解析已经看不见它们了 —— 旧版提示词仍会吐出来，
+    写入侧必须当成 unsupported 丢掉。
+    """
     changes, notes = _normalize_buyer_intent_parse_changes(
         {
             "fields": {
                 "min_valuation_yuan": "1500000000",
                 "max_valuation_yuan": "2500000000",
                 "min_market_cap_yuan": "1500000000",
+                "intent_business_tags_json": ["新式茶饮", "精品咖啡", "新式茶饮", ""],
+                "intent_business_summary": "找新式茶饮与精品咖啡连锁品牌",
+                # 以下五列已退役
                 "market_cap_range_summary": "15亿至25亿元",
                 "max_ps": "3",
                 "min_net_margin": "8",
                 "min_gross_margin": "35",
-                "industry_focus_tags_json": ["新式茶饮", "精品咖啡", "新式茶饮", ""],
+                "industry_focus_tags_json": ["新式茶饮"],
             }
         },
         "关注新式茶饮和精品咖啡，估值15亿至25亿元，PS不高于3倍，净利率不低于8%。",
     )
-    industry_notes = _normalize_buyer_intent_industry_changes(None, changes)
 
     assert changes["min_valuation_yuan"] == 1_500_000_000
     assert changes["max_valuation_yuan"] == 2_500_000_000
-    assert changes["max_ps"] == 3
-    assert changes["min_net_margin"] == 8
-    assert changes["min_gross_margin"] == 35
-    assert changes["industry_focus_tags_json"] == ["新式茶饮", "精品咖啡"]
+    assert changes["intent_business_tags_json"] == ["新式茶饮", "精品咖啡"]
+    assert changes["intent_business_summary"] == "找新式茶饮与精品咖啡连锁品牌"
+    # 与估值同值的市值被丢掉，理由单独留痕。
     assert "min_market_cap_yuan" not in changes
-    assert "market_cap_range_summary" not in changes
-    assert industry_notes == []
     assert any(note.startswith("dropped_min_market_cap_yuan") for note in notes)
+    for retired in (
+        "market_cap_range_summary",
+        "max_ps",
+        "min_net_margin",
+        "min_gross_margin",
+        "industry_focus_tags_json",
+    ):
+        assert retired not in changes, f"{retired} 已退役，不该再被解析写入"
 
 
 def test_business_update_uses_entity_specific_parser_nodes() -> None:
@@ -372,28 +407,30 @@ def test_business_update_uses_entity_specific_parser_nodes() -> None:
     ) == "business_update_extractor"
 
 
-def test_buyer_intent_update_apply_keeps_new_structured_fields() -> None:
+def test_buyer_intent_update_apply_whitelist_follows_the_registry() -> None:
+    """业务更新采纳白名单与解析白名单是同一个派生。
+
+    两份手抄的表现是「新建解析不写了，但带附件的业务更新还在写」——
+    2026-08-01 在行业字段上实测到过一次，0828 退役 32 列会把它放大 32 倍。
+    """
     changes = _allowed_buyer_intent_changes(
         {
-            "industries_json": ["商贸与消费"],
-            "excluded_industries_json": ["酒类"],
-            "industry_focus_tags_json": ["新式茶饮"],
+            "intent_business_tags_json": ["商贸与消费"],
+            "excluded_business_text": "酒类",
+            "intent_business_summary": "找新式茶饮连锁",
             "min_valuation_yuan": 1_500_000_000,
+            # 退役列与从未存在的列，两者都必须被丢掉
+            "industries_json": ["商贸与消费"],
             "max_ps": 3,
-            "min_net_margin": 8,
-            "min_gross_margin": 35,
             "unsupported": "drop",
         }
     )
 
     assert changes == {
-        "industries_json": ["商贸与消费"],
-        "excluded_industries_json": ["酒类"],
-        "industry_focus_tags_json": ["新式茶饮"],
+        "intent_business_tags_json": ["商贸与消费"],
+        "excluded_business_text": "酒类",
+        "intent_business_summary": "找新式茶饮连锁",
         "min_valuation_yuan": 1_500_000_000,
-        "max_ps": 3,
-        "min_net_margin": 8,
-        "min_gross_margin": 35,
     }
 
 
@@ -408,10 +445,9 @@ def test_buyer_intent_update_action_normalizes_numbers_and_valuation_semantics()
                     "proposed_changes_json": {
                         "min_valuation_yuan": "1500000000",
                         "min_market_cap_yuan": "1500000000",
-                        "max_ps": "3",
-                        "industry_focus_tags_json": ["新式茶饮", "新式茶饮"],
+                        "intent_business_tags_json": ["新式茶饮", "新式茶饮"],
                     },
-                    "raw_evidence_text": "估值15亿元以上，PS不高于3倍，关注新式茶饮",
+                    "raw_evidence_text": "估值15亿元以上，关注新式茶饮",
                 }
             ]
         },
@@ -427,8 +463,7 @@ def test_buyer_intent_update_action_normalizes_numbers_and_valuation_semantics()
 
     changes = actions[0]["proposed_changes_json"]
     assert changes["min_valuation_yuan"] == 1_500_000_000
-    assert changes["max_ps"] == 3
-    assert changes["industry_focus_tags_json"] == ["新式茶饮"]
+    assert changes["intent_business_tags_json"] == ["新式茶饮"]
     assert "min_market_cap_yuan" not in changes
 
 
@@ -495,3 +530,54 @@ def test_compact_parse_trace_hides_long_raw_output() -> None:
     assert trace["raw_output_preview"].endswith("…")
     assert len(trace["raw_output_preview"]) == 800
     assert trace["debug_ref"]["route"].endswith(f"/debug/entities/background_job/{JOB_ID}")
+
+
+# -- 0828：精简的收益不在数据库，在解析提示词 -----------------------------
+
+
+def test_the_field_and_enum_contracts_are_filtered_by_the_same_switch() -> None:
+    """两份契约都只装「模型能写的」，口径必须一致。
+
+    只过滤字段表、不过滤取值表的后果很隐蔽：字段表变短了，但退役字段的闭集
+    还在取值表里 —— 模型看到一张它填不进任何东西的表，每次解析都要为它分一次
+    注意力。0828 实测取值表从 17 项 1385 字符降到 7 项 468 字符。
+
+    **每多一个字段，模型每次解析都要判一次「这里有没有这个信息」** ——
+    精简换的是解析准确率，不是数据库空间。
+    """
+    from backend.app.jobs.handlers.buyer_intent_parse import (
+        _buyer_intent_enum_contract,
+        _buyer_intent_field_contract,
+    )
+    from backend.app.registry.indicators import writable_columns
+
+    writable = writable_columns("parse", "buyer_intent")
+    contract_columns = {entry["field"] for entry in _buyer_intent_field_contract()}
+
+    assert contract_columns == writable
+    assert set(_buyer_intent_enum_contract()) <= writable
+
+    # 退役字段一个都不许出现在任何一份契约里 —— 那正是本轮改动的落点。
+    for retired in ("industries_json", "max_debt_ratio", "listing_market_region", "requires_relocation"):
+        assert retired not in contract_columns
+        assert retired not in _buyer_intent_enum_contract()
+
+
+def test_the_contract_tells_the_model_which_fields_are_actually_screened() -> None:
+    """`is_condition` 读 `screening` 而不是 `default_effect`。
+
+    退役字段保留了 default_effect（比对契约本身没变坏，坏的是有没有数据可比），
+    用它判就会告诉模型「这是个初筛门槛」，而 SQL 那边根本没有它。
+    """
+    from backend.app.jobs.handlers.buyer_intent_parse import _buyer_intent_field_contract
+
+    by_field = {entry["field"]: entry for entry in _buyer_intent_field_contract()}
+
+    assert by_field["min_revenue_yuan"]["is_condition"] is True
+    assert by_field["acceptable_regions_json"]["is_condition"] is True
+    # 【召】类：进首轮召回给 LLM 读，但不参与 SQL 初筛。
+    assert by_field["intent_business_summary"]["is_condition"] is False
+    assert by_field["intent_business_tags_json"]["is_condition"] is False
+    # 业务三列没有对手方 —— 这正是判决一的含义。
+    assert by_field["intent_business_tags_json"]["target_field"] is None
+    assert by_field["intent_business_summary"]["operator"] is None

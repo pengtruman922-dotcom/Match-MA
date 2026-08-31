@@ -22,7 +22,6 @@ from sqlalchemy.orm import Session
 from backend.app.ai.llm_client import ToolCall
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import savepoint
-from backend.app.services.industry_taxonomy import list_l1_terms, list_l2_terms
 from backend.app.services.profile_sections import load_profile_sections, render_profile_text
 from backend.app.services.recommendation_agent_policy import (
     CandidatePool,
@@ -36,6 +35,7 @@ from backend.app.services.relation_flow import DEEP_PROGRESS_STATUSES
 from backend.app.services.screening_schema import build_conditions_properties
 from backend.app.services.screening_sql import (
     DEFAULT_SCREENING_LIMIT,
+    MAX_BUSINESS_SCAN_LIMIT,
     MAX_SCREENING_LIMIT,
     screen_targets,
 )
@@ -65,6 +65,11 @@ _SEARCH_TARGETS_DESCRIPTION = (
     "召回不足时看 excluded_by_condition：某一条的「字段为空」占多数说明是数据没录，"
     "该去掉它；「确实不达标」占多数说明那是真门槛，应该保留。"
     "只想知道有多少家时用 count_only=true。"
+    "\n\n**行业不是一个可筛条件**（2026-08-28 起）：买家需求侧的行业字典已下线，"
+    "业务匹配整段靠你读文本判断。所以一条只写了数字门槛的需求会召回接近全库，"
+    "那是设计如此、不是条件写错了。这种时候用 business_scan=true 把命中集的"
+    "业务摘要一次全取回来（上限 300 家，每条只有业务摘要、没有财务数字），"
+    "逐条读完选出 10-20 家真正对口的，再做深评 —— 深评跑不了 300 家。"
 )
 
 
@@ -91,10 +96,7 @@ def build_search_targets_tool(
                     "conditions": {
                         "type": "object",
                         "description": "本次的一组 AND 条件。留空表示不限，会返回全库 A-D 级标的。",
-                        "properties": build_conditions_properties(
-                            industry_l1_terms=list_l1_terms(db),
-                            industry_l2_terms=list_l2_terms(db),
-                        ),
+                        "properties": build_conditions_properties(),
                         "additionalProperties": False,
                     },
                     "limit": {
@@ -104,6 +106,16 @@ def build_search_targets_tool(
                     "offset": {
                         "type": "integer",
                         "description": "同一组条件下翻页，取更后面的结果。",
+                    },
+                    "business_scan": {
+                        "type": "boolean",
+                        "description": (
+                            "业务扫描模式：返回命中集里每一家的业务摘要（上限 300 家），"
+                            "不返回财务数字、也不返回逐条件淘汰拆分。"
+                            "**行业方向对不对口只能靠读这些摘要判断**，库里没有行业筛选条件。"
+                            "用在「SQL 收窄不下去、但要按业务方向挑人」的那一步；"
+                            "摘要为空的不要从公司名猜业务，如实说信息不足。"
+                        ),
                     },
                     "count_only": {
                         "type": "boolean",
@@ -333,6 +345,12 @@ class RecommendationAgentTools:
         limit = max(1, min(limit, MAX_SEARCH_RESULTS_PER_CALL))
         offset = max(0, _int_argument(arguments.get("offset"), 0))
         count_only = bool(arguments.get("count_only"))
+        business_scan = bool(arguments.get("business_scan"))
+        if business_scan:
+            # 业务扫描要的是「全量」，模型给的 limit 通常是它从别处抄来的 20。
+            # 这里不让它自己收窄 —— 收窄的手段是条件，不是 limit。
+            limit = MAX_BUSINESS_SCAN_LIMIT
+            count_only = False
         raw_conditions = arguments.get("conditions")
         if not isinstance(raw_conditions, dict):
             raw_conditions = arguments.get("filters")
@@ -362,7 +380,12 @@ class RecommendationAgentTools:
             return plan.error_payload()
 
         result = self._screen_targets_fn(
-            self._db, plan.conditions, limit=limit, offset=offset, count_only=count_only
+            self._db,
+            plan.conditions,
+            limit=limit,
+            offset=offset,
+            count_only=count_only,
+            business_scan=business_scan,
         )
 
         record = {
@@ -372,6 +395,7 @@ class RecommendationAgentTools:
             "note": str(arguments.get("note") or "").strip() or None,
             "filters": result.conditions,
             "count_only": count_only,
+            "business_scan": business_scan,
             "eligible_count": result.matched,
             "returned_count": result.returned_count,
             "excluded_by_condition": result.excluded_by_condition,

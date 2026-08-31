@@ -105,8 +105,6 @@ def _captured(monkeypatch, module) -> list[dict[str, Any]]:
 
 def test_the_parser_records_a_production_call(monkeypatch) -> None:
     calls = _captured(monkeypatch, conditions)
-    monkeypatch.setattr(conditions, "list_l1_terms", lambda _db: ["制造与工业"])
-    monkeypatch.setattr(conditions, "list_l2_terms", lambda _db: [])
     monkeypatch.setattr(conditions, "industry_l1_prompt_list", lambda _db: "")
     monkeypatch.setattr(conditions, "industry_l2_prompt_list", lambda _db: "")
     monkeypatch.setattr(
@@ -133,8 +131,6 @@ def test_the_parser_records_a_production_call(monkeypatch) -> None:
 def test_a_degraded_parser_still_records_the_attempt(monkeypatch) -> None:
     """「节点没被调用」和「调了但降级了」在设置页上都是一片空白 —— 排查方向却相反。"""
     calls = _captured(monkeypatch, conditions)
-    monkeypatch.setattr(conditions, "list_l1_terms", lambda _db: [])
-    monkeypatch.setattr(conditions, "list_l2_terms", lambda _db: [])
     monkeypatch.setattr(conditions, "industry_l1_prompt_list", lambda _db: "")
     monkeypatch.setattr(conditions, "industry_l2_prompt_list", lambda _db: "")
 

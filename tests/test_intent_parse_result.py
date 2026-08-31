@@ -45,12 +45,7 @@ L2_TERMS = [
 
 
 def parse(raw, user_message: str) -> dict:
-    return normalize_intent_parse_result(
-        raw,
-        industry_l1_terms=L1_TERMS,
-        industry_l2_terms=L2_TERMS,
-        user_message=user_message,
-    )
+    return normalize_intent_parse_result(raw, user_message=user_message)
 
 
 def only_group(result: dict) -> dict:
@@ -80,7 +75,7 @@ def test_case1_region_only_adds_nothing_else() -> None:
     result = parse(
         {
             "condition_groups": [
-                {"label": "", "conditions": {"region_constraints_json": [{"province": "浙江省", "city": "杭州市"}]}}
+                {"label": "", "conditions": {"acceptable_regions_json": [{"province": "浙江省", "city": "杭州市"}]}}
             ],
             "qualitative_requirements": [],
             "exclusions": {},
@@ -90,23 +85,27 @@ def test_case1_region_only_adds_nothing_else() -> None:
     )
     group = only_group(result)
     assert group["conditions"] == {
-        "region_constraints_json": [{"province": "浙江省", "city": "杭州市"}]
+        "acceptable_regions_json": [{"province": "浙江省", "city": "杭州市"}]
     }
     assert result["parser_status"] == "ok"
 
 
-def test_case2_debt_ratio_is_a_percentage_not_a_fraction() -> None:
-    """负债率 60% 落库是 60，不是 0.6。写成小数条件会一家也筛不到且不报错。"""
+def test_case2_equity_ratio_is_a_percentage_not_a_fraction() -> None:
+    """股比 51% 落库是 51，不是 0.51。写成小数条件会一家也筛不到且不报错。
+
+    这条原来测的是负债率上限，它 0828 随「双侧皆空的比率」一起退役了。
+    单位陷阱本身没有消失，只是换了承载它的字段：股比两侧存的同样是百分数。
+    """
     result = parse(
         {
             "condition_groups": [
                 {
                     "label": "",
                     "conditions": {
-                        "industries_json": ["制造与工业"],
-                        "region_constraints_json": [{"province": "江苏省"}],
+                        "min_revenue_yuan": 50000000,
+                        "acceptable_regions_json": [{"province": "江苏省"}],
                         "min_net_profit_yuan": 10000000,
-                        "max_debt_ratio": 60,
+                        "desired_equity_ratio_min": 51,
                     },
                 }
             ],
@@ -114,13 +113,13 @@ def test_case2_debt_ratio_is_a_percentage_not_a_fraction() -> None:
             "exclusions": {},
             "unstructured_notes": [],
         },
-        "江苏的制造业，净利1000万以上，负债率不超过60%",
+        "江苏的标的，净利1000万以上，至少要控股51%",
     )
     conditions = only_group(result)["conditions"]
-    assert conditions["max_debt_ratio"] == 60
+    assert conditions["desired_equity_ratio_min"] == 51
     assert conditions["min_net_profit_yuan"] == 10000000
-    assert conditions["industries_json"] == ["制造与工业"]
-    assert conditions["region_constraints_json"] == [{"province": "江苏省"}]
+    assert conditions["min_revenue_yuan"] == 50000000
+    assert conditions["acceptable_regions_json"] == [{"province": "江苏省"}]
 
 
 def test_case3_two_groups_keep_the_shared_industry() -> None:
@@ -131,7 +130,7 @@ def test_case3_two_groups_keep_the_shared_industry() -> None:
                 {
                     "label": "上市公司",
                     "conditions": {
-                        "industry_l2_json": ["机器人", "人工智能"],
+                        "min_net_profit_yuan": 5000000,
                         "acceptable_listed_status_json": ["listed"],
                         "min_market_cap_yuan": 100000000,
                         "max_pe": 15,
@@ -141,7 +140,7 @@ def test_case3_two_groups_keep_the_shared_industry() -> None:
                 {
                     "label": "非上市公司",
                     "conditions": {
-                        "industry_l2_json": ["机器人", "人工智能"],
+                        "min_net_profit_yuan": 5000000,
                         "acceptable_listed_status_json": ["unlisted"],
                         "min_revenue_yuan": 30000000,
                     },
@@ -158,7 +157,7 @@ def test_case3_two_groups_keep_the_shared_industry() -> None:
     assert listed["label"] == "上市公司"
     assert unlisted["label"] == "非上市公司"
     for group in (listed, unlisted):
-        assert group["conditions"]["industry_l2_json"] == ["机器人", "人工智能"]
+        assert group["conditions"]["min_net_profit_yuan"] == 5000000
     assert listed["conditions"]["acceptable_listed_status_json"] == ["listed"]
     assert listed["conditions"]["max_pe"] == 15
     assert listed["strength"]["max_pe"] == "preferred"
@@ -173,8 +172,8 @@ def test_case4_soft_wish_lands_in_qualitative_requirements() -> None:
             "condition_groups": [
                 {
                     "conditions": {
-                        "industries_json": ["制造与工业"],
-                        "region_constraints_json": [{"province": "浙江省"}],
+                        "min_revenue_yuan": 50000000,
+                        "acceptable_regions_json": [{"province": "浙江省"}],
                     }
                 }
             ],
@@ -184,7 +183,7 @@ def test_case4_soft_wish_lands_in_qualitative_requirements() -> None:
         },
         "浙江的制造业，最好有成熟的海外仓",
     )
-    assert only_group(result)["conditions"]["industries_json"] == ["制造与工业"]
+    assert only_group(result)["conditions"]["min_revenue_yuan"] == 50000000
     assert result["qualitative_requirements"] == ["最好有成熟的海外仓"]
 
 
@@ -198,7 +197,7 @@ def test_4a_add_condition_keeps_previous_industry_and_profit_in_the_full_snapsho
             "condition_groups": [{
                 "label": "当前需求",
                 "conditions": {
-                    "industries_json": ["制造与工业"],
+                    "min_revenue_yuan": 50000000,
                     "min_net_profit_yuan": 10000000,
                     "acceptable_listed_status_json": ["listed"],
                 },
@@ -212,7 +211,7 @@ def test_4a_add_condition_keeps_previous_industry_and_profit_in_the_full_snapsho
     )
 
     assert only_group(result)["conditions"] == {
-        "industries_json": ["制造与工业"],
+        "min_revenue_yuan": 50000000,
         "min_net_profit_yuan": 10000000,
         "acceptable_listed_status_json": ["listed"],
     }
@@ -224,8 +223,8 @@ def test_4a_replace_condition_changes_only_profit_when_everything_else_stays() -
         {
             "condition_groups": [{
                 "conditions": {
-                    "industries_json": ["制造与工业"],
-                    "region_constraints_json": [{"province": "江苏省"}],
+                    "min_revenue_yuan": 50000000,
+                    "acceptable_regions_json": [{"province": "江苏省"}],
                     "min_net_profit_yuan": 5000000,
                     "acceptable_listed_status_json": ["listed"],
                 }
@@ -238,8 +237,8 @@ def test_4a_replace_condition_changes_only_profit_when_everything_else_stays() -
     )
 
     assert only_group(result)["conditions"] == {
-        "industries_json": ["制造与工业"],
-        "region_constraints_json": [{"province": "江苏省"}],
+        "min_revenue_yuan": 50000000,
+        "acceptable_regions_json": [{"province": "江苏省"}],
         "min_net_profit_yuan": 5000000,
         "acceptable_listed_status_json": ["listed"],
     }
@@ -250,7 +249,7 @@ def test_4a_delete_condition_removes_only_region_from_the_full_snapshot() -> Non
         {
             "condition_groups": [{
                 "conditions": {
-                    "industries_json": ["制造与工业"],
+                    "min_revenue_yuan": 50000000,
                     "min_net_profit_yuan": 5000000,
                     "acceptable_listed_status_json": ["listed"],
                 }
@@ -263,9 +262,9 @@ def test_4a_delete_condition_removes_only_region_from_the_full_snapshot() -> Non
     )
 
     conditions = only_group(result)["conditions"]
-    assert "region_constraints_json" not in conditions
+    assert "acceptable_regions_json" not in conditions
     assert conditions == {
-        "industries_json": ["制造与工业"],
+        "min_revenue_yuan": 50000000,
         "min_net_profit_yuan": 5000000,
         "acceptable_listed_status_json": ["listed"],
     }
@@ -276,8 +275,8 @@ def test_4a_reset_can_discard_the_old_demand_entirely() -> None:
         {
             "condition_groups": [{
                 "conditions": {
-                    "industries_json": ["医药与健康"],
-                    "region_constraints_json": [{"province": "浙江省"}],
+                    "min_revenue_yuan": 80000000,
+                    "acceptable_regions_json": [{"province": "浙江省"}],
                 }
             }],
             "qualitative_requirements": [],
@@ -288,8 +287,8 @@ def test_4a_reset_can_discard_the_old_demand_entirely() -> None:
     )
 
     assert only_group(result)["conditions"] == {
-        "industries_json": ["医药与健康"],
-        "region_constraints_json": [{"province": "浙江省"}],
+        "min_revenue_yuan": 80000000,
+        "acceptable_regions_json": [{"province": "浙江省"}],
     }
 
 
@@ -307,7 +306,7 @@ def test_case5_deleted_field_survives_as_a_qualitative_requirement() -> None:
             "condition_groups": [
                 {
                     "conditions": {
-                        "industries_json": ["制造与工业"],
+                        "min_revenue_yuan": 50000000,
                         "operation_stability_status": "stable",
                     }
                 }
@@ -319,7 +318,7 @@ def test_case5_deleted_field_survives_as_a_qualitative_requirement() -> None:
         "要经营稳定的制造业",
     )
     conditions = only_group(result)["conditions"]
-    assert conditions == {"industries_json": ["制造与工业"]}
+    assert conditions == {"min_revenue_yuan": 50000000}
     assert "operation_stability_status" not in conditions
     # 兜底出口里必须找得到它，而且 parser_notes 要说清楚为什么没进条件。
     assert "operation_stability_status" in all_text(result)
@@ -330,7 +329,7 @@ def test_case5_model_written_wording_is_preferred_when_it_gives_one() -> None:
     """模型按提示词把「经营稳定」写进定性诉求时，保留用户的说法。"""
     result = parse(
         {
-            "condition_groups": [{"conditions": {"industries_json": ["制造与工业"]}}],
+            "condition_groups": [{"conditions": {"min_revenue_yuan": 50000000}}],
             "qualitative_requirements": ["经营稳定"],
             "exclusions": {},
             "unstructured_notes": [],
@@ -364,7 +363,7 @@ def test_exclusions_written_inside_a_group_are_hoisted_to_the_top() -> None:
             "condition_groups": [
                 {
                     "conditions": {
-                        "industries_json": ["制造与工业"],
+                        "min_revenue_yuan": 50000000,
                         "excluded_industries_json": ["房地产与建筑"],
                         "unacceptable_risk_flags_json": ["equity_frozen"],
                     }
@@ -383,8 +382,13 @@ def test_exclusions_written_inside_a_group_are_hoisted_to_the_top() -> None:
     assert result["exclusions"]["risk_flags"] == ["equity_frozen"]
 
 
-def test_unmatched_exclusion_stays_negative() -> None:
-    """方向陷阱：落不进闭集的排除词若原样进定性诉求，会读成「想要它」。"""
+def test_every_exclusion_word_stays_negative() -> None:
+    """方向陷阱：排除词若原样进定性诉求，会读成「想要它」。
+
+    0828 之前只有落不进行业闭集的词走这条路；行业条件整组退役之后，
+    **每一个排除词**都走这条路 —— 排除行业已经没有 SQL 出口了，
+    它由主 Agent 读业务摘要时执行。所以这条守卫比以前更要紧。
+    """
     result = parse(
         {
             "condition_groups": [],
@@ -394,23 +398,29 @@ def test_unmatched_exclusion_stays_negative() -> None:
         },
         "不要殡葬相关的，老板脾气不好的也不要",
     )
-    assert result["exclusions"]["industries"] == []
+    # 排除行业仍如实留在快照里（服务展示与 trace），但不再编译成筛选条件。
+    assert result["exclusions"]["industries"] == ["殡葬"]
     assert result["exclusions"]["risk_flags"] == []
     assert "不接受殡葬" in result["qualitative_requirements"]
     assert "不接受老板脾气不好" in result["qualitative_requirements"]
 
 
-# -- 用例 7：行业闭集 ------------------------------------------------------
+# -- 用例 7：行业条件已整组退役 --------------------------------------------
 
 
-def test_case7_out_of_vocabulary_industry_never_reaches_conditions() -> None:
-    """行业名写错会静默清空候选池 —— 所以字典外的词一条都不许进 conditions。"""
+def test_a_retired_industry_condition_never_reaches_conditions() -> None:
+    """行业条件 0828 整组退役，但用户说的话一个字都不能丢。
+
+    原来这条测的是「字典外的行业词不许进 conditions」（写错行业名会静默清空
+    候选池）。现在**整个行业家族**都不是可筛字段了，所以走的是同一个兜底出口：
+    不进条件、如实报 parser_notes、原话留在定性诉求里交给主 Agent 读业务摘要判断。
+    """
     result = parse(
         {
             "condition_groups": [
                 {
                     "conditions": {
-                        "industries_json": ["制造与工业"],
+                        "min_revenue_yuan": 50000000,
                         "industry_l2_json": ["新能源车企", "整车制造"],
                     }
                 }
@@ -422,10 +432,12 @@ def test_case7_out_of_vocabulary_industry_never_reaches_conditions() -> None:
         "新能源车企",
     )
     conditions = only_group(result)["conditions"]
-    assert conditions["industry_l2_json"] == ["整车制造"]
-    assert "新能源车企" not in json.dumps(conditions, ensure_ascii=False)
-    # 剔掉的那个词交给深评判断，不是丢掉。
+    assert conditions == {"min_revenue_yuan": 50000000}
+    assert "整车制造" not in json.dumps(conditions, ensure_ascii=False)
+    # 两个词都不许蒸发：它们是判业务匹配的原材料。
     assert "新能源车企" in all_text(result)
+    assert "整车制造" in all_text(result)
+    assert any("industry_l2_json" in note for note in result["parser_notes"])
 
 
 def test_canonicalised_region_is_not_reported_as_leftover() -> None:
@@ -435,10 +447,10 @@ def test_canonicalised_region_is_not_reported_as_leftover() -> None:
     深评那头收到的就是一句 Python 字典的 repr。
     """
     result = parse(
-        {"condition_groups": [{"conditions": {"region_constraints_json": [{"province": "浙江"}]}}]},
+        {"condition_groups": [{"conditions": {"acceptable_regions_json": [{"province": "浙江"}]}}]},
         "浙江的标的",
     )
-    assert only_group(result)["conditions"] == {"region_constraints_json": [{"province": "浙江省"}]}
+    assert only_group(result)["conditions"] == {"acceptable_regions_json": [{"province": "浙江省"}]}
     assert result["qualitative_requirements"] == []
     assert result["unstructured_notes"] == []
 
@@ -511,13 +523,13 @@ def test_case9_strength_defaults_to_required_for_unmarked_conditions() -> None:
                 {
                     "conditions": {
                         "min_net_profit_yuan": 30000000,
-                        "region_constraints_json": [
+                        "acceptable_regions_json": [
                             {"province": "江苏省"},
                             {"province": "浙江省"},
                             {"province": "上海市"},
                         ],
                     },
-                    "strength": {"region_constraints_json": "preferred"},
+                    "strength": {"acceptable_regions_json": "preferred"},
                 }
             ],
             "qualitative_requirements": [],
@@ -528,7 +540,7 @@ def test_case9_strength_defaults_to_required_for_unmarked_conditions() -> None:
     )
     strength = only_group(result)["strength"]
     assert strength["min_net_profit_yuan"] == "required"
-    assert strength["region_constraints_json"] == "preferred"
+    assert strength["acceptable_regions_json"] == "preferred"
 
 
 def test_unknown_strength_token_falls_back_to_required() -> None:
@@ -622,7 +634,7 @@ def test_case11_non_screening_fields_go_to_qualitative_not_conditions(column, va
         {"industry_l2_json": ["偏光膜"]},
         {"acceptable_listed_status_json": ["借壳上市"]},
         {"max_pe": "十五倍"},
-        {"region_constraints_json": ["江苏"]},
+        {"acceptable_regions_json": ["江苏"]},
         {"完全瞎编的字段": True},
     ],
 )
@@ -728,23 +740,26 @@ def test_screening_fields_prompt_is_generated_from_the_registry() -> None:
 
     entries = json.loads(screening_fields_prompt_json())
     assert [entry["field"] for entry in entries] == [field.column for field in SCREENING_FIELDS]
-    assert len(entries) == 24
+    # 数量不写死成魔数：0828 退役了 8 个条件、新建了 2 个地区条件，这类进出会
+    # 继续发生。要守的是「清单是生成的」，不是「一共几个」。
+    assert entries
 
 
 def test_ratio_fields_declare_the_percentage_unit_in_the_prompt() -> None:
     """写成「0-1 小数」的后果是模型把 60% 写成 0.6，而库里存的是 60。"""
     by_field = {entry["field"]: entry for entry in json.loads(screening_fields_prompt_json())}
-    assert "百分数" in by_field["max_debt_ratio"]["unit"]
     assert "百分数" in by_field["desired_equity_ratio_min"]["unit"]
+    assert "百分数" in by_field["desired_equity_ratio_max"]["unit"]
     assert "倍数" in by_field["max_pe"]["unit"]
 
 
 def test_exclusion_field_description_says_it_removes_candidates() -> None:
     """同一个形状在 not_overlap 下是「命中即出局」，方向写反会把语义倒过来。"""
     by_field = {entry["field"]: entry for entry in json.loads(screening_fields_prompt_json())}
-    assert "出局" in by_field["excluded_industries_json"]["note"]
     assert "出局" in by_field["unacceptable_risk_flags_json"]["note"]
-    assert "通过" in by_field["industries_json"]["note"]
+    assert "出局" in by_field["excluded_regions_json"]["note"]
+    assert "通过" in by_field["acceptable_regions_json"]["note"]
+    assert "出局" not in by_field["acceptable_regions_json"]["note"]
 
 
 # -- Prompt v0.3.0 ------------------------------------------------------

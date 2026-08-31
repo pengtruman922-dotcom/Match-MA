@@ -12,7 +12,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { buyerIntents, fieldSources, indicatorRegistry, meta, profileSections } from '../lib/api';
+import { buyerIntents, fieldSources, indicatorRegistry, profileSections } from '../lib/api';
 import type {
   BuyerIntent,
   BuyerIntentConfirmationItem,
@@ -24,11 +24,9 @@ import type {
   IndicatorGroupMeta,
   IndicatorMeta,
   IndicatorRegistryResponse,
-  IndustryOptionsResponse,
   FieldValueSource,
   ProfileSection,
 } from '../types/api';
-import IndustryPairsEditor, { type IndustryPairValue } from './IndustryPairsEditor';
 import { hasReadableEvidence, sourceDetailText } from '../features/shared/fieldSource';
 import { fieldLabel } from '../lib/fieldLabels';
 import AdministrativeAreaPicker from './AdministrativeAreaPicker';
@@ -54,7 +52,6 @@ export default function BuyerIntentRequirements({
   onRefresh?: () => void | Promise<void>;
 }) {
   const [scenarios, setScenarios] = useState<BuyerIntentScenario[]>([]);
-  const [taxonomy, setTaxonomy] = useState<IndustryOptionsResponse>({ l1: [], l2: [] });
   const [registry, setRegistry] = useState<IndicatorRegistryResponse | null>(null);
   const [loadingScenarios, setLoadingScenarios] = useState(true);
   const [resolvingItem, setResolvingItem] = useState<string | null>(null);
@@ -85,8 +82,8 @@ export default function BuyerIntentRequirements({
   useEffect(() => { void loadScenarios(); }, [loadScenarios]);
   useEffect(() => { void loadSideData(); }, [loadSideData]);
   useEffect(() => {
-    Promise.all([meta.industryOptions(), indicatorRegistry.list('buyer_intent')])
-      .then(([industryData, registryData]) => { setTaxonomy(industryData); setRegistry(registryData); })
+    indicatorRegistry.list('buyer_intent')
+      .then(setRegistry)
       .catch(() => {});
   }, []);
 
@@ -108,17 +105,12 @@ export default function BuyerIntentRequirements({
     0,
   );
 
-  const saveSharedConditions = async (
-    changes: Record<string, unknown>,
-    effectChanges: Record<string, ConditionEffect>,
-  ) => {
+  // 2026-08-28：条件强度不再逐字段可覆盖。`condition_effects_json` 整个退役 ——
+  // 生产里只有 5/52 有值，而三个活着的消费方（本组件的角标、深评上下文、
+  // 解析写入）没有一个是筛选。强度改由注册表的 default_effect 单点决定，
+  // 想表达「这条硬不硬」就写进需求业务说明正文，由 LLM 读。
+  const saveSharedConditions = async (changes: Record<string, unknown>) => {
     const payload = normalizeCommonFieldChanges(changes, indicators) as BuyerIntentUpdate;
-    if (Object.keys(effectChanges).length) {
-      payload.condition_effects_json = {
-        ...(intent.condition_effects_json || {}),
-        ...effectChanges,
-      };
-    }
     await buyerIntents.update(intent.id, payload);
     await onRefresh?.();
   };
@@ -129,7 +121,6 @@ export default function BuyerIntentRequirements({
       sort_order: scenarios.length,
       active: true,
       fields_json: {},
-      condition_effects_json: {},
     });
     setScenarios((current) => [...current, created]);
   };
@@ -141,7 +132,6 @@ export default function BuyerIntentRequirements({
       active: scenario.active,
       fields_json: scenario.fields_json,
       needs_confirmation_json: scenario.needs_confirmation_json,
-      condition_effects_json: scenario.condition_effects_json,
     });
     setScenarios((current) => [...current, created]);
   };
@@ -189,7 +179,6 @@ export default function BuyerIntentRequirements({
           active: scenario.active,
           fields_json: nextFields,
           needs_confirmation_json: nextPending,
-          condition_effects_json: scenario.condition_effects_json,
         });
         setScenarios((current) => current.map((entry) => entry.id === updated.id ? updated : entry));
       } else {
@@ -229,8 +218,8 @@ export default function BuyerIntentRequirements({
 
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p className="text-xs font-semibold text-gray-500">需求摘要</p>
-          <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-gray-800">{intent.intent_summary || '暂无需求摘要'}</p>
+          <p className="text-xs font-semibold text-gray-500">需求业务说明</p>
+          <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-gray-800">{intent.intent_business_summary || '暂无需求业务说明'}</p>
         </div>
         {pendingCount ? <StateBadge tone="amber" text={`${pendingCount} 项需要确认`} /> : null}
       </div>
@@ -242,8 +231,6 @@ export default function BuyerIntentRequirements({
           groups={registry.groups}
           indicators={indicators}
           fields={intent as unknown as Record<string, unknown>}
-          effects={intent.condition_effects_json || {}}
-          taxonomy={taxonomy}
           pending={commonPending}
           resolvingItem={resolvingItem}
           sourceByField={sourceByField}
@@ -279,8 +266,7 @@ export default function BuyerIntentRequirements({
             scenario={scenario}
             groups={registry?.groups || []}
             indicators={indicators.filter((indicator) => indicator.scenario_allowed)}
-            taxonomy={taxonomy}
-            resolvingItem={resolvingItem}
+              resolvingItem={resolvingItem}
             onSaved={(updated) => setScenarios((current) => current.map((item) => item.id === updated.id ? updated : item))}
             onCopy={() => void copyScenario(scenario)}
             onDelete={() => void deleteScenario(scenario)}
@@ -308,8 +294,6 @@ function InlineConditionEditor({
   groups,
   indicators,
   fields,
-  effects,
-  taxonomy,
   pending,
   resolvingItem,
   showEmpty = true,
@@ -325,8 +309,6 @@ function InlineConditionEditor({
   groups: IndicatorGroupMeta[];
   indicators: IndicatorMeta[];
   fields: Record<string, unknown>;
-  effects: Record<string, ConditionEffect>;
-  taxonomy: IndustryOptionsResponse;
   pending: PendingItem[];
   resolvingItem: string | null;
   showEmpty?: boolean;
@@ -335,7 +317,7 @@ function InlineConditionEditor({
   /** 字段当前值的出处。方案卡片不传：方案条件是人配的，没有独立溯源。 */
   sourceByField?: Map<string, FieldValueSource>;
   onShowEvidence?: (source: FieldValueSource) => void;
-  onSave: (changes: Record<string, unknown>, effectChanges: Record<string, ConditionEffect>) => Promise<void>;
+  onSave: (changes: Record<string, unknown>) => Promise<void>;
   onResolvePending: (item: PendingItem, action: 'apply' | 'discard', replacement?: unknown) => Promise<void>;
   onModifyPending: (item: PendingItem) => void;
 }) {
@@ -343,29 +325,17 @@ function InlineConditionEditor({
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [draftFields, setDraftFields] = useState<Record<string, unknown>>({});
-  const [draftEffects, setDraftEffects] = useState<Record<string, ConditionEffect>>({});
   const [saving, setSaving] = useState(false);
 
   const startEditing = (row: ConditionRowDefinition) => {
     setDraftFields(Object.fromEntries(row.indicators.map((indicator) => [indicator.column, fields[indicator.column]])));
-    setDraftEffects(Object.fromEntries(
-      row.indicators
-        .filter((indicator) => indicator.effect_editable && indicator.editor !== 'region_multi')
-        .flatMap((indicator) => {
-          // 草稿只装真规则。眼下每个可编辑字段都有 default_effect，这里取不到 null；
-          // 真出现了也宁可不进草稿（保存时不碰这个字段），也别把 null 写进
-          // condition_effects_json —— 那是个后端会当垃圾丢掉的值。
-          const effect = effectiveEffect(indicator, effects, fields[indicator.column]);
-          return effect ? [[indicator.column, effect] as const] : [];
-        }),
-    ));
     setEditingKey(row.key);
   };
 
   const saveRow = async () => {
     setSaving(true);
     try {
-      await onSave(draftFields, draftEffects);
+      await onSave(draftFields);
       setEditingKey(null);
     } catch (error) {
       alert(error instanceof Error ? error.message : '保存字段失败');
@@ -440,10 +410,7 @@ function InlineConditionEditor({
                         <ConditionRowEditor
                           row={row}
                           fields={draftFields}
-                          effects={draftEffects}
-                          taxonomy={taxonomy}
                           onFields={setDraftFields}
-                          onEffects={setDraftEffects}
                         />
                         <div className="flex justify-end gap-2">
                           <button type="button" disabled={saving} onClick={() => void saveRow()} className="inline-flex items-center gap-1 bg-brand-600 px-3 py-1.5 text-xs text-white disabled:opacity-50">{saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}保存</button>
@@ -454,11 +421,11 @@ function InlineConditionEditor({
                       <div className="flex items-start gap-3">
                         <div className="flex w-20 shrink-0 flex-wrap gap-1">
                           {rowHasValue ? row.indicators.filter((indicator) => hasValue(fields[indicator.column])).map((indicator) => (
-                            <EffectBadge key={indicator.column} effect={effectiveEffect(indicator, effects, fields[indicator.column])} />
+                            <EffectBadge key={indicator.column} effect={effectiveEffect(indicator, fields[indicator.column])} />
                           )) : <span className="px-1.5 py-0.5 text-[11px] text-gray-400">未设置</span>}
                         </div>
                         <span className="w-36 shrink-0 text-xs text-gray-500">{row.label}</span>
-                        <span className={`min-w-0 flex-1 whitespace-pre-wrap text-sm ${rowHasValue ? 'text-gray-800' : 'text-gray-300'}`}>{formatConditionRow(row, fields, taxonomy)}</span>
+                        <span className={`min-w-0 flex-1 whitespace-pre-wrap text-sm ${rowHasValue ? 'text-gray-800' : 'text-gray-300'}`}>{formatConditionRow(row, fields)}</span>
                         {rowPending.length ? <StateBadge tone="amber" text={`${rowPending.length} 项待确认`} /> : null}
                         <button type="button" title={`编辑${row.label}`} onClick={() => startEditing(row)} className="p-1.5 text-gray-400 hover:bg-gray-100 hover:text-brand-700"><Pencil className="h-3.5 w-3.5" /></button>
                       </div>
@@ -626,66 +593,25 @@ function displayDescriptive(value: unknown): string {
   return typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
 }
 
-function ConditionRowEditor({ row, fields, effects, taxonomy, onFields, onEffects }: {
+function ConditionRowEditor({ row, fields, onFields }: {
   row: ConditionRowDefinition;
   fields: Record<string, unknown>;
-  effects: Record<string, ConditionEffect>;
-  taxonomy: IndustryOptionsResponse;
   onFields: (value: Record<string, unknown>) => void;
-  onEffects: (value: Record<string, ConditionEffect>) => void;
 }) {
-  const setField = (field: string, value: unknown) => onFields({ ...fields, [field]: value });
-  const setEffect = (field: string, effect: ConditionEffect) => onEffects({ ...effects, [field]: effect });
-
-  if (row.key === 'accepted_industries') {
-    const l1Indicator = row.indicators.find((item) => item.column === 'industries_json');
-    const l2Indicator = row.indicators.find((item) => item.column === 'industry_l2_json');
-    return (
-      <div>
-        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <span className="text-xs font-medium text-gray-600">可接受行业</span>
-          <div className="flex gap-2">
-            {l1Indicator ? <EffectSelect label="一级" value={effects.industries_json || l1Indicator.default_effect || 'required'} onChange={(value) => setEffect('industries_json', value)} /> : null}
-            {l2Indicator ? <EffectSelect label="二级" value={effects.industry_l2_json || l2Indicator.default_effect || 'preferred'} onChange={(value) => setEffect('industry_l2_json', value)} /> : null}
-          </div>
-        </div>
-        <IndustryPairsEditor
-          value={requirementPairs(fields, taxonomy)}
-          options={taxonomy}
-          onChange={(value) => onFields({
-            ...fields,
-            industries_json: [...new Set(value.map((pair) => pair.l1))],
-            industry_l2_json: [...new Set(value.flatMap((pair) => pair.l2 ? [pair.l2] : []))],
-          })}
-        />
-      </div>
-    );
-  }
-
+  // 行业两个特例（可接受行业的一二级配对编辑器、排除行业）2026-08-28 随需求侧
+  // 行业字典下线一起删除。那三列 group 已置 None，`/meta/indicators` 不再返回
+  // 它们，所以这里也不会再收到对应的 row。业务方向现在走自由标签 + 自由文本，
+  // 由通用的 tags / textarea 编辑器渲染，不需要特例。
   const indicator = row.indicators[0];
-  if (indicator.column === 'excluded_industries_json') {
-    return (
-      <div>
-        <div className="mb-2 flex items-center justify-between gap-2"><span className="text-xs font-medium text-gray-600">{indicator.label}</span><EffectBadge effect="required" /></div>
-        <IndustryPairsEditor
-          value={industryTermsToPairs(stringArray(fields.excluded_industries_json), taxonomy)}
-          options={taxonomy}
-          onChange={(value) => setField('excluded_industries_json', [...new Set(value.map((pair) => pair.l2 || pair.l1))])}
-        />
-      </div>
-    );
-  }
-
   return (
     <FieldEditor
       indicator={indicator}
       value={fields[indicator.column]}
-      effect={effects[indicator.column] || effectiveEffect(indicator, {}, fields[indicator.column])}
-      onValue={(value) => setField(indicator.column, value)}
-      onEffect={(effect) => setEffect(indicator.column, effect)}
+      onValue={(value) => onFields({ ...fields, [indicator.column]: value })}
     />
   );
 }
+
 
 function PendingItems({ items, resolvingItem, onResolve, onModify, indicators }: {
   items: PendingItem[];
@@ -723,14 +649,13 @@ function PendingItems({ items, resolvingItem, onResolve, onModify, indicators }:
   );
 }
 
-function FieldEditor({ indicator, value, effect, onValue, onEffect }: {
+function FieldEditor({ indicator, value, onValue }: {
   indicator: IndicatorMeta;
   value: unknown;
-  effect: ConditionEffect;
   onValue: (value: unknown) => void;
-  onEffect: (value: ConditionEffect) => void;
 }) {
-  const header = <div className="mb-1 flex items-center justify-between gap-2"><span className="text-xs font-medium text-gray-600">{indicator.label}</span>{indicator.effect_editable && indicator.editor !== 'region_multi' ? <EffectSelect value={effect} onChange={onEffect} /> : <EffectBadge effect={effectiveEffect(indicator, {}, value)} />}</div>;
+  // 角标只读：强度由注册表的 default_effect 单点决定（0828 起不再逐字段覆盖）。
+  const header = <div className="mb-1 flex items-center justify-between gap-2"><span className="text-xs font-medium text-gray-600">{indicator.label}</span><EffectBadge effect={effectiveEffect(indicator, value)} /></div>;
   if (indicator.editor === 'region_multi') return <div>{header}<RegionConstraintsEditor value={regionArray(value)} onChange={onValue} /></div>;
   if (indicator.editor === 'multi_enum') return <div>{header}<CheckboxOptions value={stringArray(value)} options={indicator.enum_options} onChange={onValue} /></div>;
   if (indicator.editor === 'tags') return <div>{header}<input className="input" value={stringArray(value).join('、')} onChange={(event) => onValue(splitTerms(event.target.value))} placeholder="多个值用顿号、逗号或换行分隔" /></div>;
@@ -761,7 +686,6 @@ function ScenarioCard({
   scenario,
   groups,
   indicators,
-  taxonomy,
   resolvingItem,
   onSaved,
   onCopy,
@@ -773,7 +697,6 @@ function ScenarioCard({
   scenario: BuyerIntentScenario;
   groups: IndicatorGroupMeta[];
   indicators: IndicatorMeta[];
-  taxonomy: IndustryOptionsResponse;
   resolvingItem: string | null;
   onSaved: (scenario: BuyerIntentScenario) => void;
   onCopy: () => void;
@@ -802,7 +725,6 @@ function ScenarioCard({
         active,
         fields_json: scenario.fields_json,
         needs_confirmation_json: scenario.needs_confirmation_json,
-        condition_effects_json: scenario.condition_effects_json,
       }));
       setEditingMeta(false);
     } catch (error) {
@@ -812,17 +734,9 @@ function ScenarioCard({
     }
   };
 
-  const saveScenarioConditions = async (
-    changes: Record<string, unknown>,
-    effectChanges: Record<string, ConditionEffect>,
-  ) => {
+  const saveScenarioConditions = async (changes: Record<string, unknown>) => {
     const changedFields = new Set(Object.keys(changes));
     const nextFields = applyScenarioFieldChanges(scenario.fields_json, changes, indicators);
-    const nextEffects = { ...(scenario.condition_effects_json || {}) };
-    for (const field of changedFields) {
-      if (!(field in nextFields)) delete nextEffects[field];
-    }
-    Object.assign(nextEffects, effectChanges);
     const nextPending = scenario.needs_confirmation_json.filter((item) => !changedFields.has(item.field));
     onSaved(await buyerIntents.updateScenario(intentId, scenario.id, {
       label: scenario.label,
@@ -830,7 +744,6 @@ function ScenarioCard({
       active: scenario.active,
       fields_json: nextFields,
       needs_confirmation_json: nextPending,
-      condition_effects_json: nextEffects,
     }));
   };
 
@@ -864,8 +777,6 @@ function ScenarioCard({
         groups={groups}
         indicators={indicators}
         fields={scenario.fields_json}
-        effects={scenario.condition_effects_json || {}}
-        taxonomy={taxonomy}
         pending={scenarioPending}
         resolvingItem={resolvingItem}
         showEmpty={false}
@@ -879,20 +790,11 @@ function ScenarioCard({
 }
 
 function conditionRows(indicators: IndicatorMeta[]): ConditionRowDefinition[] {
+  // 一列一行。行业那个「一级 + 二级合成一行」的特例 0828 随行业字典下线删除。
   const rows: ConditionRowDefinition[] = [];
-  const l2 = indicators.find((item) => item.column === 'industry_l2_json');
   for (const indicator of indicators) {
-    if (!indicator.group || indicator.column === 'industry_l2_json') continue;
+    if (!indicator.group) continue;
     if (!isConditionIndicator(indicator)) continue;
-    if (indicator.column === 'industries_json') {
-      rows.push({
-        key: 'accepted_industries',
-        label: '可接受行业',
-        group: indicator.group,
-        indicators: l2 ? [indicator, l2] : [indicator],
-      });
-      continue;
-    }
     rows.push({ key: indicator.column, label: indicator.label, group: indicator.group, indicators: [indicator] });
   }
   return rows;
@@ -989,15 +891,7 @@ function normalizePendingProposedValue(
   return { valid: false };
 }
 
-function formatConditionRow(
-  row: ConditionRowDefinition,
-  fields: Record<string, unknown>,
-  taxonomy: IndustryOptionsResponse,
-): string {
-  if (row.key === 'accepted_industries') {
-    const pairs = requirementPairs(fields, taxonomy);
-    return pairs.length ? pairs.map((pair) => pair.l2 ? `${pair.l1} / ${pair.l2}` : pair.l1).join('、') : '-';
-  }
+function formatConditionRow(row: ConditionRowDefinition, fields: Record<string, unknown>): string {
   const indicator = row.indicators[0];
   const value = fields[indicator.column];
   return hasValue(value) ? formatFieldValue(indicator, value) : '-';
@@ -1011,25 +905,16 @@ function EffectBadge({ effect }: { effect: ConditionEffect | 'pending' | null })
   return <span className={`w-16 shrink-0 px-1.5 py-0.5 text-center text-[11px] font-medium ${styles[effect]}`}>{labels[effect]}</span>;
 }
 
-function EffectSelect({ value, onChange, label }: { value: ConditionEffect; onChange: (value: ConditionEffect) => void; label?: string }) {
-  return <label className="flex items-center gap-1 text-[11px] text-gray-500">{label ? <span>{label}</span> : null}<select value={value} onChange={(event) => onChange(event.target.value as ConditionEffect)} className="border border-gray-200 bg-white px-1.5 py-1 text-[11px]"><option value="required">必须</option><option value="preferred">优先</option></select></label>;
-}
-
 function CheckboxOptions({ value, options, onChange }: { value: string[]; options: Array<{ value: string; label: string }>; onChange: (value: string[]) => void }) {
   return <div className="flex min-h-9 flex-wrap gap-2 border border-gray-200 bg-white p-2">{options.map((option) => <label key={option.value} className="inline-flex items-center gap-1 text-xs text-gray-700"><input type="checkbox" checked={value.includes(option.value)} onChange={() => onChange(value.includes(option.value) ? value.filter((item) => item !== option.value) : [...value, option.value])} />{option.label}</label>)}</div>;
 }
 
 /** 返回 null 表示这个字段不是条件，只是描述，不参与初筛和排序。 */
-function effectiveEffect(indicator: IndicatorMeta, effects: Record<string, ConditionEffect>, value: unknown): ConditionEffect | null {
-  if (effects[indicator.column]) return effects[indicator.column];
-  if (['requires_relocation', 'requires_return_investment', 'requires_team_retention'].includes(indicator.column)) {
-    if (value === 'required' || value === 'preferred') return value;
-    return null;
-  }
-  if (indicator.column === 'region_constraints_json') {
-    const regions = regionArray(value);
-    return regions.some((item) => item.effect === 'required' || item.effect === 'excluded') ? 'required' : 'preferred';
-  }
+function effectiveEffect(indicator: IndicatorMeta, value: unknown): ConditionEffect | null {
+  // 迁址/返投/留任三项 0828 退役，它们的「值本身就是强度」那个特例跟着删了。
+  // 地区的 effect 三态也退役了：可接受与排除拆成两列，语义写在列名里，
+  // 强度由 default_effect 给（acceptable 优先、excluded 必须）。
+  void value;
   return (indicator.default_effect as ConditionEffect | null) || null;
 }
 
@@ -1038,26 +923,6 @@ function isConditionIndicator(indicator: IndicatorMeta): boolean {
   return Boolean(indicator.default_effect) || indicator.effect_editable;
 }
 
-function requirementPairs(fields: Record<string, unknown>, taxonomy: IndustryOptionsResponse): IndustryPairValue[] {
-  const pairs: IndustryPairValue[] = stringArray(fields.industries_json).map((l1) => ({ l1 }));
-  for (const l2 of stringArray(fields.industry_l2_json)) {
-    const match = taxonomy.l2.find((item) => item.term === l2);
-    if (match) pairs.push({ l1: match.l1, l2 });
-  }
-  return uniquePairs(pairs);
-}
-
-function industryTermsToPairs(terms: string[], taxonomy: IndustryOptionsResponse): IndustryPairValue[] {
-  return uniquePairs(terms.map((term) => {
-    const l2 = taxonomy.l2.find((item) => item.term === term);
-    return l2 ? { l1: l2.l1, l2: l2.term } : { l1: term };
-  }));
-}
-
-function uniquePairs(pairs: IndustryPairValue[]): IndustryPairValue[] {
-  const seen = new Set<string>();
-  return pairs.filter((pair) => { const key = `${pair.l1}:${pair.l2 || ''}`; if (seen.has(key)) return false; seen.add(key); return true; });
-}
 
 function formatFieldValue(indicator: IndicatorMeta, value: unknown): string {
   if (indicator.editor === 'region_multi') return regionArray(value).map((item) => `${item.province}${item.city || ''}${item.district || ''}（${item.effect === 'required' ? '必须' : item.effect === 'excluded' ? '排除' : '优先'}）`).join('、');

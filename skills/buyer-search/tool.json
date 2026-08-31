@@ -1,0 +1,113 @@
+[
+  {
+    "name": "search_buyers_business",
+    "description": "取回中大咨询撮合业务买家库里全部在库买家的业务原文（约 200 家），供你逐条读、判断谁可能想买手上这个标的。**这是为标的找买家的第一步，绝大多数情况下先调它。** 没有行业/关键词参数是设计如此：买家说的是「薄膜电容器」「线控底盘」这类细分方向，任何行业字典都接不住，所以业务匹配 100% 由你读「业务说明」和「要买什么业务」两栏完成。业务说明为空的买家如实说信息不足，不要从公司名猜业务。读完选出 5-10 家再用 get_buyer 取全量档核对财务门槛。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "detail": {
+          "type": "string",
+          "enum": ["full", "brief"],
+          "default": "full",
+          "description": "full（默认）给完整业务说明，约 600 字/买家；brief 把业务说明截到 120 字、需求摘要截到 80 字，约 280 字/买家。判不准就用 full——截断掉的往往正是判断依据。"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "get_buyer",
+    "description": "按名称或 id 取一家买家的全量档案：主体信息 + 名下全部收购需求的完整门槛与原始需求正文。用在「用户点名问某家买家在找什么」，或读完 search_buyers_business 之后核对候选。名称是模糊匹配且认曾用名与别名。**命中多个主体时会全部返回** —— 同名不同主体在生产库里是真实数据（「北大健康」有 3 个主体），请按需求内容自行判断用哪一个，或向用户说明有多条，不要合并或只取第一个。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "买家名称或别名，模糊匹配。给一部分就行，如「北大健康」。"
+        },
+        "buyer_party_id": {
+          "type": "string",
+          "description": "买家主体 id，从 search_buyers_business 或 filter_buyers 的返回里拿。给了它就不看 name。"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "filter_buyers",
+    "description": "按买家自身条件 + 手上标的的事实，反查哪些收购需求的门槛能过。返回命中需求的全量档案，上限 50 条。**target_* 传的是这个标的自己的真实数字，不是你想要的门槛** —— 代码拿它去比每条需求各自设的门槛。⚠️ **买家没设某条门槛时一律通过，并在「条件判定」里标成「买家没提过这个门槛，不构成障碍」——那是正面信号，不是信息不足**；把它读成「不满足」会让库里最灵活、最该推的那批买家全部消失。业务方向对不对口这个工具判不了，先用 search_buyers_business。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "ownership_type": {
+          "type": "string",
+          "enum": ["state_owned", "private", "foreign", "other"],
+          "description": "买家企业性质。state_owned 含央企与地方国企；国资背景基金也按国企算。显式筛选时未知/空值不算满足，会被排除。"
+        },
+        "listed_status": {
+          "type": "string",
+          "enum": ["listed", "unlisted", "pre_ipo"],
+          "description": "买家自己的上市状态（不是标的的）。显式筛选时未知/空值不算满足，会被排除。"
+        },
+        "province": {
+          "type": "string",
+          "description": "买家所在省份全称，如 江苏省 / 广东省 / 上海市。省市区三级独立生效，按你确定的层级填。「长三角」这类大区要自己展开成省份，接口只认标准行政区划。显式筛选时未知/空值不算满足，会被排除。"
+        },
+        "city": {
+          "type": "string",
+          "description": "买家所在地级市全称，如 苏州市。显式筛选时未知/空值不算满足，会被排除。"
+        },
+        "district": {
+          "type": "string",
+          "description": "买家所在区县全称，如 吴中区。显式筛选时未知/空值不算满足，会被排除。"
+        },
+        "min_market_cap_yuan": {
+          "type": "number",
+          "description": "买家自己的市值下限，单位元（10 亿写 1000000000）。用来找「买得起」的买家。没有已知市值的买家不满足此显式条件。"
+        },
+        "min_revenue_yuan": {
+          "type": "number",
+          "description": "买家自己的营收下限，单位元。没有已知营收的买家不满足此显式条件。"
+        },
+        "target_revenue_yuan": {
+          "type": "number",
+          "description": "手上这个标的的营收，单位元（2000 万写 20000000）。会去比每条需求的「最低营收」门槛。"
+        },
+        "target_net_profit_yuan": {
+          "type": "number",
+          "description": "标的的净利润，单位元。会去比需求的「最低净利润」。"
+        },
+        "target_pe": {
+          "type": "number",
+          "description": "标的的 PE，**倍数不是比例**，15 倍写 15（不是 0.15）。会去比需求的「PE 上限」。"
+        },
+        "target_market_cap_yuan": {
+          "type": "number",
+          "description": "标的市值，单位元。会去比需求的市值上下限。"
+        },
+        "target_valuation_yuan": {
+          "type": "number",
+          "description": "标的估值，单位元。会去比需求的估值上下限。"
+        },
+        "target_listed_status": {
+          "type": "string",
+          "enum": ["listed", "unlisted", "pre_ipo"],
+          "description": "标的的上市状态。会去比需求的「可接受上市状态」。"
+        },
+        "target_province": {
+          "type": "string",
+          "description": "标的所在省份全称，如 江苏省。会去比需求的「可接受地区」与「排除地区」，三级逐级独立生效。"
+        },
+        "target_city": {
+          "type": "string",
+          "description": "标的所在地级市全称，如 苏州市。"
+        },
+        "target_district": {
+          "type": "string",
+          "description": "标的所在区县全称，如 吴中区。"
+        }
+      },
+      "required": []
+    }
+  }
+]

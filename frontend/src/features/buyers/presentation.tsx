@@ -132,17 +132,23 @@ export function MoneyCell({ value }: { value?: string | number | null }) {
   return <span className="whitespace-nowrap text-xs text-gray-700">{formatCompactMoney(amount)}</span>;
 }
 
-/** 关注行业：需求的可接受行业，一级为主、二级补充。 */
+/**
+ * 关注业务：需求的业务标签（0828 起是自由标签，不过行业字典）。
+ *
+ * 行业字典只有 16 个一级行业，接不住买家说的「薄膜电容器」「线控底盘」这类
+ * 细分方向 —— 实测人均只填 1.25 个一级行业，而真正的信息落在原文里。
+ * 标签为空时退回业务说明的首句，比显示一个「-」有用。
+ */
 export function IntentIndustriesCell({ item }: { item: BuyerIntent }) {
-  const primary = (item.industries_json || []).map(String).filter(Boolean);
-  const secondary = (item.industry_l2_json || []).map(String).filter(Boolean);
-  if (!primary.length && !secondary.length) return <Blank />;
-  const all = [...primary, ...secondary];
-  return (
-    <span className="block truncate text-xs text-gray-700" title={all.join('、')}>
-      {primary.length ? primary.join('、') : secondary.join('、')}
-    </span>
-  );
+  const tags = (item.intent_business_tags_json || []).map(String).filter(Boolean);
+  if (tags.length) {
+    return (
+      <span className="block truncate text-xs text-gray-700" title={tags.join('、')}>{tags.join('、')}</span>
+    );
+  }
+  const summary = (item.intent_business_summary || '').trim();
+  if (!summary) return <Blank />;
+  return <span className="block truncate text-xs text-gray-500" title={summary}>{summary}</span>;
 }
 
 /**
@@ -343,23 +349,29 @@ export function parseYuanInput(raw: string): number | null {
 export type RequirementChip = { key: string; label: string; effect: ConditionEffect; title: string };
 
 /**
- * 各维度的默认匹配作用，来源是 backend/app/registry/indicators.py 的 BUYER_INDICATORS
- * default_effect。这里是有意的复制：列表页不加载指标契约接口。改契约默认值时需同步这里。
+ * 各维度的默认匹配作用，来源是 backend/app/registry/indicators.py 的
+ * BUYER_INTENT_INDICATORS.default_effect。这里是有意的复制：列表页不加载指标契约接口。
+ * 改契约默认值时需同步这里。
+ *
+ * 2026-08-28：`condition_effects_json`（逐字段覆盖强度）整个退役 —— 它在生产里
+ * 只有 5/52 有值，而三个活着的消费方（本文件的角标、深评上下文、解析写入）
+ * 没有一个是筛选。所以强度不再逐条可覆盖，直接读默认值。
+ * 行业两条同批退役（需求侧行业字典下线），换成业务标签。
  */
 const DEFAULT_EFFECTS = {
-  industries_json: 'required',
-  industry_l2_json: 'preferred',
+  intent_business_tags_json: 'preferred',
   acceptable_listed_status_json: 'preferred',
   min_revenue_yuan: 'required',
   min_net_profit_yuan: 'required',
-  region_constraints_json: 'preferred',
+  acceptable_regions_json: 'preferred',
+  excluded_regions_json: 'required',
 } as const;
 
 type ChipColumn = keyof typeof DEFAULT_EFFECTS;
 
-/** 返回该维度的生效作用。规则只有两态，六个维度都会进列表。 */
-function resolveEffect(item: BuyerIntent, column: ChipColumn): ConditionEffect {
-  return item.condition_effects_json?.[column] || DEFAULT_EFFECTS[column];
+/** 返回该维度的生效作用。规则只有两态。 */
+function resolveEffect(column: ChipColumn): ConditionEffect {
+  return DEFAULT_EFFECTS[column];
 }
 
 /** 多值维度收敛成「前 2 个 + N」，title 保留全量。 */
@@ -378,12 +390,11 @@ function shortProvince(value: string): string {
 }
 
 function chip(
-  item: BuyerIntent,
   column: ChipColumn,
   key: string,
   build: () => { label: string; title: string } | null,
 ): RequirementChip | null {
-  const effect = resolveEffect(item, column);
+  const effect = resolveEffect(column);
   const built = build();
   if (!built) return null;
   return { key, label: built.label, effect, title: built.title };
@@ -395,31 +406,37 @@ function chip(
  * 这些不在契约里、详情页也编辑不到的影子列。
  */
 export function requirementChips(item: BuyerIntent): { industry: RequirementChip[]; conditions: RequirementChip[] } {
+  // 第一行讲「要买什么业务」。0828 起它来自自由业务标签而不是行业字典 ——
+  // 字典只有 16 个一级行业，接不住「薄膜电容器」「线控底盘」这类细分方向。
   const industry = [
-    chip(item, 'industries_json', 'industry_l1', () => collapseValues(item.industries_json || [])),
-    chip(item, 'industry_l2_json', 'industry_l2', () => collapseValues(item.industry_l2_json || [])),
+    chip('intent_business_tags_json', 'business_tags', () => collapseValues(item.intent_business_tags_json || [])),
   ].filter(Boolean) as RequirementChip[];
 
   const conditions = [
-    chip(item, 'acceptable_listed_status_json', 'listed', () => {
-      const labels = (item.acceptable_listed_status_json || []).map((value) => valueLabel('preferred_listed_status', value));
+    chip('acceptable_listed_status_json', 'listed', () => {
+      const labels = (item.acceptable_listed_status_json || []).map((value) => valueLabel('acceptable_listed_status_json', value));
       return collapseValues(labels, 3);
     }),
-    chip(item, 'min_revenue_yuan', 'revenue', () => {
+    chip('min_revenue_yuan', 'revenue', () => {
       if (!item.min_revenue_yuan) return null;
       const text = `营收≥${formatCompactMoney(Number(item.min_revenue_yuan))}`;
       return { label: text, title: text };
     }),
-    chip(item, 'min_net_profit_yuan', 'profit', () => {
+    chip('min_net_profit_yuan', 'profit', () => {
       if (!item.min_net_profit_yuan) return null;
       const text = `净利≥${formatCompactMoney(Number(item.min_net_profit_yuan))}`;
       return { label: text, title: text };
     }),
-    chip(item, 'region_constraints_json', 'region', () => {
-      const provinces = (item.region_constraints_json || [])
-        .filter((constraint) => constraint.effect !== 'excluded')
-        .map((constraint) => shortProvince(constraint.province || ''));
+    chip('acceptable_regions_json', 'region', () => {
+      const provinces = (item.acceptable_regions_json || []).map((region) => shortProvince(region.province || ''));
       return collapseValues(provinces);
+    }),
+    // 排除地区单独出一个角标：语义写在列名里，不再靠元素里的 effect 区分，
+    // 而元素里那个 effect 从来没有真的排除过任何标的（SQL 只实现了 required 一档）。
+    chip('excluded_regions_json', 'region_excluded', () => {
+      const provinces = (item.excluded_regions_json || []).map((region) => shortProvince(region.province || ''));
+      const built = collapseValues(provinces);
+      return built ? { label: `不要${built.label}`, title: `不要${built.title}` } : null;
     }),
   ].filter(Boolean) as RequirementChip[];
 

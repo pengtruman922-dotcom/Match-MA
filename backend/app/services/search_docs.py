@@ -9,6 +9,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
+from backend.app.registry.indicators import buyer_intent_fact_columns
 from backend.app.services.profile_sections import load_profile_sections, render_profile_text
 
 
@@ -109,52 +110,42 @@ def rebuild_seller_target_search_doc(db: Session, seller_target_id: UUID) -> dic
 
 def rebuild_buyer_intent_search_doc(db: Session, buyer_intent_id: UUID) -> dict[str, Any]:
     intent = _get_buyer_intent(db, buyer_intent_id)
+    # 业务说明放进 requirement_summary 而不是 constraint_text：它现在是「这条需求
+    # 到底要买什么」的主叙述，不是一个约束条件。阶段 A 里 intent_summary 仍有存量，
+    # 所以做一次兜底 —— 迁移 022 已经把它并进新列，兜底只服务回填之前的那一小段窗口。
     requirement_summary = _join_lines(
         [
             f"意向：{intent['intent_name']}",
-            intent.get("intent_summary"),
+            intent.get("intent_business_summary") or intent.get("intent_summary"),
             intent.get("raw_requirement_text"),
         ]
     )
-    industries = intent.get("industries_json")
-    industries_text = "、".join(str(item) for item in industries if item) if isinstance(industries, list) else None
-    focus_tags = intent.get("industry_focus_tags_json")
-    focus_tags_text = "、".join(str(item) for item in focus_tags if item) if isinstance(focus_tags, list) else None
+    business_tags = intent.get("intent_business_tags_json")
+    business_tags_text = (
+        "、".join(str(item) for item in business_tags if item) if isinstance(business_tags, list) else None
+    )
     constraint_text = _join_lines(
         [
-            _kv("关注行业", industries_text),
-            _kv("细分赛道", focus_tags_text),
-            _kv("一级行业", intent.get("industry_primary")),
-            _kv("二级行业", intent.get("industry_secondary")),
-            _kv("区域", intent.get("region_scope_summary")),
-            _kv("结构化地区", _json_text(intent.get("region_constraints_json"))),
+            # 业务标签与排除方向是首轮筛选读得懂的东西，放最前面。
+            _kv("业务标签", business_tags_text),
+            _kv("排除方向", intent.get("excluded_business_text")),
+            _kv("地域说明", intent.get("region_scope_summary")),
+            _kv("可接受地区", _region_text(intent.get("acceptable_regions_json"))),
+            _kv("排除地区", _region_text(intent.get("excluded_regions_json"))),
             _money("最低营收", intent.get("min_revenue_yuan")),
             _money("最低净利润", intent.get("min_net_profit_yuan")),
             _money("最低估值", intent.get("min_valuation_yuan")),
             _money("最高估值", intent.get("max_valuation_yuan")),
             _money("最低市值", intent.get("min_market_cap_yuan")),
             _money("最高市值", intent.get("max_market_cap_yuan")),
-            _kv("市值范围", intent.get("market_cap_range_summary")),
             _kv("PE上限", _decimal_text(intent.get("max_pe"))),
-            _kv("PS上限", _decimal_text(intent.get("max_ps"))),
-            _kv("最低净利率", _decimal_text(intent.get("min_net_margin"))),
-            _kv("最低毛利率", _decimal_text(intent.get("min_gross_margin"))),
             _kv("需要控股", intent.get("requires_control")),
             _kv("需要并表", intent.get("requires_consolidation")),
-            _kv("接受少数股权", intent.get("accepts_minority_investment")),
-            _kv("迁址要求", intent.get("requires_relocation")),
-            _kv("返投要求", intent.get("requires_return_investment")),
-            _kv("团队留任要求", intent.get("requires_team_retention")),
-            _kv("可接受上市状态", intent.get("acceptable_listed_status_json") or intent.get("preferred_listed_status")),
-            _kv("条件作用", intent.get("condition_effects_json")),
-            _kv("上市板块要求", intent.get("listing_board_requirement_summary")),
-            _kv("融资/上市阶段", intent.get("financing_stage_requirement_summary")),
+            _kv("期望股比下限", _decimal_text(intent.get("desired_equity_ratio_min"))),
+            _kv("期望股比上限", _decimal_text(intent.get("desired_equity_ratio_max"))),
+            _kv("可接受上市状态", intent.get("acceptable_listed_status_json")),
             _kv("交易方式原文", intent.get("transaction_type")),
             _kv("可接受交易结构", _json_text(intent.get("transaction_types_json"))),
-            _kv("溢价要求", intent.get("premium_tolerance_summary")),
-            _kv("溢价上限", _decimal_text(intent.get("max_premium_rate"))),
-            _kv("负债率上限", _decimal_text(intent.get("max_debt_ratio"))),
-            _kv("负债率要求", intent.get("debt_ratio_requirement_summary")),
             _kv("重大风险容忍", intent.get("major_risk_tolerance_summary")),
             _kv("不接受的重大风险", _json_text(intent.get("unacceptable_risk_flags_json"))),
             _kv("收购方产业优势", intent.get("buyer_industry_advantage_summary")),
@@ -415,24 +406,10 @@ def _get_seller_target(db: Session, seller_target_id: UUID) -> dict[str, Any]:
 def _get_buyer_intent(db: Session, buyer_intent_id: UUID) -> dict[str, Any]:
     row = db.execute(
         text(
-            """
+            f"""
             select
-              id, buyer_party_id, intent_name, raw_requirement_text, intent_summary,
-              industry_primary, industry_secondary, industries_json, industry_l2_json,
-              excluded_industries_json, industry_focus_tags_json,
-              region_scope_summary, region_constraints_json,
-              min_revenue_yuan, min_net_profit_yuan, max_pe, max_ps,
-              min_net_margin, min_gross_margin, min_valuation_yuan, max_valuation_yuan,
-              min_market_cap_yuan, max_market_cap_yuan, market_cap_range_summary,
-              requires_control, requires_consolidation, accepts_minority_investment,
-              preferred_listed_status, acceptable_listed_status_json, condition_effects_json,
-              requires_relocation, requires_return_investment, requires_team_retention,
-              listing_board_requirement_summary,
-              financing_stage_requirement_summary, transaction_type, transaction_types_json,
-              premium_tolerance_summary, max_premium_rate, max_debt_ratio,
-              debt_ratio_requirement_summary, major_risk_tolerance_summary,
-              unacceptable_risk_flags_json,
-              buyer_industry_advantage_summary
+              id, buyer_party_id, intent_name,
+              {', '.join(buyer_intent_fact_columns())}
             from buyer_intent
             where id = :buyer_intent_id
               and team_id = :team_id
@@ -478,6 +455,26 @@ def _decimal_text(value: Any) -> str | None:
     if isinstance(value, Decimal):
         return format(value.normalize(), "f")
     return str(value)
+
+
+def _region_text(value: Any) -> str | None:
+    """`[{province, city, district}]` → 「广东省 / 江苏省苏州市」。
+
+    省市区三级逐级独立生效，所以只拼这一项**填到的**层级 —— 补全成三级会让
+    「只说了江苏省」看起来像「江苏省某个具体的市」，模型会照着这个错的粒度判。
+    """
+    if not isinstance(value, list) or not value:
+        return None
+    parts: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        # 直辖市的省与市同名，直接拼会变成「北京市北京市」。
+        levels = [str(item.get(key) or "").strip() for key in ("province", "city", "district")]
+        label = "".join(dict.fromkeys(level for level in levels if level))
+        if label and label not in parts:
+            parts.append(label)
+    return "、".join(parts) or None
 
 
 def _json_text(value: Any) -> str | None:
