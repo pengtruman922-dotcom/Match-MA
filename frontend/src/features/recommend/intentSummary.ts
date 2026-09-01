@@ -1,4 +1,4 @@
-import { fieldLabel, valueLabel } from '../../lib/fieldLabels';
+import { valueLabel } from '../../lib/fieldLabels';
 import { formatYuan } from '../../lib/format';
 import type { BuyerIntent } from '../../types/api';
 
@@ -47,40 +47,45 @@ export function intentToRequirementText(intent: BuyerIntent): string {
     const text = String(value || '').trim();
     if (text && text !== '-') lines.push(`${label}：${text}`);
   };
-  const enumValue = (field: keyof BuyerIntent) => {
-    const raw = intent[field];
-    if (raw === null || raw === undefined || raw === '' || raw === 'unknown') return null;
-    return valueLabel(String(field), raw);
-  };
-  const money = (value: string | null) => (value ? formatYuan(value) : null);
+  const money = (value: string | number | null | undefined) =>
+    value === null || value === undefined || value === '' ? null : formatYuan(String(value));
 
   push('买家', intent.buyer_name);
 
-  // 0828：行业字典在需求侧下线，业务方向来自自由标签 + 业务说明。
-  // 存量行业列（industry_primary / industries_json 等）迁移 022 已并进
-  // intent_business_summary，所以这里不再逐个拼它们。
-  push('目标业务', industryList(intent.intent_business_tags_json || []).join('、'));
-  push('业务方向', intent.intent_business_summary);
-  push('排除方向', intent.excluded_business_text);
-  // 地区先说原话（「优先广东」这类语气只有它表达得了），再补结构化的省份。
-  push('地区', intent.region_scope_summary);
-  push('可接受地区', regionText(intent.acceptable_regions_json));
-  push('排除地区', regionText(intent.excluded_regions_json));
-
-  push('营收下限', money(intent.min_revenue_yuan));
-  push('净利下限', money(intent.min_net_profit_yuan));
-  push('PE 上限', intent.max_pe ? `不超过 ${intent.max_pe}` : null);
-  const valuationLow = money(intent.min_valuation_yuan);
-  const valuationHigh = money(intent.max_valuation_yuan);
-  if (valuationLow || valuationHigh) {
-    push('估值区间', `${valuationLow || '不限'} ~ ${valuationHigh || '不限'}`);
-  }
-  push(fieldLabel('buyer_intent', 'requires_control'), enumValue('requires_control'));
-  push(fieldLabel('buyer_intent', 'requires_consolidation'), enumValue('requires_consolidation'));
-  const listed = (intent.acceptable_listed_status_json || [])
-    .map((value) => valueLabel('acceptable_listed_status_json', value))
-    .join('、');
-  push(fieldLabel('buyer_intent', 'acceptable_listed_status_json'), listed);
+  // 0901：业务方向与全部门槛住在方案里，需求本身只是容器。继续读 intent 上那些
+  // 退役列的表现是**这段话越来越空**：重跑解析之后新值全在方案上，而这里读的是
+  // 存量值，看不出错、只是推荐对话的开场白里什么条件都没有了。
+  const scenarios = intent.scenarios_json || [];
+  const multi = scenarios.length > 1;
+  scenarios.forEach((scenario, index) => {
+    // 多方案是 OR。不写这一句，读的人（和模型）会把几档的条件叠加起来当一档看，
+    // 于是「酒店」那一档凭空背上「粮油食品」那一档的营收与估值要求。
+    const prefix = multi ? `方案 ${index + 1} · ` : '';
+    push(`${prefix}目标业务`, industryList(scenario.business_tags_json || []).join('、'));
+    push(`${prefix}业务方向`, scenario.scenario_summary);
+    push(`${prefix}排除方向`, scenario.excluded_business_text);
+    push(`${prefix}要求地区`, regionText(scenario.required_regions_json));
+    push(`${prefix}营收下限`, money(scenario.min_revenue_yuan));
+    push(`${prefix}净利下限`, money(scenario.min_net_profit_yuan));
+    push(`${prefix}PE 上限`, scenario.max_pe ? `不超过 ${scenario.max_pe}` : null);
+    const valuationLow = money(scenario.min_valuation_yuan);
+    const valuationHigh = money(scenario.max_valuation_yuan);
+    if (valuationLow || valuationHigh) {
+      push(`${prefix}估值区间`, `${valuationLow || '不限'} ~ ${valuationHigh || '不限'}`);
+    }
+    const marketLow = money(scenario.min_market_cap_yuan);
+    const marketHigh = money(scenario.max_market_cap_yuan);
+    if (marketLow || marketHigh) {
+      push(`${prefix}市值区间`, `${marketLow || '不限'} ~ ${marketHigh || '不限'}`);
+    }
+    const listed = (scenario.acceptable_listed_status_json || [])
+      .map((value) => valueLabel('acceptable_listed_status_json', value))
+      .join('、');
+    push(`${prefix}上市状态`, listed);
+    // 「广东优先」这类偏好只住在这里 —— 丢了它，读的人会以为这个买家不限地区。
+    push(`${prefix}其他要求`, scenario.other_requirements_text);
+  });
+  if (multi) lines.push('（以上方案满足任意一个即可，不要把它们的条件叠加起来看）');
 
   const note = String(intent.raw_requirement_text || '').trim();
   if (note) lines.push(`其他要求：${note.slice(0, 500)}`);
