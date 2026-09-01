@@ -4,11 +4,30 @@
 
 | 文件 | 用途 |
 |---|---|
-| `tool.json` | 三个工具的定义（OpenAI function-calling 格式），直接喂给 wegent 的工具注册 |
+| `tool.json` | Wegent 可识别的单个工具定义（OpenAI function-calling 格式），通过 `operation` 分发三种查询 |
 | `SKILL.md` | 给 Agent 读的技能说明：三接口用法 + 7 条硬规则 + **空值方向那一条** |
 | `search_buyers.py` | 可独立运行的实现，也可 `from search_buyers import search_buyers_business, get_buyer, filter_buyers` 调用 |
 
 与 `skills/target-search/`（为买家找标的）是反方向的一对，凭证方案完全相同。
+
+## Wegent 注册方式
+
+本目录按 `target-search` 的单工具格式接入：注册 `tool.json` 后，工具名是
+`search_buyers`，运行入口是 `search_buyers.py` 里的同名 `search_buyers()` 函数。
+它不是 MCP server，不需要在 Wegent 里寻找名为 Match-MA 的 MCP。Wegent 需要支持
+执行 skill 的 Python 入口并把 `tool.json` 注册为 function tool。
+
+三个原始查询函数仍保留，但不直接作为三个 tool 注册。调用时传 `operation`：
+
+```json
+{"operation": "business", "detail": "full"}
+{"operation": "get", "name": "北大健康"}
+{"operation": "filter", "city": "杭州市"}
+```
+
+如果 Wegent 的导入器只接受一个 `tool.json` 对象，这个版本可以直接导入；如果它
+只支持 MCP、不能执行 Python skill，则需要 Wegent 管理员提供执行器或另建 MCP
+适配层，仓库里的 skill 文件本身无法注册 MCP 服务。
 
 ## 这个 skill 与标的侧那个最大的不同
 

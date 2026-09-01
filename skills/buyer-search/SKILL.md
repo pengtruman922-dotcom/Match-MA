@@ -14,6 +14,26 @@ user-invocable: true
 **这是一个把材料交给你的工具，不是一个匹配工具。** 业务是否对口 100% 由你读文本判断，
 库里**没有行业筛选**这回事。
 
+## Wegent 调用入口
+
+本 skill 对外注册为一个 `search_buyers` 工具，使用 `operation` 选择查询形状：
+
+- `business`：全库业务原文，通常第一步调用；
+- `get`：按 `name` 或 `buyer_party_id` 取全量档案；
+- `filter`：按买家自身条件和标的事实反查需求门槛。
+
+只接受标准省、市、区名称。`长三角`、`华东` 等大区要由调用方 Agent 先展开，
+再把标准行政区划传给 `filter`，skill 不把大区当作可筛值。
+
+例如只看买家所在地在杭州的在库需求：
+
+```json
+{"operation": "filter", "city": "杭州市"}
+```
+
+Wegent 侧应注册目录中的 `tool.json` 并执行 `search_buyers.py` 的同名入口；
+这个 skill 通过 HTTPS 调 Match-MA REST API，不依赖 Match-MA MCP server。
+
 ## 什么时候用
 
 - 手上有一个标的（或一段出售需求描述），要找可能的买家。

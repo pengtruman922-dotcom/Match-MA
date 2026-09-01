@@ -808,6 +808,70 @@ def filter_buyers(
     return {"matched": len(hits), "returned": returned, "notes": notes}
 
 
+# -- Wegent 单工具兼容入口 -----------------------------------------------
+
+
+def search_buyers(
+    operation: str = "business",
+    detail: str = "full",
+    name: str | None = None,
+    buyer_party_id: str | None = None,
+    ownership_type: str | None = None,
+    listed_status: str | None = None,
+    province: str | None = None,
+    city: str | None = None,
+    district: str | None = None,
+    min_market_cap_yuan: float | None = None,
+    min_revenue_yuan: float | None = None,
+    target_revenue_yuan: float | None = None,
+    target_net_profit_yuan: float | None = None,
+    target_pe: float | None = None,
+    target_market_cap_yuan: float | None = None,
+    target_valuation_yuan: float | None = None,
+    target_listed_status: str | None = None,
+    target_province: str | None = None,
+    target_city: str | None = None,
+    target_district: str | None = None,
+) -> dict[str, Any]:
+    """Wegent-compatible single tool entry point.
+
+    Wegent's skill loader expects one ``tool.json`` object and a Python function
+    with the same name.  Keep the three query shapes behind an explicit operation
+    so the loader can expose one tool without changing their semantics.
+    """
+    op = str(operation or "business").strip().lower()
+    if op in {"business", "search_buyers_business"}:
+        return search_buyers_business(detail=detail)
+    if op in {"get", "get_buyer"}:
+        return get_buyer(name=name, buyer_party_id=buyer_party_id)
+    if op in {"filter", "filter_buyers"}:
+        return filter_buyers(
+            ownership_type=ownership_type,
+            listed_status=listed_status,
+            province=province,
+            city=city,
+            district=district,
+            min_market_cap_yuan=min_market_cap_yuan,
+            min_revenue_yuan=min_revenue_yuan,
+            target_revenue_yuan=target_revenue_yuan,
+            target_net_profit_yuan=target_net_profit_yuan,
+            target_pe=target_pe,
+            target_market_cap_yuan=target_market_cap_yuan,
+            target_valuation_yuan=target_valuation_yuan,
+            target_listed_status=target_listed_status,
+            target_province=target_province,
+            target_city=target_city,
+            target_district=target_district,
+        )
+    return {
+        "matched": 0,
+        "returned": [],
+        "error": (
+            f"不支持的 operation: {operation!r}。请使用 business、get 或 filter。"
+        ),
+    }
+
+
 # -- 诊断与凭证 -----------------------------------------------------------
 
 

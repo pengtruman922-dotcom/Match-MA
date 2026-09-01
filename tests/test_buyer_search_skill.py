@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import sys
 
@@ -318,3 +319,74 @@ def test_full_intent_includes_pause_and_confirmation_details(skill) -> None:
 
     assert payload["暂停原因"] == "等待顾问确认"
     assert payload["待确认项"][0]["field"] == "max_pe"
+
+
+def test_wegent_tool_definition_is_a_single_tool_object() -> None:
+    tool_path = SKILL.parent / "tool.json"
+    tool = json.loads(tool_path.read_text(encoding="utf-8"))
+
+    assert isinstance(tool, dict)
+    assert tool["name"] == "search_buyers"
+    assert tool["parameters"]["properties"]["operation"]["enum"] == [
+        "business",
+        "get",
+        "filter",
+    ]
+    assert tool["parameters"]["required"] == ["operation"]
+
+
+def test_wegent_entrypoint_dispatches_each_operation(skill, monkeypatch) -> None:
+    calls: list[tuple[str, dict]] = []
+
+    def fake_business(**kwargs):
+        calls.append(("business", kwargs))
+        return {"operation": "business"}
+
+    def fake_get(**kwargs):
+        calls.append(("get", kwargs))
+        return {"operation": "get"}
+
+    def fake_filter(**kwargs):
+        calls.append(("filter", kwargs))
+        return {"operation": "filter"}
+
+    monkeypatch.setattr(skill, "search_buyers_business", fake_business)
+    monkeypatch.setattr(skill, "get_buyer", fake_get)
+    monkeypatch.setattr(skill, "filter_buyers", fake_filter)
+
+    assert skill.search_buyers("business", detail="brief") == {"operation": "business"}
+    assert skill.search_buyers("get", name="北大健康") == {"operation": "get"}
+    assert skill.search_buyers("filter", city="杭州市", target_district="西湖区") == {"operation": "filter"}
+    assert calls == [
+        ("business", {"detail": "brief"}),
+        ("get", {"name": "北大健康", "buyer_party_id": None}),
+        (
+            "filter",
+            {
+                "ownership_type": None,
+                "listed_status": None,
+                "province": None,
+                "city": "杭州市",
+                "district": None,
+                "min_market_cap_yuan": None,
+                "min_revenue_yuan": None,
+                "target_revenue_yuan": None,
+                "target_net_profit_yuan": None,
+                "target_pe": None,
+                "target_market_cap_yuan": None,
+                "target_valuation_yuan": None,
+                "target_listed_status": None,
+                "target_province": None,
+                "target_city": None,
+                "target_district": "西湖区",
+            },
+        ),
+    ]
+
+
+def test_wegent_entrypoint_rejects_unknown_operation_without_network(skill) -> None:
+    result = skill.search_buyers("unsupported")
+
+    assert result["matched"] == 0
+    assert result["returned"] == []
+    assert "operation" in result["error"]
