@@ -567,9 +567,16 @@ def create_buyer_intent(
             bindparam("excluded_industries_json", type_=JSONB),
             bindparam("industry_focus_tags_json", type_=JSONB),
             bindparam("region_constraints_json", type_=JSONB),
-            bindparam("intent_business_tags_json", type_=JSONB),
-            bindparam("acceptable_regions_json", type_=JSONB),
-            bindparam("excluded_regions_json", type_=JSONB),
+            # ⚠️ **这里声明的每个名字都必须在上面的 values 里真的出现。**
+            # `text().bindparams()` 对不存在的名字直接抛 ArgumentError，而这是
+            # 请求期构造 —— 表现是「新建买家需求每一次都 500」，且没有任何
+            # 静态检查会拦住它。0828 加 intent_business_tags_json /
+            # acceptable_regions_json / excluded_regions_json 三个新列时，
+            # 参数字典和这里都加了、**唯独漏了 insert 的列与值清单**，
+            # 于是新建买家从 0828 上线起一直炸到 0901 才被点到。
+            # 那三列 0901 已随需求侧字段整体退役（内容住在方案表上），
+            # 所以不是把它们补进 insert，而是从这里去掉。
+            # tests/test_sql_bindparams.py 现在钉着这条线。
             bindparam("acceptable_listed_status_json", type_=JSONB),
             bindparam("transaction_types_json", type_=JSONB),
             bindparam("acceptable_cash_flow_status_json", type_=JSONB),
@@ -1586,20 +1593,15 @@ def _buyer_intent_params(payload: BuyerIntentCreate, current_user: AuthContext, 
         "excluded_industries_json": payload.excluded_industries_json or [],
         "industry_focus_tags_json": payload.industry_focus_tags_json or [],
         "region_scope_summary": payload.region_scope_summary,
-        "intent_business_tags_json": payload.intent_business_tags_json or [],
         "intent_business_summary": payload.intent_business_summary,
         "excluded_business_text": payload.excluded_business_text,
-        # 归一放在这里而不是只放在解析 handler 里：REST 写入绕过归一的后果是脏形状
-        # 直接落库。生产里就躺着两条 —— 一条是裸字符串数组 `["四川省","云南省"]`，
-        # 一条是 `{"raw_text":"长三角、珠三角区域","constraint_type":"soft"}`。
+        # 0901：业务标签与两个地区数组随需求侧字段整体退役（内容住在方案表上），
+        # 所以这里不再产出它们的参数，上面的 insert 也不再写这三列。
+        # 归一逻辑没有消失，它搬到了方案的写入口（BuyerIntentScenarioWrite.normalized）——
+        # REST 写入绕过归一的后果是脏形状直接落库，生产里就躺着两条：
+        # 一条是裸字符串数组 `["四川省","云南省"]`，一条是
+        # `{"raw_text":"长三角、珠三角区域","constraint_type":"soft"}`。
         # 筛选按 `->>'province'` 取值，两条都取不出东西：**存了等于没存，且看不出来**。
-        # 归一还会把「长三角」展开成四个省 —— 顾问手填时写的也是城市群。
-        "acceptable_regions_json": normalize_buyer_regions(
-            payload.acceptable_regions_json or [], field="acceptable_regions_json"
-        )[0],
-        "excluded_regions_json": normalize_buyer_regions(
-            payload.excluded_regions_json or [], field="excluded_regions_json"
-        )[0],
         "region_constraints_json": payload.region_constraints_json or [],
         "min_revenue_yuan": payload.min_revenue_yuan,
         "min_net_profit_yuan": payload.min_net_profit_yuan,

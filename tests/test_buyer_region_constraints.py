@@ -150,18 +150,26 @@ def test_an_ordinary_province_is_untouched_by_the_cluster_layer() -> None:
 def test_the_rest_routes_normalize_regions_too() -> None:
     """解析 handler 归一了，REST 写入没归一 —— 于是脏形状直接落进初筛要读的那一列。
 
-    生产里那两条就是这么来的。静态断言：两条写路径都必须过归一。
+    生产里那两条就是这么来的：一条裸字符串数组 `["四川省","云南省"]`，一条
+    `{"raw_text":"长三角、珠三角区域","constraint_type":"soft"}`。筛选按
+    `->>'province'` 取值，两条都取不出东西 —— **存了等于没存，且看不出来**。
+
+    0901 起地区住在方案表上（`required_regions_json`），所以要守的写路径变了：
+    新建需求那条不再写地区列（它退役了），方案的新增与修改才是入口。
     """
     import inspect
 
     from backend.app.api.routes import buyer_intents as module
 
-    # 新建走参数构造器，更新在自己函数里改 changes —— 两条路各自都要过归一。
-    created = inspect.getsource(module._buyer_intent_params)
-    assert "normalize_buyer_regions" in created, "新建路径（参数构造器）没归一地域"
-    assert "_buyer_intent_params" in inspect.getsource(module.create_buyer_intent), (
-        "新建不再走参数构造器了，这条断言要跟着改"
-    )
+    # 方案的新建与修改共用同一个归一：两条路各写一份的表现是「谁填的」决定
+    # 值长什么样 —— 顾问敲「江苏」，解析写「江苏省」，而 SQL 只认后者。
+    normalized = inspect.getsource(module.BuyerIntentScenarioWrite.normalized)
+    assert "normalize_buyer_regions" in normalized, "方案写入没归一地域"
+    for route in (module.create_buyer_intent_scenario, module.update_buyer_intent_scenario):
+        assert "payload.normalized()" in inspect.getsource(route), (
+            f"{route.__name__} 绕过了归一，脏形状会直接落进初筛要读的那一列"
+        )
+    # 需求侧的更新路径仍然可能改到存量地区列（阶段 A 列还在），继续守。
     update = inspect.getsource(module.update_buyer_intent)
     assert "normalize_buyer_regions" in update, "更新路径没归一地域"
 
