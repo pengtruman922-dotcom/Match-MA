@@ -548,7 +548,9 @@ BUYER_INTENT_SCENARIO_INDICATORS: tuple[Indicator, ...] = (
     #
     # 不再单设「业务说明」：022 之后 intent_business_summary 中位只有 54 字，
     # 跟标签列表差不多长，再设一个跨业务与门槛的摘要，两个文本字段必然互相抄。
-    Indicator("scenario_summary", "摘要", "scenario_business", "text", writable_by=_BI_WRITE, editor="textarea"),
+    # 这是方案对外展示的业务要求说明（同时作为方案标题/检索摘要），避免顾问
+    # 只看到业务标签而不知道该方案完整想买什么。
+    Indicator("scenario_summary", "业务要求说明", "scenario_business", "text", writable_by=_BI_WRITE, editor="textarea"),
     Indicator("business_tags_json", "业务标签", "scenario_business", "json", writable_by=_BI_WRITE, multi_value=True, editor="tags"),
     # 排除方向必须让 LLM 看见：首轮筛是纯文本判断，排除项不进上下文就等于没有。
     Indicator("excluded_business_text", "排除方向", "scenario_business", "text", writable_by=_BI_WRITE, editor="textarea"),

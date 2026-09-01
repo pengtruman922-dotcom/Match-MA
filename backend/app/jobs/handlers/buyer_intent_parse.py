@@ -5,6 +5,7 @@ import re
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -214,6 +215,8 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
         buyer_intent_id=buyer_intent_id,
         raw_scenarios=(parsed_output_json or {}).get("scenarios"),
         raw_requirement_text=raw_requirement_text,
+        # 兼容 normalizer v0.4.x 的旧形状：它把共有门槛放在顶层 fields。
+        common_fields=(parsed_output_json or {}).get("fields"),
         notes=normalization_notes,
     )
 
@@ -764,12 +767,71 @@ def _canonical_reconciliation_value(value: Any) -> Any:
 MAX_PARSED_SCENARIOS = 6
 
 
+def _scenario_fields_with_common_fields(
+    raw_scenario: dict[str, Any],
+    common_fields: Any,
+) -> dict[str, Any]:
+    """Combine legacy common fields with one scenario's fields.
+
+    ``buyer_intent_normalizer`` v0.4.x emitted shared requirements in the
+    top-level ``fields`` object and only put the branch discriminator (usually
+    listed/unlisted) in each scenario.  Since 0901 the scenario table is the
+    sole home for business/threshold facts, so dropping that common object
+    silently erased otherwise valid requirements.  Keep accepting the legacy
+    shape during the prompt rollout; scenario-specific values override shared
+    ones (for example, each branch's listed status).
+    """
+    merged: dict[str, Any] = {}
+    if isinstance(common_fields, dict):
+        merged.update(common_fields)
+    scenario_fields = raw_scenario.get("fields") or raw_scenario.get("conditions")
+    if isinstance(scenario_fields, dict):
+        merged.update(scenario_fields)
+    return merged
+
+
+def _explicit_yuan_amounts(raw_requirement_text: str) -> dict[str, Decimal]:
+    """Extract unambiguous 亿-level thresholds from the source text.
+
+    OCR frequently inserts a line break between the number and ``亿元`` (and
+    LLMs then occasionally drop a zero while converting units).  Only repair
+    fields whose Chinese label and unit occur together; this is deliberately
+    conservative and leaves ambiguous amounts to the model/review flow.
+    """
+    compact = re.sub(r"\s+", "", raw_requirement_text or "")
+    patterns = {
+        "max_market_cap_yuan": r"市值(?:范围|上限)?[^。；;\n]{0,80}?([0-9]+(?:\.[0-9]+)?)亿(?:元)?以内",
+        "min_market_cap_yuan": r"市值(?:范围|下限)?[^。；;\n]{0,80}?([0-9]+(?:\.[0-9]+)?)亿(?:元)?以上",
+        "min_net_profit_yuan": r"净利润(?:要求)?[^。；;\n]{0,80}?([0-9]+(?:\.[0-9]+)?)亿(?:元)?以上",
+    }
+    output: dict[str, Decimal] = {}
+    for field, pattern in patterns.items():
+        match = re.search(pattern, compact, flags=re.IGNORECASE)
+        if match:
+            output[field] = Decimal(match.group(1)) * Decimal(100_000_000)
+    return output
+
+
+def _repair_explicit_yuan_amounts(
+    changes: dict[str, Any],
+    raw_requirement_text: str,
+    notes: list[str],
+) -> None:
+    """Repair only model values contradicted by an explicit 亿 threshold."""
+    for field, expected in _explicit_yuan_amounts(raw_requirement_text).items():
+        current = changes.get(field)
+        if current is not None and Decimal(str(current)) != expected:
+            changes[field] = expected
+            notes.append(f"repaired_{field}_from_explicit_yuan_text")
+
+
 def _replace_buyer_intent_scenarios(
     db: Session,
     *,
     buyer_intent_id: UUID,
     raw_scenarios: Any,
     raw_requirement_text: str = "",
+    common_fields: Any = None,
     notes: list[str] | None = None,
 ) -> int:
     """把解析产出的方案写进 buyer_intent_scenario 的真列。
@@ -793,7 +855,7 @@ def _replace_buyer_intent_scenarios(
             continue
         normalized, scenario_notes = _normalize_buyer_intent_parse_changes(
             {
-                "fields": item.get("fields") or item.get("conditions") or {},
+                "fields": _scenario_fields_with_common_fields(item, common_fields),
                 "needs_confirmation": item.get("needs_confirmation"),
             },
             raw_requirement_text,
@@ -1197,6 +1259,10 @@ def _normalize_buyer_intent_parse_changes(
             if field in changes:
                 changes.pop(field, None)
                 notes.append(f"dropped_{field}:source_mentions_valuation_not_market_cap")
+
+    # OCR 常把「150 亿元」「0.2 亿元」拆成多行，模型偶尔会少乘一个 10。
+    # 对带明确字段标签和“亿”单位的门槛做一次确定性校正，避免静默错筛。
+    _repair_explicit_yuan_amounts(changes, raw_requirement_text, notes)
 
     changes["needs_confirmation_json"] = pending
     if scenario_scope:

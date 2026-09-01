@@ -18,10 +18,56 @@ from backend.app.jobs.handlers.buyer_intent_parse import (
     _reconcile_buyer_intent_scope,
     _remove_structured_profile_duplicates,
     _route_scoped_confirmation_items,
+    _repair_explicit_yuan_amounts,
+    _scenario_fields_with_common_fields,
     _set_buyer_intent_parse_stage,
 )
 
 JOB_ID = UUID("00000000-0000-0000-0000-000000000001")
+
+
+def test_legacy_common_fields_are_carried_into_each_scenario() -> None:
+    common = {
+        "scenario_summary": "食品饮料标的，净利润 2000 万以上",
+        "min_net_profit_yuan": 20_000_000,
+        "acceptable_listed_status_json": ["listed", "unlisted"],
+    }
+    scenario = {
+        "fields": {
+            "acceptable_listed_status_json": ["listed"],
+        }
+    }
+
+    merged = _scenario_fields_with_common_fields(scenario, common)
+
+    assert merged == {
+        "scenario_summary": "食品饮料标的，净利润 2000 万以上",
+        "min_net_profit_yuan": 20_000_000,
+        "acceptable_listed_status_json": ["listed"],
+    }
+
+
+def test_scenario_fields_win_over_legacy_common_fields() -> None:
+    merged = _scenario_fields_with_common_fields(
+        {"fields": {"max_pe": 15}},
+        {"max_pe": 50},
+    )
+
+    assert merged["max_pe"] == 15
+
+
+def test_explicit_ocr_yuan_threshold_repairs_model_scale_error() -> None:
+    changes = {"max_market_cap_yuan": 1_500_000_000, "min_net_profit_yuan": 2_000_000}
+    notes: list[str] = []
+    _repair_explicit_yuan_amounts(
+        changes,
+        "市值范围：15\n0亿元以内；经营情况（净利润要求）：0.2\n亿元以上",
+        notes,
+    )
+
+    assert changes["max_market_cap_yuan"] == 15_000_000_000
+    assert changes["min_net_profit_yuan"] == 20_000_000
+    assert len(notes) == 2
 
 
 class _FakeMappingResult:
