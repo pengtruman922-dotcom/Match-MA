@@ -57,8 +57,17 @@ def test_consumers_derive_from_the_registry() -> None:
     assert SELLER_TARGET_CHANGE_FIELDS == writable_columns("parse")
     assert set(RESEARCH_STRUCTURED_FIELDS) == writable_columns("research")
     assert SELLER_TARGET_ENUM_FIELDS == writable_enum_values()
-    assert BUYER_INTENT_CHANGE_FIELDS == writable_columns("parse", "buyer_intent")
-    assert BUYER_INTENT_ENUM_FIELDS == writable_enum_values("buyer_intent")
+    # 0901 起买家侧是两张表的并集：需求容器 + 方案。抽取阶段不知道一句话最后
+    # 落到哪张表，分流在 extracted_action_apply 里做，所以白名单必须两边都收。
+    assert BUYER_INTENT_CHANGE_FIELDS == (
+        writable_columns("parse", "buyer_intent")
+        | writable_columns("parse", "buyer_intent_scenario")
+        | {"scenario_index"}
+    )
+    assert BUYER_INTENT_ENUM_FIELDS == {
+        **writable_enum_values("buyer_intent"),
+        **writable_enum_values("buyer_intent_scenario"),
+    }
 
 
 def _buyer_intent_columns() -> set[str]:
@@ -115,14 +124,15 @@ def test_retired_buyer_intent_fields_are_fully_switched_off() -> None:
     列本身还在（阶段 A 一列没删），所以这条守的是「标志位」不是「列」。
     """
     retired = set(RETIRED_BUYER_INTENT_COLUMNS)
-    assert len(retired) == 32, f"退役清单应为 32 列，实际 {len(retired)}"
+    # 0828 退役 32 列，0901 方案化把剩下的 23 个业务/门槛列整体搬去方案层，
+    # 需求本身只剩容器字段（名称、级别、状态、暂停原因、原始需求）。
+    assert len(retired) == 55, f"退役清单应为 55 列，实际 {len(retired)}"
 
     by_column = {ind.column: ind for ind in BUYER_INTENT_INDICATORS}
     for column in retired:
         indicator = by_column[column]
         assert "parse" not in indicator.writable_by, f"{column} 仍在解析白名单里"
         assert not indicator.screening, f"{column} 仍在初筛 schema 里"
-        assert not indicator.scenario_allowed, f"{column} 仍能作为方案字段被覆盖"
         # group=None 有两个必须的作用：需求信息页不再显示它（新旧字段不并排），
         # 以及 _remove_structured_profile_duplicates 不再拿它的存量值去删
         # 「其他」里的句子 —— 六段说明文字的内容正是要搬进「其他」的。
@@ -390,7 +400,6 @@ def test_buyer_party_facts_do_not_join_screening_or_the_comparison_contract() ->
         assert not indicator.screening, f"{indicator.column} 不该进初筛"
         assert indicator.target_column is None, f"{indicator.column} 没有对手方"
         assert indicator.operator is None
-        assert indicator.default_effect is None
 
 
 def test_buyer_party_projection_is_derived_everywhere_it_is_read() -> None:

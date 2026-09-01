@@ -282,26 +282,35 @@ def _business_test_variables(
     input_text: str,
 ) -> dict[str, Any]:
     requirement = input_text.strip() or "关注医药与健康，营收不低于800万元，要求控股，长三角优先。"
+    # 这份样本是节点自测展示给顾问看的输入形状，**它教的就是模型该产出什么**。
+    # 0901 起门槛住在方案里、强度（effect）已删除、行业字典已下线 ——
+    # 样本停在旧形状不会报错，只会让自测页面一直在教一个不存在的契约。
     semantic_sample = {
-        "intent_summary": "寻找医药与健康行业的控股型投资标的",
-        "conditions": [
-            {"field": "industries_json", "operator": "overlap", "value": ["医药与健康"], "effect": "required"},
-            {"field": "min_revenue_yuan", "operator": "gte", "value": 8000000, "effect": "required"},
-            {"field": "requires_control", "operator": "requirement_capability", "value": "yes", "effect": "required"},
-            {"field": "region_constraints_json", "operator": "region_any", "value": "长三角", "effect": "preferred"},
+        "scenarios": [
+            {
+                "summary": "医药与健康方向的控股型投资标的，长三角优先",
+                "conditions": [
+                    {"field": "min_revenue_yuan", "operator": "gte", "value": 8000000},
+                    {"field": "acceptable_listed_status_json", "operator": "in", "value": ["unlisted"]},
+                ],
+                # 「要求控股」「长三角优先」都是结构化字段接不住的约束，进其他要求。
+                "other_requirements": "要求取得控股权；长三角优先（偏好，非硬性）。",
+            }
         ],
-        "scenarios": [],
         "needs_confirmation": [],
     }
+    # 0901 起买家需求的业务与门槛住在方案表上，需求本身只是容器 ——
+    # 只取 buyer_intent 的话这份契约会是空的，节点自测于是测了个寂寞。
     contract = [
         {
             "field": indicator.column,
             "kind": indicator.kind,
             "operator": indicator.operator,
-            "default_effect": indicator.default_effect,
+            "missing_policy": indicator.missing_policy,
             "enum_values": [value for value, _ in (indicator.enum_options or ())],
         }
-        for indicator in indicators_for("buyer_intent")
+        for entity in ("buyer_intent", "buyer_intent_scenario")
+        for indicator in indicators_for(entity)
         if indicator.group is not None
     ]
     mode = "target_to_buyer" if node_name.endswith("to_buyer") else "buyer_to_target"

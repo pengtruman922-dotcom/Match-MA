@@ -75,7 +75,7 @@ def test_case1_region_only_adds_nothing_else() -> None:
     result = parse(
         {
             "condition_groups": [
-                {"label": "", "conditions": {"acceptable_regions_json": [{"province": "浙江省", "city": "杭州市"}]}}
+                {"label": "", "conditions": {"required_regions_json": [{"province": "浙江省", "city": "杭州市"}]}}
             ],
             "qualitative_requirements": [],
             "exclusions": {},
@@ -85,7 +85,7 @@ def test_case1_region_only_adds_nothing_else() -> None:
     )
     group = only_group(result)
     assert group["conditions"] == {
-        "acceptable_regions_json": [{"province": "浙江省", "city": "杭州市"}]
+        "required_regions_json": [{"province": "浙江省", "city": "杭州市"}]
     }
     assert result["parser_status"] == "ok"
 
@@ -93,8 +93,10 @@ def test_case1_region_only_adds_nothing_else() -> None:
 def test_case2_equity_ratio_is_a_percentage_not_a_fraction() -> None:
     """股比 51% 落库是 51，不是 0.51。写成小数条件会一家也筛不到且不报错。
 
-    这条原来测的是负债率上限，它 0828 随「双侧皆空的比率」一起退役了。
-    单位陷阱本身没有消失，只是换了承载它的字段：股比两侧存的同样是百分数。
+    这条原来测的是负债率上限（0828 退役），然后换成股比（0901 随方案化退役，
+    标的侧 transfer_ratio 录入率只有 3%）。单位陷阱本身一直没消失，只是换了
+    承载它的字段 —— 现在是 PE：kind=ratio 一刀切会让模型把 15 倍写成 0.15，
+    条件一家也筛不到且不报错，而 agent 看到的是「这批标的 PE 普遍偏高」。
     """
     result = parse(
         {
@@ -103,9 +105,9 @@ def test_case2_equity_ratio_is_a_percentage_not_a_fraction() -> None:
                     "label": "",
                     "conditions": {
                         "min_revenue_yuan": 50000000,
-                        "acceptable_regions_json": [{"province": "江苏省"}],
+                        "required_regions_json": [{"province": "江苏省"}],
                         "min_net_profit_yuan": 10000000,
-                        "desired_equity_ratio_min": 51,
+                        "max_pe": 15,
                     },
                 }
             ],
@@ -113,13 +115,13 @@ def test_case2_equity_ratio_is_a_percentage_not_a_fraction() -> None:
             "exclusions": {},
             "unstructured_notes": [],
         },
-        "江苏的标的，净利1000万以上，至少要控股51%",
+        "江苏的标的，净利1000万以上，PE 不超过 15 倍",
     )
     conditions = only_group(result)["conditions"]
-    assert conditions["desired_equity_ratio_min"] == 51
+    assert conditions["max_pe"] == 15
     assert conditions["min_net_profit_yuan"] == 10000000
     assert conditions["min_revenue_yuan"] == 50000000
-    assert conditions["acceptable_regions_json"] == [{"province": "江苏省"}]
+    assert conditions["required_regions_json"] == [{"province": "江苏省"}]
 
 
 def test_case3_two_groups_keep_the_shared_industry() -> None:
@@ -173,7 +175,7 @@ def test_case4_soft_wish_lands_in_qualitative_requirements() -> None:
                 {
                     "conditions": {
                         "min_revenue_yuan": 50000000,
-                        "acceptable_regions_json": [{"province": "浙江省"}],
+                        "required_regions_json": [{"province": "浙江省"}],
                     }
                 }
             ],
@@ -224,7 +226,7 @@ def test_4a_replace_condition_changes_only_profit_when_everything_else_stays() -
             "condition_groups": [{
                 "conditions": {
                     "min_revenue_yuan": 50000000,
-                    "acceptable_regions_json": [{"province": "江苏省"}],
+                    "required_regions_json": [{"province": "江苏省"}],
                     "min_net_profit_yuan": 5000000,
                     "acceptable_listed_status_json": ["listed"],
                 }
@@ -238,7 +240,7 @@ def test_4a_replace_condition_changes_only_profit_when_everything_else_stays() -
 
     assert only_group(result)["conditions"] == {
         "min_revenue_yuan": 50000000,
-        "acceptable_regions_json": [{"province": "江苏省"}],
+        "required_regions_json": [{"province": "江苏省"}],
         "min_net_profit_yuan": 5000000,
         "acceptable_listed_status_json": ["listed"],
     }
@@ -262,7 +264,7 @@ def test_4a_delete_condition_removes_only_region_from_the_full_snapshot() -> Non
     )
 
     conditions = only_group(result)["conditions"]
-    assert "acceptable_regions_json" not in conditions
+    assert "required_regions_json" not in conditions
     assert conditions == {
         "min_revenue_yuan": 50000000,
         "min_net_profit_yuan": 5000000,
@@ -276,7 +278,7 @@ def test_4a_reset_can_discard_the_old_demand_entirely() -> None:
             "condition_groups": [{
                 "conditions": {
                     "min_revenue_yuan": 80000000,
-                    "acceptable_regions_json": [{"province": "浙江省"}],
+                    "required_regions_json": [{"province": "浙江省"}],
                 }
             }],
             "qualitative_requirements": [],
@@ -288,7 +290,7 @@ def test_4a_reset_can_discard_the_old_demand_entirely() -> None:
 
     assert only_group(result)["conditions"] == {
         "min_revenue_yuan": 80000000,
-        "acceptable_regions_json": [{"province": "浙江省"}],
+        "required_regions_json": [{"province": "浙江省"}],
     }
 
 
@@ -366,6 +368,7 @@ def test_exclusions_written_inside_a_group_are_hoisted_to_the_top() -> None:
                         "min_revenue_yuan": 50000000,
                         "excluded_industries_json": ["房地产与建筑"],
                         "unacceptable_risk_flags_json": ["equity_frozen"],
+                        "requires_control": "yes",
                     }
                 }
             ],
@@ -378,6 +381,8 @@ def test_exclusions_written_inside_a_group_are_hoisted_to_the_top() -> None:
     conditions = only_group(result)["conditions"]
     assert "excluded_industries_json" not in conditions
     assert "unacceptable_risk_flags_json" not in conditions
+    # 0901 退役：控股要求实测真淘汰 0 次，只在标的 can_control 没录时开火。
+    assert "requires_control" not in conditions
     assert result["exclusions"]["industries"] == ["房地产与建筑"]
     assert result["exclusions"]["risk_flags"] == ["equity_frozen"]
 
@@ -447,10 +452,10 @@ def test_canonicalised_region_is_not_reported_as_leftover() -> None:
     深评那头收到的就是一句 Python 字典的 repr。
     """
     result = parse(
-        {"condition_groups": [{"conditions": {"acceptable_regions_json": [{"province": "浙江"}]}}]},
+        {"condition_groups": [{"conditions": {"required_regions_json": [{"province": "浙江"}]}}]},
         "浙江的标的",
     )
-    assert only_group(result)["conditions"] == {"acceptable_regions_json": [{"province": "浙江省"}]}
+    assert only_group(result)["conditions"] == {"required_regions_json": [{"province": "浙江省"}]}
     assert result["qualitative_requirements"] == []
     assert result["unstructured_notes"] == []
 
@@ -523,13 +528,13 @@ def test_case9_strength_defaults_to_required_for_unmarked_conditions() -> None:
                 {
                     "conditions": {
                         "min_net_profit_yuan": 30000000,
-                        "acceptable_regions_json": [
+                        "required_regions_json": [
                             {"province": "江苏省"},
                             {"province": "浙江省"},
                             {"province": "上海市"},
                         ],
                     },
-                    "strength": {"acceptable_regions_json": "preferred"},
+                    "strength": {"required_regions_json": "preferred"},
                 }
             ],
             "qualitative_requirements": [],
@@ -540,7 +545,7 @@ def test_case9_strength_defaults_to_required_for_unmarked_conditions() -> None:
     )
     strength = only_group(result)["strength"]
     assert strength["min_net_profit_yuan"] == "required"
-    assert strength["acceptable_regions_json"] == "preferred"
+    assert strength["required_regions_json"] == "preferred"
 
 
 def test_unknown_strength_token_falls_back_to_required() -> None:
@@ -634,7 +639,7 @@ def test_case11_non_screening_fields_go_to_qualitative_not_conditions(column, va
         {"industry_l2_json": ["偏光膜"]},
         {"acceptable_listed_status_json": ["借壳上市"]},
         {"max_pe": "十五倍"},
-        {"acceptable_regions_json": ["江苏"]},
+        {"required_regions_json": ["江苏"]},
         {"完全瞎编的字段": True},
     ],
 )
@@ -745,21 +750,32 @@ def test_screening_fields_prompt_is_generated_from_the_registry() -> None:
     assert entries
 
 
-def test_ratio_fields_declare_the_percentage_unit_in_the_prompt() -> None:
-    """写成「0-1 小数」的后果是模型把 60% 写成 0.6，而库里存的是 60。"""
+def test_ratio_fields_declare_their_unit_in_the_prompt() -> None:
+    """kind=ratio 一刀切写「0-1 小数」的后果是模型把 15 倍写成 0.15。
+
+    0901 之后 max_pe 是唯一的 ratio 条件（负债率 0828 退役、股比本轮退役），
+    所以这条守卫只剩一个用户 —— 但它守的规则没变：**每个 ratio 条件都必须
+    显式声明单位**，漏一个在构建 schema 时就会炸，不会静默放行。
+    """
     by_field = {entry["field"]: entry for entry in json.loads(screening_fields_prompt_json())}
-    assert "百分数" in by_field["desired_equity_ratio_min"]["unit"]
-    assert "百分数" in by_field["desired_equity_ratio_max"]["unit"]
     assert "倍数" in by_field["max_pe"]["unit"]
+    for entry in by_field.values():
+        if entry.get("value_type") == "number":
+            assert entry["unit"], f"{entry['field']} 没有声明单位"
 
 
-def test_exclusion_field_description_says_it_removes_candidates() -> None:
-    """同一个形状在 not_overlap 下是「命中即出局」，方向写反会把语义倒过来。"""
+def test_the_region_condition_says_it_keeps_candidates_not_removes_them() -> None:
+    """同一个形状（省市区数组）在相反方向上语义倒过来。
+
+    0901 之前还有一个 region_none 的「排除地区」，照 region_any 那句写会让
+    模型把「不要新疆」理解成「只要新疆」，而 SQL 那边照做且不报错。
+    排除地区本轮退役（实测真淘汰 0 次），这条守的是留下来的方向没写反。
+    """
     by_field = {entry["field"]: entry for entry in json.loads(screening_fields_prompt_json())}
-    assert "出局" in by_field["unacceptable_risk_flags_json"]["note"]
-    assert "出局" in by_field["excluded_regions_json"]["note"]
-    assert "通过" in by_field["acceptable_regions_json"]["note"]
-    assert "出局" not in by_field["acceptable_regions_json"]["note"]
+    assert "通过" in by_field["required_regions_json"]["note"]
+    assert "出局" not in by_field["required_regions_json"]["note"]
+    for retired in ("excluded_regions_json", "unacceptable_risk_flags_json", "requires_control"):
+        assert retired not in by_field, f"{retired} 已退役，不该还在提示词清单里"
 
 
 # -- Prompt v0.3.0 ------------------------------------------------------

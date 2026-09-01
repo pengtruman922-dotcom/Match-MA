@@ -13,6 +13,7 @@ from backend.app.ai.prompting import render_template
 from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
 from backend.app.registry.indicators import (
+    buyer_intent_scenario_fact_columns,
     buyer_party_fact_columns,
     multi_value_enum_values,
     writable_columns,
@@ -110,8 +111,21 @@ SELLER_TARGET_FIELD_ALIASES = {
     "pe_multiple": "pe_ratio",
 }
 
-# 派生自指标注册表（唯一事实源）：哪些 buyer_intent 列允许解析写入。
-BUYER_INTENT_CHANGE_FIELDS = writable_columns("parse", "buyer_intent")
+# 派生自指标注册表（唯一事实源）：一条 buyer_intent_update 允许改哪些列。
+#
+# 0901 起是**两张表的并集**：需求容器（名称、级别、状态、暂停原因、原始需求）
+# 加上方案的 13 列。业务更新说「市值放宽到 100 亿」时改的其实是某个方案，
+# 而抽取阶段并不知道这句话最后会落到哪张表 —— 它只负责把字段名留下来，
+# 分流在 extracted_action_apply 里做（_allowed_scenario_changes）。
+#
+# 少了方案那一半的表现是：门槛类改动在抽取阶段就被当成 unsupported_field
+# 静默丢掉，业务更新照样显示「已解析」，而那句话里的数字一个都没留下。
+# `scenario_index` 是方案定位，不是业务字段，所以单列。
+BUYER_INTENT_CHANGE_FIELDS = (
+    writable_columns("parse", "buyer_intent")
+    | writable_columns("parse", "buyer_intent_scenario")
+    | {"scenario_index"}
+)
 
 BUYER_INTENT_FIELD_ALIASES = {
     "requirement": "intent_summary",
@@ -182,8 +196,11 @@ SELLER_TARGET_ENUM_FIELDS = writable_enum_values()
 
 SELLER_TARGET_POST_PARSE_STATUSES = {"parsing", "pending_review", "insufficient", "parse_failed"}
 
-# 派生自指标注册表：买家意向可写枚举列的合法取值。
-BUYER_INTENT_ENUM_FIELDS = writable_enum_values("buyer_intent")
+# 派生自指标注册表：买家意向可写枚举列的合法取值（同上，两张表的并集）。
+BUYER_INTENT_ENUM_FIELDS = {
+    **writable_enum_values("buyer_intent"),
+    **writable_enum_values("buyer_intent_scenario"),
+}
 
 BUYER_SELLER_RELATION_ENUM_FIELDS = {
     "status": {
@@ -694,6 +711,13 @@ def buyer_intent_context_columns() -> list[str]:
 
 
 def _fetch_buyer_intents(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
+    """业务更新解析看到的买家需求上下文：容器字段 + 它名下的全部方案。
+
+    **方案必须带上。** 0901 起业务方向与门槛住在方案里，模型看不到方案就
+    只能凭空猜「这条需求现在的门槛是什么」，更要命的是多方案需求它无从判断
+    这次更新该打到哪一档 —— 而 `scenario_index` 不给就默认打到第一个，
+    于是「非上市档的 PE 放宽到 15」会被写进上市档。那不报错。
+    """
     if not ids:
         return []
     # 列名来自指标注册表，不是外部输入，可以安全拼接。
@@ -711,7 +735,34 @@ def _fetch_buyer_intents(db: Session, ids: list[UUID]) -> list[dict[str, Any]]:
         ),
         {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID, "ids": ids},
     ).mappings().all()
-    return [_json_safe_dict(row) for row in rows]
+    intents = [_json_safe_dict(row) for row in rows]
+    scenario_projection = ", ".join(buyer_intent_scenario_fact_columns())
+    scenario_rows = db.execute(
+        text(
+            f"""
+            select buyer_intent_id,
+                   row_number() over (
+                     partition by buyer_intent_id order by sort_order, created_at
+                   ) - 1 as scenario_index,
+                   {scenario_projection}
+            from buyer_intent_scenario
+            where team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+              and active
+              and buyer_intent_id = any(:ids)
+            order by buyer_intent_id, sort_order, created_at
+            """
+        ),
+        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID, "ids": ids},
+    ).mappings().all()
+    by_intent: dict[str, list[dict[str, Any]]] = {}
+    for row in scenario_rows:
+        payload = _json_safe_dict(row)
+        by_intent.setdefault(str(payload.pop("buyer_intent_id")), []).append(payload)
+    for intent in intents:
+        intent["scenarios"] = by_intent.get(str(intent.get("id")), [])
+    return intents
 
 def _uuid_list(values: Any) -> list[UUID]:
     if not isinstance(values, list):

@@ -40,39 +40,37 @@ from backend.app.services.screening_schema import SCREENING_FIELDS, normalize_co
 QUERY_PARSER_NODE_NAME = "recommendation_query_parser"
 
 def _condition_value_kind(field: str) -> str | None:
-    indicator = indicator_by_column("buyer_intent", field)
+    """方案字段 → 归一化形状。0901 起只剩四种，全部由 kind/editor 决定。
+
+    以前这里还有按列名写死的四个分支（控股与并表的 yes_no、上市状态、
+    上市地、迁址返投留任对赌的 requirement_strength），它们打在的列本轮
+    全部退役 —— 那几条约束现在落进方案的 other_requirements_text 文本。
+    """
+    indicator = indicator_by_column("buyer_intent_scenario", field)
     if indicator.kind in {"yuan", "ratio"}:
         return "number"
-    if indicator.editor in {"industry", "industry_l2"}:
-        return "industry_list"
     if indicator.editor in {"multi_enum", "tags"}:
         return "string_list"
     if indicator.editor == "region_multi":
         return "region_list"
-    if field in {"requires_control", "requires_consolidation", "accepts_minority_investment"}:
-        return "yes_no"
-    if field == "preferred_listed_status":
-        return "listed_status"
-    if field == "listing_market_region":
-        return "listing_market_region"
-    if field in {"requires_relocation", "requires_return_investment", "requires_team_retention", "earnout_requirement"}:
-        return "requirement_strength"
     if indicator.kind == "text":
         return "text"
     return None
 
 
-# Every scenario/chat field is derived from the buyer condition contract.
+# 方案与对话覆盖用的是同一份词表，0901 起它来自**方案注册表**：
+# 门槛已经不住在 buyer_intent 上了，继续从那边派生只会得到一份空表，
+# 而空表不报错 —— 表现是「方案字段一个都写不进去」。
 OVERRIDE_FIELD_KINDS: dict[str, str] = {
     indicator.column: kind
-    for indicator in indicators_for("buyer_intent")
-    if (indicator.scenario_allowed or indicator.column == "preferred_listed_status")
+    for indicator in indicators_for("buyer_intent_scenario")
     if (kind := _condition_value_kind(indicator.column)) is not None
 }
 
 _LISTED_STATUS_VALUES = {"listed", "unlisted", "pre_ipo", "any", "unknown"}
 _YES_NO_VALUES = {"yes", "no", "unknown"}
-# 从注册表取，不再手抄：上市地 2026-08-07 换成交易所闭集，手抄一份就会漂。
+# 上市地 2026-08-07 换成交易所闭集，0828 随双侧皆空退役 —— 取值表留着给
+# 覆盖存储里的存量值兜底，不再有任何字段声明指向它。
 _LISTING_MARKET_REGION_VALUES = {
     value for value, _ in (indicator_by_column("buyer_intent", "listing_market_region").enum_options or ())
 }

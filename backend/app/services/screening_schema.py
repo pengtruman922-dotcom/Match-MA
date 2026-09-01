@@ -2,7 +2,7 @@
 
 手写的 schema 与注册表脱钩之后必然漂移：改造前的 `_FILTER_PROPERTIES` 只开放了
 12 个字段（引擎实际支持 26 个），行业名又没有闭集约束，模型写错一个行业名会静默
-清空整个候选池。这里的每个 property 都从 `indicators_for("buyer_intent")` 里
+清空整个候选池。这里的每个 property 都从 `indicators_for("buyer_intent_scenario")` 里
 `screening=True` 的指标派生，行业闭集在运行时从 `industry_taxonomy` 注入 —— 模型
 填不出字典外的行业名，那条失败路径从根上消失。
 
@@ -45,7 +45,7 @@ CAPABILITY_VALUES: tuple[str, ...] = ("yes", "likely")
 # 代价是**正向初筛不再有行业条件**，一条只写了「最低营收 1 亿」的需求会召回
 # 接近全库。补偿在 `screen_targets(business_scan=True)`：一次把命中集的业务摘要
 # 全量吐给主 Agent 做首轮语义筛。见方案 0828 §十。
-_REGION_COLUMNS: frozenset[str] = frozenset({"acceptable_regions_json", "excluded_regions_json"})
+_REGION_COLUMNS: frozenset[str] = frozenset({"required_regions_json"})
 
 # kind=ratio 混着两种量纲，而注册表这一层表达不了单位：负债率与股比**两侧都存
 # 百分数**（60% 存 60 —— 标的侧实测 current_debt_ratio 9.55~75、transfer_ratio
@@ -69,13 +69,16 @@ _YUAN_HINT = "单位元，2000 万写 20000000"
 class ScreeningField:
     """一个可筛条件：模型看到的形状 + SQL 需要的对手方。"""
 
-    column: str  # buyer_intent 列名 = 条件的键
+    column: str  # buyer_intent_scenario 列名 = 条件的键
     label: str
     operator: str  # gte | lte | in | eq | overlap | not_overlap | region_any | requirement_capability
     target_column: str  # 注册表原样声明的标的侧对手方
     value_type: str  # number | boolean | enum | enum_list | industry_l1 | industry_l2 | industry_any | region_list
     enum_values: tuple[str, ...] = ()
     unit_hint: str = ""
+    # 标的没录这个数时出局还是通过。见注册表 Indicator.missing_policy ——
+    # 这不是「必须/优先」的替代品，那个东西 2026-09-01 删掉了。
+    missing_policy: str = "exclude"
 
 
 def _value_type(column: str, kind: str, operator: str) -> str:
@@ -96,7 +99,7 @@ def _value_type(column: str, kind: str, operator: str) -> str:
 
 def _build_fields() -> tuple[ScreeningField, ...]:
     fields: list[ScreeningField] = []
-    for indicator in indicators_for("buyer_intent"):
+    for indicator in indicators_for("buyer_intent_scenario"):
         if not indicator.screening:
             continue
         if not indicator.operator or not indicator.target_column:
@@ -127,6 +130,7 @@ def _build_fields() -> tuple[ScreeningField, ...]:
                 operator=indicator.operator,
                 target_column=indicator.target_column,
                 value_type=value_type,
+                missing_policy=indicator.missing_policy,
                 enum_values=enum_values,
                 unit_hint=unit_hint,
             )

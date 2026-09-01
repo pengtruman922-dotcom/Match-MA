@@ -205,15 +205,19 @@ def apply_buyer_intent_update_action(
             detail="Action must be accepted before apply.",
         )
 
-    changes = _allowed_buyer_intent_changes(action["proposed_changes_json"])
-    if not changes:
+    proposed = dict(action["proposed_changes_json"] or {})
+    scenario_index = _scenario_target_index(proposed)
+    scenario_changes = _allowed_scenario_changes(proposed)
+    changes = _allowed_buyer_intent_changes(proposed)
+    if not changes and not scenario_changes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No supported changes to apply.")
 
     # 地区两列要过省份词表再落库，与新建解析那条路同一套政策 —— 两边不一致的话，
     # 「带不带附件」会决定地区要不要归一（2026-08-01 在行业字段上实测过这个问题）。
     # 行业字典的归一 0828 随字典下线一起去掉了：需求业务标签是自由标签，不过字典。
     region_notes = _normalize_buyer_intent_regions(changes)
-    if not changes:
+    region_notes += _normalize_buyer_intent_regions(scenario_changes)
+    if not changes and not scenario_changes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No supported changes to apply after region normalization.",
@@ -223,7 +227,14 @@ def apply_buyer_intent_update_action(
     original = _get_buyer_intent_snapshot_or_404(db, buyer_intent_id)
     _apply_grade_pair(changes, original, allow_reactivation=False)
     diff = diff_payload(original, changes)
-    if not diff:
+    scenario_fields = _apply_scenario_changes(
+        db,
+        buyer_intent_id=buyer_intent_id,
+        changes=scenario_changes,
+        index=scenario_index,
+        actor_user_id=actor_user_id,
+    )
+    if not diff and not scenario_fields:
         _mark_action_applied(db, action["id"], review_status="auto_accepted" if not require_accepted else None)
         _refresh_business_update_status(db, action["business_update_id"])
         return {
@@ -238,31 +249,32 @@ def apply_buyer_intent_update_action(
     set_clauses = [f"{field} = :{field}" for field in diff]
     set_clauses.extend(["updated_at = now()", "updated_by = :updated_by"])
 
-    update_statement = text(
-        f"""
-            update buyer_intent
-            set {', '.join(set_clauses)}
-            where id = :buyer_intent_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
-              and deleted_at is null
-            """
-    )
-    json_fields = BUYER_INTENT_JSONB_COLUMNS
-    bind_params = [bindparam(field, type_=JSONB) for field in diff if field in json_fields]
-    if bind_params:
-        update_statement = update_statement.bindparams(*bind_params)
+    if diff:
+        update_statement = text(
+            f"""
+                update buyer_intent
+                set {', '.join(set_clauses)}
+                where id = :buyer_intent_id
+                  and team_id = :team_id
+                  and workspace_id = :workspace_id
+                  and deleted_at is null
+                """
+        )
+        json_fields = BUYER_INTENT_JSONB_COLUMNS
+        bind_params = [bindparam(field, type_=JSONB) for field in diff if field in json_fields]
+        if bind_params:
+            update_statement = update_statement.bindparams(*bind_params)
 
-    db.execute(
-        update_statement,
-        {
-            **{field: changes[field] for field in diff},
-            "updated_by": actor_user_id,
-            "buyer_intent_id": buyer_intent_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
-    )
+        db.execute(
+            update_statement,
+            {
+                **{field: changes[field] for field in diff},
+                "updated_by": actor_user_id,
+                "buyer_intent_id": buyer_intent_id,
+                "team_id": DEFAULT_TEAM_ID,
+                "workspace_id": DEFAULT_WORKSPACE_ID,
+            },
+        )
 
     source_context = _action_source_context(action, default_source_label="Business update extracted action")
     write_action_logs_for_diff(
@@ -314,7 +326,7 @@ def apply_buyer_intent_update_action(
         "business_update_id": action["business_update_id"],
         "entity_type": "buyer_intent",
         "entity_id": buyer_intent_id,
-        "applied_fields": list(diff.keys()),
+        "applied_fields": list(diff.keys()) + scenario_fields,
         "industry_normalization_notes": region_notes,
     }
 
@@ -802,9 +814,120 @@ BUYER_INTENT_JSONB_COLUMNS: frozenset[str] = frozenset(
 )
 
 
+BUYER_INTENT_SCENARIO_JSONB_COLUMNS: frozenset[str] = frozenset(
+    indicator.column
+    for indicator in indicators_for("buyer_intent_scenario")
+    if indicator.kind == "json"
+)
+
+
 def _allowed_buyer_intent_changes(changes: dict[str, Any]) -> dict[str, Any]:
     allowed_fields = writable_columns("parse", "buyer_intent") | _BUYER_INTENT_ADOPT_SYSTEM_FIELDS
     return {key: value for key, value in changes.items() if key in allowed_fields}
+
+
+def _allowed_scenario_changes(changes: dict[str, Any]) -> dict[str, Any]:
+    """业务更新里落在**方案**上的那部分改动。
+
+    0901 起门槛住在方案里，所以一条「市值放宽到 100 亿」的业务更新其实是在改
+    某个方案。两份白名单必须分开取：混在一起用需求侧那份的话，全部门槛字段
+    会被当成 unsupported 静默丢掉 —— 业务更新照样显示「已采纳」，而库里没变。
+    """
+    allowed = writable_columns("parse", "buyer_intent_scenario")
+    return {key: value for key, value in changes.items() if key in allowed}
+
+
+def _scenario_target_index(changes: dict[str, Any]) -> int:
+    """改哪个方案。40/48 条需求只有一个方案，不给就是它。
+
+    多方案需求由解析给出 ``scenario_index``。给了非法值不静默兜底到 0 ——
+    那会把「上市档的门槛」写进非上市档，而两档的数字本来就不一样。
+    """
+    raw = changes.pop("scenario_index", None)
+    if raw is None:
+        return 0
+    try:
+        index = int(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"scenario_index must be an integer, got {raw!r}.",
+        ) from None
+    if index < 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="scenario_index must not be negative.",
+        )
+    return index
+
+
+def _apply_scenario_changes(
+    db: Session,
+    *,
+    buyer_intent_id: UUID,
+    changes: dict[str, Any],
+    index: int,
+    actor_user_id: UUID,
+) -> list[str]:
+    """把方案字段写进第 index 个在册方案，返回真正落库的列名。"""
+    if not changes:
+        return []
+    columns = sorted(set(changes) | {"id"})
+    row = db.execute(
+        text(
+            f"""
+            select {', '.join(columns)}
+            from buyer_intent_scenario
+            where buyer_intent_id = :buyer_intent_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+            order by sort_order, created_at
+            offset :offset limit 1
+            """
+        ),
+        {
+            "buyer_intent_id": buyer_intent_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "offset": index,
+        },
+    ).mappings().first()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"buyer intent has no scenario at index {index}.",
+        )
+    original = dict(row)
+    scenario_id = original.pop("id")
+    diff = diff_payload(original, changes)
+    if not diff:
+        return []
+    set_clauses = [f"{field} = :{field}" for field in diff]
+    set_clauses.extend(["updated_at = now()", "updated_by = :updated_by"])
+    statement = text(
+        f"""
+        update buyer_intent_scenario
+        set {', '.join(set_clauses)}
+        where id = :scenario_id
+        """
+    )
+    binds = [
+        bindparam(field, type_=JSONB)
+        for field in diff
+        if field in BUYER_INTENT_SCENARIO_JSONB_COLUMNS
+    ]
+    if binds:
+        statement = statement.bindparams(*binds)
+    db.execute(
+        statement,
+        {
+            **{field: changes[field] for field in diff},
+            "updated_by": actor_user_id,
+            "scenario_id": scenario_id,
+        },
+    )
+    return list(diff.keys())
 
 
 def _normalize_buyer_intent_regions(changes: dict[str, Any]) -> list[str]:
@@ -815,13 +938,13 @@ def _normalize_buyer_intent_regions(changes: dict[str, Any]) -> list[str]:
     的那一刻，没有第二次复核的机会，留一个筛不到东西的脏值比丢掉更糟。
     """
     notes: list[str] = []
-    if "intent_business_tags_json" in changes:
-        tags = normalize_business_tags(changes["intent_business_tags_json"])
+    if "business_tags_json" in changes:
+        tags = normalize_business_tags(changes["business_tags_json"])
         if tags:
-            changes["intent_business_tags_json"] = tags
+            changes["business_tags_json"] = tags
         else:
-            changes.pop("intent_business_tags_json", None)
-    for column in ("acceptable_regions_json", "excluded_regions_json"):
+            changes.pop("business_tags_json", None)
+    for column in ("required_regions_json",):
         if column not in changes:
             continue
         regions, pending = normalize_buyer_regions(changes[column], field=column)

@@ -16,6 +16,8 @@ from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_
 from backend.app.jobs.handlers.buyer_intent_parse import (
     BUYER_INTENT_PARSE_JSON_FIELDS,
     BUYER_INTENT_PARSE_NUMERIC_FIELDS,
+    BUYER_INTENT_SCENARIO_JSON_FIELDS,
+    BUYER_INTENT_SCENARIO_NUMERIC_FIELDS,
 )
 from backend.app.jobs.handlers.common import (
     ALLOWED_ACTION_TYPES,
@@ -787,8 +789,17 @@ def _normalize_proposed_changes(
     return proposed_changes, []
 
 def _normalize_buyer_intent_action_changes(changes: dict[str, Any], *, evidence_text: str) -> list[str]:
+    """一条 buyer_intent_update 的取值归一，**两张表的字段一起过**。
+
+    0901 起门槛住在方案里，而抽取阶段并不知道这句话最后落到哪张表 ——
+    分流在 extracted_action_apply 做。只过需求侧那一半的表现是：
+    「估值 15 亿」原样留成字符串 "1500000000" 落进方案的 numeric 列，
+    要么被 PG 隐式转换掩盖过去，要么在别的写法上当场炸。
+    """
     notes: list[str] = []
-    for field in BUYER_INTENT_PARSE_NUMERIC_FIELDS:
+    numeric_fields = BUYER_INTENT_PARSE_NUMERIC_FIELDS | BUYER_INTENT_SCENARIO_NUMERIC_FIELDS
+    json_fields = BUYER_INTENT_PARSE_JSON_FIELDS | BUYER_INTENT_SCENARIO_JSON_FIELDS
+    for field in numeric_fields:
         if field in changes:
             normalized = _optional_decimal(changes[field])
             if normalized is None:
@@ -797,19 +808,21 @@ def _normalize_buyer_intent_action_changes(changes: dict[str, Any], *, evidence_
             else:
                 changes[field] = normalized
 
-    for field in BUYER_INTENT_PARSE_JSON_FIELDS:
+    for field in json_fields:
         if field in changes and not isinstance(changes[field], (list, dict)):
             changes.pop(field, None)
             notes.append(f"{field}:dropped_invalid_json")
 
     # 业务标签只做形状归一（去重去空限长），不过行业字典 —— 0828 判决一。
     # 与新建解析走同一个函数：两处各写一份的表现是「带不带附件」决定要不要去重。
-    if "intent_business_tags_json" in changes:
-        cleaned_tags = normalize_business_tags(changes["intent_business_tags_json"])
+    for tag_field in ("intent_business_tags_json", "business_tags_json"):
+        if tag_field not in changes:
+            continue
+        cleaned_tags = normalize_business_tags(changes[tag_field])
         if cleaned_tags:
-            changes["intent_business_tags_json"] = cleaned_tags
+            changes[tag_field] = cleaned_tags
         else:
-            changes.pop("intent_business_tags_json", None)
+            changes.pop(tag_field, None)
 
     source = evidence_text.lower()
     if ("估值" in evidence_text or "valuation" in source) and not (

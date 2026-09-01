@@ -418,11 +418,17 @@ export interface BuyerIntentConfirmationItem {
   proposed_value_status?: 'invalid' | 'requires_review';
 }
 
+/** 一条地区要求，省市区三级独立生效：只填省 = 全省命中。
+ *
+ * 0901 删掉了 `effect`（必须/优先/排除）。它是个撒谎的字段：SQL 那边
+ * `screening_sql.py` 是一组纯 AND，从来不区分强弱；而 022 之后
+ * `normalize_buyer_regions` 会**静默吃掉**这个键 —— 顾问在「可接受地区」里
+ * 给一条选「排除」，得到的仍然是可接受地区，跟他选的正好相反。
+ * 「优先大湾区」这类偏好现在进方案的 other_requirements_text。 */
 export interface BuyerRegionConstraint {
   province: string;
   city?: string;
   district?: string;
-  effect: 'required' | 'preferred' | 'excluded';
 }
 
 export interface BuyerIntentProcessingState {
@@ -549,6 +555,7 @@ export interface BuyerIntent {
   owner_user_id?: string | null;
   owner_name?: string | null;
   scenario_labels?: string[];
+  scenarios_json?: BuyerIntentScenarioSummary[];
   created_at: string;
   updated_at: string;
   processing_state?: BuyerIntentProcessingState | null;
@@ -1394,8 +1401,9 @@ export interface IndicatorMeta {
   fold_into: string | null;
   target_column: string | null;
   operator: string | null;
-  default_effect: ConditionEffect | null;
-  effect_editable: boolean;
+  /** 标的没录这个数时出局还是通过。**不是「必须/优先」的替代品** ——
+   *  那个东西 2026-09-01 删掉了，它从来没进过 SQL。 */
+  missing_policy: 'exclude' | 'keep';
   scenario_allowed: boolean;
   multi_value: boolean;
   sql_recall: boolean;
@@ -1930,25 +1938,72 @@ export interface RecommendationPage {
   polling_hint: Record<string, unknown>;
 }
 
+/** 一个方案 = 一份完整独立的收购要求。0901 起没有名称，摘要就是标题。
+ *
+ * `label` 与 `fields_json` 仍在响应里，但**已停止写入** —— 内容在迁移 023
+ * 搬进了下面这些真列。读它们只会读到旧值。 */
 export interface BuyerIntentScenario {
   id: string;
   buyer_intent_id: string;
   label: string;
   sort_order: number;
   active: boolean;
-  fields_json: Record<string, unknown>;
   needs_confirmation_json: BuyerIntentConfirmationItem[];
   source: string;
   created_at: string;
   updated_at: string;
+  scenario_summary: string | null;
+  business_tags_json: string[];
+  excluded_business_text: string | null;
+  required_regions_json: BuyerRegionConstraint[];
+  acceptable_listed_status_json: string[];
+  min_revenue_yuan: string | number | null;
+  min_net_profit_yuan: string | number | null;
+  max_pe: string | number | null;
+  min_market_cap_yuan: string | number | null;
+  max_market_cap_yuan: string | number | null;
+  min_valuation_yuan: string | number | null;
+  max_valuation_yuan: string | number | null;
+  other_requirements_text: string | null;
+}
+
+/** 列表页「关键需求」列读的那一份：方案的精简投影，随需求列表一次返回。
+ *
+ * 不复用 BuyerIntentScenario：那份带 id / 审计列 / 待确认项，列表一页 50 条
+ * 全带上是白扔的带宽，而列表只用得到这几个维度。 */
+export interface BuyerIntentScenarioSummary {
+  scenario_summary: string | null;
+  business_tags_json: string[];
+  excluded_business_text: string | null;
+  required_regions_json: BuyerRegionConstraint[];
+  acceptable_listed_status_json: string[];
+  min_revenue_yuan: string | number | null;
+  min_net_profit_yuan: string | number | null;
+  max_pe: string | number | null;
+  min_market_cap_yuan: string | number | null;
+  max_market_cap_yuan: string | number | null;
+  min_valuation_yuan: string | number | null;
+  max_valuation_yuan: string | number | null;
+  other_requirements_text: string | null;
 }
 
 export interface BuyerIntentScenarioWrite {
-  label: string;
   sort_order: number;
   active: boolean;
-  fields_json: Record<string, unknown>;
   needs_confirmation_json?: BuyerIntentConfirmationItem[];
+  scenario_summary?: string | null;
+  business_tags_json?: string[];
+  excluded_business_text?: string | null;
+  required_regions_json?: BuyerRegionConstraint[];
+  acceptable_listed_status_json?: string[];
+  min_revenue_yuan?: string | number | null;
+  min_net_profit_yuan?: string | number | null;
+  max_pe?: string | number | null;
+  min_market_cap_yuan?: string | number | null;
+  max_market_cap_yuan?: string | number | null;
+  min_valuation_yuan?: string | number | null;
+  max_valuation_yuan?: string | number | null;
+  other_requirements_text?: string | null;
 }
 
 export interface RecommendationMessage {

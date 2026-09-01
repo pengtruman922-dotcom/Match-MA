@@ -50,86 +50,70 @@ def _clause(column: str, value, index: int = 0):
 
 def test_gte_and_lte_compare_the_declared_target_column() -> None:
     assert _clause("min_net_profit_yuan", 10000000).sql == "st.current_net_profit_yuan >= :c0"
-    assert _clause("max_pe", 15).sql == "st.pe_ratio <= :c0"
+    # max_pe 的 missing_policy 是 keep，命中片段被包了一层「没录也放行」，
+    # 所以这里断言的是里面那半 —— 比较契约本身没有变。
+    assert "st.pe_ratio <= :c0" in _clause("max_pe", 15).sql
 
 
-def test_in_and_eq_bind_their_values() -> None:
+def test_in_binds_its_values() -> None:
     listed = _clause("acceptable_listed_status_json", ["listed", "pre_ipo"])
     assert listed.sql == "st.listed_status = any(:c0)"
     assert listed.params == {"c0": ["listed", "pre_ipo"]}
 
-    # `eq` 算子 0828 起在买家侧没有在役字段了（上市地要求随双侧皆空的枚举退役），
-    # 但 build_clause 仍然实现它 —— 下一个成对新建的单值枚举会直接用上。
-    # 拿一个临时构造的字段验，而不是删掉这条：算子实现坏了不会有别的东西报警。
-    exchange = build_clause(
-        replace(SCREENING_FIELDS_BY_COLUMN["max_pe"], operator="eq", target_column="listing_market_region"),
-        "sse",
-        0,
-    )
-    assert exchange.sql == "st.listing_market_region = :c0"
 
+def test_every_implemented_operator_has_a_live_field_using_it() -> None:
+    """**没人调的 SQL 构造器要删掉，代价已经付过一次。**
 
-def test_requirement_capability_passes_yes_and_likely() -> None:
-    """强度不进 SQL：required 与 preferred 生成的条件完全一样。"""
-    clause = _clause("requires_control", True)
+    行业那条分支写死了 industry_pairs_json 的路径，于是任何扁平数组字段都会
+    静默生成打在错误列上的 SQL —— overlap 恒不命中（候选池恒空）、
+    not_overlap 恒为真（条件形同虚设），两种都不报错。
 
-    assert clause.sql == "st.can_control = any(:c0)"
-    assert clause.params == {"c0": ["yes", "likely"]}
-
-
-def test_excluded_regions_are_the_negation_of_acceptable_regions() -> None:
-    """region_any 与 region_none 共用同一段构造，只在最后取反。
-
-    0828 之前买家侧只有 region_constraints_json 一列，靠元素里的 effect 三态区分
-    可接受/优先/排除，而 SQL 只实现了 required 那一档 —— 也就是说**排除地区
-    从来没有真的排除过任何标的**，存了等于没存且看不出来。
+    0901 方案化退役了控股/并表/交易结构/重大风险/排除地区五个条件，对应的
+    eq、requirement_capability、overlap、not_overlap、region_none 五个算子
+    随之删除。这条守的是「不再攒出第二个没人调的分支」—— build_clause 的
+    收尾是 raise，算子缺失会当场炸，那是安全的方向。
     """
-    acceptable = _clause("acceptable_regions_json", JIANGSU)
-    excluded = _clause("excluded_regions_json", JIANGSU)
+    implemented = {"gte", "lte", "in", "region_any"}
+    in_use = {field.operator for field in SCREENING_FIELDS}
 
-    assert acceptable.sql == "((st.location_province = :c0_0_province))"
-    assert excluded.sql == "not coalesce(((st.location_province = :c0_0_province)), false)"
+    assert in_use == implemented
+    for operator in ("eq", "requirement_capability", "overlap", "not_overlap", "region_none"):
+        broken = replace(SCREENING_FIELDS_BY_COLUMN["max_pe"], operator=operator)
+        with pytest.raises(ValueError, match="unsupported screening operator"):
+            build_clause(broken, 1, 0)
 
 
-def test_excluded_regions_do_not_throw_out_targets_with_no_region_recorded() -> None:
-    """买家说「不要新疆」，一个连省份都没录的标的**不该**因此出局。
+def test_a_keep_policy_field_lets_a_target_with_no_number_through() -> None:
+    """标的侧 PE 录入率 56%、估值 38%、市值 11% —— 这三项上「没录」压倒性地是
+    数据缺口而不是资质不够。
 
-    那是数据缺口不是「它在新疆」。所以这一条的缺失恒 false ——
-    它从不贡献缺失统计，agent 也就不会拿它去解释召回为什么少。
+    实测 48 需求 x 71 标的：这五个字段贡献约 1250 次缺数淘汰、仅 320 次真淘汰。
+    读成「不达标」的代价是把没录数的标的整批扔掉，而 agent 看到的只是
+    「符合条件的很少」—— 错得最难查的那个方向。
+
+    **这不是把条件变软**：标的有数就照判，第二条断言钉的就是这一点。
     """
-    clause = _clause("excluded_regions_json", JIANGSU)
+    clause = _clause("max_pe", 15)
 
-    assert clause.missing_sql == "false"
+    assert clause.field.missing_policy == "keep"
+    assert clause.sql == "(coalesce(st.pe_ratio is null, false) or (st.pe_ratio <= :c0))"
 
 
-def test_a_flat_array_overlap_does_not_go_through_the_industry_path() -> None:
-    """交易结构存的是字符串数组。
+def test_an_exclude_policy_field_still_throws_out_a_target_with_no_number() -> None:
+    """营收 77% / 净利 82% / 上市状态 87% / 省份 97% —— 这四项上缺的是真缺。
 
-    走错形状不会报错：0828 之前这里有一条行业分支，打在 industry_pairs_json 上的
-    overlap 恒不命中（候选池恒空），扁平数组的字段一旦走错就是这个结果。
-    行业分支已随需求侧行业条件一起删除，这条守的是「没走回去」。
+    两条策略必须同时守：只守一边的话，把全部字段改成 keep 也能过测试，
+    而那等于初筛不再筛任何东西。
     """
-    clause = _clause("transaction_types_json", ["equity_transfer"])
+    clause = _clause("min_net_profit_yuan", 10000000)
 
-    assert "jsonb_array_elements_text(" in clause.sql
-    assert "acceptable_transaction_structures_json" in clause.sql
-    assert "industry_pairs_json" not in clause.sql
-
-
-def test_risk_exclusion_also_throws_out_targets_nobody_checked() -> None:
-    """`not exists(...)` 对空数组恒为真，而空数组是「未核查」。
-
-    少了前半段，「没查过」会被当成「干净」通过风险条件 —— 方向恰好是危险的那一边。
-    """
-    clause = _clause("unacceptable_risk_flags_json", ["litigation"])
-
-    assert clause.sql.startswith("not (st.major_risk_flags_json is null or jsonb_array_length(")
-    assert "not exists(" in clause.sql
+    assert clause.field.missing_policy == "exclude"
+    assert clause.sql == "st.current_net_profit_yuan >= :c0"
 
 
 def test_region_ands_the_levels_that_were_given_and_ors_the_constraints() -> None:
     clause = _clause(
-        "acceptable_regions_json",
+        "required_regions_json",
         [{"province": "江苏省", "city": "苏州市"}, {"province": "浙江省"}],
     )
 
@@ -165,9 +149,10 @@ def test_a_condition_never_lets_a_missing_value_through() -> None:
         else:
             value = samples[field.value_type]
         clause = build_clause(field, value, 0)
-        if field.operator == "region_none":
-            # 排除类条件天生是「命中即出局」，缺失恒 false —— 它不参与
-            # 「缺失即出局」这条规则，参与了反而会把没录地区的标的一起扔掉。
+        if field.missing_policy == "keep":
+            # keep 的字段是**故意**放行缺失的（PE/市值/估值，标的侧录入率
+            # 11%~56%），由上面那两条专门守。这条守的是 exclude 那一档
+            # 没有被悄悄改软。
             continue
         permissive = clause.sql.replace(f"not {clause.missing_sql}", "")
         assert "is null" not in permissive, field.column
@@ -222,7 +207,7 @@ def test_region_missing_means_compatible_but_incomplete() -> None:
 
     两者不分开，agent 会把一个真门槛当成数据缺口去放宽。
     """
-    missing = _clause("acceptable_regions_json", [{"province": "江苏省", "city": "苏州市"}]).missing_sql
+    missing = _clause("required_regions_json", [{"province": "江苏省", "city": "苏州市"}]).missing_sql
 
     assert "st.location_province = :c0_0_province or coalesce(st.location_province, '') = ''" in missing
     assert "coalesce(st.location_city, '') = ''" in missing
@@ -234,7 +219,7 @@ def test_region_missing_means_compatible_but_incomplete() -> None:
 
 def test_the_breakdown_is_one_scan_not_one_query_per_condition() -> None:
     clauses = [
-        _clause("acceptable_regions_json", JIANGSU, 0),
+        _clause("required_regions_json", JIANGSU, 0),
         _clause("min_net_profit_yuan", 10000000, 1),
     ]
     sql = _count_sql(clauses, [f"coalesce({clause.sql}, false)" for clause in clauses])

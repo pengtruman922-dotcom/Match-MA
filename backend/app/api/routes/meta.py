@@ -68,8 +68,10 @@ def list_indicators(entity: str = "seller_target") -> dict[str, Any]:
                 "fold_into": ind.fold_into,
                 "target_column": ind.target_column,
                 "operator": ind.operator,
-                "default_effect": ind.default_effect,
-                "effect_editable": ind.effect_editable,
+                # default_effect / effect_editable 2026-09-01 删除：它们表达
+                # 「这个买家有多想要」，而 screening_sql.py 是一组纯 AND，
+                # 从来不区分强弱 —— 界面上那个「优先」角标在骗人。
+                "missing_policy": ind.missing_policy,
                 "scenario_allowed": ind.scenario_allowed,
                 "multi_value": ind.multi_value,
                 "sql_recall": ind.sql_recall,

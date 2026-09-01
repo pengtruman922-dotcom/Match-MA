@@ -34,6 +34,15 @@ def skill():
     return module
 
 
+def _intent(scenario: dict | None = None) -> dict:
+    """一条只有一个方案的需求。
+
+    0901 起门槛住在方案里，传一个扁平的 intent 等于「这条需求没有任何方案」——
+    那是不合法状态，判定表会是空的。
+    """
+    return {"scenarios_json": [scenario or {}]}
+
+
 TARGET = {
     "revenue_yuan": 200_000_000,
     "net_profit_yuan": 20_000_000,
@@ -54,7 +63,7 @@ def test_a_buyer_with_no_thresholds_passes_everything(skill) -> None:
     正向筛选里「没提」= 不带这个条件、天然无害；反向里如果把 NULL 当成
     「不满足」，这一批会整体消失 —— 方向恰好是最贵的那一边。
     """
-    checks = skill._intent_checks({}, TARGET)
+    checks = skill._intent_checks(_intent(), TARGET)
 
     assert checks, "至少要判几条，返回空说明判定表没接上"
     assert all(passed for _, _, passed in checks)
@@ -66,7 +75,7 @@ def test_an_unstated_threshold_is_reported_as_not_an_obstacle(skill) -> None:
 
     合并成一个「通过」会让调用方无法判断这条命中有多硬。
     """
-    checks = skill._intent_checks({"min_revenue_yuan": 100_000_000}, TARGET)
+    checks = skill._intent_checks(_intent({"min_revenue_yuan": 100_000_000}), TARGET)
     verdicts = {
         label: ("明确符合" if stated else "买家没提过这个门槛，不构成障碍")
         for label, stated, _ in checks
@@ -79,64 +88,97 @@ def test_an_unstated_threshold_is_reported_as_not_an_obstacle(skill) -> None:
 def test_a_stated_threshold_that_fails_really_fails(skill) -> None:
     """没提就通过，但**提了就要真判** —— 否则这个工具等于没筛。"""
     checks = dict((label, (stated, passed)) for label, stated, passed in skill._intent_checks(
-        {
+        _intent({
             "min_revenue_yuan": 500_000_000,
-            "acceptable_regions_json": [{"province": "广东省"}],
+            "required_regions_json": [{"province": "广东省"}],
             "acceptable_listed_status_json": ["listed"],
-        },
+        }),
         TARGET,
     ))
 
     assert checks["最低营收"] == (True, False)
-    assert checks["可接受地区"] == (True, False)
-    assert checks["可接受上市状态"] == (True, False)
+    assert checks["要求地区"] == (True, False)
+    assert checks["上市状态"] == (True, False)
 
 
 def test_an_empty_region_array_means_unrestricted_not_no_region(skill) -> None:
-    """空数组 = 不限，**不是**「没有可接受地区」。
+    """空数组 = 不限，**不是**「没有要求地区」。
 
     读反了的话，凡是没填地区的买家全部出局 —— 而那是绝大多数。
     """
     checks = dict((label, (stated, passed)) for label, stated, passed in skill._intent_checks(
-        {"acceptable_regions_json": [], "excluded_regions_json": []}, TARGET
+        _intent({"required_regions_json": []}), TARGET
     ))
 
-    assert checks["可接受地区"] == (False, True)
-    assert checks["排除地区"] == (False, True)
+    assert checks["要求地区"] == (False, True)
 
 
-def test_a_target_with_no_region_is_not_thrown_out_by_an_exclusion(skill) -> None:
-    """买家说「不要新疆」，一个连省份都没录的标的不该因此出局。
+def test_a_target_with_no_region_is_not_thrown_out_when_a_region_is_required(skill) -> None:
+    """买家要江苏，一个连省份都没录的标的不该因此出局。
 
-    那是数据缺口，不是「它在新疆」。方向反了会把没录地区的标的整批筛掉。
+    那是数据缺口，不是「它不在江苏」。方向反了会把没录地区的标的整批筛掉。
     """
     blind = {**TARGET, "province": "", "city": "", "district": ""}
     checks = dict((label, passed) for label, _, passed in skill._intent_checks(
-        {"excluded_regions_json": [{"province": "新疆维吾尔自治区"}]}, blind
+        _intent({"required_regions_json": [{"province": "江苏省"}]}), blind
     ))
 
-    assert checks["排除地区"] is True
+    assert checks["要求地区"] is True
 
 
-def test_an_excluded_region_that_matches_does_throw_the_target_out(skill) -> None:
+def test_a_target_outside_the_required_region_is_thrown_out(skill) -> None:
     checks = dict((label, passed) for label, _, passed in skill._intent_checks(
-        {"excluded_regions_json": [{"province": "江苏省"}]}, TARGET
+        _intent({"required_regions_json": [{"province": "新疆维吾尔自治区"}]}), TARGET
     ))
 
-    assert checks["排除地区"] is False
+    assert checks["要求地区"] is False
 
 
 def test_region_levels_match_independently(skill) -> None:
     """只填省 = 全省命中；填到市 = 只匹配那个市。"""
     province_only = dict((label, passed) for label, _, passed in skill._intent_checks(
-        {"acceptable_regions_json": [{"province": "江苏省"}]}, TARGET
+        _intent({"required_regions_json": [{"province": "江苏省"}]}), TARGET
     ))
     wrong_city = dict((label, passed) for label, _, passed in skill._intent_checks(
-        {"acceptable_regions_json": [{"province": "江苏省", "city": "南京市"}]}, TARGET
+        _intent({"required_regions_json": [{"province": "江苏省", "city": "南京市"}]}), TARGET
     ))
 
-    assert province_only["可接受地区"] is True
-    assert wrong_city["可接受地区"] is False
+    assert province_only["要求地区"] is True
+    assert wrong_city["要求地区"] is False
+
+
+def test_matching_any_one_scenario_matches_the_requirement(skill) -> None:
+    """**多方案是 OR，不是 AND。**
+
+    把三个方案的门槛叠加起来判，会让岭南商旅的「酒店」那一档凭空背上
+    「粮油食品」那一档的营收与估值要求 —— 叠加不报错，表现只是
+    「这个买家好像什么都不要」。生产里 8 条需求有分档。
+    """
+    intent = {
+        "scenarios_json": [
+            # 上市档：这个标的是非上市，过不了
+            {"acceptable_listed_status_json": ["listed"], "max_market_cap_yuan": 5_000_000_000},
+            # 非上市档：过得了
+            {"acceptable_listed_status_json": ["unlisted"], "max_pe": 15},
+        ]
+    }
+    checks = skill._intent_checks(intent, TARGET)
+
+    assert all(passed for _, _, passed in checks), "命中任意一档即算命中"
+    verdicts = dict((label, (stated, passed)) for label, stated, passed in checks)
+    assert verdicts["上市状态"] == (True, True), "返回的应该是命中的那一档的判定表"
+
+
+def test_a_requirement_that_fits_no_scenario_still_shows_where_it_missed(skill) -> None:
+    """一档都不命中时要看得到差在哪，不能返回空表。
+
+    空表会被读成「没有任何门槛」—— 那是相反的结论。
+    """
+    intent = _intent({"min_revenue_yuan": 5_000_000_000})
+    checks = skill._intent_checks(intent, TARGET)
+
+    assert checks
+    assert dict((label, passed) for label, _, passed in checks)["最低营收"] is False
 
 
 def test_a_missing_target_number_is_not_counted_as_a_shortfall(skill) -> None:
@@ -145,7 +187,7 @@ def test_a_missing_target_number_is_not_counted_as_a_shortfall(skill) -> None:
     「我们不知道这个标的的 PE」和「这个标的 PE 太高」是两个结论。
     """
     checks = dict((label, passed) for label, _, passed in skill._intent_checks(
-        {"max_pe": 10}, {**TARGET, "pe": None}
+        _intent({"max_pe": 10}), {**TARGET, "pe": None}
     ))
 
     assert checks["PE 上限"] is True
@@ -211,7 +253,11 @@ def test_the_gate_drops_e_grade_closed_and_archived(skill) -> None:
 
 def test_a_paused_intent_is_returned_but_labelled(skill) -> None:
     payload = skill._intent_business(
-        {"intent_name": "示例需求", "status": "paused", "intent_business_summary": "找上游"},
+        {
+            "intent_name": "示例需求",
+            "status": "paused",
+            "scenarios_json": [{"scenario_summary": "找上游"}],
+        },
         brief=False,
     )
 
@@ -287,7 +333,7 @@ def test_a_threshold_free_intent_says_so_explicitly(skill) -> None:
         "intent_name": "示例需求",
         "intent_grade": "B",
         "status": "active",
-        "intent_business_summary": "找华东的工业自动化标的",
+        "scenarios_json": [{"scenario_summary": "找华东的工业自动化标的"}],
     })
 
     assert "门槛" not in payload
@@ -299,13 +345,38 @@ def test_facts_and_thresholds_stay_in_two_separate_blocks(skill) -> None:
     payload = skill._intent_full({
         "id": "i-2",
         "intent_name": "示例需求",
-        "intent_business_summary": "找上游材料",
-        "min_revenue_yuan": "100000000",
+        "scenarios_json": [{
+            "scenario_summary": "找上游材料",
+            "min_revenue_yuan": "100000000",
+        }],
     })
 
     assert payload["业务方向"]["要买什么业务"] == "找上游材料"
     assert payload["门槛"]["最低营收"] == "1亿"
     assert "最低营收" not in payload["业务方向"]
+
+
+def test_a_requirement_whose_thresholds_live_only_in_scenarios_is_not_reported_as_open(skill) -> None:
+    """**skill 2026-09-01 之前不读方案，这是那个 bug 的回归守卫。**
+
+    生产里 8 条需求有分档，其中 2 条（港股综合能源、远景智创）的门槛
+    **只存在于方案里** —— 不读方案的话这个工具会返回
+    「这条需求没有提出任何硬门槛，不构成障碍」，把有门槛的买家报成
+    库里最灵活的买家。错的方向恰好是最贵的那一边。
+    """
+    payload = skill._intent_full({
+        "id": "i-3",
+        "intent_name": "港股大型综合能源与环保集团-并购需求",
+        "scenarios_json": [
+            {"scenario_summary": "非上市环保/资源化", "min_revenue_yuan": "100000000"},
+            {"scenario_summary": "上市公司", "min_market_cap_yuan": "2000000000"},
+        ],
+    })
+
+    assert "门槛说明" not in payload, "有门槛却报成「没有门槛」正是那个 bug"
+    assert len(payload["方案"]) == 2
+    assert payload["方案"][0]["门槛"]["最低营收"] == "1亿"
+    assert "任意一个方案" in payload["方案说明"]
 
 
 def test_full_intent_includes_pause_and_confirmation_details(skill) -> None:

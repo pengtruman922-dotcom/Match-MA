@@ -31,8 +31,16 @@ class Indicator:
     # Buyer-demand comparison contract. Seller facts leave these values empty.
     target_column: str | None = None
     operator: str | None = None
-    default_effect: str | None = None
-    effect_editable: bool = False
+    # 标的侧没录这个数时，这条买家条件怎么办。**这不是「必须/优先」的替代品** ——
+    # 「这个买家有多想要」（default_effect，2026-09-01 删除）模型判不准、SQL 也
+    # 从来没用过，那个角标写着「优先」而 screening_sql.py 照硬筛，是在骗人。
+    # 本字段问的是另一件事：**「标的没录这个数」算不算「标的不达标」**。
+    # 那是工程问题，有确定答案，答案取决于标的侧的录入率：
+    #   exclude —— 缺的是真缺（营收 77%、净利 82%、上市状态 87%、省份 97%）
+    #   keep    —— 缺的是数据不是资质（PE 56%、估值 38%、市值 11%），通过但标记未知
+    # 实测 48 需求 x 71 标的：全部淘汰里 73% 是「标的没录这个数」造成的，
+    # 其中市值/估值/PE 五项贡献约 1250 次误杀、仅 320 次真淘汰。
+    missing_policy: str = "exclude"
     scenario_allowed: bool = False
     multi_value: bool = False
     sql_recall: bool = False
@@ -254,79 +262,15 @@ _BI_RETIRED_READONLY: frozenset[str] = frozenset()
 
 BUYER_INTENT_INDICATORS: tuple[Indicator, ...] = (
     Indicator("raw_requirement_text", "原始需求", None, "text", writable_by=_BI_PARSE),
-    # ===== 业务方向：本单新建的三列，取代整套行业字典 =====
+    # ===== 业务与门槛整体搬去方案层（2026-09-01） =====
     #
-    # 三列都**不设 target_column / operator / default_effect** —— 它们没有对手方，
-    # 这正是判决一的含义。写法与 buyer_party 的业务标签/业务说明同构（总纲 §5）。
-    #
-    # 跨侧匹配需要共享词表，那是行业字典存在的唯一理由。买家需求放弃字典，
-    # 等价于放弃「行业」这一维的 SQL 硬筛 —— 代价是**正向初筛不再有行业条件**，
-    # 业务匹配整体交给 LLM 读文本（正向 search_targets 的 business_scan、
-    # 反向 skills/buyer-search 的接口一）。这个代价是判断的一部分，不是漏了。
-    #
-    # 依据：实测买家需求人均只填 1.25 个一级行业、二级行业只有 21% 有值，
-    # 而信息主要落在**不参与匹配的** industry_primary(92%) /
-    # industry_secondary(73%) 两个原文列里 —— 字典今天已经没在承担业务匹配。
-    Indicator("intent_business_tags_json", "需求业务标签", "intent_scope", "json", writable_by=_BI_WRITE, scenario_allowed=True, multi_value=True, editor="tags"),
-    # **口径**：必须写清「要买什么样的业务」。它是反向检索首轮筛选唯一读的东西，
-    # 写成「符合公司战略的优质标的」这种话，那条需求在反向里就等于不存在。
-    Indicator("intent_business_summary", "需求业务说明", "intent_scope", "text", writable_by=_BI_WRITE, scenario_allowed=True, editor="textarea"),
-    # 排除方向必须让 LLM 看见：首轮筛是纯文本判断，排除项不进上下文就等于没有。
-    Indicator("excluded_business_text", "排除业务方向", "intent_scope", "text", writable_by=_BI_WRITE, scenario_allowed=True, editor="textarea"),
-    # ===== 地区：两个平铺数组，保留省市区三级，去掉 effect 三态 =====
-    #
-    # 只填省 = 全省命中，填到市 = 只匹配那个市，三级逐级独立生效。
-    # **空数组 = 不限**，不是「没有可接受地区」—— 反向检索里把空当成「不满足」
-    # 会让一半以上的买家当场消失，这是反向最容易写错的一处。
-    #
-    # required 与 preferred 的区别（「必须在广东」对「优先广东」）不再进枚举，
-    # 交给 region_scope_summary 的原话承载：语气和强度归文本，阈值和枚举归字段。
-    Indicator("acceptable_regions_json", "可接受地区", "intent_scope", "json", screening=True, writable_by=_BI_WRITE, target_column="location_province,location_city,location_district", operator="region_any", default_effect="preferred", scenario_allowed=True, multi_value=True, deterministic_rank=True, editor="region_multi"),
-    # 排除地区从 effect="excluded" 拆成独立列，语义写在列名里。
-    # 算子是 region_none：命中即出局，与 region_any 严格互补。
-    Indicator("excluded_regions_json", "排除地区", "intent_scope", "json", screening=True, writable_by=_BI_WRITE, target_column="location_province,location_city,location_district", operator="region_none", default_effect="required", scenario_allowed=True, multi_value=True, deterministic_rank=True, editor="region_multi"),
-    # 不参与匹配，但**不能退役**：它装的是两个地区数组装不下的语气
-    # （「优先」「最好但非强制」「以…为主」）。去掉 effect 三态之后，
-    # 强弱信息只剩这一列在承载，所以它比改造前更重要，不是更次要。
-    Indicator("region_scope_summary", "地域摘要", "intent_scope", "text", writable_by=_BI_WRITE, scenario_allowed=True, editor="text"),
-    # 讲买家自身的产业背景，对业务匹配有用，进首轮召回的业务卡片。
-    Indicator("buyer_industry_advantage_summary", "产业优势", "intent_scope", "text", writable_by=_BI_WRITE, scenario_allowed=True),
-    # ===== 经营与财务：留下的都是**可比较的量** =====
-    Indicator("min_revenue_yuan", "最低营收", "intent_financial", "yuan", screening=True, writable_by=_BI_WRITE, target_column="current_revenue_yuan", operator="gte", default_effect="required", effect_editable=True, scenario_allowed=True, sql_recall=True, deterministic_rank=True),
-    Indicator("min_net_profit_yuan", "最低净利润", "intent_financial", "yuan", screening=True, writable_by=_BI_WRITE, target_column="current_net_profit_yuan", operator="gte", default_effect="required", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
-    Indicator("max_pe", "PE 上限", "intent_financial", "ratio", screening=True, writable_by=_BI_WRITE, target_column="pe_ratio", operator="lte", default_effect="required", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
-    Indicator("min_valuation_yuan", "最低估值", "intent_financial", "yuan", screening=True, writable_by=_BI_WRITE, target_column="valuation_yuan", operator="gte", default_effect="preferred", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
-    Indicator("max_valuation_yuan", "最高估值", "intent_financial", "yuan", screening=True, writable_by=_BI_WRITE, target_column="valuation_yuan", operator="lte", default_effect="required", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
-    # 市值两条只有 9% 填充率，仍然保留 —— **填充率不是判据**。判据是「这一维是不是
-    # 真实存在的收购条件」和「对手方有没有数据」：上市公司买上市公司时市值区间是
-    # 硬约束，标的侧 market_cap_yuan 也确实有值可比。而 accepts_minority_investment
-    # 填充率 38% 反而退役，因为它的对手方 70/71 是 unknown，带上它候选池只剩 1 家。
-    Indicator("min_market_cap_yuan", "最低市值", "intent_financial", "yuan", screening=True, writable_by=_BI_WRITE, target_column="market_cap_yuan", operator="gte", default_effect="preferred", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
-    Indicator("max_market_cap_yuan", "最高市值", "intent_financial", "yuan", screening=True, writable_by=_BI_WRITE, target_column="market_cap_yuan", operator="lte", default_effect="preferred", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
-    # unacceptable_risk_flags_json 的明细载体（能接受什么程度、什么前提下能接受）。
-    # 枚举用于筛选，本列是明细，两者并存，不要合并。
-    Indicator("major_risk_tolerance_summary", "风险容忍", "intent_financial", "text", writable_by=_BI_WRITE, scenario_allowed=True),
-    # ===== 交易与能力要求 =====
-    # 标的侧对手方有数据（can_control 44% / can_consolidate 41%），
-    # 是少数真能筛掉东西的枚举，所以留。
-    Indicator("requires_control", "控股要求", "intent_deal", "enum", screening=True, writable_by=_BI_WRITE, target_column="can_control", operator="requirement_capability", default_effect="required", effect_editable=True, scenario_allowed=True, sql_recall=True, deterministic_rank=True, enum_options=_YES_NO_LIKE),
-    Indicator("requires_consolidation", "并表要求", "intent_deal", "enum", screening=True, writable_by=_BI_WRITE, target_column="can_consolidate", operator="requirement_capability", default_effect="required", effect_editable=True, scenario_allowed=True, deterministic_rank=True, enum_options=_YES_NO_LIKE),
-    Indicator("desired_equity_ratio_min", "期望股比下限", "intent_deal", "ratio", screening=True, writable_by=_BI_WRITE, target_column="transfer_ratio_max", operator="gte", default_effect="required", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
-    Indicator("desired_equity_ratio_max", "期望股比上限", "intent_deal", "ratio", screening=True, writable_by=_BI_WRITE, target_column="transfer_ratio_min", operator="lte", default_effect="required", effect_editable=True, scenario_allowed=True, deterministic_rank=True),
-    Indicator("acceptable_listed_status_json", "可接受上市状态", "intent_deal", "json", screening=True, writable_by=_BI_WRITE, target_column="listed_status", operator="in", default_effect="preferred", effect_editable=True, scenario_allowed=True, multi_value=True, deterministic_rank=True, editor="multi_enum", enum_options=_BI_LISTED_ACCEPTABLE),
-    # 交易方式原文：存量取值混了三个正交轴，只有「交易结构」那一轴对得上标的侧
-    # 闭集，支付方式与控制权诉求的信息只在这一列里活着。进深评，不参与匹配。
-    Indicator("transaction_type", "交易方式原文", "intent_deal", "text", writable_by=_BI_WRITE, scenario_allowed=True),
-    # 0817 刚建的两列，还没跑出数据，**不判早**：填充率低不是退役的理由，
-    # 「维度不真实」或「对手方没有数据」才是。这两条两样都不占。
-    Indicator("transaction_types_json", "可接受交易结构", "intent_deal", "json", screening=True, writable_by=_BI_WRITE, target_column="acceptable_transaction_structures_json", operator="overlap", default_effect="preferred", effect_editable=True, scenario_allowed=True, multi_value=True, deterministic_rank=True, editor="multi_enum", enum_options=_TRANSACTION_STRUCTURES),
-    # 三态由代码派生，不由 SQL 判（services/buyer_risk_tolerance.py）：
-    #   []       未提及 → 不带这个条件
-    #   四值全集  不接受全部（落库时展开）
-    #   其余子集  不接受特定类型
-    # SQL 不是裸 not_overlap：标的侧 [] 表示「未核查」，必须先出局，
-    # 否则「没查过」会被当成「干净」。
-    Indicator("unacceptable_risk_flags_json", "不接受的重大风险", "intent_deal", "json", screening=True, writable_by=_BI_WRITE, target_column="major_risk_flags_json", operator="not_overlap", default_effect="preferred", effect_editable=True, scenario_allowed=True, multi_value=True, deterministic_rank=True, editor="multi_enum", enum_options=_UNACCEPTABLE_RISK_FLAGS),
+    # 需求不再是一组字段，是一个容器挂 1..N 个互相独立、各自完整的方案。
+    # 原来的 23 个业务/门槛列全部退役到本文件下方的退役区，等价声明移到
+    # BUYER_INTENT_SCENARIO_INDICATORS。**取消公共层不是重构口味，是修 bug**：
+    # 实测生产库公共层与方案层的取值冲突 11 个格子，广百股份的公共层挂着
+    # 「估值上限 30 亿 + 地区山东/广东」，而它两个方案是「重奢奥莱项目」和
+    # 「超市便利店」—— 那两条约束属于哪一个，原文里根本看不出来，
+    # 公共层就是解析器猜不出归属时的兜底桶，现在两个方案都被压着。
     # ===== 系统列 =====
     # 需求级别与它的 E 细分原因，与标的侧同一套语义。status 从「需求状态」降级成
     # 「E 的细分原因」，取值不变，只是不再单独作为闸门。
@@ -451,6 +395,41 @@ BUYER_INTENT_INDICATORS: tuple[Indicator, ...] = (
     Indicator("financing_stage_requirement_summary", "融资阶段要求（已退役）", None, "text", writable_by=_BI_RETIRED),
     Indicator("premium_tolerance_summary", "溢价要求（已退役）", None, "text", writable_by=_BI_RETIRED),
     Indicator("debt_ratio_requirement_summary", "负债率要求说明（已退役）", None, "text", writable_by=_BI_RETIRED),
+
+    # -- 2026-09-01 方案化：需求侧 23 个业务/门槛列整体退役 --
+    #
+    # 它们的等价声明在 BUYER_INTENT_SCENARIO_INDICATORS 里，打在
+    # buyer_intent_scenario 的真列上。这里保留声明是为了阶段 B 的 drop 清单，
+    # 以及「这些列还在库里」这个事实的唯一声明处。
+    #
+    # 六条**不进方案层**，内容并入方案的 other_requirements_text：
+    # 控股要求与并表要求（实测 48x71 全量对判：用得最多的两个字段，
+    # 真淘汰 0 次，只在标的 can_control 没录时开火）、期望股比上下限
+    # （标的侧 transfer_ratio 录入率 3%）、可接受交易结构（对手方录入率 1%）、
+    # 不接受的重大风险（4%）、排除地区（真淘汰 0 次）。
+    Indicator("intent_business_tags_json", "需求业务标签（已退役）", None, "json", writable_by=_BI_RETIRED, multi_value=True, editor="tags"),
+    Indicator("intent_business_summary", "需求业务说明（已退役）", None, "text", writable_by=_BI_RETIRED, editor="textarea"),
+    Indicator("excluded_business_text", "排除业务方向（已退役）", None, "text", writable_by=_BI_RETIRED, editor="textarea"),
+    Indicator("acceptable_regions_json", "可接受地区（已退役）", None, "json", writable_by=_BI_RETIRED, target_column="location_province,location_city,location_district", operator="region_any", multi_value=True, deterministic_rank=True, editor="region_multi"),
+    Indicator("excluded_regions_json", "排除地区（已退役）", None, "json", writable_by=_BI_RETIRED, target_column="location_province,location_city,location_district", operator="region_none", multi_value=True, deterministic_rank=True, editor="region_multi"),
+    Indicator("region_scope_summary", "地域摘要（已退役）", None, "text", writable_by=_BI_RETIRED, editor="text"),
+    Indicator("buyer_industry_advantage_summary", "产业优势（已退役）", None, "text", writable_by=_BI_RETIRED),
+    Indicator("min_revenue_yuan", "最低营收（已退役）", None, "yuan", writable_by=_BI_RETIRED, target_column="current_revenue_yuan", operator="gte", deterministic_rank=True),
+    Indicator("min_net_profit_yuan", "最低净利润（已退役）", None, "yuan", writable_by=_BI_RETIRED, target_column="current_net_profit_yuan", operator="gte", deterministic_rank=True),
+    Indicator("max_pe", "PE 上限（已退役）", None, "ratio", writable_by=_BI_RETIRED, target_column="pe_ratio", operator="lte", deterministic_rank=True),
+    Indicator("min_valuation_yuan", "最低估值（已退役）", None, "yuan", writable_by=_BI_RETIRED, target_column="valuation_yuan", operator="gte", deterministic_rank=True),
+    Indicator("max_valuation_yuan", "最高估值（已退役）", None, "yuan", writable_by=_BI_RETIRED, target_column="valuation_yuan", operator="lte", deterministic_rank=True),
+    Indicator("min_market_cap_yuan", "最低市值（已退役）", None, "yuan", writable_by=_BI_RETIRED, target_column="market_cap_yuan", operator="gte", deterministic_rank=True),
+    Indicator("max_market_cap_yuan", "最高市值（已退役）", None, "yuan", writable_by=_BI_RETIRED, target_column="market_cap_yuan", operator="lte", deterministic_rank=True),
+    Indicator("major_risk_tolerance_summary", "风险容忍（已退役）", None, "text", writable_by=_BI_RETIRED),
+    Indicator("requires_control", "控股要求（已退役）", None, "enum", writable_by=_BI_RETIRED, target_column="can_control", operator="requirement_capability", deterministic_rank=True, enum_options=_YES_NO_LIKE),
+    Indicator("requires_consolidation", "并表要求（已退役）", None, "enum", writable_by=_BI_RETIRED, target_column="can_consolidate", operator="requirement_capability", deterministic_rank=True, enum_options=_YES_NO_LIKE),
+    Indicator("desired_equity_ratio_min", "期望股比下限（已退役）", None, "ratio", writable_by=_BI_RETIRED, target_column="transfer_ratio_max", operator="gte", deterministic_rank=True),
+    Indicator("desired_equity_ratio_max", "期望股比上限（已退役）", None, "ratio", writable_by=_BI_RETIRED, target_column="transfer_ratio_min", operator="lte", deterministic_rank=True),
+    Indicator("acceptable_listed_status_json", "可接受上市状态（已退役）", None, "json", writable_by=_BI_RETIRED, target_column="listed_status", operator="in", multi_value=True, deterministic_rank=True, editor="multi_enum", enum_options=_BI_LISTED_ACCEPTABLE),
+    Indicator("transaction_type", "交易方式原文（已退役）", None, "text", writable_by=_BI_RETIRED),
+    Indicator("transaction_types_json", "可接受交易结构（已退役）", None, "json", writable_by=_BI_RETIRED, target_column="acceptable_transaction_structures_json", operator="overlap", multi_value=True, deterministic_rank=True, editor="multi_enum", enum_options=_TRANSACTION_STRUCTURES),
+    Indicator("unacceptable_risk_flags_json", "不接受的重大风险（已退役）", None, "json", writable_by=_BI_RETIRED, target_column="major_risk_flags_json", operator="not_overlap", multi_value=True, deterministic_rank=True, editor="multi_enum", enum_options=_UNACCEPTABLE_RISK_FLAGS),
 )
 
 # 阶段 B 的 drop 清单，从上面的退役声明派生 —— 不要另手写一份。
@@ -533,10 +512,83 @@ BUYER_PARTY_INDICATORS: tuple[Indicator, ...] = (
     Indicator("supplementary_summary", "补充信息", "party_other", "text", writable_by=_ALL, editor="textarea"),
 )
 
+
+# ================= 买家需求方案（2026-09-01） =================
+#
+# 一条买家需求 = 一个容器挂 1..N 个**互相独立、各自完整**的方案，
+# 命中任意一个即算命中这条需求。没有公共层。
+#
+# **拆分标准（提示词与人工都按这一条）**：把这个需求的各维度取值列出来 ——
+# 业务、地区、上市状态、营收、净利、市值、估值、PE。如果任意组合都成立，
+# 就是一个方案；如果存在「A 维度取了这个值，B 维度就必须取那个值」的绑定，
+# 就按绑定拆。**单个字段多值不算绑定** —— 湖北农发的十来个农业赛道配
+# 「规模灵活，从四五亿估值到五十亿都看」，任一组合都成立，是一个方案。
+# 岭南商旅的酒店/旅游/粮油食品，拿酒店的业务配粮油的财务门槛不成立，拆三个。
+#
+# **轴不固定。** 生产里北大健康按上市状态、广晟按业务板块、盐业按交易结构、
+# 广百按业务方向。代码和提示词都不得预设「按上市/非上市拆」。
+#
+# **拿不准就拆。** 两个方向代价不对称：拆多了每个方案门槛更少、召回更宽；
+# 该拆没拆，不兼容的条件被 AND 在一起（上市 AND 非上市 = 空集），直接筛出零条。
+BUYER_INTENT_SCENARIO_GROUPS: tuple[IndicatorGroup, ...] = (
+    IndicatorGroup("scenario_business", "要买什么", "scenario_business"),
+    IndicatorGroup("scenario_threshold", "门槛", "scenario_threshold"),
+)
+
+BUYER_INTENT_SCENARIO_INDICATORS: tuple[Indicator, ...] = (
+    # ===== 要买什么 =====
+    #
+    # 方案**不设名称**（label 列保留但停止写入）。摘要就是标题，它同时承担三个
+    # 职责：界面上这个方案的标题、反向检索 skill 第一层扫描读的材料、
+    # 业务匹配判断的主材料。
+    #
+    # **口径**：一段话说清这个方案要买什么业务、什么地域、什么规模。
+    # 不写成条目列表，也不写成「符合公司战略的优质标的」这种话 ——
+    # 那样写，这个方案在反向检索里就等于不存在。
+    #
+    # 不再单设「业务说明」：022 之后 intent_business_summary 中位只有 54 字，
+    # 跟标签列表差不多长，再设一个跨业务与门槛的摘要，两个文本字段必然互相抄。
+    Indicator("scenario_summary", "摘要", "scenario_business", "text", writable_by=_BI_WRITE, editor="textarea"),
+    Indicator("business_tags_json", "业务标签", "scenario_business", "json", writable_by=_BI_WRITE, multi_value=True, editor="tags"),
+    # 排除方向必须让 LLM 看见：首轮筛是纯文本判断，排除项不进上下文就等于没有。
+    Indicator("excluded_business_text", "排除方向", "scenario_business", "text", writable_by=_BI_WRITE, editor="textarea"),
+
+    # ===== 门槛 =====
+    #
+    # 名字从「可接受地区」改成「要求地区」，因为它是硬要求。
+    # 「广东优先」「优先大湾区」这类偏好**不进这一列**，进 other_requirements_text ——
+    # 实测 36 家买家原话里提到地域的 16 家中有 9 家说的是「优先/最好」，
+    # 填进硬筛会把外地的好标的直接筛掉。
+    # 空数组 = 不限，不是「没有要求地区」。
+    Indicator("required_regions_json", "要求地区", "scenario_threshold", "json", screening=True, writable_by=_BI_WRITE, target_column="location_province,location_city,location_district", operator="region_any", multi_value=True, deterministic_rank=True, editor="region_multi"),
+    Indicator("acceptable_listed_status_json", "上市状态", "scenario_threshold", "json", screening=True, writable_by=_BI_WRITE, target_column="listed_status", operator="in", multi_value=True, deterministic_rank=True, editor="multi_enum", enum_options=_BI_LISTED_ACCEPTABLE),
+    # 缺失即出局的四项：标的侧录入率 77%/82%/87%/97%，缺的是真缺。
+    Indicator("min_revenue_yuan", "最低营收", "scenario_threshold", "yuan", screening=True, writable_by=_BI_WRITE, target_column="current_revenue_yuan", operator="gte", sql_recall=True, deterministic_rank=True),
+    Indicator("min_net_profit_yuan", "最低净利润", "scenario_threshold", "yuan", screening=True, writable_by=_BI_WRITE, target_column="current_net_profit_yuan", operator="gte", deterministic_rank=True),
+    # 缺失不出局的五项：标的侧 PE 56%、估值 38%、市值 11%，缺的是数据不是资质。
+    # 它们按现行「缺失即出局」语义会贡献约 1250 次误杀、只换来 320 次真淘汰。
+    Indicator("max_pe", "PE 上限", "scenario_threshold", "ratio", screening=True, writable_by=_BI_WRITE, target_column="pe_ratio", operator="lte", missing_policy="keep", deterministic_rank=True),
+    Indicator("min_market_cap_yuan", "最低市值", "scenario_threshold", "yuan", screening=True, writable_by=_BI_WRITE, target_column="market_cap_yuan", operator="gte", missing_policy="keep", deterministic_rank=True),
+    Indicator("max_market_cap_yuan", "最高市值", "scenario_threshold", "yuan", screening=True, writable_by=_BI_WRITE, target_column="market_cap_yuan", operator="lte", missing_policy="keep", deterministic_rank=True),
+    Indicator("min_valuation_yuan", "最低估值", "scenario_threshold", "yuan", screening=True, writable_by=_BI_WRITE, target_column="valuation_yuan", operator="gte", missing_policy="keep", deterministic_rank=True),
+    Indicator("max_valuation_yuan", "最高估值", "scenario_threshold", "yuan", screening=True, writable_by=_BI_WRITE, target_column="valuation_yuan", operator="lte", missing_policy="keep", deterministic_rank=True),
+    # 结构化字段装不下的约束全在这里：偏好语气、交易结构、控股与并表、股比、
+    # 迁址、团队留任、返投、对赌、负债率、净利率、溢价、市场地位、风险清单。
+    # **是 AI 归纳，不是原话** —— 保留全部约束信息，去掉冗余表达。
+    # 它不参与初筛，进深评与反向检索的第二层。
+    Indicator("other_requirements_text", "其他要求", "scenario_threshold", "text", writable_by=_BI_WRITE, editor="textarea"),
+)
+
+# 方案表的事实列：投影、搜索文档、skill 都从这里取，不要手写第二份。
+def buyer_intent_scenario_fact_columns() -> list[str]:
+    return [indicator.column for indicator in BUYER_INTENT_SCENARIO_INDICATORS]
+
+
 _BY_ENTITY: dict[str, tuple[Indicator, ...]] = {
     "seller_target": SELLER_TARGET_INDICATORS,
     "buyer_intent": BUYER_INTENT_INDICATORS,
     "buyer_party": BUYER_PARTY_INDICATORS,
+    "buyer_intent_scenario": BUYER_INTENT_SCENARIO_INDICATORS,
 }
 
 
@@ -554,6 +606,8 @@ def groups_for(entity: str = "seller_target") -> tuple[IndicatorGroup, ...]:
         return BUYER_GROUPS
     if entity == "buyer_party":
         return BUYER_PARTY_GROUPS
+    if entity == "buyer_intent_scenario":
+        return BUYER_INTENT_SCENARIO_GROUPS
     raise ValueError(f"registry does not cover entity {entity!r}")
 
 

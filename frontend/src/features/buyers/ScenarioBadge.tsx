@@ -6,24 +6,34 @@ import type { BuyerIntentScenario } from '../../types/api';
 import { formatCompactMoney } from '../../lib/format';
 import { valueLabel } from '../../lib/fieldLabels';
 
-/** 把方案的 fields_json 压成一句话；只取列表用得上的几个维度。 */
+/** 把一个方案压成一句话；只取列表用得上的几个维度。
+ *
+ * 0901 起读的是方案表的真列，不再是 fields_json 那个没有 schema 的袋子 ——
+ * 实测 18 个方案的 83 个取值里有 25 个打在已退役的列上，那正是没 schema 的后果。 */
 function scenarioSummary(scenario: BuyerIntentScenario): string {
-  const fields = scenario.fields_json || {};
   const parts: string[] = [];
 
-  const listed = fields.acceptable_listed_status_json;
+  const listed = scenario.acceptable_listed_status_json;
   if (Array.isArray(listed) && listed.length) {
     parts.push(listed.map((value) => valueLabel('acceptable_listed_status_json', String(value))).join('、'));
   }
-  // 0828：行业字典在需求侧下线，方案里的业务方向来自自由标签。
-  const tags = fields.intent_business_tags_json;
+  const tags = scenario.business_tags_json;
   if (Array.isArray(tags) && tags.length) parts.push(tags.map(String).join('、'));
-  if (fields.min_revenue_yuan) parts.push(`营收≥${formatCompactMoney(Number(fields.min_revenue_yuan))}`);
-  if (fields.min_net_profit_yuan) parts.push(`净利≥${formatCompactMoney(Number(fields.min_net_profit_yuan))}`);
-  if (fields.max_pe) parts.push(`PE≤${Number(fields.max_pe).toFixed(0)}`);
-  if (fields.max_market_cap_yuan) parts.push(`市值≤${formatCompactMoney(Number(fields.max_market_cap_yuan))}`);
+  if (scenario.min_revenue_yuan) parts.push(`营收≥${formatCompactMoney(Number(scenario.min_revenue_yuan))}`);
+  if (scenario.min_net_profit_yuan) parts.push(`净利≥${formatCompactMoney(Number(scenario.min_net_profit_yuan))}`);
+  if (scenario.max_pe) parts.push(`PE≤${Number(scenario.max_pe).toFixed(0)}`);
+  if (scenario.max_market_cap_yuan) parts.push(`市值≤${formatCompactMoney(Number(scenario.max_market_cap_yuan))}`);
 
-  return parts.length ? parts.join(' · ') : '未设置结构化条件';
+  // 一条门槛都没提**不是**「信息不足」，它是库里最灵活的那批方案，恰恰最该推。
+  return parts.length ? parts.join(' · ') : '没有门槛，不构成障碍';
+}
+
+/** 方案没有名称（0901 判决三：摘要就是标题），抬头取摘要首句。 */
+function scenarioTitle(scenario: BuyerIntentScenario, index: number): string {
+  const summary = (scenario.scenario_summary || '').trim();
+  if (!summary) return `方案 ${index + 1}`;
+  const firstLine = summary.split(/[\n。；;]/)[0].trim();
+  return firstLine.length > 18 ? `${firstLine.slice(0, 18)}…` : firstLine || `方案 ${index + 1}`;
 }
 
 export default function ScenarioBadge({ intentId, labels }: { intentId: string; labels: string[] }) {
@@ -81,9 +91,9 @@ export default function ScenarioBadge({ intentId, labels }: { intentId: string; 
                   <Loader2 className="h-3 w-3 animate-spin" />读取方案...
                 </p>
               ) : scenarios && scenarios.length ? (
-                scenarios.map((scenario) => (
+                scenarios.map((scenario, index) => (
                   <p key={scenario.id} className="px-1 py-1 text-xs leading-5 text-gray-600">
-                    <span className="font-medium text-gray-900">{scenario.label}</span>
+                    <span className="font-medium text-gray-900">{scenarioTitle(scenario, index)}</span>
                     <span className="text-gray-400">：</span>
                     {scenarioSummary(scenario)}
                   </p>

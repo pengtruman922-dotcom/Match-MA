@@ -60,10 +60,7 @@ from backend.app.services.industry_taxonomy import (
     industry_l1_prompt_list,
     industry_l2_prompt_list,
 )
-from backend.app.services.recommendation_conditions import (
-    CONDITION_EFFECTS,
-    normalize_scenario_fields,
-)
+from backend.app.services.recommendation_conditions import CONDITION_EFFECTS
 from backend.app.services.region_dictionary import PROVINCES, normalize_buyer_regions
 from backend.app.services.search_docs import (
     create_search_doc_rebuild_job,
@@ -216,6 +213,8 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
         db,
         buyer_intent_id=buyer_intent_id,
         raw_scenarios=(parsed_output_json or {}).get("scenarios"),
+        raw_requirement_text=raw_requirement_text,
+        notes=normalization_notes,
     )
 
     return {
@@ -404,10 +403,20 @@ def _remove_structured_profile_duplicates(
     structured_fields: dict[str, Any],
     normalization_notes: list[str],
 ) -> list[dict[str, Any]]:
-    """Keep “其他” for genuinely unstructured facts, not a second field copy."""
+    """Keep “其他” for genuinely unstructured facts, not a second field copy.
+
+    比对对象是**非条件**的文本字段：条件字段（营收下限、PE 上限那些）的值是
+    数字，拿它去做子串比对只会误删「营收 5 亿」这种句子里的数字部分。
+    以前这里用 `default_effect is not None` 表达「是条件」，0901 那个标志删掉了，
+    改读 `screening` —— 它问的正是同一件事，而且是唯一还在生效的那个。
+    """
     structured_texts: list[str] = []
-    for indicator in indicators_for("buyer_intent"):
-        if not indicator.group or indicator.default_effect is not None:
+    indicators = (
+        *indicators_for("buyer_intent"),
+        *indicators_for("buyer_intent_scenario"),
+    )
+    for indicator in indicators:
+        if indicator.screening:
             continue
         value = structured_fields.get(indicator.column)
         if not _has_reconciliation_value(value):
@@ -454,19 +463,17 @@ def _profile_compare_text(value: Any) -> str:
 
 
 def _buyer_intent_field_contract() -> list[dict[str, Any]]:
-    """模型能写的全部买家字段，注册表派生。
+    """模型能写的全部字段，注册表派生。
 
-    筛选条件按 default_effect 过滤过一次，于是描述字段（溢价要求、风险容忍这些）
-    整组对模型不可见，它们也就永远写不进来。现在按「可写」筛，
-    ``is_condition`` 告诉模型这一条是参与初筛的门槛还是只供深评阅读的描述。
+    0901 起契约的主体是**方案**的字段：需求本身只是容器（名称、级别、状态），
+    业务方向与门槛全部住在方案里。所以这里合并两份 —— 需求侧剩下的系统列，
+    加上方案侧的 13 列。
 
-    ``is_condition`` 读 ``screening`` 而不是 ``default_effect``（0817 改）：
-    两个标志承的是两件事 —— ``screening`` 是「这一条进不进初筛 schema」，
-    ``default_effect`` 是「它在需求单链路的规则打分里算硬还是软」。
-    毛利率、PS、溢价上限、迁址/返投/留任这六项现在只有后者，用 default_effect
-    判就会告诉模型「这是个初筛门槛」，而 SQL 那边根本没有它们。
+    ``is_condition`` 读 ``screening``：它是「这一条进不进初筛 schema」。
+    0901 删掉了 default_effect（「这个买家有多想要」），那个标志从来没进过
+    SQL，却在契约里告诉模型有强弱之分 —— 模型于是花注意力去判一个不存在的维度。
     """
-    return [
+    contract = [
         {
             "field": indicator.column,
             "label": indicator.label,
@@ -475,14 +482,15 @@ def _buyer_intent_field_contract() -> list[dict[str, Any]]:
             "target_field": indicator.target_column,
             "operator": indicator.operator,
             "is_condition": indicator.screening,
-            "default_effect": indicator.default_effect,
-            "scenario_allowed": indicator.scenario_allowed,
+            "scope": scope,
             "multi_value": indicator.multi_value,
             "enum_values": [value for value, _ in (indicator.enum_options or ())],
         }
-        for indicator in indicators_for("buyer_intent")
+        for scope, entity in (("intent", "buyer_intent"), ("scenario", "buyer_intent_scenario"))
+        for indicator in indicators_for(entity)
         if "parse" in indicator.writable_by
     ]
+    return contract
 
 
 def _buyer_intent_enum_contract() -> dict[str, list[str]]:
@@ -496,7 +504,8 @@ def _buyer_intent_enum_contract() -> dict[str, list[str]]:
     """
     return {
         indicator.column: [value for value, _ in indicator.enum_options]
-        for indicator in indicators_for("buyer_intent")
+        for entity in ("buyer_intent", "buyer_intent_scenario")
+        for indicator in indicators_for(entity)
         if indicator.enum_options and "parse" in indicator.writable_by
     }
 
@@ -700,9 +709,23 @@ def _normalize_confirmation_proposed_value(
     field: str,
     proposed_value: Any,
 ) -> tuple[bool, Any]:
-    try:
-        indicator = indicator_by_column("buyer_intent", field)
-    except KeyError:
+    """把一条待确认项的候选值过一遍它所属作用域的归一。
+
+    作用域要**按字段找**，不能写死成需求侧：0901 起门槛住在方案里，
+    用需求侧那份白名单去归一 max_pe，它会当场被判成 unsupported、
+    返回「归一不出值」—— 于是「模型给的和当前值其实一样」这件事永远发现不了，
+    每次重跑都往待确认里堆一条重复项。
+    """
+    scope = None
+    indicator = None
+    for candidate_scope, entity in (("scenario", "buyer_intent_scenario"), ("intent", "buyer_intent")):
+        try:
+            indicator = indicator_by_column(entity, field)
+        except KeyError:
+            continue
+        scope = candidate_scope
+        break
+    if indicator is None or scope is None:
         return False, None
     value = proposed_value
     if indicator.multi_value and not isinstance(value, list):
@@ -710,6 +733,7 @@ def _normalize_confirmation_proposed_value(
     normalized, _ = _normalize_buyer_intent_parse_changes(
         {"fields": {field: value}},
         "",
+        scope=scope,
     )
     _normalize_buyer_intent_regions(normalized)
     result = normalized.get(field)
@@ -745,52 +769,51 @@ def _replace_buyer_intent_scenarios(
     *,
     buyer_intent_id: UUID,
     raw_scenarios: Any,
+    raw_requirement_text: str = "",
+    notes: list[str] | None = None,
 ) -> int:
-    """Rewrite the intent's scenarios from the parser output.
+    """把解析产出的方案写进 buyer_intent_scenario 的真列。
 
-    A single scenario carries no information a flat intent does not already
-    hold, so it is dropped: leaving zero rows keeps screening on the original
-    single-pass path. Only genuine disjunctions ("已上市且市值≤50亿" OR
-    "未上市且可控股") are persisted.
+    0901 起**方案是门槛唯一的住处**，需求本身只是容器。两条随之改变的规则：
+
+    一、**单方案也要落库。** 0828 之前一个方案「不带任何新信息」所以被丢掉，
+    留零行让初筛走扁平那条路。现在扁平那条路不存在了 —— 丢掉唯一的方案
+    等于把这条需求的门槛全部丢掉，而且不报错。
+
+    二、**按 sort_order 对齐，不按 label 对齐。** 方案不再有名称（判决三：
+    摘要就是标题），拿摘要去做对齐键会在重跑改写摘要时把两条方案错配。
     """
     if not isinstance(raw_scenarios, list):
         return 0
+    notes = [] if notes is None else notes
     existing_rows = _load_parser_scenarios(db, buyer_intent_id)
-    existing_by_label = {
-        _normalized_scope_label(row.get("label")): row
-        for row in existing_rows
-        if _normalized_scope_label(row.get("label"))
-    }
-    parsed: list[tuple[str, dict[str, Any], list[dict[str, Any]]]] = []
+    parsed: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
     for index, item in enumerate(raw_scenarios[:MAX_PARSED_SCENARIOS]):
         if not isinstance(item, dict):
             continue
-        raw_fields = item.get("fields") or item.get("conditions") or {}
-        pending = _normalize_confirmation_items(item.get("needs_confirmation"), BUYER_INTENT_PARSE_FIELDS)
-        raw_fields = _remove_pending_condition_values(raw_fields, pending)
-        label = str(item.get("label") or item.get("name") or f"方案{index + 1}").strip()[:120]
-        existing = existing_by_label.get(_normalized_scope_label(label), {})
-        current_fields = existing.get("fields_json") if isinstance(existing.get("fields_json"), dict) else {}
-        scenario_notes: list[str] = []
-        reconciled = _reconcile_buyer_intent_scope(
-            db,
-            current_fields=current_fields,
-            candidate_changes={
-                **_normalize_parsed_scenario_fields(raw_fields),
-                "needs_confirmation_json": pending,
+        normalized, scenario_notes = _normalize_buyer_intent_parse_changes(
+            {
+                "fields": item.get("fields") or item.get("conditions") or {},
+                "needs_confirmation": item.get("needs_confirmation"),
             },
-            normalization_notes=scenario_notes,
-            scope_label=label,
+            raw_requirement_text,
+            scope="scenario",
         )
-        pending = reconciled.pop("needs_confirmation_json", [])
-        fields = {**current_fields, **reconciled}
+        notes.extend(f"scenario{index}:{note}" for note in scenario_notes)
+        pending = normalized.pop("needs_confirmation_json", [])
+        normalized = _normalize_parsed_scenario_fields(normalized)
+        existing = existing_rows[index] if index < len(existing_rows) else {}
+        current = {
+            column: existing.get(column)
+            for column in BUYER_INTENT_SCENARIO_PARSE_FIELDS
+            if existing.get(column) not in (None, "", [], {})
+        }
+        fields = {**current, **normalized}
         if not fields and not pending:
             continue
-        parsed.append((label, fields, pending))
+        parsed.append((fields, pending))
 
-    # A one-scenario output is the flat/common representation. On a reparse it
-    # is not authority to erase two already reviewed scenario scopes.
-    if len(parsed) < 2:
+    if not parsed:
         return len(existing_rows)
 
     db.execute(
@@ -811,43 +834,51 @@ def _replace_buyer_intent_scenarios(
             "workspace_id": DEFAULT_WORKSPACE_ID,
         },
     )
-    for sort_order, (label, fields, pending) in enumerate(parsed):
-        db.execute(
-            text(
-                """
-                insert into buyer_intent_scenario (
-                  team_id, workspace_id, buyer_intent_id, label, sort_order,
-                  fields_json, needs_confirmation_json, source, created_by, updated_by
-                )
-                values (
-                  :team_id, :workspace_id, :buyer_intent_id, :label, :sort_order,
-                  :fields_json, :needs_confirmation_json, 'parser', :user_id, :user_id
-                )
-                """
-            ).bindparams(
-                bindparam("fields_json", type_=JSONB),
-                bindparam("needs_confirmation_json", type_=JSONB),
-            ),
-            {
-                "team_id": DEFAULT_TEAM_ID,
-                "workspace_id": DEFAULT_WORKSPACE_ID,
-                "buyer_intent_id": buyer_intent_id,
-                "label": label,
-                "sort_order": sort_order,
-                "fields_json": fields,
-                "needs_confirmation_json": pending,
-                "user_id": SYSTEM_USER_ID,
-            },
+    columns = sorted(BUYER_INTENT_SCENARIO_PARSE_FIELDS)
+    column_sql = ", ".join(columns)
+    value_sql = ", ".join(f":{column}" for column in columns)
+    binds = [
+        bindparam(column, type_=JSONB)
+        for column in columns
+        if column in BUYER_INTENT_SCENARIO_JSON_FIELDS
+    ]
+    statement = text(
+        f"""
+        insert into buyer_intent_scenario (
+          team_id, workspace_id, buyer_intent_id, label, sort_order,
+          needs_confirmation_json, source, created_by, updated_by, {column_sql}
         )
+        values (
+          :team_id, :workspace_id, :buyer_intent_id, '', :sort_order,
+          :needs_confirmation_json, 'parser', :user_id, :user_id, {value_sql}
+        )
+        """
+    ).bindparams(bindparam("needs_confirmation_json", type_=JSONB), *binds)
+    for sort_order, (fields, pending) in enumerate(parsed):
+        params: dict[str, Any] = {
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+            "buyer_intent_id": buyer_intent_id,
+            "sort_order": sort_order,
+            "needs_confirmation_json": pending,
+            "user_id": SYSTEM_USER_ID,
+        }
+        for column in columns:
+            value = fields.get(column)
+            if value is None and column in BUYER_INTENT_SCENARIO_JSON_FIELDS:
+                value = []
+            params[column] = value
+        db.execute(statement, params)
     db.commit()
     return len(parsed)
 
 
 def _load_parser_scenarios(db: Session, buyer_intent_id: UUID) -> list[dict[str, Any]]:
+    columns = ", ".join(sorted(BUYER_INTENT_SCENARIO_PARSE_FIELDS))
     rows = db.execute(
         text(
-            """
-            select label, fields_json, needs_confirmation_json
+            f"""
+            select sort_order, needs_confirmation_json, {columns}
             from buyer_intent_scenario
             where buyer_intent_id = :buyer_intent_id
               and team_id = :team_id
@@ -866,31 +897,22 @@ def _load_parser_scenarios(db: Session, buyer_intent_id: UUID) -> list[dict[str,
     return [dict(row) for row in rows]
 
 
-def _normalize_parsed_scenario_fields(raw_fields: Any) -> dict[str, Any]:
-    """方案内嵌字段走与公共条件同一套归一（上市状态闭集 + 地区两列）。"""
-    fields = normalize_scenario_fields(raw_fields)
-    if "acceptable_listed_status_json" in fields:
-        statuses = _normalize_acceptable_listed_statuses(fields["acceptable_listed_status_json"])
-        if statuses:
-            fields["acceptable_listed_status_json"] = statuses
+def _normalize_parsed_scenario_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    """方案字段的最后一道：地区过省份词表。
+
+    闭集、业务标签、金额单位都已经由 _normalize_buyer_intent_parse_changes
+    （scope="scenario"）处理过 —— 这里只剩地区，因为它要访问地区词表，
+    而那是个比形状归一重得多的依赖。
+    """
+    fields = dict(fields)
+    if "required_regions_json" in fields:
+        regions, _ = normalize_buyer_regions(
+            fields["required_regions_json"], field="required_regions_json"
+        )
+        if regions:
+            fields["required_regions_json"] = regions
         else:
-            fields.pop("acceptable_listed_status_json", None)
-    if "preferred_listed_status" in fields:
-        listed_status = _normalize_listed_status(fields["preferred_listed_status"])
-        fields["preferred_listed_status"] = "pre_ipo" if listed_status == "preparing_listing" else listed_status
-    if "intent_business_tags_json" in fields:
-        tags = normalize_business_tags(fields["intent_business_tags_json"])
-        if tags:
-            fields["intent_business_tags_json"] = tags
-        else:
-            fields.pop("intent_business_tags_json", None)
-    for column in ("acceptable_regions_json", "excluded_regions_json"):
-        if column in fields:
-            regions, _ = normalize_buyer_regions(fields[column], field=column)
-            if regions:
-                fields[column] = regions
-            else:
-                fields.pop(column, None)
+            fields.pop("required_regions_json", None)
     return fields
 
 
@@ -1008,6 +1030,33 @@ BUYER_INTENT_TEXT_LIMITS = {
     "intent_name": 300,
 }
 
+# 方案侧的三份白名单，与需求侧同一手法派生。方案是 0901 起门槛的唯一住处，
+# 所以这三份比需求侧那三份更要紧 —— 漏一列的表现是「模型写了、库里没有」，
+# 而门槛悄悄少一条不报错，只会让候选池变宽。
+BUYER_INTENT_SCENARIO_PARSE_FIELDS = writable_columns("parse", "buyer_intent_scenario")
+
+BUYER_INTENT_SCENARIO_JSON_FIELDS = {
+    indicator.column
+    for indicator in indicators_for("buyer_intent_scenario")
+    if indicator.kind == "json" and "parse" in indicator.writable_by
+}
+
+BUYER_INTENT_SCENARIO_NUMERIC_FIELDS = {
+    indicator.column
+    for indicator in indicators_for("buyer_intent_scenario")
+    if indicator.kind in {"yuan", "ratio"} and "parse" in indicator.writable_by
+}
+
+def _all_parse_writable_fields() -> set[str]:
+    """需求容器 + 方案，两张表可写列的并集。
+
+    校验阶段还不知道一个字段最后落到哪张表 —— 分流在写入时做。
+    只认需求侧那一半的话，模型正确产出的门槛会被判成「不支持的字段」，
+    整次解析被判失败，而失败原因指向的是一个其实完全合法的输出。
+    """
+    return BUYER_INTENT_PARSE_FIELDS | BUYER_INTENT_SCENARIO_PARSE_FIELDS
+
+
 def _validate_buyer_intent_parse_output(parsed_output_json: dict[str, Any] | None) -> dict[str, Any]:
     if parsed_output_json is None:
         return {"valid": False, "error": "LLM output is not a JSON object."}
@@ -1018,10 +1067,19 @@ def _validate_buyer_intent_parse_output(parsed_output_json: dict[str, Any] | Non
     candidate = parsed_output_json.get("fields", parsed_output_json)
     if not isinstance(candidate, dict):
         return {"valid": False, "error": "Buyer intent parser output must be an object."}
-    allowed_count = len([key for key in candidate if key in BUYER_INTENT_PARSE_FIELDS])
+    allowed = _all_parse_writable_fields()
+    allowed_count = len([key for key in candidate if key in allowed])
     allowed_count += len(
-        _normalize_confirmation_items(parsed_output_json.get("needs_confirmation"), BUYER_INTENT_PARSE_FIELDS)
+        _normalize_confirmation_items(parsed_output_json.get("needs_confirmation"), allowed)
     )
+    # 方案里的字段同样算数：一次解析可能只产出 scenarios（业务方向与门槛全在
+    # 方案里，容器层什么都没变），那不是「没有可用字段」。
+    for item in parsed_output_json.get("scenarios") or []:
+        if not isinstance(item, dict):
+            continue
+        fields = item.get("fields") or item.get("conditions") or {}
+        if isinstance(fields, dict):
+            allowed_count += len([key for key in fields if key in allowed])
     return {
         "valid": allowed_count > 0,
         "field_count": allowed_count,
@@ -1031,28 +1089,49 @@ def _validate_buyer_intent_parse_output(parsed_output_json: dict[str, Any] | Non
 def _normalize_buyer_intent_parse_changes(
     parsed_output_json: dict[str, Any] | None,
     raw_requirement_text: str,
+    *,
+    scope: str = "intent",
 ) -> tuple[dict[str, Any], list[str]]:
+    """解析产出 → 可落库的字段，两个作用域共用一份归一。
+
+    ``scope="intent"`` 走需求容器那张表（0901 之后只剩名称/级别/状态/暂停原因/
+    原始需求），``scope="scenario"`` 走方案表的 13 列。
+
+    **两个作用域必须共用这一个函数。** 0828 时方案走的是另一条更薄的归一
+    （normalize_scenario_fields），于是「5000万」这种写法在公共条件上会被换算成
+    50000000、在方案里却原样留成 5000 —— 同一句话落在哪一层决定了它换不换算，
+    而门槛 0901 起只住在方案里，那条薄路径正好接手了全部的数字。
+    """
     if not parsed_output_json:
         return {}, []
     candidate = parsed_output_json.get("fields", parsed_output_json)
     if not isinstance(candidate, dict):
         return {}, []
 
+    scenario_scope = scope == "scenario"
+    allowed = BUYER_INTENT_SCENARIO_PARSE_FIELDS if scenario_scope else BUYER_INTENT_PARSE_FIELDS
+    numeric = (
+        BUYER_INTENT_SCENARIO_NUMERIC_FIELDS if scenario_scope else BUYER_INTENT_PARSE_NUMERIC_FIELDS
+    )
+    json_fields = (
+        BUYER_INTENT_SCENARIO_JSON_FIELDS if scenario_scope else BUYER_INTENT_PARSE_JSON_FIELDS
+    )
+
     notes: list[str] = []
     raw_pending = parsed_output_json.get("needs_confirmation")
     if raw_pending is None:
         raw_pending = candidate.get("needs_confirmation_json")
-    pending = _normalize_confirmation_items(raw_pending, BUYER_INTENT_PARSE_FIELDS)
+    pending = _normalize_confirmation_items(raw_pending, allowed)
     candidate = _remove_pending_condition_values(candidate, pending)
     notes.extend(f"held_for_confirmation:{item['field']}" for item in pending)
     changes: dict[str, Any] = {}
     for key, value in candidate.items():
         if key == "needs_confirmation_json":
             continue
-        if key not in BUYER_INTENT_PARSE_FIELDS:
+        if key not in allowed:
             notes.append(f"ignored_unsupported_field:{key}")
             continue
-        if key in BUYER_INTENT_PARSE_NUMERIC_FIELDS:
+        if key in numeric:
             changes[key] = _optional_decimal(value)
             continue
         if key in YES_NO_LIKE_FIELDS:
@@ -1065,8 +1144,9 @@ def _normalize_buyer_intent_parse_changes(
         if key == "acceptable_listed_status_json":
             normalized_statuses = _normalize_acceptable_listed_statuses(value)
             changes[key] = normalized_statuses
-            changes["preferred_listed_status"] = legacy_listed_status(normalized_statuses)
-            continue
+            if not scenario_scope:
+                # preferred_listed_status 是需求侧的兼容派生列，方案表上没有它。
+                changes["preferred_listed_status"] = legacy_listed_status(normalized_statuses)
             continue
         if key == "equity_requirement_type":
             changes[key] = _normalize_equity_requirement_type(value)
@@ -1074,7 +1154,7 @@ def _normalize_buyer_intent_parse_changes(
         if key in REQUIREMENT_STRENGTH_FIELDS:
             changes[key] = _normalize_requirement_strength(value)
             continue
-        if key == "intent_business_tags_json":
+        if key in {"intent_business_tags_json", "business_tags_json"}:
             # 自由标签，只做形状归一（去空白、去空值、去重、限长），**不过任何词表**——
             # 过字典正是 0828 判决一要下线的东西。归空了就整列摘掉：
             # 空数组会被后面的 reconciliation 当成「未提及」，那是对的。
@@ -1101,7 +1181,7 @@ def _normalize_buyer_intent_parse_changes(
             else:
                 notes.append(f"dropped_{key}:no_recognised_values")
             continue
-        if key in BUYER_INTENT_PARSE_JSON_FIELDS:
+        if key in json_fields:
             changes[key] = value if isinstance(value, (list, dict)) else []
             continue
         text_value = str(value).strip() if value is not None else None
@@ -1118,8 +1198,11 @@ def _normalize_buyer_intent_parse_changes(
                 changes.pop(field, None)
                 notes.append(f"dropped_{field}:source_mentions_valuation_not_market_cap")
 
-    changes["raw_requirement_text"] = raw_requirement_text
     changes["needs_confirmation_json"] = pending
+    if scenario_scope:
+        return {key: value for key, value in changes.items() if value is not None}, notes
+
+    changes["raw_requirement_text"] = raw_requirement_text
     if "parsed_requirement_json" not in changes:
         changes["parsed_requirement_json"] = {
             "source": "buyer_intent_parser",

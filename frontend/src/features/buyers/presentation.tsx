@@ -1,5 +1,10 @@
 import { Loader2 } from 'lucide-react';
-import type { BuyerIntent, BuyerIntentParseStatus, BuyerParty, ConditionEffect } from '../../types/api';
+import type {
+  BuyerIntent,
+  BuyerIntentParseStatus,
+  BuyerIntentScenarioSummary,
+  BuyerParty,
+} from '../../types/api';
 import { valueLabel } from '../../lib/fieldLabels';
 import { gradeClass, intentGrade, intentGradeLabel } from '../../lib/entityGrade';
 import { formatCompactMoney, formatYuan } from '../../lib/format';
@@ -36,12 +41,13 @@ export function isActiveParseStatus(status: BuyerIntentParseStatus): boolean {
   return status.processing_state.overall_status === 'processing';
 }
 
-/** 必须条件实心、优先条件描边。 */
+/** 角标不再分「必须 / 优先」两种画法。
+ *
+ * 那个区分 2026-09-01 删掉了：`screening_sql.py` 是一组纯 AND，从来不区分
+ * 强弱，描边的「优先」和实心的「必须」在筛选里一模一样 —— 画法在骗人。
+ * 「优先大湾区」这类语气现在住在方案的「其他要求」文本里。 */
 function ChipTag({ chip }: { chip: RequirementChip }) {
-  const style = chip.effect === 'required'
-    ? 'bg-gray-100 text-gray-700'
-    : 'border border-gray-200 bg-white text-gray-500';
-  return <span title={chip.title} className={`inline-block max-w-full truncate px-1.5 py-0.5 text-[11px] leading-4 ${style}`}>{chip.label}</span>;
+  return <span title={chip.title} className="inline-block max-w-full truncate bg-gray-100 px-1.5 py-0.5 text-[11px] leading-4 text-gray-700">{chip.label}</span>;
 }
 
 export function RequirementCell({ item }: { item: BuyerIntent }) {
@@ -139,14 +145,40 @@ export function MoneyCell({ value }: { value?: string | number | null }) {
  * 细分方向 —— 实测人均只填 1.25 个一级行业，而真正的信息落在原文里。
  * 标签为空时退回业务说明的首句，比显示一个「-」有用。
  */
+
+/** 一条需求的全部启用方案。0901 起业务与门槛住在这里，需求本身只是容器。
+ *
+ * 列表的每一格都要**并起来**显示，不能取最严或最宽的那一个：多方案是 OR，
+ * 取最严会漏掉宽档能吃下的标的，取最宽会让顾问以为这个买家什么都收。 */
+function scenariosOf(item: BuyerIntent): BuyerIntentScenarioSummary[] {
+  return item.scenarios_json || [];
+}
+
+function joinUnique(values: Array<string | null | undefined>): string {
+  return [...new Set(values.map((value) => (value || '').trim()).filter(Boolean))].join('、');
+}
+
+/** 数字类门槛：每个方案一段，多方案时并列显示。 */
+function moneyList(
+  item: BuyerIntent,
+  read: (scenario: BuyerIntentScenarioSummary) => string | number | null,
+  prefix: string,
+): string {
+  const parts = scenariosOf(item)
+    .map(read)
+    .map(Number)
+    .filter(Number.isFinite)
+    .map((value) => `${prefix}${formatCompactMoney(value)}`);
+  return joinUnique(parts);
+}
+
 export function IntentIndustriesCell({ item }: { item: BuyerIntent }) {
-  const tags = (item.intent_business_tags_json || []).map(String).filter(Boolean);
-  if (tags.length) {
-    return (
-      <span className="block truncate text-xs text-gray-700" title={tags.join('、')}>{tags.join('、')}</span>
-    );
+  const tags = joinUnique(scenariosOf(item).flatMap((scenario) => scenario.business_tags_json || []));
+  if (tags) {
+    return <span className="block truncate text-xs text-gray-700" title={tags}>{tags}</span>;
   }
-  const summary = (item.intent_business_summary || '').trim();
+  // 标签为空时退回方案摘要，比显示一个「-」有用。
+  const summary = joinUnique(scenariosOf(item).map((scenario) => scenario.scenario_summary));
   if (!summary) return <Blank />;
   return <span className="block truncate text-xs text-gray-500" title={summary}>{summary}</span>;
 }
@@ -158,7 +190,11 @@ export function IntentIndustriesCell({ item }: { item: BuyerIntent }) {
  * 只显示 acceptable 会把「都可以但偏好上市」压成「都可以」。
  */
 export function ListingWantedCell({ item }: { item: BuyerIntent }) {
-  const acceptable = (item.acceptable_listed_status_json || []).map(String).filter(Boolean);
+  const acceptable = [...new Set(
+    scenariosOf(item).flatMap((scenario) => (scenario.acceptable_listed_status_json || []).map(String)),
+  )].filter(Boolean);
+  // preferred_listed_status 是 022 之前的兼容派生列，0901 随需求侧门槛一起退役。
+  // 存量值还在，作为空集时的兜底 —— 重跑之后它不再更新。
   const preferred = item.preferred_listed_status && item.preferred_listed_status !== 'unknown'
     ? item.preferred_listed_status
     : null;
@@ -178,10 +214,16 @@ export function ListingWantedCell({ item }: { item: BuyerIntent }) {
 
 /** 市值/估值要求：与买家侧同一个展示位规则，上市看市值区间、非上市看估值区间。 */
 export function WorthWantedCell({ item }: { item: BuyerIntent }) {
-  const wantsListed = item.preferred_listed_status === 'listed'
-    || (item.acceptable_listed_status_json || []).map(String).includes('listed');
-  const marketCap = moneyRange(item.min_market_cap_yuan, item.max_market_cap_yuan);
-  const valuation = moneyRange(item.min_valuation_yuan, item.max_valuation_yuan);
+  const scenarios = scenariosOf(item);
+  const wantsListed = scenarios.some((scenario) =>
+    (scenario.acceptable_listed_status_json || []).map(String).includes('listed'),
+  );
+  const marketCap = joinUnique(
+    scenarios.map((scenario) => moneyRange(scenario.min_market_cap_yuan, scenario.max_market_cap_yuan)),
+  );
+  const valuation = joinUnique(
+    scenarios.map((scenario) => moneyRange(scenario.min_valuation_yuan, scenario.max_valuation_yuan)),
+  );
   // 想买上市的就优先给市值区间；它没填就退回估值区间，而不是留白。
   const text = (wantsListed ? marketCap || valuation : valuation || marketCap);
   if (!text) return <Blank />;
@@ -207,11 +249,9 @@ function moneyRange(min?: string | number | null, max?: string | number | null):
 
 /** 营收要求：需求侧的营收下限。 */
 export function RevenueWantedCell({ item }: { item: BuyerIntent }) {
-  const value = item.min_revenue_yuan;
-  if (value === null || value === undefined || value === '') return <Blank />;
-  const amount = Number(value);
-  if (!Number.isFinite(amount)) return <Blank />;
-  return <span className="whitespace-nowrap text-xs text-gray-700">≥{formatCompactMoney(amount)}</span>;
+  const text = moneyList(item, (scenario) => scenario.min_revenue_yuan, '≥');
+  if (!text) return <Blank />;
+  return <span className="whitespace-nowrap text-xs text-gray-700" title={text}>{text}</span>;
 }
 
 /**
@@ -222,20 +262,21 @@ export function RevenueWantedCell({ item }: { item: BuyerIntent }) {
  * 退回时标灰，提示它没被结构化（初筛闸门只认结构化的那份）。
  */
 export function RegionWantedCell({ item }: { item: BuyerIntent }) {
-  const constraints = Array.isArray(item.region_constraints_json) ? item.region_constraints_json : [];
-  const provinces = constraints
-    // 排除项不是「它要哪里」，混进来会把「不要华北」显示成「华北」。
-    .filter((entry) => (entry?.effect || 'preferred') !== 'excluded')
-    .map((entry) => (entry?.province || '').trim())
-    .filter(Boolean);
-  const unique = [...new Set(provinces)];
-  if (unique.length) {
-    return <span className="block truncate text-xs text-gray-700" title={unique.join('、')}>{unique.join('、')}</span>;
+  const provinces = joinUnique(
+    scenariosOf(item)
+      .flatMap((scenario) => scenario.required_regions_json || [])
+      .map((entry) => (entry?.province || '').trim()),
+  );
+  if (provinces) {
+    return <span className="block truncate text-xs text-gray-700" title={provinces}>{provinces}</span>;
   }
-  const summary = (item.region_scope_summary || '').trim();
-  if (!summary) return <Blank />;
+  // 「要求地区」是硬要求，留空是常态而不是缺数据：实测 36 家买家里提到地域的
+  // 16 家中有 9 家说的是「优先/最好」，那种语气进的是方案的「其他要求」。
+  // 所以这里退回「其他要求」的原话并标灰，而不是显示一个「-」。
+  const other = joinUnique(scenariosOf(item).map((scenario) => scenario.other_requirements_text));
+  if (!other) return <Blank />;
   return (
-    <span className="block truncate text-xs text-gray-400" title={`未结构化，原文：${summary}`}>{summary}</span>
+    <span className="block truncate text-xs text-gray-400" title={`非硬性要求，原话：${other}`}>{other}</span>
   );
 }
 
@@ -346,33 +387,7 @@ export function parseYuanInput(raw: string): number | null {
   return amount;
 }
 
-export type RequirementChip = { key: string; label: string; effect: ConditionEffect; title: string };
-
-/**
- * 各维度的默认匹配作用，来源是 backend/app/registry/indicators.py 的
- * BUYER_INTENT_INDICATORS.default_effect。这里是有意的复制：列表页不加载指标契约接口。
- * 改契约默认值时需同步这里。
- *
- * 2026-08-28：`condition_effects_json`（逐字段覆盖强度）整个退役 —— 它在生产里
- * 只有 5/52 有值，而三个活着的消费方（本文件的角标、深评上下文、解析写入）
- * 没有一个是筛选。所以强度不再逐条可覆盖，直接读默认值。
- * 行业两条同批退役（需求侧行业字典下线），换成业务标签。
- */
-const DEFAULT_EFFECTS = {
-  intent_business_tags_json: 'preferred',
-  acceptable_listed_status_json: 'preferred',
-  min_revenue_yuan: 'required',
-  min_net_profit_yuan: 'required',
-  acceptable_regions_json: 'preferred',
-  excluded_regions_json: 'required',
-} as const;
-
-type ChipColumn = keyof typeof DEFAULT_EFFECTS;
-
-/** 返回该维度的生效作用。规则只有两态。 */
-function resolveEffect(column: ChipColumn): ConditionEffect {
-  return DEFAULT_EFFECTS[column];
-}
+export type RequirementChip = { key: string; label: string; title: string };
 
 /** 多值维度收敛成「前 2 个 + N」，title 保留全量。 */
 function collapseValues(values: string[], max = 2): { label: string; title: string } | null {
@@ -390,14 +405,12 @@ function shortProvince(value: string): string {
 }
 
 function chip(
-  column: ChipColumn,
   key: string,
   build: () => { label: string; title: string } | null,
 ): RequirementChip | null {
-  const effect = resolveEffect(column);
   const built = build();
   if (!built) return null;
-  return { key, label: built.label, effect, title: built.title };
+  return { key, label: built.label, title: built.title };
 }
 
 /**
@@ -406,37 +419,44 @@ function chip(
  * 这些不在契约里、详情页也编辑不到的影子列。
  */
 export function requirementChips(item: BuyerIntent): { industry: RequirementChip[]; conditions: RequirementChip[] } {
+  // 0901：业务与门槛住在方案里。一条需求可能有多个方案，列表把它们**并起来**
+  // 显示 —— 多方案是 OR，所以「营收≥1亿 或 营收≥5亿」在列表这一格里显示成
+  // 两个角标，而不是取最严或最宽的那一个。取任何一个都会误导：
+  // 取最严会漏掉宽档能吃下的标的，取最宽会让顾问以为这个买家什么都收。
+  const scenarios = item.scenarios_json || [];
+  const pick = <T,>(read: (scenario: BuyerIntentScenarioSummary) => T | null | undefined): T[] =>
+    scenarios.map(read).filter((value): value is T => value !== null && value !== undefined);
+
   // 第一行讲「要买什么业务」。0828 起它来自自由业务标签而不是行业字典 ——
   // 字典只有 16 个一级行业，接不住「薄膜电容器」「线控底盘」这类细分方向。
   const industry = [
-    chip('intent_business_tags_json', 'business_tags', () => collapseValues(item.intent_business_tags_json || [])),
+    chip('business_tags', () => collapseValues(scenarios.flatMap((scenario) => scenario.business_tags_json || []))),
   ].filter(Boolean) as RequirementChip[];
 
   const conditions = [
-    chip('acceptable_listed_status_json', 'listed', () => {
-      const labels = (item.acceptable_listed_status_json || []).map((value) => valueLabel('acceptable_listed_status_json', value));
+    chip('listed', () => {
+      const labels = scenarios
+        .flatMap((scenario) => scenario.acceptable_listed_status_json || [])
+        .map((value) => valueLabel('acceptable_listed_status_json', value));
       return collapseValues(labels, 3);
     }),
-    chip('min_revenue_yuan', 'revenue', () => {
-      if (!item.min_revenue_yuan) return null;
-      const text = `营收≥${formatCompactMoney(Number(item.min_revenue_yuan))}`;
-      return { label: text, title: text };
+    chip('revenue', () => {
+      const values = pick((scenario) => scenario.min_revenue_yuan).map(Number).filter(Number.isFinite);
+      return collapseValues(values.map((value) => `营收≥${formatCompactMoney(value)}`));
     }),
-    chip('min_net_profit_yuan', 'profit', () => {
-      if (!item.min_net_profit_yuan) return null;
-      const text = `净利≥${formatCompactMoney(Number(item.min_net_profit_yuan))}`;
-      return { label: text, title: text };
+    chip('profit', () => {
+      const values = pick((scenario) => scenario.min_net_profit_yuan).map(Number).filter(Number.isFinite);
+      return collapseValues(values.map((value) => `净利≥${formatCompactMoney(value)}`));
     }),
-    chip('acceptable_regions_json', 'region', () => {
-      const provinces = (item.acceptable_regions_json || []).map((region) => shortProvince(region.province || ''));
+    chip('pe', () => {
+      const values = pick((scenario) => scenario.max_pe).map(Number).filter(Number.isFinite);
+      return collapseValues(values.map((value) => `PE≤${value.toFixed(0)}`));
+    }),
+    chip('region', () => {
+      const provinces = scenarios
+        .flatMap((scenario) => scenario.required_regions_json || [])
+        .map((region) => shortProvince(region.province || ''));
       return collapseValues(provinces);
-    }),
-    // 排除地区单独出一个角标：语义写在列名里，不再靠元素里的 effect 区分，
-    // 而元素里那个 effect 从来没有真的排除过任何标的（SQL 只实现了 required 一档）。
-    chip('excluded_regions_json', 'region_excluded', () => {
-      const provinces = (item.excluded_regions_json || []).map((region) => shortProvince(region.province || ''));
-      const built = collapseValues(provinces);
-      return built ? { label: `不要${built.label}`, title: `不要${built.title}` } : null;
     }),
   ].filter(Boolean) as RequirementChip[];
 

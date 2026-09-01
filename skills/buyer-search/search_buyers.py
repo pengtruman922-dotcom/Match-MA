@@ -368,6 +368,27 @@ def _load(token: str) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
 # -- 三种返回形状 ---------------------------------------------------------
 
 
+def _scenarios(intent: dict[str, Any]) -> list[dict[str, Any]]:
+    """一条需求的全部方案。**业务方向与门槛只住在这里。**
+
+    2026-09-01 之前 skill 完全不读方案，只读 buyer_intent 那一行。后果不是报错：
+    生产里 8 条需求有分档，其中 2 条的门槛**只存在于方案里** —— 对它们这个
+    工具会返回「这条需求没有提出任何硬门槛，不构成障碍」，把有门槛的买家报成
+    库里最灵活的买家。错的方向恰好是最贵的那一边。
+    """
+    rows = intent.get("scenarios_json")
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
+def _scenario_label(index: int, total: int) -> str:
+    """方案 0901 起没有名称（摘要就是标题），抬头用序号。
+
+    单方案时不提「方案」二字：40/48 条需求只有一个方案，给它套一层分档的说法
+    会让调用方以为还有别的档没给它看。
+    """
+    return "需求" if total <= 1 else f"方案 {index + 1}"
+
+
 def _party_business(party: dict[str, Any], *, brief: bool) -> dict[str, Any]:
     """买家主体的【召】类字段：判业务匹配的核心材料。"""
     summary = party.get("business_summary")
@@ -379,16 +400,24 @@ def _party_business(party: dict[str, Any], *, brief: bool) -> dict[str, Any]:
 
 
 def _intent_business(intent: dict[str, Any], *, brief: bool) -> dict[str, Any]:
-    """需求的【召】类字段。四项都是自由文本，业务匹配全靠它们。"""
-    summary = intent.get("intent_business_summary") or intent.get("intent_summary")
-    payload = _compact({
-        "需求名称": _clean(intent.get("intent_name")),
-        "业务标签": _labels(intent.get("intent_business_tags_json"), {}),
-        "要买什么业务": _truncate(summary, BRIEF_INTENT_CHARS) if brief else _clean(summary),
-        "排除方向": _clean(intent.get("excluded_business_text")),
-        "地域说明": _clean(intent.get("region_scope_summary")),
-        "买家产业优势": _clean(intent.get("buyer_industry_advantage_summary")),
-    })
+    """需求的【召】类字段：逐方案的自由文本，业务匹配全靠它们。"""
+    scenarios = _scenarios(intent)
+    payload: dict[str, Any] = _compact({"需求名称": _clean(intent.get("intent_name"))})
+    blocks = []
+    for index, scenario in enumerate(scenarios):
+        summary = scenario.get("scenario_summary")
+        blocks.append(_compact({
+            "档": _scenario_label(index, len(scenarios)) if len(scenarios) > 1 else None,
+            "业务标签": _labels(scenario.get("business_tags_json"), {}),
+            "要买什么业务": _truncate(summary, BRIEF_INTENT_CHARS) if brief else _clean(summary),
+            "排除方向": _clean(scenario.get("excluded_business_text")),
+        }))
+    blocks = [block for block in blocks if block]
+    if len(blocks) == 1:
+        payload.update(blocks[0])
+    elif blocks:
+        payload["方案"] = blocks
+        payload["方案说明"] = "满足任意一个方案即算命中这条需求，逐个读、逐个判。"
     if str(intent.get("status") or "") == "paused":
         payload["状态"] = "暂停推荐（仍在库里，推荐前先跟顾问确认）"
     return payload
@@ -428,49 +457,63 @@ def _party_full(party: dict[str, Any]) -> dict[str, Any]:
     })
 
 
-def _intent_full(intent: dict[str, Any]) -> dict[str, Any]:
-    """需求全量档。分成「业务方向」与「门槛」两块，因为两者的缺失含义相反。"""
-    thresholds = _compact({
-        "最低营收": _money(intent.get("min_revenue_yuan")),
-        "最低净利润": _money(intent.get("min_net_profit_yuan")),
-        "PE 上限": _ratio(intent.get("max_pe")),
-        "估值下限": _money(intent.get("min_valuation_yuan")),
-        "估值上限": _money(intent.get("max_valuation_yuan")),
-        "市值下限": _money(intent.get("min_market_cap_yuan")),
-        "市值上限": _money(intent.get("max_market_cap_yuan")),
-        "可接受上市状态": _labels(intent.get("acceptable_listed_status_json"), LISTED_LABELS),
-        "可接受地区": _region_text(intent.get("acceptable_regions_json")),
-        "排除地区": _region_text(intent.get("excluded_regions_json")),
-        "要求控股": CAPABILITY_LABELS.get(str(intent.get("requires_control") or "")),
-        "要求并表": CAPABILITY_LABELS.get(str(intent.get("requires_consolidation") or "")),
-        "期望股比下限": _ratio(intent.get("desired_equity_ratio_min")),
-        "期望股比上限": _ratio(intent.get("desired_equity_ratio_max")),
-        "可接受交易结构": _labels(intent.get("transaction_types_json"), TRANSACTION_LABELS),
-        "不接受的重大风险": _labels(intent.get("unacceptable_risk_flags_json"), RISK_LABELS),
+def _scenario_thresholds(scenario: dict[str, Any]) -> dict[str, Any]:
+    return _compact({
+        "最低营收": _money(scenario.get("min_revenue_yuan")),
+        "最低净利润": _money(scenario.get("min_net_profit_yuan")),
+        "PE 上限": _ratio(scenario.get("max_pe")),
+        "估值下限": _money(scenario.get("min_valuation_yuan")),
+        "估值上限": _money(scenario.get("max_valuation_yuan")),
+        "市值下限": _money(scenario.get("min_market_cap_yuan")),
+        "市值上限": _money(scenario.get("max_market_cap_yuan")),
+        "上市状态": _labels(scenario.get("acceptable_listed_status_json"), LISTED_LABELS),
+        "要求地区": _region_text(scenario.get("required_regions_json")),
     })
+
+
+def _scenario_full(scenario: dict[str, Any], index: int, total: int) -> dict[str, Any]:
+    """一个方案的完整档：业务方向与门槛**分成两块**，因为两者的缺失含义相反。"""
+    thresholds = _scenario_thresholds(scenario)
+    payload = _compact({
+        "档": _scenario_label(index, total) if total > 1 else None,
+        "业务方向": _compact({
+            "业务标签": _labels(scenario.get("business_tags_json"), {}),
+            "要买什么业务": _clean(scenario.get("scenario_summary")),
+            "排除方向": _clean(scenario.get("excluded_business_text")),
+        }),
+        "门槛": thresholds,
+        "其他要求": _clean(scenario.get("other_requirements_text")),
+    })
+    if not thresholds:
+        # 一个门槛都没提 ≠ 信息不足。它是**最灵活的那批方案**，恰恰最该推。
+        payload["门槛说明"] = "这个方案没有提出任何硬门槛，不构成障碍。"
+    return payload
+
+
+def _intent_full(intent: dict[str, Any]) -> dict[str, Any]:
+    """需求全量档 = 容器信息 + 1..N 个各自完整的方案。
+
+    0901 起需求本身只是容器（名称、级别、状态），业务方向与门槛全部住在方案里。
+    「门槛整块为空 = 最灵活的买家」这条语义没变，但判定要看**全部方案都空**才算数
+    —— 这正是 skill 不读方案时那个 bug 的成因。
+    """
+    scenarios = _scenarios(intent)
+    blocks = [_scenario_full(scenario, index, len(scenarios)) for index, scenario in enumerate(scenarios)]
     payload = _compact({
         "id": str(intent.get("id") or ""),
         "需求名称": _clean(intent.get("intent_name")),
         "级别": _clean(intent.get("intent_grade")),
         "状态": INTENT_STATUS_LABELS.get(str(intent.get("status") or "")),
         "暂停原因": _clean(intent.get("pause_reason")),
-        "业务方向": _compact({
-            "业务标签": _labels(intent.get("intent_business_tags_json"), {}),
-            "要买什么业务": _clean(
-                intent.get("intent_business_summary") or intent.get("intent_summary")
-            ),
-            "排除方向": _clean(intent.get("excluded_business_text")),
-            "地域说明": _clean(intent.get("region_scope_summary")),
-            "买家产业优势": _clean(intent.get("buyer_industry_advantage_summary")),
-        }),
-        "门槛": thresholds,
-        "交易方式原文": _clean(intent.get("transaction_type")),
-        "风险容忍": _clean(intent.get("major_risk_tolerance_summary")),
         "待确认项": intent.get("needs_confirmation_json"),
         "原始需求": _clean_requirement_text(intent.get("raw_requirement_text")),
     })
-    if not thresholds:
-        # 一个门槛都没提 ≠ 信息不足。它是**最灵活的那批买家**，恰恰最该推。
+    if len(blocks) == 1:
+        payload.update(blocks[0])
+    elif blocks:
+        payload["方案"] = blocks
+        payload["方案说明"] = "满足任意一个方案即算命中这条需求。不要把多个方案的门槛叠加起来判。"
+    if not any(_scenario_thresholds(scenario) for scenario in scenarios):
         payload["门槛说明"] = "这条需求没有提出任何硬门槛，不构成障碍。"
     return payload
 
@@ -611,8 +654,8 @@ def _region_hit(regions: Any, province: str, city: str, district: str) -> bool:
     return False
 
 
-def _intent_checks(intent: dict[str, Any], target: dict[str, Any]) -> list[tuple[str, bool, bool]]:
-    """逐条门槛的判定，返回 (条件名, 买家提了没, 提了的话过没过)。
+def _scenario_checks(scenario: dict[str, Any], target: dict[str, Any]) -> list[tuple[str, bool, bool]]:
+    """一个方案逐条门槛的判定，返回 (条件名, 买家提了没, 提了的话过没过)。
 
     ⚠️ **反向检索最大的陷阱在这里**：买家没提这条门槛时 `stated=False`，
     调用方必须把它读成「不构成障碍」而不是「不满足」。把 NULL 当成不满足，
@@ -632,44 +675,57 @@ def _intent_checks(intent: dict[str, Any], target: dict[str, Any]) -> list[tuple
             return
         checks.append((label, True, value >= limit if at_least else value <= limit))
 
-    numeric("最低营收", intent.get("min_revenue_yuan"), target.get("revenue_yuan"), at_least=True)
-    numeric("最低净利润", intent.get("min_net_profit_yuan"), target.get("net_profit_yuan"), at_least=True)
-    numeric("PE 上限", intent.get("max_pe"), target.get("pe"), at_least=False)
-    numeric("估值下限", intent.get("min_valuation_yuan"), target.get("valuation_yuan"), at_least=True)
-    numeric("估值上限", intent.get("max_valuation_yuan"), target.get("valuation_yuan"), at_least=False)
-    numeric("市值下限", intent.get("min_market_cap_yuan"), target.get("market_cap_yuan"), at_least=True)
-    numeric("市值上限", intent.get("max_market_cap_yuan"), target.get("market_cap_yuan"), at_least=False)
+    numeric("最低营收", scenario.get("min_revenue_yuan"), target.get("revenue_yuan"), at_least=True)
+    numeric("最低净利润", scenario.get("min_net_profit_yuan"), target.get("net_profit_yuan"), at_least=True)
+    numeric("PE 上限", scenario.get("max_pe"), target.get("pe"), at_least=False)
+    numeric("估值下限", scenario.get("min_valuation_yuan"), target.get("valuation_yuan"), at_least=True)
+    numeric("估值上限", scenario.get("max_valuation_yuan"), target.get("valuation_yuan"), at_least=False)
+    numeric("市值下限", scenario.get("min_market_cap_yuan"), target.get("market_cap_yuan"), at_least=True)
+    numeric("市值上限", scenario.get("max_market_cap_yuan"), target.get("market_cap_yuan"), at_least=False)
 
-    acceptable = intent.get("acceptable_listed_status_json")
+    acceptable = scenario.get("acceptable_listed_status_json")
     listed = _clean(target.get("listed_status"))
     if not isinstance(acceptable, list) or not acceptable:
-        checks.append(("可接受上市状态", False, True))
+        checks.append(("上市状态", False, True))
     elif not listed:
-        checks.append(("可接受上市状态", True, True))
+        checks.append(("上市状态", True, True))
     else:
-        checks.append(("可接受上市状态", True, listed in {str(item) for item in acceptable}))
+        checks.append(("上市状态", True, listed in {str(item) for item in acceptable}))
 
     province, city, district = (
         _clean(target.get("province")), _clean(target.get("city")), _clean(target.get("district")),
     )
-    acceptable_regions = intent.get("acceptable_regions_json")
-    if not isinstance(acceptable_regions, list) or not acceptable_regions:
-        # 空数组 = 不限，**不是**「没有可接受地区」。
-        checks.append(("可接受地区", False, True))
+    regions = scenario.get("required_regions_json")
+    if not isinstance(regions, list) or not regions:
+        # 空数组 = 不限，**不是**「没有要求地区」。
+        checks.append(("要求地区", False, True))
     elif not (province or city or district):
-        checks.append(("可接受地区", True, True))
+        checks.append(("要求地区", True, True))
     else:
-        checks.append(("可接受地区", True, _region_hit(acceptable_regions, province, city, district)))
-
-    excluded_regions = intent.get("excluded_regions_json")
-    if not isinstance(excluded_regions, list) or not excluded_regions:
-        checks.append(("排除地区", False, True))
-    elif not (province or city or district):
-        # 标的连省份都没录，不该因为「买家不要新疆」而出局 —— 那是数据缺口。
-        checks.append(("排除地区", True, True))
-    else:
-        checks.append(("排除地区", True, not _region_hit(excluded_regions, province, city, district)))
+        checks.append(("要求地区", True, _region_hit(regions, province, city, district)))
     return checks
+
+
+def _intent_checks(intent: dict[str, Any], target: dict[str, Any]) -> list[tuple[str, bool, bool]]:
+    """整条需求的判定 —— **命中任意一个方案即算命中**。
+
+    多方案是 OR，不是 AND。把三个方案的门槛叠加起来判，会让岭南商旅的「酒店」
+    那一档凭空背上「粮油食品」那一档的营收与估值要求，而叠加不报错，
+    表现只是「这个买家好像什么都不要」。
+
+    返回的是**命中的那个方案**的判定表；一个都不命中时返回第一个方案的，
+    让调用方看得到它差在哪。
+    """
+    scenarios = _scenarios(intent)
+    if not scenarios:
+        # 需求没有方案是不合法状态（迁移 023 给每条需求都生成了一个）。
+        # 真遇到就当成「没提任何门槛」，那是这个数据形状下唯一诚实的读法。
+        return []
+    tables = [_scenario_checks(scenario, target) for scenario in scenarios]
+    for table in tables:
+        if all(passed for _, _, passed in table):
+            return table
+    return tables[0]
 
 
 def _party_conditions_hit(party: dict[str, Any], filters: dict[str, Any]) -> bool:

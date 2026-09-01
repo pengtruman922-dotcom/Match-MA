@@ -26,7 +26,7 @@ def _properties() -> dict:
 def _screening_columns() -> set[str]:
     return {
         indicator.column
-        for indicator in indicators_for("buyer_intent")
+        for indicator in indicators_for("buyer_intent_scenario")
         if indicator.screening and indicator.operator and indicator.target_column
     }
 
@@ -78,43 +78,52 @@ def test_industry_conditions_are_gone_from_the_schema() -> None:
     assert not indicator_by_column("seller_target", "industry_pairs_json").screening
 
 
-@pytest.mark.parametrize("column", ["acceptable_regions_json", "excluded_regions_json"])
-def test_region_takes_three_optional_levels(column: str) -> None:
-    spec = _properties()[column]
+def test_region_takes_three_optional_levels() -> None:
+    spec = _properties()["required_regions_json"]
 
     assert spec["type"] == "array"
     assert set(spec["items"]["properties"]) == {"province", "city", "district"}
     assert spec["items"]["additionalProperties"] is False
 
 
-def test_the_two_region_conditions_say_opposite_things() -> None:
-    """同一个形状（省市区数组）在 region_none 下方向相反。
+def test_the_region_condition_says_in_not_out() -> None:
+    """「要求地区」是命中即通过。
 
-    照 region_any 那句写，模型会把「不要新疆」理解成「只要新疆」，
-    而 SQL 那边照做且不报错。
+    0901 之前还有一个同形状、方向相反的「排除地区」（region_none），
+    照 region_any 那句描述写会让模型把「不要新疆」理解成「只要新疆」，
+    而 SQL 那边照做且不报错。排除地区本轮退役（实测真淘汰 0 次），
+    这条守的是留下来的这一个方向没写反。
     """
-    properties = _properties()
+    description = _properties()["required_regions_json"]["description"]
 
-    assert "即通过" in properties["acceptable_regions_json"]["description"]
-    assert "即出局" in properties["excluded_regions_json"]["description"]
-    assert "即出局" not in properties["acceptable_regions_json"]["description"]
+    assert "即通过" in description
+    assert "即出局" not in description
 
 
 # -- 五个能力要求统一是布尔 -----------------------------------------------
 
 
-def test_requirement_capability_fields_are_plain_booleans() -> None:
-    """买家侧值域有两套（yes/no/unknown/likely 与 required/preferred/...），
-    skill 不认强度 —— 强度由 agent 决定这次调用带不带这个条件。"""
-    capability_columns = [
-        field.column for field in SCREENING_FIELDS if field.operator == "requirement_capability"
-    ]
-    # 数量不写死：0817 把迁址/返投/团队留任移出初筛（标的侧全库 unknown，
-    # 从未筛掉任何一家），这类进出会继续发生。要守的是「凡是这个算子的字段，
-    # 在 schema 里都必须是 boolean」，不是「一共几个」。
-    assert capability_columns
-    for column in capability_columns:
-        assert _properties()[column]["type"] == "boolean"
+def test_the_retired_conditions_are_gone_from_the_schema() -> None:
+    """0901 方案化退役的六个条件不能还在模型看得见的 schema 里。
+
+    留一个在 schema 里的后果不是报错，是 agent 填了它、SQL 拿它去筛一个
+    没人再写入的列 —— 于是候选池恒空，而错误信息一句都没有。
+
+    控股要求与并表要求是买家侧用得最多的两个字段（21 条和 18 条需求填了），
+    实测 48x71 全量对判**真淘汰 0 次**，只在标的 can_control 没录时开火。
+    """
+    properties = _properties()
+    for column in (
+        "requires_control",
+        "requires_consolidation",
+        "desired_equity_ratio_min",
+        "desired_equity_ratio_max",
+        "transaction_types_json",
+        "unacceptable_risk_flags_json",
+        "excluded_regions_json",
+        "acceptable_regions_json",
+    ):
+        assert column not in properties, column
 
 
 def test_unknown_is_never_an_acceptable_value() -> None:
@@ -130,12 +139,11 @@ def test_unknown_is_never_an_acceptable_value() -> None:
 def test_money_and_ratio_descriptions_carry_their_unit() -> None:
     properties = _properties()
     assert "20000000" in properties["min_net_profit_yuan"]["description"]
-    # 负债率与股比两侧都存百分数（标的侧实测 9.55~75、60/80）。写「0-1 小数」
-    # 会让模型把 60% 写成 0.6，条件一家也筛不到且不报错 —— 而 agent 看到的是
-    # 「这批标的负债率普遍偏高」。
-    assert "51% 写 51" in properties["desired_equity_ratio_min"]["description"]
-    assert "51% 写 51" in properties["desired_equity_ratio_max"]["description"]
-    # PE 是倍数不是比例：kind=ratio 一刀切会让模型把 15 倍写成 0.15。
+    assert "20000000" in properties["min_revenue_yuan"]["description"]
+    # PE 是倍数不是比例：kind=ratio 一刀切会让模型把 15 倍写成 0.15，
+    # 条件一家也筛不到且不报错 —— 而 agent 看到的是「这批标的 PE 普遍偏高」。
+    # 0901 之后 max_pe 是唯一的 ratio 条件（负债率与股比随本轮退役），
+    # 所以单位声明那条守卫比以前更要紧：它现在只剩一个用户。
     assert "15 倍写 15" in properties["max_pe"]["description"]
 
 
@@ -148,28 +156,14 @@ def test_a_ratio_field_without_a_declared_unit_fails_loudly(monkeypatch) -> None
         module._build_fields()
 
 
-def test_an_exclusion_condition_says_out_not_in() -> None:
-    """同一个形状（闭集多选）在 not_overlap 下方向相反。
+def test_the_closed_set_conditions_share_the_registry_declaration() -> None:
+    """闭集不在这里复制一份 —— 复制的那份会在枚举加值时静默过期。
 
-    照 overlap 那句写，模型会把「不接受涉诉」理解成「要涉诉的」。
+    0901 之后唯一的闭集条件是上市状态。unknown 不进买家侧：
+    「可接受未知上市状态」讲不通，而它一旦混进来就等于这个条件失效。
     """
-    description = _properties()["unacceptable_risk_flags_json"]["description"]
-
-    assert "即出局" in description
-    assert "已核查" in description
-    assert "即通过" not in description
-
-
-def test_the_two_flat_array_conditions_carry_the_shared_closed_set() -> None:
-    """交易结构与重大风险和标的侧共用同一个闭集，不复制一份。"""
-    properties = _properties()
-
-    assert properties["transaction_types_json"]["items"]["enum"] == [
-        "equity_transfer", "capital_increase", "asset_purchase", "merger", "other",
-    ]
-    # none 是「核查状态」不是「风险类型」，不进买家侧。
-    assert properties["unacceptable_risk_flags_json"]["items"]["enum"] == [
-        "litigation", "equity_frozen", "enforcement", "violation",
+    assert _properties()["acceptable_listed_status_json"]["items"]["enum"] == [
+        "listed", "unlisted", "pre_ipo",
     ]
 
 
@@ -206,10 +200,16 @@ def test_false_capability_is_not_a_condition() -> None:
     assert conditions == {}
 
 
-def test_true_capability_survives_in_any_spelling() -> None:
-    for value in (True, "true", "yes", "required"):
-        conditions, _ = _normalize({"requires_control": value})
-        assert conditions == {"requires_control": True}
+def test_a_retired_condition_key_is_reported_not_silently_dropped() -> None:
+    """退役条件被塞进来时要如实报告，不能静默吃掉。
+
+    静默吃掉的后果是 agent 以为条件生效了，实际上筛的是另一组 ——
+    它接着会去解释一个不存在的召回结果。
+    """
+    conditions, ignored = _normalize({"requires_control": True, "min_revenue_yuan": 1})
+
+    assert conditions == {"min_revenue_yuan": 1.0}
+    assert any("requires_control" in item for item in ignored)
 
 
 def test_enum_values_outside_the_closed_set_are_dropped() -> None:
@@ -234,13 +234,13 @@ def test_a_number_that_is_not_a_number_is_reported() -> None:
 
 def test_short_province_names_are_canonicalized() -> None:
     """标的侧存的是 江苏省；模型写 江苏 而不归一化，SQL 一家也筛不到。"""
-    conditions, _ = _normalize({"acceptable_regions_json": [{"province": "江苏", "city": "苏州市"}]})
+    conditions, _ = _normalize({"required_regions_json": [{"province": "江苏", "city": "苏州市"}]})
 
-    assert conditions == {"acceptable_regions_json": [{"province": "江苏省", "city": "苏州市"}]}
+    assert conditions == {"required_regions_json": [{"province": "江苏省", "city": "苏州市"}]}
 
 
 def test_an_empty_region_constraint_is_dropped() -> None:
-    conditions, ignored = _normalize({"acceptable_regions_json": [{"province": ""}]})
+    conditions, ignored = _normalize({"required_regions_json": [{"province": ""}]})
 
     assert conditions == {}
     assert ignored

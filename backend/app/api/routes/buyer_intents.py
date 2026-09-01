@@ -25,12 +25,16 @@ from backend.app.api.routes.utils import (
     write_action_logs_for_diff,
 )
 from backend.app.db import get_db
-from backend.app.registry.indicators import indicators_for
+from backend.app.registry.indicators import (
+    buyer_intent_scenario_fact_columns,
+    indicators_for,
+)
 from backend.app.registry.nodes import buyer_parse_node_names
 from backend.app.services.entity_grade import BUYER_GRADE, resolve_grade_pair
 from backend.app.services.listed_status import legacy_listed_status
 from backend.app.api.routes.buyer_parties import _enum_labels as buyer_party_enum_labels
 from backend.app.services.profile_sections import buyer_party_readiness_sql
+from backend.app.services.business_tags import normalize_business_tags
 from backend.app.services.region_dictionary import normalize_buyer_regions
 from backend.app.services.recommendation_conditions import normalize_scenario_fields
 from backend.app.services.search_docs import create_search_doc_rebuild_job
@@ -220,6 +224,9 @@ class BuyerIntentOut(BaseModel):
     owner_user_id: UUID | None = None
     owner_name: str | None = None
     scenario_labels: list[str] = []
+    # 列表页的「关键需求」列读这一份。0901 起门槛住在方案里，
+    # 一条需求可能有多个方案，列表把它们并起来显示。
+    scenarios_json: list[dict[str, Any]] = []
     created_at: str
     updated_at: str
     processing_state: dict[str, Any] | None = None
@@ -446,6 +453,30 @@ BUYER_INTENT_OUT_COLUMNS = f"""
                   and s.workspace_id = bi.workspace_id
                   and s.active
                   and s.deleted_at is null) as scenario_labels,
+              -- 0901：业务与门槛住在方案里，列表页的「关键需求」列必须读它。
+              -- 少了这一段的表现是**列表页不报错、只是那一列空了** ——
+              -- 重跑解析之后新值全在方案上，而列表还在读 bi 上那些退役列的存量值。
+              (select coalesce(jsonb_agg(jsonb_build_object(
+                        'scenario_summary', s.scenario_summary,
+                        'business_tags_json', s.business_tags_json,
+                        'excluded_business_text', s.excluded_business_text,
+                        'required_regions_json', s.required_regions_json,
+                        'acceptable_listed_status_json', s.acceptable_listed_status_json,
+                        'min_revenue_yuan', s.min_revenue_yuan,
+                        'min_net_profit_yuan', s.min_net_profit_yuan,
+                        'max_pe', s.max_pe,
+                        'min_market_cap_yuan', s.min_market_cap_yuan,
+                        'max_market_cap_yuan', s.max_market_cap_yuan,
+                        'min_valuation_yuan', s.min_valuation_yuan,
+                        'max_valuation_yuan', s.max_valuation_yuan,
+                        'other_requirements_text', s.other_requirements_text
+                      ) order by s.sort_order, s.created_at), '[]'::jsonb)
+                 from buyer_intent_scenario s
+                where s.buyer_intent_id = bi.id
+                  and s.team_id = bi.team_id
+                  and s.workspace_id = bi.workspace_id
+                  and s.active
+                  and s.deleted_at is null) as scenarios_json,
               bi.created_at::text as created_at, bi.updated_at::text as updated_at
 """
 
@@ -1814,26 +1845,96 @@ def _truncate_text(value: Any, max_length: int) -> str | None:
     return text_value[: max_length - 1] + "…"
 
 
+# 方案表的列清单从注册表派生，三条 SQL（list / insert / update）共用一份 ——
+# 三处各手写一遍的表现是「新增一列后读得到、写不进去」，而写不进去不报错。
+_SCENARIO_COLUMNS: tuple[str, ...] = tuple(buyer_intent_scenario_fact_columns())
+_SCENARIO_COLUMN_SQL = ", ".join(_SCENARIO_COLUMNS)
+_SCENARIO_VALUE_SQL = ", ".join(f":{column}" for column in _SCENARIO_COLUMNS)
+_SCENARIO_SET_SQL = ", ".join(f"{column} = :{column}" for column in _SCENARIO_COLUMNS)
+_SCENARIO_JSON_BINDS = tuple(
+    bindparam(indicator.column, type_=JSONB)
+    for indicator in indicators_for("buyer_intent_scenario")
+    if indicator.kind == "json"
+)
+
+
 class BuyerIntentScenarioOut(BaseModel):
+    """一个方案 = 一份完整独立的收购要求。0901 起没有名称，摘要就是标题。
+
+    `label` 与 `fields_json` 保留在响应里只为兼容存量读取方，**已停止写入** ——
+    它们的内容在迁移 023 里搬进了下面这些真列。
+    """
+
     id: UUID
     buyer_intent_id: UUID
     label: str
     sort_order: int
     active: bool
-    fields_json: dict[str, Any]
-    needs_confirmation_json: list[Any] = []
     source: str
     created_at: str
     updated_at: str
+    needs_confirmation_json: list[Any] = []
+    # 要买什么
+    scenario_summary: str | None = None
+    business_tags_json: list[Any] = []
+    excluded_business_text: str | None = None
+    # 门槛
+    required_regions_json: list[Any] = []
+    acceptable_listed_status_json: list[Any] = []
+    min_revenue_yuan: Decimal | None = None
+    min_net_profit_yuan: Decimal | None = None
+    max_pe: Decimal | None = None
+    min_market_cap_yuan: Decimal | None = None
+    max_market_cap_yuan: Decimal | None = None
+    min_valuation_yuan: Decimal | None = None
+    max_valuation_yuan: Decimal | None = None
+    other_requirements_text: str | None = None
 
 
 class BuyerIntentScenarioWrite(BaseModel):
-    label: str = Field(min_length=1, max_length=120)
+    """新增或修改一个方案。**顾问手填与解析写入落在同一批列上。**
+
+    没有 `label`：判决三删掉了方案名称。前端新增方案时给的是一个空方案，
+    顾问自己填摘要，摘要即标题。
+    """
+
     sort_order: int = 0
     active: bool = True
-    # 只接受条件白名单里的字段；越权字段在 normalize_scenario_fields 中被丢弃。
-    fields_json: dict[str, Any] = Field(default_factory=dict)
     needs_confirmation_json: list[Any] = Field(default_factory=list)
+    scenario_summary: str | None = None
+    business_tags_json: list[Any] = Field(default_factory=list)
+    excluded_business_text: str | None = None
+    required_regions_json: list[Any] = Field(default_factory=list)
+    acceptable_listed_status_json: list[Any] = Field(default_factory=list)
+    min_revenue_yuan: Decimal | None = None
+    min_net_profit_yuan: Decimal | None = None
+    max_pe: Decimal | None = None
+    min_market_cap_yuan: Decimal | None = None
+    max_market_cap_yuan: Decimal | None = None
+    min_valuation_yuan: Decimal | None = None
+    max_valuation_yuan: Decimal | None = None
+    other_requirements_text: str | None = None
+
+    def normalized(self) -> dict[str, Any]:
+        """走与解析同一套归一：闭集、业务标签形状、地区词表。
+
+        手填与解析各归一一份的表现是「谁填的」决定值长什么样 ——
+        顾问敲「江苏」，解析写「江苏省」，SQL 只认后者。
+        """
+        payload = {
+            column: getattr(self, column)
+            for column in buyer_intent_scenario_fact_columns()
+        }
+        fields = normalize_scenario_fields(payload)
+        for column, value in payload.items():
+            # normalize_scenario_fields 只认它的词表；文本列原样保留。
+            fields.setdefault(column, value)
+        regions, _ = normalize_buyer_regions(
+            fields.get("required_regions_json"), field="required_regions_json"
+        )
+        fields["required_regions_json"] = regions
+        fields["business_tags_json"] = normalize_business_tags(fields.get("business_tags_json"))
+        return fields
 
 
 @router.get("/{buyer_intent_id}/scenarios", response_model=list[BuyerIntentScenarioOut])
@@ -1846,10 +1947,11 @@ def list_buyer_intent_scenarios(
     ensure_entity_visible(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
     rows = db.execute(
         text(
-            """
+            f"""
             select
-              id, buyer_intent_id, label, sort_order, active, fields_json,
+              id, buyer_intent_id, label, sort_order, active,
               needs_confirmation_json, source,
+              {_SCENARIO_COLUMN_SQL},
               created_at::text as created_at, updated_at::text as updated_at
             from buyer_intent_scenario
             where buyer_intent_id = :buyer_intent_id
@@ -1883,34 +1985,36 @@ def create_buyer_intent_scenario(
     ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
     row = db.execute(
         text(
-            """
+            f"""
             insert into buyer_intent_scenario (
               team_id, workspace_id, buyer_intent_id, label, sort_order, active,
-              fields_json, needs_confirmation_json, source, created_by, updated_by
+              needs_confirmation_json, source, created_by, updated_by,
+              {_SCENARIO_COLUMN_SQL}
             )
             values (
-              :team_id, :workspace_id, :buyer_intent_id, :label, :sort_order, :active,
-              :fields_json, :needs_confirmation_json, 'manual', :user_id, :user_id
+              :team_id, :workspace_id, :buyer_intent_id, '', :sort_order, :active,
+              :needs_confirmation_json, 'manual', :user_id, :user_id,
+              {_SCENARIO_VALUE_SQL}
             )
             returning
-              id, buyer_intent_id, label, sort_order, active, fields_json,
+              id, buyer_intent_id, label, sort_order, active,
               needs_confirmation_json, source,
+              {_SCENARIO_COLUMN_SQL},
               created_at::text as created_at, updated_at::text as updated_at
             """
         ).bindparams(
-            bindparam("fields_json", type_=JSONB),
             bindparam("needs_confirmation_json", type_=JSONB),
+            *_SCENARIO_JSON_BINDS,
         ),
         {
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
             "buyer_intent_id": buyer_intent_id,
-            "label": payload.label,
             "sort_order": payload.sort_order,
             "active": payload.active,
-            "fields_json": normalize_scenario_fields(payload.fields_json),
             "needs_confirmation_json": payload.needs_confirmation_json,
-                "user_id": current_user.user_id,
+            "user_id": current_user.user_id,
+            **payload.normalized(),
         },
     ).mappings().one()
     db.commit()
@@ -1929,13 +2033,12 @@ def update_buyer_intent_scenario(
     ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
     row = db.execute(
         text(
-            """
+            f"""
             update buyer_intent_scenario
-            set label = :label,
-                sort_order = :sort_order,
+            set sort_order = :sort_order,
                 active = :active,
-                fields_json = :fields_json,
                 needs_confirmation_json = :needs_confirmation_json,
+                {_SCENARIO_SET_SQL},
                 updated_at = now(),
                 updated_by = :user_id
             where id = :scenario_id
@@ -1944,25 +2047,25 @@ def update_buyer_intent_scenario(
               and workspace_id = :workspace_id
               and deleted_at is null
             returning
-              id, buyer_intent_id, label, sort_order, active, fields_json,
+              id, buyer_intent_id, label, sort_order, active,
               needs_confirmation_json, source,
+              {_SCENARIO_COLUMN_SQL},
               created_at::text as created_at, updated_at::text as updated_at
             """
         ).bindparams(
-            bindparam("fields_json", type_=JSONB),
             bindparam("needs_confirmation_json", type_=JSONB),
+            *_SCENARIO_JSON_BINDS,
         ),
         {
             "scenario_id": scenario_id,
             "buyer_intent_id": buyer_intent_id,
             "team_id": DEFAULT_TEAM_ID,
             "workspace_id": DEFAULT_WORKSPACE_ID,
-            "label": payload.label,
             "sort_order": payload.sort_order,
             "active": payload.active,
-            "fields_json": normalize_scenario_fields(payload.fields_json),
             "needs_confirmation_json": payload.needs_confirmation_json,
-                "user_id": current_user.user_id,
+            "user_id": current_user.user_id,
+            **payload.normalized(),
         },
     ).mappings().one_or_none()
     if row is None:

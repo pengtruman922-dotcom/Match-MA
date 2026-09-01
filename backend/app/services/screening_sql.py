@@ -32,7 +32,6 @@ from sqlalchemy.orm import Session
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.registry.indicators import indicator_by_column
 from backend.app.services.screening_schema import (
-    CAPABILITY_VALUES,
     SCREENING_FIELDS,
     SCREENING_FIELDS_BY_COLUMN,
     UNKNOWN_CODE,
@@ -104,7 +103,7 @@ _BASE_ROW_COLUMNS: tuple[str, ...] = (
     "main_products_text",
 )
 
-_PLAIN_OPERATORS = frozenset({"gte", "lte", "in", "eq", "requirement_capability"})
+_PLAIN_OPERATORS = frozenset({"gte", "lte", "in"})
 
 
 def _row_columns() -> tuple[str, ...]:
@@ -205,28 +204,16 @@ def _missing_sql(column: str) -> str:
 # 一条脏数据就能把整次筛选打成 500（同 buyer_intents.py 的 _JSONB_ARRAY）。
 #
 # 行业的 exists/missing 两个构造器 2026-08-28 随需求侧行业条件一起删除。
-# 它们打在 seller_target.industry_pairs_json 上，而现在没有任何买家条件指向那一列
-# （注册表里它的 screening 也一并置 False）。留着一个没人调的 SQL 构造器，
-# 下一个人会以为行业还能筛。
-
-
-def _flat_array(column: str) -> str:
-    return (
-        f"case when jsonb_typeof(st.{column}) = 'array'"
-        f" then st.{column} else '[]'::jsonb end"
-    )
-
-
-def _flat_array_exists(column: str, param: str, index: int) -> str:
-    """扁平字符串数组（重大风险、可接受交易结构）的重合判定。
-
-    与行业那两个函数的区别只在形状：行业存的是 {l1, l2} 对象数组，这里存的是
-    字符串数组，所以走 jsonb_array_elements_text 而不是取键。
-    """
-    return (
-        f"exists(select 1 from jsonb_array_elements_text({_flat_array(column)}) flat_{index}"
-        f" where flat_{index} = any(:{param}))"
-    )
+# 2026-09-01 方案化又删掉四个：eq / requirement_capability / overlap 与
+# not_overlap（_array_clause 与两个 _flat_array 辅助函数）/ region_none。
+# 它们对应的买家条件（控股要求、并表要求、可接受交易结构、不接受的重大风险、
+# 排除地区）本轮全部退役，没有任何字段再指向它们。
+#
+# **留着没人调的 SQL 构造器是有代价的**，代价已经发生过一次：行业那条分支
+# 写死了 industry_pairs_json 的路径，于是任何扁平数组字段都会静默生成打在
+# 错误列上的 SQL —— overlap 恒不命中、not_overlap 恒为真，两种都不报错。
+# 现在 build_clause 的收尾是 raise，算子不存在会当场炸，那是安全的方向。
+# tests/test_screening_sql.py 有一条守卫盯着「实现的算子必须有字段在用」。
 
 
 def build_clause(field: ScreeningField, value: Any, index: int) -> Clause:
@@ -234,48 +221,42 @@ def build_clause(field: ScreeningField, value: Any, index: int) -> Clause:
     param = f"c{index}"
     operator = field.operator
     if operator == "gte":
-        return Clause(field, value, f"st.{field.target_column} >= :{param}",
-                      _missing_sql(field.target_column), {param: value})
-    if operator == "lte":
-        return Clause(field, value, f"st.{field.target_column} <= :{param}",
-                      _missing_sql(field.target_column), {param: value})
-    if operator == "eq":
-        return Clause(field, value, f"st.{field.target_column} = :{param}",
-                      _missing_sql(field.target_column), {param: value})
-    if operator == "in":
-        return Clause(field, value, f"st.{field.target_column} = any(:{param})",
-                      _missing_sql(field.target_column), {param: list(value)})
-    if operator == "requirement_capability":
-        return Clause(field, value, f"st.{field.target_column} = any(:{param})",
-                      _missing_sql(field.target_column), {param: list(CAPABILITY_VALUES)})
-    if operator in {"overlap", "not_overlap"}:
-        return _array_clause(field, value, index, param)
-    if operator in {"region_any", "region_none"}:
-        return _region_clause(field, value, index)
-    raise ValueError(f"unsupported screening operator {operator!r} on {field.column}")
+        clause = Clause(field, value, f"st.{field.target_column} >= :{param}",
+                        _missing_sql(field.target_column), {param: value})
+    elif operator == "lte":
+        clause = Clause(field, value, f"st.{field.target_column} <= :{param}",
+                        _missing_sql(field.target_column), {param: value})
+    elif operator == "in":
+        clause = Clause(field, value, f"st.{field.target_column} = any(:{param})",
+                        _missing_sql(field.target_column), {param: list(value)})
+    elif operator == "region_any":
+        clause = _region_clause(field, value, index)
+    else:
+        raise ValueError(f"unsupported screening operator {operator!r} on {field.column}")
+    return _apply_missing_policy(clause)
 
 
-def _array_clause(field: ScreeningField, value: Any, index: int, param: str) -> Clause:
-    """overlap / not_overlap 打在标的侧的**扁平字符串数组**上。
+def _apply_missing_policy(clause: Clause) -> Clause:
+    """`missing_policy="keep"` 的字段：标的没录这个数时通过，不出局。
 
-    以前这里还有一条行业分支（industry_pairs_json 是 {l1, l2} 对象数组），
-    0828 随需求侧行业条件一起删掉了。当时那条分支写死了行业路径，于是
-    **扁平数组的字段会静默生成打在 industry_pairs_json 上的 SQL** ——
-    overlap 恒不命中（候选池恒空）、not_overlap 恒命中（条件恒真）。
-    两种都不报错，正是最难查的那一类，所以这里保留一句提醒：
-    新增 overlap 类条件时，先确认对手方列的形状。
+    **这不是把条件变软。** 标的有数就照判，一分不让 —— 变的只是「没录」这一种
+    情况的归属：从「不达标」改成「不知道」。判据是标的侧的录入率：
+    PE 56% / 估值 38% / 市值 11%，这三项上「缺」压倒性地是数据缺口而不是资质不够。
+    实测 48 需求 x 71 标的，这五个字段贡献约 1250 次缺数淘汰、仅 320 次真淘汰。
+
+    包成 (missing or hit) 之后，_count_sql 的诊断拆分会自动跟着对：
+    missed = not sql 蕴含 not missing，于是 missing_<i> 恒为 0 ——
+    「因为没录而被这条淘汰」在 keep 字段上确实不再发生。
     """
-    base = field.target_column.split(".")[0]
-    values = {param: list(value)}
-    hit = _flat_array_exists(base, param, index)
-    missing = _missing_sql(base)
-    if field.operator == "overlap":
-        return Clause(field, value, hit, missing, values)
-    # not_overlap 必须显式排掉缺失：`not exists(...)` 对空数组恒为真，而
-    # major_risk_flags_json 的空数组是「**未核查**」。少了前半段，「没查过」
-    # 会被当成「干净」通过风险条件 —— 方向恰好是危险的那一边。
-    # 行业那条分支保持原样（排除行业不因行业为空而出局），两者语义确实不同。
-    return Clause(field, value, f"not {missing} and not {hit}", missing, values)
+    if clause.field.missing_policy != "keep":
+        return clause
+    return Clause(
+        clause.field,
+        clause.value,
+        f"({_boolean(clause.missing_sql)} or ({clause.sql}))",
+        clause.missing_sql,
+        clause.params,
+    )
 
 
 _REGION_COLUMNS = {
@@ -289,9 +270,7 @@ _LEVEL_BY_COLUMN = {column: level for level, column in _REGION_COLUMNS.items()}
 def _region_clause(field: ScreeningField, constraints: list[dict[str, str]], index: int) -> Clause:
     """每个 constraint 展开成它自己填到的层级的 AND，多个 constraint 之间 OR。
 
-    两个算子共用这段构造，只在最后取反：
-      region_any（acceptable_regions_json）  命中即通过
-      region_none（excluded_regions_json）   命中即出局
+    只有 region_any（required_regions_json）一个算子在用：命中即通过。
 
     0828 之前买家侧只有一列 region_constraints_json，靠元素里的 effect 三态区分
     可接受/优先/排除，而 SQL 只实现了 required 那一档 —— 也就是说**排除地区
@@ -322,11 +301,6 @@ def _region_clause(field: ScreeningField, constraints: list[dict[str, str]], ind
         missing_parts.append(f"(({compatible}) and ({blank}))")
     hit = "(" + " or ".join(parts) + ")" if parts else "false"
     missing = "(" + " or ".join(missing_parts) + ")" if missing_parts else "false"
-    if field.operator == "region_none":
-        # 排除地区不把「地区没录全」算成缺失：买家说「不要新疆」，一个连省份都
-        # 没录的标的**不该**因此出局 —— 那是数据缺口，不是它在新疆。
-        # 所以命中取反、缺失恒 false（这一条从不贡献缺失统计）。
-        return Clause(field, constraints, f"not {_boolean(hit)}", "false", params)
     return Clause(field, constraints, hit, missing, params)
 
 

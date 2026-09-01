@@ -9,7 +9,10 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
-from backend.app.registry.indicators import buyer_intent_fact_columns
+from backend.app.registry.indicators import (
+    buyer_intent_fact_columns,
+    buyer_intent_scenario_fact_columns,
+)
 from backend.app.services.profile_sections import load_profile_sections, render_profile_text
 
 
@@ -110,45 +113,47 @@ def rebuild_seller_target_search_doc(db: Session, seller_target_id: UUID) -> dic
 
 def rebuild_buyer_intent_search_doc(db: Session, buyer_intent_id: UUID) -> dict[str, Any]:
     intent = _get_buyer_intent(db, buyer_intent_id)
-    # 业务说明放进 requirement_summary 而不是 constraint_text：它现在是「这条需求
-    # 到底要买什么」的主叙述，不是一个约束条件。阶段 A 里 intent_summary 仍有存量，
-    # 所以做一次兜底 —— 迁移 022 已经把它并进新列，兜底只服务回填之前的那一小段窗口。
+    scenarios = _get_buyer_intent_scenarios(db, buyer_intent_id)
+    # 业务说明放进 requirement_summary 而不是 constraint_text：它是「这条需求到底
+    # 要买什么」的主叙述，不是一个约束条件。0901 起它住在方案的摘要里。
     requirement_summary = _join_lines(
         [
             f"意向：{intent['intent_name']}",
-            intent.get("intent_business_summary") or intent.get("intent_summary"),
+            *[
+                _kv(_scenario_label(index, len(scenarios)), scenario.get("scenario_summary"))
+                for index, scenario in enumerate(scenarios)
+            ],
             intent.get("raw_requirement_text"),
         ]
     )
-    business_tags = intent.get("intent_business_tags_json")
-    business_tags_text = (
-        "、".join(str(item) for item in business_tags if item) if isinstance(business_tags, list) else None
-    )
+    # 门槛逐方案分段。**这一段以前完全没有方案的份** —— 深评只读 buyer_intent
+    # 那一行，于是 8 条有分档的需求里，门槛只存在于方案的那 2 条对深评来说
+    # 「一个门槛都没提」，而那是最贵的读错方向：把有门槛的买家当成最灵活的买家。
     constraint_text = _join_lines(
         [
-            # 业务标签与排除方向是首轮筛选读得懂的东西，放最前面。
-            _kv("业务标签", business_tags_text),
-            _kv("排除方向", intent.get("excluded_business_text")),
-            _kv("地域说明", intent.get("region_scope_summary")),
-            _kv("可接受地区", _region_text(intent.get("acceptable_regions_json"))),
-            _kv("排除地区", _region_text(intent.get("excluded_regions_json"))),
-            _money("最低营收", intent.get("min_revenue_yuan")),
-            _money("最低净利润", intent.get("min_net_profit_yuan")),
-            _money("最低估值", intent.get("min_valuation_yuan")),
-            _money("最高估值", intent.get("max_valuation_yuan")),
-            _money("最低市值", intent.get("min_market_cap_yuan")),
-            _money("最高市值", intent.get("max_market_cap_yuan")),
-            _kv("PE上限", _decimal_text(intent.get("max_pe"))),
-            _kv("需要控股", intent.get("requires_control")),
-            _kv("需要并表", intent.get("requires_consolidation")),
-            _kv("期望股比下限", _decimal_text(intent.get("desired_equity_ratio_min"))),
-            _kv("期望股比上限", _decimal_text(intent.get("desired_equity_ratio_max"))),
-            _kv("可接受上市状态", intent.get("acceptable_listed_status_json")),
-            _kv("交易方式原文", intent.get("transaction_type")),
-            _kv("可接受交易结构", _json_text(intent.get("transaction_types_json"))),
-            _kv("重大风险容忍", intent.get("major_risk_tolerance_summary")),
-            _kv("不接受的重大风险", _json_text(intent.get("unacceptable_risk_flags_json"))),
-            _kv("收购方产业优势", intent.get("buyer_industry_advantage_summary")),
+            *(
+                _join_lines(
+                    [
+                        f"【{_scenario_label(index, len(scenarios))}】",
+                        _kv("业务标签", _tags_text(scenario.get("business_tags_json"))),
+                        _kv("排除方向", scenario.get("excluded_business_text")),
+                        _kv("要求地区", _region_list_text(scenario.get("required_regions_json"))),
+                        _kv("上市状态", scenario.get("acceptable_listed_status_json")),
+                        _money("最低营收", scenario.get("min_revenue_yuan")),
+                        _money("最低净利润", scenario.get("min_net_profit_yuan")),
+                        _kv("PE上限", _decimal_text(scenario.get("max_pe"))),
+                        _money("最低市值", scenario.get("min_market_cap_yuan")),
+                        _money("最高市值", scenario.get("max_market_cap_yuan")),
+                        _money("最低估值", scenario.get("min_valuation_yuan")),
+                        _money("最高估值", scenario.get("max_valuation_yuan")),
+                        _kv("其他要求", scenario.get("other_requirements_text")),
+                    ]
+                )
+                for index, scenario in enumerate(scenarios)
+            ),
+            # 多方案是 OR 不是 AND。不写这一句，模型会把三个方案的门槛叠加起来判，
+            # 于是「酒店」那一档凭空背上「粮油食品」那一档的营收与估值要求。
+            "匹配规则：满足任意一个方案即算命中这条需求。" if len(scenarios) > 1 else None,
         ]
     )
     # 标准化不了的说法现在住在各模块的「其他」里。搜索文档是深评实际读到的
@@ -401,6 +406,61 @@ def _get_seller_target(db: Session, seller_target_id: UUID) -> dict[str, Any]:
     if row is None:
         raise ValueError(f"Seller target not found: {seller_target_id}")
     return dict(row)
+
+
+
+def _scenario_label(index: int, total: int) -> str:
+    """方案在文档里的抬头。
+
+    方案 0901 起没有名称（摘要就是标题），所以抬头用序号。单方案时不提
+    「方案」二字：40/48 条需求只有一个方案，给它套一层分档的说法会让模型
+    以为还有别的档没给它看。
+    """
+    return "需求" if total <= 1 else f"方案 {index + 1}"
+
+
+def _tags_text(value: Any) -> str | None:
+    if not isinstance(value, list):
+        return None
+    return "、".join(str(item) for item in value if item) or None
+
+
+def _region_list_text(value: Any) -> str | None:
+    if not isinstance(value, list):
+        return None
+    parts: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        # 直辖市的省与市同名，直接拼会变成「北京市北京市」。
+        levels = [item.get("province"), item.get("city"), item.get("district")]
+        text_value = "".join(dict.fromkeys(str(level) for level in levels if level))
+        if text_value:
+            parts.append(text_value)
+    return "、".join(parts) or None
+
+
+def _get_buyer_intent_scenarios(db: Session, buyer_intent_id: UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            f"""
+            select {', '.join(buyer_intent_scenario_fact_columns())}
+            from buyer_intent_scenario
+            where buyer_intent_id = :buyer_intent_id
+              and team_id = :team_id
+              and workspace_id = :workspace_id
+              and deleted_at is null
+              and active
+            order by sort_order, created_at
+            """
+        ),
+        {
+            "buyer_intent_id": buyer_intent_id,
+            "team_id": DEFAULT_TEAM_ID,
+            "workspace_id": DEFAULT_WORKSPACE_ID,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
 
 
 def _get_buyer_intent(db: Session, buyer_intent_id: UUID) -> dict[str, Any]:

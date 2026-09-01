@@ -134,8 +134,12 @@ NODES: tuple[NodeSpec, ...] = (
             "从买家原始材料一步抽取并规范化需求字段。"
             "两阶段节点未同时就绪时，由它替两者代跑。"
         ),
-        runtime_inputs=("买家需求原文（含附件文本）", "买家画像上下文", "一级/二级行业字典（自动注入）"),
-        prompt_variables=("raw_requirement_text", "buyer_profile_json", "industry_l1_list", "industry_l2_list"),
+        runtime_inputs=("买家需求原文（含附件文本）", "买家画像上下文"),
+        # industry_l1_list / industry_l2_list 2026-09-01 从契约里移除，理由与
+        # buyer_intent_normalizer 那条相同（0828 判决一：买家需求侧行业字典下线）。
+        # **handler 仍然照常传这两个变量** —— 线上可能正跑着引用它们的 v0.9.0，
+        # 撤掉传参会让那一版渲染成 "null"。
+        prompt_variables=("raw_requirement_text", "buyer_profile_json"),
         default_timeout_seconds=300,
         sort_order=50,
     ),
