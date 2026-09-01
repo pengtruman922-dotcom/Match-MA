@@ -80,6 +80,10 @@ export MATCH_MA_USERNAME="wegent-buyer-search"
 export MATCH_MA_PASSWORD="<该账号的密码>"
 ```
 
+这里的账号应是单独创建的 Wegent 账号（例如 `wegent-buyer-search`），不要使用
+`admin` 的兼容登录凭证。兼容登录可能返回静态管理员令牌，它没有 JWT 到期时间，
+也不符合外部 skill 的最小权限目标。
+
 ### 情况二：不能注入环境变量、沙箱又是临时的（wegent 目前就是这样）
 
 此时 skill 目录是唯一的持久存储。**在 skill 目录里放一个 `auth.local.json`，
@@ -103,6 +107,16 @@ python skills/buyer-search/search_buyers.py --issue-token
 
 为什么是 JWT 不是密码：JWT **7 天自动过期**，泄漏的损失有界；密码是长期有效的，
 还能用来登录 Web 端、改自己的密码。
+
+### 需要更长有效期时
+
+有效期由 Match-MA 服务端的 `AUTH_TOKEN_TTL_SECONDS` 控制，脚本本身不能把 JWT
+自行延长。Railway 控制台的生产环境变量可以设成例如 `2592000`（30 天）或
+`7776000`（90 天），然后重新运行上面的 `--issue-token` 取得新令牌。这个变量
+会影响所有之后新签发的登录 JWT，不只影响 Wegent；已有令牌仍按原到期时间失效。
+
+建议为 Wegent 使用单独账号，并优先选择 30 天而不是永久令牌。账号停用后服务端
+通常在约 60 秒内拒绝该账号的请求，但令牌泄漏期间仍可能被使用。
 
 `auth.local.json` 已写进仓库根的 `.gitignore`（`skills/**/auth.local.json`），
 不会被提交。**但它在 wegent 那边是明文存着的** —— 所以：
