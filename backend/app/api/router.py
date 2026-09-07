@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from backend.app.api.routes import (
+    agent_calls,
     api_keys,
     auth,
     attachments,
@@ -34,6 +35,7 @@ api_router = APIRouter()
 api_router.include_router(auth.router)
 api_router.include_router(users.router)
 api_router.include_router(api_keys.router)
+api_router.include_router(agent_calls.router)
 # MCP 端点自己鉴权（API key），见 main.py 的 SELF_AUTHENTICATED_PATHS。
 api_router.include_router(mcp.router)
 api_router.include_router(health.router)

@@ -40,7 +40,29 @@ curl -s -X POST https://match-ma-production.up.railway.app/api/v1/api-keys/<id>/
 ```
 
 `type` 必须显式写 `streamable-http`，Wegent 的默认值不是它。配置存在这个机器人的 Ghost 里，
-运行时把 `headers` 原样带到连接上。**Ghost 所属的 Team 分享出去时这段配置可能一起分享**，
+运行时把 `headers` 原样带到连接上。
+
+**如果连不上（「Failed to connect: match-ma」），先换成把 key 放进 URL 的写法：**
+
+```json
+{
+  "mcpServers": {
+    "match-ma": {
+      "type": "streamable-http",
+      "url": "https://match-ma-production.up.railway.app/api/v1/mcp?api_key=mma_……"
+    }
+  }
+}
+```
+
+原因：Wegent 走 Claude Code 执行器时，后端把 `headers` 改名成 `auth` 交给执行器，执行器再交给
+Claude Code 时只认 `headers`，Authorization 头在这一步丢掉（`request_builder.py` 与
+`executor/src/agents/claude_options.rs`）。端点因此也接受 URL 参数 `api_key`，头优先。
+key 进 URL 会出现在边缘日志里，所以它只读、可停用；能用头的客户端仍然用头。
+
+排查连不上的顺序：管理员调 `GET /api/v1/agent-calls` 看最近记录——没有记录是请求没到
+Match-MA（网络），`actor_label = unauthenticated` 是到了但 key 没带对（参数里有呈上的 key 前缀
+和 User-Agent），有 `initialize` 记录就是连接成功过。**Ghost 所属的 Team 分享出去时这段配置可能一起分享**，
 要么这个 Team 保持私有，要么每个使用者在自己的机器人里填自己的 key。
 
 加完用 Wegent 自带的「测试连接」看六个工具有没有列出来：

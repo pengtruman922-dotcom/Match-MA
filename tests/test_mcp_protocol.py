@@ -1,7 +1,8 @@
 """MCP 端点：JSON-RPC 层与 HTTP 层（2026-09-07）。
 
 协议层用假工具直接测；HTTP 层用 TestClient，把数据库依赖和凭证解析换成桩，
-只验「无凭证 401、GET 405、initialize 回版本、通知回 202、tools/call 回 content」。
+只验「无凭证 401、GET 405、initialize 回版本、通知回 202、tools/call 回 content」，
+以及两条留痕：401 记 key 前缀，initialize 记为一次连接。
 """
 
 from __future__ import annotations
@@ -146,7 +147,14 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(
         mcp_route, "_write_call_log", lambda db, caller, records: written.extend(records)
     )
+    failures: list[tuple[str | None, list[str], str | None]] = []
+    monkeypatch.setattr(
+        mcp_route,
+        "_write_auth_failure",
+        lambda db, token, methods, user_agent: failures.append((token, methods, user_agent)),
+    )
     app.state.written = written
+    app.state.failures = failures
     return TestClient(app)
 
 
@@ -155,12 +163,26 @@ def test_the_mcp_path_bypasses_the_jwt_middleware_but_still_needs_a_key(client: 
     response = client.post("/api/v1/mcp", json=_req("ping"))
     assert response.status_code == 401
     assert response.headers["www-authenticate"] == "Bearer"
-    assert (
-        client.post(
-            "/api/v1/mcp", json=_req("ping"), headers={"Authorization": "Bearer mma_bad"}
-        ).status_code
-        == 401
+    bad = client.post("/api/v1/mcp", json=_req("ping"), headers={"Authorization": "Bearer mma_bad"})
+    assert bad.status_code == 401
+    # 401 留痕：记方法名和呈上的令牌，不记完整令牌（截断在写库那一层做）。
+    assert [(token, methods) for token, methods, _ in client.app.state.failures] == [
+        (None, ["ping"]),
+        ("mma_bad", ["ping"]),
+    ]
+
+
+def test_the_key_may_also_travel_in_the_url_for_clients_that_drop_headers(
+    client: TestClient,
+) -> None:
+    """wegent 的 Claude Code 路径会把 headers 改名成 auth 再丢掉，兜底认 ?api_key=。"""
+    ok = client.post("/api/v1/mcp?api_key=mma_ok", json=_req("ping"))
+    assert ok.status_code == 200 and ok.json()["result"] == {}
+    # 头优先：头里是坏 key 时不会拿 URL 里的好 key 兜底。
+    both = client.post(
+        "/api/v1/mcp?api_key=mma_ok", json=_req("ping"), headers={"Authorization": "Bearer mma_bad"}
     )
+    assert both.status_code == 401
 
 
 def test_get_is_405_because_there_is_no_event_stream(client: TestClient) -> None:
@@ -193,7 +215,8 @@ def test_initialize_notification_and_call_over_http(client: TestClient) -> None:
     body = call.json()
     assert body["id"] == 1 and body["result"]["isError"] is False
     assert json.loads(body["result"]["content"][0]["text"])["echo"] == {"a": 1}
-    assert [record.tool_name for record in client.app.state.written] == ["echo"]
+    # initialize 也留痕（它是「连接成功」的证据），通知不留，tools/call 记工具名。
+    assert [record.tool_name for record in client.app.state.written] == ["initialize", "echo"]
 
     bad = client.post("/api/v1/mcp", content=b"{not json", headers=headers)
     assert bad.status_code == 400
