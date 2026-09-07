@@ -17,6 +17,13 @@ PUBLIC_API_PATHS = {
     "/api/v1/auth/login",
 }
 
+# 自己做鉴权的路径：MCP 端点用 API key（mma_…），不是 JWT，中间件认不出它。
+# 路由里没有凭证一样回 401，这里只是不替它判。
+SELF_AUTHENTICATED_PATHS = {
+    "/api/v1/mcp",
+    "/api/v1/mcp/",
+}
+
 
 class Utf8JsonMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
@@ -32,6 +39,9 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
         settings = get_settings()
         if not settings.auth_enabled or request.method == "OPTIONS" or request.url.path in PUBLIC_API_PATHS:
             request.state.auth = ADMIN_CONTEXT if not settings.auth_enabled else None
+            return await call_next(request)
+        if request.url.path in SELF_AUTHENTICATED_PATHS:
+            request.state.auth = None
             return await call_next(request)
 
         auth_header = request.headers.get("authorization", "")

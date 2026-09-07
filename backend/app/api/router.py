@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from backend.app.api.routes import (
+    api_keys,
     auth,
     attachments,
     background_jobs,
@@ -14,6 +15,7 @@ from backend.app.api.routes import (
     field_sources,
     global_search,
     health,
+    mcp,
     meta,
     model_config,
     profile_sections,
@@ -31,6 +33,9 @@ from backend.app.api.routes import (
 api_router = APIRouter()
 api_router.include_router(auth.router)
 api_router.include_router(users.router)
+api_router.include_router(api_keys.router)
+# MCP 端点自己鉴权（API key），见 main.py 的 SELF_AUTHENTICATED_PATHS。
+api_router.include_router(mcp.router)
 api_router.include_router(health.router)
 api_router.include_router(meta.router)
 api_router.include_router(model_config.router)

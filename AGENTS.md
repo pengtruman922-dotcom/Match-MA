@@ -113,4 +113,5 @@ ssh match-ma-aliyun 'cd /opt/match-ma/deploy && docker compose ps -a --format "t
 - 新增影响运行时的环境变量时，`backend/app/config.py`、`.env.example`、`deploy/.env.example` 三处都要覆盖到；`deploy/docker-compose.yml` 里 api 与 3 个 worker 共用 `x-backend` 锚点，**不要给单个服务单独加 environment**，否则会破坏「API 与 worker 配置必须一致」这个前提（尤其 `MODEL_SECRET_ENCRYPTION_KEY` 与 S3 配置）。
 - `backend/app/jobs/handlers/` 是按任务域拆分的包，`__init__.py` re-export 全部名字；新增 handler 放对应域模块并在 `dispatch.py` 注册，跨域共享的 helper 放 `common.py`（模块依赖必须保持无环）。
 - `prompt_template.few_shot_examples_json` 是死存储，不会注入 LLM 消息 —— few-shot 示例必须写进 `user_prompt_template` 正文。
+- 外部 Agent 的查询工具只在 `backend/app/mcp/tools.py` 登记（名称、说明、参数 schema、handler），形状逻辑在 `services/agent_buyer_views.py` / `agent_target_views.py`；**不要再往 `skills/*/` 里写查询代码**，那两个带脚本的 skill 是过渡承载，wegent 走 MCP。新增工具要同步 `tests/test_mcp_tools.py` 的名单与 `skills/match-ma-mcp/SKILL.md`。
 - Prompt 版本通过设置页「Prompt 版本管理」或 `/model-config/prompts` API 维护（新建版本/回滚都即时生效，不需要部署）；**不要再写 prompt seed 迁移**，迁移只管 schema（baseline 里的 prompt 种子是唯一例外，只服务全新安装）。仅当新 prompt 需要新输出字段/新变量时才需要配套代码发版。
