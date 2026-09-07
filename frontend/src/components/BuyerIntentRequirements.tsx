@@ -196,7 +196,8 @@ export default function BuyerIntentRequirements({
         await saveScenario(scenario, { needs_confirmation_json: remaining });
       } else {
         const remaining = (intent.needs_confirmation_json || []).filter((entry) => !sameConfirmation(entry, item));
-        await buyerIntents.update(intent.id, { needs_confirmation_json: remaining } as Record<string, never>);
+        const patch: Record<string, unknown> = { needs_confirmation_json: remaining };
+        await buyerIntents.update(intent.id, patch as Record<string, never>);
         await onRefresh?.();
       }
     } finally {
