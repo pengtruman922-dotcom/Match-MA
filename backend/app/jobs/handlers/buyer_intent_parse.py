@@ -790,41 +790,6 @@ def _scenario_fields_with_common_fields(
     return merged
 
 
-def _explicit_yuan_amounts(raw_requirement_text: str) -> dict[str, Decimal]:
-    """Extract unambiguous 亿-level thresholds from the source text.
-
-    OCR frequently inserts a line break between the number and ``亿元`` (and
-    LLMs then occasionally drop a zero while converting units).  Only repair
-    fields whose Chinese label and unit occur together; this is deliberately
-    conservative and leaves ambiguous amounts to the model/review flow.
-    """
-    compact = re.sub(r"\s+", "", raw_requirement_text or "")
-    patterns = {
-        "max_market_cap_yuan": r"市值(?:范围|上限)?[^。；;\n]{0,80}?([0-9]+(?:\.[0-9]+)?)亿(?:元)?以内",
-        "min_market_cap_yuan": r"市值(?:范围|下限)?[^。；;\n]{0,80}?([0-9]+(?:\.[0-9]+)?)亿(?:元)?以上",
-        "min_net_profit_yuan": r"净利润(?:要求)?[^。；;\n]{0,80}?([0-9]+(?:\.[0-9]+)?)亿(?:元)?以上",
-    }
-    output: dict[str, Decimal] = {}
-    for field, pattern in patterns.items():
-        match = re.search(pattern, compact, flags=re.IGNORECASE)
-        if match:
-            output[field] = Decimal(match.group(1)) * Decimal(100_000_000)
-    return output
-
-
-def _repair_explicit_yuan_amounts(
-    changes: dict[str, Any],
-    raw_requirement_text: str,
-    notes: list[str],
-) -> None:
-    """Repair only model values contradicted by an explicit 亿 threshold."""
-    for field, expected in _explicit_yuan_amounts(raw_requirement_text).items():
-        current = changes.get(field)
-        if current is not None and Decimal(str(current)) != expected:
-            changes[field] = expected
-            notes.append(f"repaired_{field}_from_explicit_yuan_text")
-
-
 def _replace_buyer_intent_scenarios(
     db: Session,
     *,
@@ -1260,9 +1225,10 @@ def _normalize_buyer_intent_parse_changes(
                 changes.pop(field, None)
                 notes.append(f"dropped_{field}:source_mentions_valuation_not_market_cap")
 
-    # OCR 常把「150 亿元」「0.2 亿元」拆成多行，模型偶尔会少乘一个 10。
-    # 对带明确字段标签和“亿”单位的门槛做一次确定性校正，避免静默错筛。
-    _repair_explicit_yuan_amounts(changes, raw_requirement_text, notes)
+    # **代码不改模型给的数字，只能提问。** 0901 曾在这里用正则从原文抓
+    # 「净利润…N亿以上」覆盖模型值，被需求卡片的模板行
+    # 「经营情况（净利润要求）：营业收入10亿元以上」骗到：首批 10 家里 6 个错数
+    # 有 5 个是它改出来的，而模型本来是对的。再有同类怀疑走 needs_confirmation。
 
     changes["needs_confirmation_json"] = pending
     if scenario_scope:

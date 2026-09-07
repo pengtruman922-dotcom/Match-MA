@@ -42,6 +42,10 @@ import AdministrativeAreaPicker from './AdministrativeAreaPicker';
  * 3. **原始需求材料**。它在「更新记录」tab 里看，这里不重复一份。
  *
  * 单方案的需求（生产里 40/48 条）**不套方案框**，界面上不出现「方案」二字。
+ *
+ * **待确认项 0907 起只是弱提醒。** 解析时拿不准的地方标在对应字段旁边，顾问看过点
+ * 「知道了」就消失；改值只走字段编辑器。原来的采纳 / 放弃两个按钮删掉了：
+ * 「放弃」只删提醒、不动字段，字面承诺和实际行为相反，比没有这个按钮更糟。
  */
 type PendingItem = BuyerIntentConfirmationItem & { scenarioId: string | null; scopeLabel: string };
 
@@ -181,7 +185,7 @@ export default function BuyerIntentRequirements({
     }
   }, [intent.id, loadScenarios, scenarios.length]);
 
-  const resolvePending = useCallback(async (item: PendingItem, action: 'apply' | 'discard', value?: unknown) => {
+  const dismissPending = useCallback(async (item: PendingItem) => {
     const key = confirmationKey(item);
     setResolvingItem(key);
     try {
@@ -189,20 +193,10 @@ export default function BuyerIntentRequirements({
         const scenario = scenarios.find((entry) => entry.id === item.scenarioId);
         if (!scenario) return;
         const remaining = (scenario.needs_confirmation_json || []).filter((entry) => !sameConfirmation(entry, item));
-        const patch: Record<string, unknown> = { needs_confirmation_json: remaining };
-        if (action === 'apply') {
-          const proposed = value === undefined ? item.proposed_value : value;
-          patch[item.field] = mergeProposedValue((scenario as unknown as Record<string, unknown>)[item.field], proposed);
-        }
-        await saveScenario(scenario, patch);
+        await saveScenario(scenario, { needs_confirmation_json: remaining });
       } else {
         const remaining = (intent.needs_confirmation_json || []).filter((entry) => !sameConfirmation(entry, item));
-        const patch: Record<string, unknown> = { needs_confirmation_json: remaining };
-        if (action === 'apply') {
-          const proposed = value === undefined ? item.proposed_value : value;
-          patch[item.field] = mergeProposedValue((intent as unknown as Record<string, unknown>)[item.field], proposed);
-        }
-        await buyerIntents.update(intent.id, patch as Record<string, never>);
+        await buyerIntents.update(intent.id, { needs_confirmation_json: remaining } as Record<string, never>);
         await onRefresh?.();
       }
     } finally {
@@ -210,14 +204,7 @@ export default function BuyerIntentRequirements({
     }
   }, [intent, onRefresh, saveScenario, scenarios]);
 
-  const modifyPending = useCallback((item: PendingItem) => {
-    const initial = item.proposed_value === undefined ? '' : JSON.stringify(item.proposed_value, null, 2);
-    const input = window.prompt('修改建议值。数组或对象请填写合法 JSON；普通文字可直接填写。', initial);
-    if (input === null) return;
-    let parsed: unknown = input;
-    try { parsed = JSON.parse(input); } catch { parsed = input.trim(); }
-    void resolvePending(item, 'apply', parsed);
-  }, [resolvePending]);
+  const intentReminders = useMemo(() => pending.filter((item) => !item.scenarioId), [pending]);
 
   const failedJob = parseStatus?.latest_job?.status === 'failed' ? parseStatus.latest_job : null;
   const multi = scenarios.length > 1;
@@ -235,7 +222,7 @@ export default function BuyerIntentRequirements({
         <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
           {multi ? <span className="font-medium text-gray-700">{scenarios.length} 个方案</span> : null}
           {multi ? <span>满足任意一个方案即算命中这条需求</span> : null}
-          {pending.length ? <StateBadge tone="amber" text={`${pending.length} 项需要确认`} /> : null}
+          {pending.length ? <StateBadge tone="amber" text={`${pending.length} 处解析时不确定`} /> : null}
         </div>
         <button
           type="button"
@@ -247,13 +234,8 @@ export default function BuyerIntentRequirements({
         </button>
       </div>
 
-      {pending.length ? (
-        <PendingPanel
-          items={pending}
-          resolvingItem={resolvingItem}
-          onResolve={resolvePending}
-          onModify={modifyPending}
-        />
+      {intentReminders.length ? (
+        <ReminderList items={intentReminders} resolvingItem={resolvingItem} onDismiss={dismissPending} />
       ) : null}
 
       {loading ? <Loading label="正在读取方案" /> : null}
@@ -267,6 +249,9 @@ export default function BuyerIntentRequirements({
           indicatorByColumn={indicatorByColumn}
           sourceByField={sourceByField}
           busy={busy}
+          reminders={pending.filter((item) => item.scenarioId === scenario.id)}
+          resolvingItem={resolvingItem}
+          onDismiss={dismissPending}
           onShowEvidence={setOpenEvidence}
           onSave={(patch) => saveScenario(scenario, patch)}
           onCopy={() => void copyScenario(scenario)}
@@ -293,6 +278,9 @@ function ScenarioBlock({
   indicatorByColumn,
   sourceByField,
   busy,
+  reminders,
+  resolvingItem,
+  onDismiss,
   onShowEvidence,
   onSave,
   onCopy,
@@ -304,6 +292,9 @@ function ScenarioBlock({
   indicatorByColumn: Map<string, IndicatorMeta>;
   sourceByField: Map<string, FieldValueSource>;
   busy: boolean;
+  reminders: PendingItem[];
+  resolvingItem: string | null;
+  onDismiss: (item: PendingItem) => void | Promise<void>;
   onShowEvidence: (source: FieldValueSource) => void;
   onSave: (patch: Record<string, unknown>) => Promise<void>;
   onCopy: () => void;
@@ -347,8 +338,10 @@ function ScenarioBlock({
     const value = fields[column];
     const source = sourceByField.get(column);
     const isEditing = editing === column;
+    const fieldReminders = reminders.filter((item) => item.field === column);
     return (
-      <div key={column} className="flex min-w-0 items-start gap-2 py-1">
+      <div key={column} className="py-1">
+        <div className="flex min-w-0 items-start gap-2">
         <span className="w-24 shrink-0 pt-1 text-xs text-gray-500">{indicator.label}</span>
         {isEditing ? (
           <div className="min-w-0 flex-1 space-y-2">
@@ -369,12 +362,18 @@ function ScenarioBlock({
             <IconButton title={`编辑${indicator.label}`} onClick={() => { setDraft(value ?? null); setEditing(column); }}><Pencil className="h-3.5 w-3.5" /></IconButton>
           </>
         )}
+        </div>
+        {fieldReminders.length ? <ReminderList compact items={fieldReminders} resolvingItem={resolvingItem} onDismiss={onDismiss} /> : null}
       </div>
     );
   };
 
+  // 提醒指向的字段不在这一页上（例如解析器对整段材料的疑问），就放在方案顶上。
+  const orphanReminders = reminders.filter((item) => !SCENARIO_FIELDS.includes(item.field));
+
   const body = (
     <div className="space-y-3">
+      {orphanReminders.length ? <ReminderList items={orphanReminders} resolvingItem={resolvingItem} onDismiss={onDismiss} /> : null}
       {/* 要买什么 —— 摘要就是这个方案的标题 */}
       <div className="space-y-1">
         {cell('scenario_summary')}
@@ -423,36 +422,34 @@ function ScenarioBlock({
   );
 }
 
-function PendingPanel({ items, resolvingItem, onResolve, onModify }: {
+/** 解析时不确定的地方。只提醒、不代写：改值请点字段旁边的铅笔。 */
+function ReminderList({ items, resolvingItem, onDismiss, compact = false }: {
   items: PendingItem[];
   resolvingItem: string | null;
-  onResolve: (item: PendingItem, action: 'apply' | 'discard') => void | Promise<void>;
-  onModify: (item: PendingItem) => void;
+  onDismiss: (item: PendingItem) => void | Promise<void>;
+  compact?: boolean;
 }) {
   return (
-    <div className="space-y-2 border border-amber-200 bg-amber-50 p-3">
+    <div className={compact ? 'ml-24 mt-0.5 space-y-1' : 'space-y-1 border border-amber-200 bg-amber-50 px-3 py-2'}>
       {items.map((item) => {
         const key = confirmationKey(item);
+        const showProposed = item.proposed_value !== undefined && item.proposed_value_status !== 'invalid';
         return (
-          <div key={key} className="border border-amber-200 bg-white px-3 py-2 text-xs">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="font-medium text-gray-700">{item.scopeLabel} · {item.field}</span>
-              <span className="text-gray-500">{item.reason}</span>
-            </div>
-            {item.evidence ? <p className="mt-1 whitespace-pre-wrap text-gray-500">原文：{item.evidence}</p> : null}
-            {item.proposed_value !== undefined ? (
-              <p className="mt-1 text-gray-700">建议值：{displayUnknown(item.proposed_value)}</p>
-            ) : null}
-            <div className="mt-2 flex flex-wrap gap-2">
-              {item.proposed_value !== undefined ? <button type="button" disabled={resolvingItem === key} onClick={() => void onResolve(item, 'apply')} className="border border-amber-300 bg-white px-2.5 py-1 text-xs text-amber-800 disabled:opacity-50">采纳建议值</button> : null}
-              {item.proposed_value !== undefined ? <button type="button" disabled={resolvingItem === key} onClick={() => onModify(item)} className="border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-600 disabled:opacity-50">修改并采纳</button> : null}
-              <button type="button" disabled={resolvingItem === key} onClick={() => void onResolve(item, 'discard')} className="border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-600 disabled:opacity-50">不设置该条件</button>
-            </div>
+          <div key={key} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[11px] text-amber-700">
+            {!compact ? <span className="font-medium">{item.scopeLabel} · {reminderFieldLabel(item.field)}</span> : null}
+            <span>解析时不确定：{item.reason}</span>
+            {showProposed ? <span className="text-amber-800">解析建议 {displayUnknown(item.proposed_value)}</span> : null}
+            {item.evidence ? <span className="text-gray-500">原文「{item.evidence}」</span> : null}
+            <button type="button" disabled={resolvingItem === key} onClick={() => void onDismiss(item)} className="underline disabled:opacity-50">知道了</button>
           </div>
         );
       })}
     </div>
   );
+}
+
+function reminderFieldLabel(field: string): string {
+  return field === 'raw_requirement_text' ? '原始需求' : field;
 }
 
 function FieldEditor({ indicator, value, onValue }: {
@@ -516,13 +513,6 @@ function formatFieldValue(indicator: IndicatorMeta, value: unknown): string {
   if (indicator.kind === 'enum') return indicator.enum_options.find((option) => option.value === value)?.label || String(value);
   if (Array.isArray(value)) return value.map((item) => indicator.enum_options.find((option) => option.value === item)?.label || displayUnknown(item)).join('、');
   return String(value);
-}
-
-function mergeProposedValue(current: unknown, proposed: unknown): unknown {
-  if (!Array.isArray(current)) return proposed;
-  const additions = Array.isArray(proposed) ? proposed : [proposed];
-  const seen = new Set(current.map((item) => JSON.stringify(item)));
-  return [...current, ...additions.filter((item) => { const key = JSON.stringify(item); if (seen.has(key)) return false; seen.add(key); return true; })];
 }
 
 function regionArray(value: unknown): BuyerRegionConstraint[] { return Array.isArray(value) ? value.filter((item): item is BuyerRegionConstraint => Boolean(item) && typeof item === 'object' && 'province' in item) : []; }

@@ -1349,31 +1349,9 @@ def review_buyer_intent(
 ) -> dict[str, Any]:
     intent = _get_buyer_intent_or_404(db, buyer_intent_id)
     ensure_entity_writable(db, current_user, entity_type="buyer_intent", entity_id=buyer_intent_id)
-    pending = intent.get("needs_confirmation_json")
-    scenario_pending_count = db.execute(
-        text(
-            """
-            select count(*)
-            from buyer_intent_scenario
-            where buyer_intent_id = :buyer_intent_id
-              and team_id = :team_id
-              and workspace_id = :workspace_id
-              and deleted_at is null
-              and jsonb_array_length(needs_confirmation_json) > 0
-            """
-        ),
-        {
-            "buyer_intent_id": buyer_intent_id,
-            "team_id": DEFAULT_TEAM_ID,
-            "workspace_id": DEFAULT_WORKSPACE_ID,
-        },
-    ).scalar_one()
-    if (pending or scenario_pending_count) and not payload.clear_confirmations:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Resolve or explicitly clear pending confirmation items before completing review.",
-        )
-
+    # 待确认项 0907 起只是弱提醒，不再挡复核：原来这里在有待确认项时直接 409，
+    # 而界面上那个「不设置该条件」只删提醒不动字段，顾问被迫为了过这道门去点掉
+    # 一批和字段值无关的问句。clear_confirmations 仍然可用，语义是「全部知道了」。
     db.execute(
         text(
             """

@@ -18,7 +18,6 @@ from backend.app.jobs.handlers.buyer_intent_parse import (
     _reconcile_buyer_intent_scope,
     _remove_structured_profile_duplicates,
     _route_scoped_confirmation_items,
-    _repair_explicit_yuan_amounts,
     _scenario_fields_with_common_fields,
     _set_buyer_intent_parse_stage,
 )
@@ -56,18 +55,42 @@ def test_scenario_fields_win_over_legacy_common_fields() -> None:
     assert merged["max_pe"] == 15
 
 
-def test_explicit_ocr_yuan_threshold_repairs_model_scale_error() -> None:
-    changes = {"max_market_cap_yuan": 1_500_000_000, "min_net_profit_yuan": 2_000_000}
-    notes: list[str] = []
-    _repair_explicit_yuan_amounts(
-        changes,
-        "市值范围：15\n0亿元以内；经营情况（净利润要求）：0.2\n亿元以上",
-        notes,
-    )
+def test_the_parser_never_rewrites_the_model_s_numbers() -> None:
+    """**代码不改模型给的数字，只能提问。**
 
-    assert changes["max_market_cap_yuan"] == 15_000_000_000
-    assert changes["min_net_profit_yuan"] == 20_000_000
-    assert len(notes) == 2
+    0901 曾用正则从原文抓「净利润…N亿以上」覆盖模型值，被需求卡片的模板行骗到：
+    「经营情况（净利润要求）：营业收入10亿元以上；利润总额1亿元以上」里紧跟着
+    「净利润」出现的第一个「N亿以上」是营收，于是两个方案的净利润都被改成 10 亿，
+    而模型本来给的是对的。首批 10 家里 6 个错数有 5 个是这样来的。
+    下面三段是生产原文，模型的值必须原样落库。
+    """
+    from decimal import Decimal
+
+    from backend.app.jobs.handlers import buyer_intent_parse
+
+    assert not hasattr(buyer_intent_parse, "_repair_explicit_yuan_amounts")
+
+    cases = [
+        (
+            "4. 经营情况（净利润要求)：营业收入10亿元以上；利润总额1亿元以上",
+            {"min_revenue_yuan": 1_000_000_000, "min_net_profit_yuan": 100_000_000},
+        ),
+        (
+            "4. 经营情况（净利润要求)：**总营收2亿元以上，净利润2000万元以上，EBITDA率20%以上**",
+            {"min_revenue_yuan": 200_000_000, "min_net_profit_yuan": 20_000_000},
+        ),
+        (
+            "4. 经营情况（净利润要求)：扣非0.2亿元以上",
+            {"min_net_profit_yuan": 10_000_000},
+        ),
+    ]
+    for raw_text, fields in cases:
+        changes, notes = _normalize_buyer_intent_parse_changes(
+            {"fields": fields}, raw_text, scope="scenario"
+        )
+        for field, expected in fields.items():
+            assert changes[field] == Decimal(expected), (raw_text, field, changes[field])
+        assert not any(note.startswith("repaired_") for note in notes)
 
 
 class _FakeMappingResult:

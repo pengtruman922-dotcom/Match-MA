@@ -13,6 +13,7 @@ from backend.app.registry.indicators import (
     buyer_intent_fact_columns,
     buyer_intent_scenario_fact_columns,
 )
+from backend.app.services.scenario_text import dedupe_scenario_requirements
 from backend.app.services.profile_sections import load_profile_sections, render_profile_text
 
 
@@ -129,8 +130,15 @@ def rebuild_buyer_intent_search_doc(db: Session, buyer_intent_id: UUID) -> dict[
     # 门槛逐方案分段。**这一段以前完全没有方案的份** —— 深评只读 buyer_intent
     # 那一行，于是 8 条有分档的需求里，门槛只存在于方案的那 2 条对深评来说
     # 「一个门槛都没提」，而那是最贵的读错方向：把有门槛的买家当成最灵活的买家。
+    # 多方案的「其他要求」大半是复读的（上市/非上市两档共用一套股权、交易、风险
+    # 条款）。各方案都有的句子只写一遍，剩下的留在各自方案里 —— 输出层机械去重，
+    # 不加字段、不让解析器猜公共层（0907）。
+    shared_requirements, remaining_requirements = dedupe_scenario_requirements(
+        [scenario.get("other_requirements_text") for scenario in scenarios]
+    )
     constraint_text = _join_lines(
         [
+            _join_lines(["【各方案共同要求】", *shared_requirements]) if shared_requirements else None,
             *(
                 _join_lines(
                     [
@@ -146,7 +154,7 @@ def rebuild_buyer_intent_search_doc(db: Session, buyer_intent_id: UUID) -> dict[
                         _money("最高市值", scenario.get("max_market_cap_yuan")),
                         _money("最低估值", scenario.get("min_valuation_yuan")),
                         _money("最高估值", scenario.get("max_valuation_yuan")),
-                        _kv("其他要求", scenario.get("other_requirements_text")),
+                        _kv("其他要求", remaining_requirements[index]),
                     ]
                 )
                 for index, scenario in enumerate(scenarios)
