@@ -185,10 +185,22 @@ def test_the_key_may_also_travel_in_the_url_for_clients_that_drop_headers(
     assert both.status_code == 401
 
 
-def test_get_is_405_because_there_is_no_event_stream(client: TestClient) -> None:
-    response = client.get("/api/v1/mcp", headers={"Authorization": "Bearer mma_ok"})
-    assert response.status_code == 405
-    assert response.headers["allow"] == "POST"
+def test_get_is_405_for_event_streams_but_200_for_plain_probes(client: TestClient) -> None:
+    """MCP 客户端要开流时回 405；宿主的可达性探测（普通 GET / HEAD）回 200，
+    否则会被当成不可达丢掉。"""
+    stream = client.get("/api/v1/mcp", headers={"Accept": "text/event-stream"})
+    assert stream.status_code == 405
+    assert stream.headers["allow"] == "POST"
+
+    probe = client.get("/api/v1/mcp")
+    assert probe.status_code == 200
+    assert probe.json()["tools"] == ["echo", "boom"]
+    assert client.head("/api/v1/mcp").status_code == 200
+    assert client.get("/api/v1/mcp/").status_code == 200
+
+    # 带斜杠的 POST 也认，不靠 307 重定向（探测器和部分客户端不跟随重定向）。
+    slash = client.post("/api/v1/mcp/?api_key=mma_ok", json=_req("ping"))
+    assert slash.status_code == 200
 
 
 def test_initialize_notification_and_call_over_http(client: TestClient) -> None:

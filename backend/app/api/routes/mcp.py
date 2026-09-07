@@ -149,9 +149,37 @@ async def mcp_post(request: Request, db: Session = Depends(get_db)) -> Response:
 
 
 @router.get("")
-async def mcp_get() -> Response:
-    # 无状态实现不开服务端事件流。协议允许用 405 表示这一点，官方客户端会照常继续。
-    return Response(status_code=405, headers={"Allow": "POST"})
+@router.get("/")
+async def mcp_get(request: Request) -> Response:
+    """两种 GET：MCP 客户端要开事件流的，回 405（无状态实现不开流，协议允许，客户端照常继续）；
+    浏览器或可达性探测的普通 GET，回 200 和一份自描述 —— 有的宿主在挂载前会先探一下 URL，
+    405 会被当成「不可达」直接丢弃这个服务器。"""
+    accept = request.headers.get("accept", "")
+    if "text/event-stream" in accept and "application/json" not in accept:
+        return Response(status_code=405, headers={"Allow": "POST"})
+    return JSONResponse(
+        {
+            "name": "match-ma",
+            "version": _server_version(),
+            "transport": "streamable-http",
+            "endpoint": MCP_PATH,
+            "auth": "Authorization: Bearer <api key>，或 URL 参数 api_key",
+            "tools": [tool.name for tool in TOOLS],
+            "how": "POST JSON-RPC 2.0：initialize / tools/list / tools/call",
+        },
+        media_type="application/json",
+    )
+
+
+@router.head("")
+@router.head("/")
+async def mcp_head() -> Response:
+    return Response(status_code=200)
+
+
+@router.post("/")
+async def mcp_post_slash(request: Request, db: Session = Depends(get_db)) -> Response:
+    return await mcp_post(request, db)
 
 
 @router.delete("")
