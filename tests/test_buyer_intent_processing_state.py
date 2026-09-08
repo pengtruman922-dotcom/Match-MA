@@ -259,3 +259,86 @@ def test_final_attachment_exception_closes_state_after_job_is_failed(monkeypatch
     attachment_ocr._finalize_attachment_job_failure(Db(), job, "trace insert failed")
 
     assert calls == ["attachment_failed", "business_update_closed"]
+
+
+def test_a_newer_successful_reparse_outranks_the_stale_failed_update_job() -> None:
+    """第一次解析超时失败后经 API 重新发起解析并成功：业务更新的「最近任务」仍是那次失败，
+    但它比这次成功更早，需求应显示已解析，而不是「业务更新处理失败」（0908 ECS 三家买家实况）。"""
+    state = _state(
+        update={
+            "id": UPDATE_ID,
+            "created_at": "2026-09-08T09:44:00+08:00",
+            "processing_status": "failed",
+            "latest_job_status": "failed",
+            "latest_job_created_at": "2026-09-08T10:31:55+08:00",
+            "latest_job_error_message": "400: buyer intent has no scenario at index 0.",
+        },
+        attachments=[{"parse_status": "parsed", "latest_job_status": "succeeded"}],
+        parse_job={
+            "id": UUID("00000000-0000-0000-0000-000000000105"),
+            "status": "succeeded",
+            "created_at": "2026-09-08T10:31:55+08:00",
+            "finished_at": "2026-09-08T11:10:38+08:00",
+            "payload_json": {"buyer_intent_id": str(INTENT_ID)},
+            "metadata_json": {"processing_stage": "writing"},
+        },
+    )
+
+    assert state["overall_status"] == "succeeded"
+    assert state["current_stage"] == "completed"
+    assert state["error_message"] is None
+
+
+def test_a_failed_update_job_newer_than_the_parse_still_wins() -> None:
+    """反过来：解析早就成功，之后新上传材料的抽取失败了，这才是该报失败的情形。"""
+    state = _state(
+        update={
+            "id": UPDATE_ID,
+            "created_at": "2026-09-08T12:00:00+08:00",
+            "processing_status": "failed",
+            "latest_job_status": "failed",
+            "latest_job_created_at": "2026-09-08T12:01:00+08:00",
+            "latest_job_error_message": "boom",
+        },
+        parse_job={
+            "id": UUID("00000000-0000-0000-0000-000000000106"),
+            "status": "succeeded",
+            "created_at": "2026-09-08T10:00:00+08:00",
+            "finished_at": "2026-09-08T10:30:00+08:00",
+            "payload_json": {"buyer_intent_id": str(INTENT_ID)},
+            "metadata_json": {"processing_stage": "writing"},
+        },
+    )
+
+    assert state["overall_status"] == "failed"
+    assert state["current_stage"] == "business_update_processing"
+
+
+def test_multimodal_images_do_not_keep_the_intent_reading_attachments() -> None:
+    """png 直接喂多模态模型，永远没有 OCR 任务、parse_status 一直 pending：
+    解析成功后需求不能还停在「正在读取附件」。"""
+    state = _state(
+        update={
+            "id": UPDATE_ID,
+            "created_at": "2026-09-08T09:44:00+08:00",
+            "processing_status": "applied",
+            "latest_job_status": "succeeded",
+        },
+        attachments=[
+            {"parse_status": "pending", "file_type": "png", "mime_type": "image/png"},
+            {"parse_status": "parsed", "latest_job_status": "succeeded"},
+        ],
+        parse_job={
+            "id": UUID("00000000-0000-0000-0000-000000000107"),
+            "status": "succeeded",
+            "created_at": "2026-09-08T09:44:16+08:00",
+            "finished_at": "2026-09-08T11:00:38+08:00",
+            "payload_json": {"business_update_id": str(UPDATE_ID)},
+            "metadata_json": {"processing_stage": "writing"},
+        },
+    )
+
+    assert state["overall_status"] == "succeeded"
+    assert state["attachment_summary"]["skipped"] == 1
+    assert state["attachment_summary"]["pending"] == 0
+    assert state["attachment_warning_count"] == 0

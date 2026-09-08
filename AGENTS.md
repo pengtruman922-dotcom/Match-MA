@@ -92,6 +92,7 @@ ssh match-ma-aliyun 'cd /opt/match-ma/deploy && docker compose ps -a --format "t
 - **镜像只由 `migrate` 构建一次**：`x-backend` 锚点**不带 `build`**。若给每个后端服务都加 `build`，compose 会并发跑 6 份 `pip install`，小内存机器会被直接挤爆（表现为 SSH 被服务器断开）。因此必须先 `build` 再 `up`。
 - **web 容器跑在 UTC**：`Dockerfile.frontend` 的 caddy 阶段未设 `TZ`，其日志与文件时间戳比其他容器早 8 小时，排查时先换算。
 - **性能瓶颈在公网带宽，不在服务端**：实测服务端全部接口 < 13 毫秒、gzip 压缩率 88%~91%，页面慢是 ECS 公网带宽所致（1 Mbps ≈ 130 KB/s，首屏 230 KB 即需 2.5 秒）。遇到"系统慢"先量带宽，不要去优化后端。
+- **模型 / prompt / 节点配置不在代码里，迁移不会带过来**：它们是库里的数据（`model_provider_config`、`model_node_config`、`prompt_template`），`git pull` 与迁移都不管。自建环境是空的 baseline 种子，两侧会各自漂移。对齐办法：拉 Railway 的 `GET /model-config/settings-page` 存快照，再往自建 `POST /model-config/prompts`（新建版本并设默认）。**Railway 用 env 模式存 key（`ALIYUN_API_KEY`），自建没有这个环境变量、用的是 direct 模式的密文**，所以新建 provider 不能照抄——在库里 `insert ... select` 复制现有行的 `api_key_encrypted`（同一个 DashScope key 对该端点所有模型通用），密钥密文不出库。改完调 `POST /model-config/nodes/{id}/test` 验一次；OCR 类型节点该接口一律回 `skipped`，那是没实现，不是坏了。
 
 ## 测试与验证
 

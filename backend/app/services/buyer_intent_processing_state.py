@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.registry.nodes import buyer_parse_node_names
+from backend.app.services.attachment_status import attachment_waits_for_text_extraction
 
 ACTIVE_JOB_STATUSES = {"queued", "running", "retry_waiting"}
 FAILED_JOB_STATUSES = {"failed", "canceled", "cancelled"}
@@ -79,7 +80,7 @@ def buyer_intent_processing_states(
                 """
                 select
                   al.entity_id as business_update_id,
-                  a.id, a.parse_status, a.metadata_json,
+                  a.id, a.parse_status, a.metadata_json, a.file_type, a.mime_type,
                   latest_job.id as latest_job_id,
                   latest_job.status as latest_job_status,
                   latest_job.error_code as latest_job_error_code,
@@ -218,6 +219,15 @@ def compute_buyer_intent_processing_state(
     attachment_failed = bool(attachment_states) and any(state == "failed" for state in attachment_states)
     all_attachments_failed = bool(attachment_states) and all(state == "failed" for state in attachment_states)
     parse_succeeded = parse_is_current and parse_status == "succeeded"
+    # 重新发起的解析成功了，就不该再被材料链上更早的那次失败盖住：
+    # 失败的旧解析 / 抽取任务仍是业务更新的「最近任务」，但它比这次成功更早。
+    parse_outranks_update_failure = parse_succeeded and (
+        business_update is None
+        or _time_value(parse_job.get("finished_at") or parse_job.get("created_at"))
+        >= _time_value(
+            business_update.get("latest_job_created_at") or business_update.get("created_at")
+        )
+    )
     update_succeeded = update_status in {"parsed", "partially_applied", "applied"}
     reliable_history = bool(
         parse_status == "succeeded"
@@ -234,6 +244,8 @@ def compute_buyer_intent_processing_state(
         overall, stage = "processing", "business_update_processing"
     elif parse_is_current and parse_status in FAILED_JOB_STATUSES:
         overall, stage = "failed", parse_stage or "ai_parse"
+    elif parse_outranks_update_failure:
+        overall, stage = "succeeded", "completed"
     elif business_update and (update_status == "failed" or update_job_status in FAILED_JOB_STATUSES):
         overall = "failed"
         stage = "attachment_extraction" if attachment_failed else "business_update_processing"
@@ -252,7 +264,11 @@ def compute_buyer_intent_processing_state(
     review_status = (
         "reviewed" if intent.get("reviewed_at") else "needs_confirmation" if needs_count else "pending"
     )
-    error_source = _latest_error_source(attachments, parse_job if parse_is_current else None, business_update)
+    error_source = _latest_error_source(
+        attachments,
+        parse_job if parse_is_current else None,
+        None if parse_outranks_update_failure else business_update,
+    )
     status_label = {
         "not_started": "未解析",
         "processing": "解析中",
@@ -299,6 +315,10 @@ def _effective_attachment_state(item: dict[str, Any]) -> str:
     latest_job = str(item.get("latest_job_status") or "")
     if stored in {"pending", "parsing"} and latest_job in FAILED_JOB_STATUSES:
         return "failed"
+    # 图片直接喂多模态模型、或策略为跳过 OCR 的附件，永远不会有文字抽取任务，
+    # parse_status 也就一直停在 pending —— 它们不是「正在读取」，不能把需求卡在附件阶段。
+    if stored in {"pending", "parsing"} and not attachment_waits_for_text_extraction(item):
+        return "skipped"
     return {"pending": "pending", "parsing": "processing", "parsed": "succeeded", "failed": "failed", "skipped": "skipped"}.get(stored, "pending")
 
 
