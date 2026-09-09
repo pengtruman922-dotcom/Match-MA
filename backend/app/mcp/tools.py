@@ -224,8 +224,9 @@ def _targets_filter(context: ToolContext, arguments: dict[str, Any]) -> dict[str
 TARGETS_SCAN = ToolSpec(
     name="targets_scan",
     description=(
-        "全库标的的业务扫描：每条只有名称、级别、行业、地区、上市状态、业务摘要和主要产品，没有财务数字。"
-        "没有行业或关键词参数：业务是否对口由你逐条读「业务摘要」判断，行业只是辅助。正向查询的第一步；"
+        "全库标的的业务扫描：每条只有名称、级别、业务标签、地区、上市状态、业务摘要和主要产品，没有财务数字。"
+        "没有行业或关键词参数：业务是否对口由你逐条读「业务摘要」判断，业务标签只是辅助"
+        "（自由词，老数据可能没有；键不存在 = 没录，不是没有业务）。正向查询的第一步；"
         f"上限 {MAX_BUSINESS_SCAN_LIMIT} 条，超出用 offset 翻页。业务摘要为空的不要从公司名猜。"
     ),
     input_schema={

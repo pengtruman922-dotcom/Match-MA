@@ -1,7 +1,6 @@
 from backend.app.api.routes.extracted_actions import (
     _seller_target_changes_with_parse_completion as _action_seller_target_changes_with_parse_completion,
 )
-from backend.app.api.routes.seller_targets import _normalized_create_industry_pairs
 from backend.app.services.extracted_action_apply import _lifecycle_status_from_changes
 from backend.app.jobs.handlers import (
     _normalize_change_fields,
@@ -88,20 +87,55 @@ def test_seller_target_parse_supports_rollback_fields() -> None:
     assert SELLER_TARGET_PARSE_FIELDS <= ROLLBACK_FIELDS_BY_ENTITY["seller_target"]
 
 
-def test_extracted_action_keeps_normalized_industry_fields() -> None:
+def test_extracted_action_keeps_business_tags_and_drops_retired_industry_keys() -> None:
+    """行业字典 0908 下线：业务标签原样进白名单，旧版 prompt 吐的行业键被滤掉。"""
     changes, notes = _normalize_change_fields(
         {
+            "business_tags_json": ["医疗器械", "体外诊断"],
             "industry_pairs_json": [{"l1": "医药与健康", "l2": "医疗器械"}],
+            "industry_l1": "医药与健康",
         },
         allowed_fields=SELLER_TARGET_CHANGE_FIELDS,
         aliases=SELLER_TARGET_FIELD_ALIASES,
         enum_fields=SELLER_TARGET_ENUM_FIELDS,
     )
 
-    assert changes == {
-        "industry_pairs_json": [{"l1": "医药与健康", "l2": "医疗器械"}],
-    }
+    assert changes == {"business_tags_json": ["医疗器械", "体外诊断"]}
+    assert "industry_pairs_json" not in changes
+    assert "industry_l1" not in changes
     assert notes == []
+
+
+def test_the_industry_alias_now_feeds_business_tags() -> None:
+    """模型吐 `industry: "汽车零部件"` 时，以前映射到 002 就删掉的 industry_secondary
+    列、被静默丢弃；0908 起映射到业务标签，单个字符串当一个标签。"""
+    assert SELLER_TARGET_FIELD_ALIASES["industry"] == "business_tags_json"
+
+
+def test_seller_target_parse_normalizes_business_tags_shape() -> None:
+    """自由标签只做形状归一：去空白、去重、单字符串也认；归空了整列摘掉并留 note。"""
+    changes, notes = _normalize_seller_target_parse_changes(
+        {"fields": {"business_tags_json": [" 汽车零部件 ", "汽车零部件", "", "商用车车架"]}}
+    )
+    assert changes["business_tags_json"] == ["汽车零部件", "商用车车架"]
+    assert notes == []
+
+    changes, notes = _normalize_seller_target_parse_changes({"fields": {"business_tags_json": "PCB"}})
+    assert changes["business_tags_json"] == ["PCB"]
+
+    changes, notes = _normalize_seller_target_parse_changes({"fields": {"business_tags_json": ["", None]}})
+    assert "business_tags_json" not in changes
+    assert "dropped_business_tags_json:no_usable_tags" in notes
+
+
+def test_seller_target_parse_ignores_retired_industry_fields() -> None:
+    """旧版 prompt（v0.11.0）还会吐 industry_l1 / industry_l2；不再转换，如实记成不支持。"""
+    changes, notes = _normalize_seller_target_parse_changes(
+        {"fields": {"industry_l1": "制造与工业", "industry_l2": "汽车零部件", "business_summary": "做车架的"}}
+    )
+    assert changes == {"business_summary": "做车架的"}
+    assert "ignored_unsupported_field:industry_l1" in notes
+    assert "ignored_unsupported_field:industry_l2" in notes
 
 
 def test_seller_target_parse_keeps_derived_state_out_of_fact_diff() -> None:
@@ -138,13 +172,3 @@ def test_terminal_sale_statuses_close_the_target_lifecycle() -> None:
     assert _lifecycle_status_from_changes({"sale_status": "已停售"}) == "off_market"
     assert _lifecycle_status_from_changes({"is_for_sale": "no"}) == "off_market"
     assert _lifecycle_status_from_changes({"is_for_sale": "yes"}) is None
-
-
-def test_blank_industry_is_allowed_when_creating_a_target() -> None:
-    class _NoDbAccess:
-        def execute(self, *args, **kwargs):  # noqa: ANN002, ANN003
-            raise AssertionError("blank industry must not query the taxonomy")
-
-    assert _normalized_create_industry_pairs(
-        _NoDbAccess(), {"industry_pairs_json": [], "industry_l1": None, "industry_l2": None}
-    ) == []

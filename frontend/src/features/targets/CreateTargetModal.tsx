@@ -12,7 +12,8 @@ type CreateTargetForm = {
   targetName: string;
   targetType: string;
   targetSubjectName: string;
-  industry: string;
+  /** 业务标签，顿号 / 逗号 / 换行分隔（0908 起替代行业输入）。 */
+  businessTags: string;
   region: string;
   askingPrice: string;
   askingPriceDate: string;
@@ -23,7 +24,7 @@ const DEFAULT_CREATE_FORM: CreateTargetForm = {
   targetName: '',
   targetType: 'company',
   targetSubjectName: '',
-  industry: '',
+  businessTags: '',
   region: '',
   askingPrice: '',
   askingPriceDate: '',
@@ -140,8 +141,7 @@ export default function CreateTargetModal({ onClose, onCreated }: { onClose: () 
         target_subject_name: normalizeOptional(form.targetSubjectName),
         // 无材料的新建标的是「未处理」而不是「已完成」——它还没被任何 AI 流水线碰过。
         information_status: shouldParse ? 'parsing' : 'insufficient',
-        industry_l1: normalizeOptional(form.industry),
-        industry_pairs_json: normalizeOptional(form.industry) ? [{ l1: normalizeOptional(form.industry)! }] : [],
+        business_tags_json: splitTags(form.businessTags),
         location_province: region.province,
         location_city: region.city,
         asking_price_yuan: askingPriceYuan,
@@ -231,13 +231,13 @@ export default function CreateTargetModal({ onClose, onCreated }: { onClose: () 
               placeholder="可留空；解析后如与标的相同会直接显示同名主体"
             />
           </Field>
-          <Field label="行业">
+          <Field label="业务标签">
             <input
               type="text"
-              value={form.industry}
-              onChange={(event) => updateForm('industry', event.target.value)}
+              value={form.businessTags}
+              onChange={(event) => updateForm('businessTags', event.target.value)}
               className="input"
-              placeholder="可选，留空由系统解析"
+              placeholder="细分赛道或产品品类，多个用顿号分隔；可留空由系统解析"
             />
           </Field>
           <Field label="地区">
@@ -355,18 +355,23 @@ function normalizeOptional(value: string): string | undefined {
   return trimmed || undefined;
 }
 
+/** 与买家侧同一种切法：顿号、中英文逗号、换行都算分隔符，去重去空。 */
+function splitTags(value: string): string[] {
+  return [...new Set(value.split(/[、，,\n]/).map((item) => item.trim()).filter(Boolean))];
+}
+
 function buildCreateTargetRawText(form: CreateTargetForm, payload: SellerTargetCreate): string {
   const lines = [
     '【新建标的初始输入】',
     `标的名称：${payload.target_name}`,
     `类型：${formatTargetType(payload.target_type || 'company')}`,
     form.targetSubjectName.trim() ? `标的主体：${form.targetSubjectName.trim()}` : null,
-    form.industry.trim() ? `行业：${form.industry.trim()}` : null,
+    form.businessTags.trim() ? `业务标签：${splitTags(form.businessTags).join('、')}` : null,
     form.region.trim() ? `地区：${form.region.trim()}` : null,
     form.askingPrice.trim() ? `报价：${form.askingPrice.trim()}` : null,
     form.askingPriceDate.trim() ? `报价时间：${form.askingPriceDate.trim()}` : null,
     '',
-    '解析要求：如果附件或正式文件识别到更完整的标的名称、主体名称、一级/二级行业、行业标签或地区，请以正式材料为准，可以覆盖上述初始输入；行业和地区字段请输出中文。不要臆造材料中没有的信息。业务摘要（business_summary）请用一两句话概括标的主营业务与核心亮点，不要照抄或粘贴原文。',
+    '解析要求：如果附件或正式文件识别到更完整的标的名称、主体名称、业务标签或地区，请以正式材料为准，可以覆盖上述初始输入；业务标签写细分赛道或产品品类的自由词（3~5 个），地区字段请输出中文。不要臆造材料中没有的信息。业务摘要（business_summary）请用一两句话概括标的主营业务与核心亮点，不要照抄或粘贴原文。',
   ].filter((line): line is string => line !== null);
 
   if (form.supplement.trim()) {

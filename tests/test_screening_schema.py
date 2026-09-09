@@ -73,9 +73,14 @@ def test_industry_conditions_are_gone_from_the_schema() -> None:
     for column in ("industries_json", "industry_l2_json", "excluded_industries_json"):
         assert column not in properties
         assert column not in SCREENING_FIELDS_BY_COLUMN
-    # 标的侧那一列也不再挂「筛」角标：没有任何买家条件能打在它上面了。
-    # 角标撒谎的代价是顾问按它决定先补哪个字段，补错方向。
-    assert not indicator_by_column("seller_target", "industry_pairs_json").screening
+    # 0908 判决 B：标的侧的业务标签不进 targets_filter，也不挂「筛」角标。
+    # 两侧标签都是自由词，SQL 相等匹配漏掉的标的不会出现在任何拆分里，Agent 看不见
+    # 自己漏了什么；库 94 / 71 家，targets_scan 一页就是全库，读文本判断更准。
+    assert "business_tags_json" not in properties
+    assert not indicator_by_column("seller_target", "business_tags_json").screening
+    # 退役的行业列没有任何角色：不筛、不写、不显示。
+    retired = indicator_by_column("seller_target", "industry_pairs_json")
+    assert not retired.screening and not retired.writable_by and retired.group is None
 
 
 def test_region_takes_three_optional_levels() -> None:

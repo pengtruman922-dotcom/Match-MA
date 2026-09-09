@@ -159,10 +159,9 @@ def _record_rejected_fields(
 
 
 def _record_region_notes(db: Session, extracted_action_id: UUID, notes: list[str]) -> None:
-    """把字典对齐时挪走的行业说法挂到 action 上。
+    """把地区归一时丢掉的说法挂到 action 上（键名沿用 industry_normalization_notes）。
 
-    值没丢（都进了 industry_focus_tags_json 走深评），但「模型说的是汽车电子零部件、
-    字典里只有汽车零部件」这件事只有这里留得住 —— 也是判断字典该不该补词的依据。
+    行业字典 0908 下线后这里只剩地区一种 note；键名不改是为了不动读它的调试页。
     """
     db.execute(
         text(
@@ -707,20 +706,9 @@ def _get_or_create_relation(
 
 
 def _allowed_seller_target_changes(changes: dict[str, Any]) -> dict[str, Any]:
-    allowed = {key: value for key, value in changes.items() if key in writable_columns("parse")}
-    # Existing editable prompts may still emit the retired raw industry keys.
-    # Consume them only as transient dictionary-normalization candidates; they
-    # are never written back as seller_target columns.
-    if "industry_pairs_json" not in allowed:
-        legacy_pair = {
-            "l1": changes.get("industry_l1") or changes.get("industry_primary"),
-            "l2": changes.get("industry_l2") or changes.get("industry_secondary"),
-        }
-        if legacy_pair["l1"] or legacy_pair["l2"]:
-            # The writer performs the database-backed canonicalization. This
-            # local shape conversion only keeps old prompt output actionable.
-            allowed["industry_pairs_json"] = [legacy_pair]
-    return allowed
+    # 行业字典 0908 下线：旧版 prompt 吐出的 industry_l1 / industry_l2 /
+    # industry_pairs_json 不再被转换，注册表白名单直接把它们滤掉。
+    return {key: value for key, value in changes.items() if key in writable_columns("parse")}
 
 
 def _lifecycle_status_from_changes(changes: dict[str, Any]) -> str | None:

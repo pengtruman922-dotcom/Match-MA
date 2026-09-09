@@ -158,20 +158,18 @@ SELLER_TARGET_INDICATORS: tuple[Indicator, ...] = (
     Indicator("location_city", "所在市", "identity", "text", screening=True, writable_by=_BOTH_MANUAL, fold_into="location_province"),
     Indicator("location_district", "所在区", "identity", "text", screening=True, writable_by=_BOTH_MANUAL, fold_into="location_province"),
     # 业务与产品
-    # screening 2026-08-28 置 False（判决一的连带后果，**不是它降级了**）。
-    # 它仍是唯一的标的行业事实源（总纲 §2.3 不变），仍然解析、仍然显示、
-    # 仍然进深评 —— 变的是买家侧那三个行业条件本轮退役之后，**没有任何买家条件
-    # 能再打在它上面**，它不再是一个可筛维度。
-    # 标的侧的 screening 只喂信息页那个「筛」角标，角标撒谎的代价是顾问按它决定
-    # 先补哪个字段、补错方向，所以这里必须跟着改。
-    # 行业匹配整体交给 LLM 读业务摘要（正向 search_targets 的 business_scan、
-    # 反向 skills/buyer-search 的接口一）。要恢复行业硬筛，两侧同时改回来。
-    Indicator("industry_pairs_json", "所属行业", "business_product", "json", writable_by=_BOTH_MANUAL),
+    # 业务标签（2026-09-08，方案 0908）：标的行业改成自由标签，与买家主体 /
+    # 买家方案的 business_tags_json 同构 —— 同一个归一函数、同一段契约文案
+    # （services/business_tags.py）、同一种 GIN 索引。**没有 enum_options 是刻意的**：
+    # multi_value=True 但无闭集，multi_value_enum_values() 与 field_writer 的闭集
+    # 校验都会自动跳过它，归一只做形状（去重去空限长），不过任何词表。
+    # 不设 screening：外部 Agent 的 targets_filter 不加标签条件（判决 B），
+    # 标签只随 targets_scan / target_get 返回给 Agent 读文本判断。
+    Indicator("business_tags_json", "业务标签", "business_product", "json", writable_by=_BOTH_MANUAL, multi_value=True, editor="tags"),
     Indicator("business_summary", "业务摘要", "business_product", "text", writable_by=_BOTH_MANUAL),
-    # 行业只到 L2：「做锂电池正极材料的」与「做锂电池 PACK 的」归在同一个 L2 下。
-    # 产品词是长尾，建受控字典的维护成本无上限且字典外的词会被丢弃，所以走自由
-    # 文本 + 深评。买家侧对手方是已存在的 industry_focus_tags_json（语义配对）。
-    # 不塞进 business_summary：后者有 300 字上限，塞进去会被截断。
+    # 主要产品是产品线枚举，与业务标签是两个轴：标签说在哪个赛道，产品说卖什么。
+    # 产品词是长尾，走自由文本 + 深评。不塞进 business_summary：后者有 300 字上限，
+    # 塞进去会被截断。
     Indicator("main_products_text", "主要产品", "business_product", "text", writable_by=_BOTH_MANUAL),
     # 经营质量
     Indicator("current_revenue_yuan", "营收", "ops_quality", "yuan", screening=True, writable_by=_ALL),
@@ -237,6 +235,21 @@ SELLER_TARGET_INDICATORS: tuple[Indicator, ...] = (
     # 系统状态不是信息页业务事实，不允许手动编辑。
     # pending_review 仅在数据库 check 中兼容历史行，不再向任何写入方暴露。
     Indicator("information_status", "信息状态", None, "enum", writable_by=_PARSE, enum_options=(("normal", "正常"), ("insufficient", "信息不足"), ("parsing", "解析中"), ("researching", "调研中"), ("parse_failed", "解析失败"))),
+
+    # ================= 退役区（2026-09-08，方案 0908 阶段 A） =================
+    #
+    # 行业字典整体下线：industry_pairs_json 的职责由上面的 business_tags_json 接管
+    # （迁移 025 把二级行业回填成标签）。这一列**仍在库里、数据冻结**，删列在阶段 B
+    # （连同 industry_l1 / industry_l2 两个兼容投影列、四个索引、industry_taxonomy 表）。
+    #
+    # writable_by 直接清空而不是像买家侧那样留 manual：它的任何写入都要过字典归一，
+    # 而字典服务阶段 A 就删了。group=None 不进信息页，deep_eval=False 不进深评上下文，
+    # 没有 screening —— 它对所有读者都不可见，唯一的作用是让 seller_target_fact_columns()
+    # 在阶段 B 之前继续认识这一列。
+    #
+    # **不要把这一块当死代码删掉。** 它是阶段 B 的 drop 清单（RETIRED_SELLER_TARGET_COLUMNS）
+    # 的来源之一，也是「这一列还在库里」这个事实的唯一声明处。
+    Indicator("industry_pairs_json", "所属行业（已退役）", None, "json", writable_by=frozenset(), deep_eval=False),
 )
 
 _BI_PARSE = frozenset({"parse"})
@@ -651,13 +664,23 @@ def multi_value_enum_values(entity: str = "seller_target") -> dict[str, set[str]
 
 
 # 注册表之外、但要跟着事实列一起被读出来的 seller_target 列。
-# industry_l1 / industry_l2 是 industry_pairs_json 的兼容投影（总纲 §2.3），
+# industry_l1 / industry_l2 曾是 industry_pairs_json 的兼容投影，0908 起是退役死列
+# （没有写入方、没有读者），留在这里只为阶段 B 删列前 SELECT 投影还认识它们。
 # gap_summary 是零写入的历史列（判死待办，六处读路径仍在，见施工单 0806 §三）。
 _SELLER_TARGET_EXTRA_FACT_COLUMNS: tuple[str, ...] = (
     "industry_l1",
     "industry_l2",
     "gap_summary",
 )
+
+# 阶段 B 的 drop 清单（方案 0908 §5.4），从退役声明派生 —— 不要另手写一份。
+# 阶段 B 的动作：迁移 026 drop 这三列 + 四个索引 + 一个约束 + industry_taxonomy 表，
+# 代码侧删掉上面的退役条目与 _SELLER_TARGET_EXTRA_FACT_COLUMNS 里的两个投影列。
+RETIRED_SELLER_TARGET_COLUMNS: tuple[str, ...] = tuple(
+    indicator.column
+    for indicator in SELLER_TARGET_INDICATORS
+    if indicator.group is None and not indicator.writable_by
+) + ("industry_l1", "industry_l2")
 
 
 def seller_target_fact_columns() -> list[str]:

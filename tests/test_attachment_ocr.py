@@ -73,35 +73,6 @@ class _SqlCaptureDb:
         return _SqlCaptureResult()
 
 
-class _IndustryLookupResult:
-    def __init__(self, value=None, values=None) -> None:
-        self.value = value
-        self.values = values or []
-
-    def scalar_one_or_none(self):
-        return self.value
-
-    def scalars(self):
-        return self
-
-    def all(self):
-        return self.values
-
-
-class _IndustryLookupDb:
-    TERM_TO_L1 = {
-        "医药与健康": "医药与健康",
-        "医疗器械": "医药与健康",
-    }
-
-    def execute(self, statement, params=None):
-        sql = str(statement)
-        if "select l1_name" in sql:
-            return _IndustryLookupResult(self.TERM_TO_L1.get((params or {}).get("term")))
-        if "and level = 'l2'" in sql:
-            return _IndustryLookupResult(values=["医疗器械"])
-        raise AssertionError(f"Unexpected industry query: {sql}")
-
 
 
 class _NoOcrRowDb:
@@ -667,7 +638,8 @@ def test_business_update_accepts_unambiguous_action_shape_aliases() -> None:
     assert actions[0]["normalization_notes"][:3] == validation["accepted_aliases"]["0"]
 
 
-def test_business_update_derives_and_keeps_seller_industry_dimensions() -> None:
+def test_business_update_normalizes_seller_business_tags_and_drops_retired_industry_keys() -> None:
+    """行业字典 0908 下线：标的动作的业务标签只做形状归一，旧行业键被白名单滤掉。"""
     actions = _normalize_actions(
         {
             "actions": [
@@ -676,8 +648,9 @@ def test_business_update_derives_and_keeps_seller_industry_dimensions() -> None:
                     "target_entity_type": "seller_target",
                     "target_entity_id": str(SELLER_TARGET_ID),
                     "proposed_changes_json": {
+                        "business_tags_json": ["医疗器械", " 医疗器械", "", "体外诊断"],
                         "industry_primary": "医药与健康",
-                        "industry_secondary": "医疗器械",
+                        "industry_pairs_json": [{"l1": "医药与健康", "l2": "医疗器械"}],
                     },
                 }
             ]
@@ -689,12 +662,12 @@ def test_business_update_derives_and_keeps_seller_industry_dimensions() -> None:
             "attachment_evidence_ids": [],
             "image_evidence_attachment_ids": [],
         },
-        db=_IndustryLookupDb(),
     )
 
     assert actions[0]["proposed_changes_json"] == {
-        "industry_pairs_json": [{"l1": "医药与健康", "l2": "医疗器械"}],
+        "business_tags_json": ["医疗器械", "体外诊断"],
     }
+    assert "industry_pairs_json" not in actions[0]["proposed_changes_json"]
 
 
 def test_business_update_extracts_profile_sections_outside_seller_columns() -> None:

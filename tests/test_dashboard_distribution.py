@@ -72,7 +72,7 @@ def test_overview_counts_every_lifecycle_status() -> None:
     assert "lifecycle_status" not in code
     assert "status = 'active'" not in code
     # 软删除仍然要排除——那是删掉的数据，不是卖掉的标的。
-    # 六段查询：标的合计 / 标的省份 / 标的行业 / 营收分档 / 买家合计 / 买家省份。
+    # 六段查询：标的合计 / 标的省份 / 标的业务标签 / 营收分档 / 买家合计 / 买家省份。
     assert code.count("deleted_at is null") == 6
 
 
@@ -89,7 +89,7 @@ def test_overview_returns_counts_only() -> None:
         | set(re.findall(r'buyer_totals\["(\w+)"\]', code))
     )
     assert selected == {
-        "province", "l2", "count", "total", "province_unknown", "industry_unknown",
+        "province", "tag", "count", "total", "province_unknown", "tags_unknown",
         "generated_at", "revenue_unknown", "bucket_index",
     }
 
@@ -113,27 +113,29 @@ def test_empty_revenue_buckets_are_still_reported() -> None:
     assert "counted_buckets.get(index, 0)" in code
 
 
-def test_industry_top_list_declares_what_it_left_out() -> None:
+def test_business_tag_top_list_declares_what_it_left_out() -> None:
     """只画前 N 名时必须报出榜外数量，否则 top 10 会被当成全部。"""
     code = _sql_only(_source())
 
-    assert "[:INDUSTRY_TOP_N]" in code
-    assert "industry_other_count" in code
-    assert stats_route.INDUSTRY_TOP_N > 0
+    assert "[:BUSINESS_TAG_TOP_N]" in code
+    assert "business_tags_other_count" in code
+    assert "business_tags_unknown_count" in code
+    assert stats_route.BUSINESS_TAG_TOP_N > 0
 
 
-def test_industry_is_counted_by_l2_per_target() -> None:
-    """按二级行业统计，且一个标的在同一 L2 下重复出现只算一次。
+def test_business_tags_are_counted_per_target() -> None:
+    """按业务标签统计，且一个标的在同一标签下重复出现只算一次。
 
-    看板取 L2 而不是 L1：一级行业太粗，「制造与工业 20 个」读不出赛道。
+    0908 行业字典下线：看板不再读 industry_pairs_json 的二级行业，读自由标签。
     """
     code = _sql_only(_source())
 
-    assert "pair ->> 'l2'" in code
+    assert "jsonb_array_elements_text" in code
+    assert "business_tags_json" in code
     assert "select distinct" in code
     assert "seller_target.id as target_id" in code
-    # L1 不再出现在取数里，只剩 L2。
-    assert "'l1'" not in code
+    for retired in ("industry_pairs_json", "'l1'", "'l2'", "industry_taxonomy"):
+        assert retired not in code
 
 
 def test_buyer_province_panel_reads_the_party_location() -> None:
@@ -166,7 +168,7 @@ def test_page_shows_two_maps_and_two_bar_panels() -> None:
     """2026-07-29 讨论后的版面：两张地图各占一行，两块条形图并排。"""
     source = DASHBOARD_PAGE.read_text(encoding="utf-8")
 
-    for title in ("标的省级分布", "买家省级分布", "标的行业分布 top", "标的营收规模"):
+    for title in ("标的省级分布", "买家省级分布", "标的业务标签 top", "标的营收规模"):
         assert f'title="{title}"' in source
     # 讨论中明确去掉的三块
     assert "省份排行" not in source
@@ -175,15 +177,18 @@ def test_page_shows_two_maps_and_two_bar_panels() -> None:
     assert "更新于" in source, "只保留更新时间，其余说明文字不上大屏"
 
 
-def test_industry_panel_admits_the_dictionary_is_not_deduplicated() -> None:
-    """二级行业字典里「食品 / 食品制造 / 食品加工」尚未合并，同一赛道会分散在多行。
+def test_tag_panel_reports_untagged_targets_and_drops_the_dictionary_caveat() -> None:
+    """业务标签是自由词，同义不合并是设计不是失真；页面只报「多少个标的还没填标签」。
 
-    生产数据里这已经在发生（食品类 6 个标的散成 4 行），榜单因此是偏的。
-    在页面上说出来，比让人以为 top 榜是准的强。去重工单见拆除验收单 §1.3。
+    老数据回填只覆盖了有二级行业的那部分（阿里云 13/94），没标签的标的必须在
+    脚注里说出来，否则榜单会被读成全库画像。旧的「字典同义词未合并」那句随字典删。
     """
     source = DASHBOARD_PAGE.read_text(encoding="utf-8")
 
-    assert "同义词未合并" in source
+    assert "未填业务标签" in source
+    assert "business_tags_unknown_count" in source
+    assert "同义词未合并" not in source
+    assert "行业字典" not in source
 
 
 def test_map_carries_every_province_including_taiwan() -> None:

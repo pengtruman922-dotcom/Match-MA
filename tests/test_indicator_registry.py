@@ -43,6 +43,7 @@ BASELINE = REPO / "database/migrations/001_baseline.sql"
 R4A_MIGRATION = REPO / "database/migrations/002_target_information_model.sql"
 R5_MIGRATION = REPO / "database/migrations/004_information_refinement.sql"
 RESEARCH_PERIOD_MIGRATION = REPO / "database/migrations/009_research_financial_period_guard.sql"
+BUSINESS_TAGS_MIGRATION = REPO / "database/migrations/025_seller_target_business_tags.sql"
 BUYER_CONTRACT_MIGRATION = REPO / "database/migrations/011_buyer_intent_condition_contract.sql"
 TARGET_FACTS_MIGRATION = REPO / "database/migrations/015_target_risk_and_structure_facts.sql"
 GRADE_MIGRATION = REPO / "database/migrations/017_entity_grade.sql"
@@ -274,6 +275,10 @@ def test_every_indicator_is_a_real_seller_target_column() -> None:
         "location_city": (migration_sql, "add column location_city text"),
         "location_district": (migration_sql, "add column location_district text"),
         "industry_pairs_json": (refinement_sql, "add column industry_pairs_json jsonb"),
+        "business_tags_json": (
+            BUSINESS_TAGS_MIGRATION.read_text(encoding="utf-8"),
+            "add column if not exists business_tags_json jsonb",
+        ),
         "financial_period_end_date": (
             RESEARCH_PERIOD_MIGRATION.read_text(encoding="utf-8"),
             "add column if not exists financial_period_end_date date",

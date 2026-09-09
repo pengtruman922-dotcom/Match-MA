@@ -82,10 +82,7 @@ import type {
   FailureSummary,
   FieldValueSource,
   GlobalSearchResponse,
-  IndustryDictionaryImportResult,
-  IndustryDictionaryTerm,
   IndicatorRegistryResponse,
-  IndustryOptionsResponse,
   ModelConnectionTestResult,
   ModelConfigSettingsPage,
   ModelNodeConfig,
@@ -122,8 +119,7 @@ export const sellerTargets = {
   list: (params?: {
     q?: string;
     search_field?: SellerTargetSearchField;
-    industry_l1?: string;
-    industry_l2?: string;
+    business_tag?: string;
     province?: string;
     city?: string;
     district?: string;
@@ -767,40 +763,8 @@ export const indicatorRegistry = {
     apiRequest<IndicatorRegistryResponse>(`/meta/indicators${buildQuery({ entity })}`),
 };
 
-export const meta = {
-  industryOptions: () => apiRequest<IndustryOptionsResponse>('/meta/industry-options'),
-};
-
-export const dataDictionaries = {
-  industry: (params?: { q?: string; level?: string; include_inactive?: boolean }) =>
-    apiRequest<IndustryDictionaryTerm[]>(`/data-dictionaries/industry${buildQuery(params || {})}`),
-  createIndustryTerm: (data: {
-    term: string;
-    level: 'l1' | 'l2';
-    parent_id?: string | null;
-    aliases?: string[];
-    active?: boolean;
-    sort_order?: number;
-  }) =>
-    apiRequest<IndustryDictionaryTerm>('/data-dictionaries/industry', { method: 'POST', body: JSON.stringify(data) }),
-  updateIndustryTerm: (id: string, data: {
-    term?: string;
-    parent_id?: string | null;
-    aliases?: string[];
-    active?: boolean;
-    sort_order?: number;
-  }) =>
-    apiRequest<IndustryDictionaryTerm>(`/data-dictionaries/industry/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  industryImportTemplate: () => apiBlobResponse('/data-dictionaries/industry/import-template'),
-  importIndustry: (file: File, dryRun: boolean) => {
-    const body = new FormData();
-    body.append('file', file);
-    return apiRequest<IndustryDictionaryImportResult>(`/data-dictionaries/industry/import?dry_run=${dryRun}`, {
-      method: 'POST',
-      body,
-    });
-  },
-};
+// `meta.industryOptions` 与整个 `dataDictionaries` 客户端 2026-09-08 随行业字典
+// 下线删除（方案 0908）。
 
 export const debugApi = {
   businessUpdate: (id: string) => apiRequest<BusinessUpdateDebugBundle>(`/debug/business-updates/${id}`),

@@ -22,10 +22,12 @@ export interface SellerTarget {
   pending_research_conflict_count?: number;
   research_job_type?: 'seller_target_research' | 'seller_target_research_map' | null;
   research_job_status?: 'queued' | 'running' | 'retry_waiting' | null;
-  // L1/L2 是唯一展示与筛选行业维度；原始表述保存在更新/证据审计中。
-  industry_l1: string | null;
-  industry_l2: string | null;
-  industry_pairs_json: Array<{ l1: string; l2?: string }>;
+  /** 自由业务标签（0908 起替代行业字典）：细分赛道 / 产品品类，老数据可能为空。 */
+  business_tags_json: string[];
+  // 三个退役列阶段 A 仍随行出参（值冻结），阶段 B 随 drop 一起删。
+  industry_l1?: string | null;
+  industry_l2?: string | null;
+  industry_pairs_json?: Array<{ l1: string; l2?: string }>;
   main_products_text: string | null;
   location_province: string | null;
   location_city: string | null;
@@ -84,7 +86,7 @@ export interface SellerTargetListResponse {
   offset: number;
 }
 
-export type SellerTargetSearchField = 'target_name' | 'target_subject_name' | 'business_summary' | 'industry';
+export type SellerTargetSearchField = 'target_name' | 'target_subject_name' | 'business_summary' | 'business_tags';
 
 export interface SellerTargetFilterOption {
   value: string;
@@ -93,8 +95,8 @@ export interface SellerTargetFilterOption {
 }
 
 /** A cascader level. `count` annotates a dictionary entry rather than defining
- * it: the picker renders the full industry taxonomy / area dictionary, and
- * these counts only say how many targets sit behind each choice. */
+ * it: the picker renders the full area dictionary, and these counts only say
+ * how many targets sit behind each choice. */
 export interface SellerTargetCountedOption {
   value: string;
   count: number;
@@ -102,7 +104,8 @@ export interface SellerTargetCountedOption {
 }
 
 export interface SellerTargetFilterOptions {
-  industries: SellerTargetCountedOption[];
+  /** 业务标签是自由词，没有字典骨架：只列库里真实存在的标签及计数。 */
+  business_tags: SellerTargetFilterOption[];
   regions: SellerTargetCountedOption[];
   statuses: SellerTargetFilterOption[];
   owners?: SellerTargetFilterOption[];
@@ -138,9 +141,7 @@ export interface SellerTargetCreate {
   // 创建只收 A-D，默认 C；刚建的标的就已售出/已停售没有意义。
   target_grade?: string;
   information_status?: string;
-  industry_l1?: string;
-  industry_l2?: string;
-  industry_pairs_json?: Array<{ l1: string; l2?: string }>;
+  business_tags_json?: string[];
   location_province?: string;
   location_city?: string;
   location_district?: string;
@@ -164,9 +165,7 @@ export interface SellerTargetUpdate {
   target_subject_name?: string;
   target_grade?: string;
   lifecycle_status?: string;
-  industry_l1?: string;
-  industry_l2?: string;
-  industry_pairs_json?: Array<{ l1: string; l2?: string }>;
+  business_tags_json?: string[];
   location_province?: string;
   location_city?: string;
   location_district?: string;
@@ -722,42 +721,6 @@ export interface ModelConfigSettingsPage {
   prompt_variable_labels: Record<string, string>;
   overview: Record<string, number>;
   security_note: string;
-}
-
-export interface IndustryDictionaryTerm {
-  id: string;
-  term: string;
-  level: 'l1' | 'l2';
-  l1_name: string;
-  parent_id: string | null;
-  parent_name: string | null;
-  aliases: Array<{ id: string; term: string; active: boolean }>;
-  active: boolean;
-  sort_order: number;
-  usage_count: number;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface IndustryDictionaryImportRow {
-  row_number: number;
-  l1: string;
-  l2: string | null;
-  aliases: string[];
-  active: boolean;
-  status: 'ready' | 'error';
-  message: string;
-}
-
-export interface IndustryDictionaryImportResult {
-  dry_run: boolean;
-  total_rows: number;
-  ready_rows: number;
-  error_rows: number;
-  created_l1: number;
-  created_l2: number;
-  created_aliases: number;
-  rows: IndustryDictionaryImportRow[];
 }
 
 export type BuyerIntentSearchField = 'intent_name' | 'buyer_name' | 'raw_requirement_text' | 'intent_summary';
@@ -1415,11 +1378,6 @@ export interface IndicatorMeta {
 export interface IndicatorRegistryResponse {
   groups: IndicatorGroupMeta[];
   indicators: IndicatorMeta[];
-}
-
-export interface IndustryOptionsResponse {
-  l1: Array<{ term: string }>;
-  l2: Array<{ term: string; l1: string }>;
 }
 
 export interface FieldValueSource {
@@ -2340,9 +2298,9 @@ export interface TargetProvinceCount {
   count: number;
 }
 
-export interface TargetIndustryCount {
-  /** 二级行业。一级行业太粗，看板上读不出赛道。 */
-  l2: string;
+export interface TargetBusinessTagCount {
+  /** 业务标签（自由词，0908 起替代二级行业）。 */
+  tag: string;
   count: number;
 }
 
@@ -2360,12 +2318,12 @@ export interface PlatformOverview {
     provinces: TargetProvinceCount[];
     /** 标的总数减去有省份的标的数；地图上单独标注，不混进「0 个」。 */
     province_unknown_count: number;
-    /** 只含前 N 名；一个标的可挂多个二级行业，因此各项之和可能大于 total。 */
-    industries: TargetIndustryCount[];
-    /** 榜外还有多少个二级行业。 */
-    industry_other_count: number;
-    /** 完全没有二级行业的标的数。 */
-    industry_unknown_count: number;
+    /** 只含前 N 名；一个标的可挂多个标签，因此各项之和可能大于 total。 */
+    business_tags: TargetBusinessTagCount[];
+    /** 榜外还有多少个标签。 */
+    business_tags_other_count: number;
+    /** 一个标签都没有的标的数（老数据回填只覆盖了有二级行业的那部分）。 */
+    business_tags_unknown_count: number;
     /** 含计数为 0 的档位，顺序即档位顺序。 */
     revenue_buckets: RevenueBucketCount[];
     revenue_unknown_count: number;

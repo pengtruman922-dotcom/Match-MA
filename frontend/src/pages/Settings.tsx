@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Database, Server, Settings2 } from 'lucide-react';
-import IndustryDictionary from '../features/settings/IndustryDictionary';
+import { Server, Settings2 } from 'lucide-react';
 import ModelSection from '../features/settings/ModelSection';
 import NodeList from '../features/settings/NodeList';
 import { ErrorState, Loading, TabButton } from '../features/settings/shared';
@@ -8,7 +7,9 @@ import { modelConfig } from '../lib/api';
 import { isAdmin } from '../lib/auth';
 import type { ModelConfigSettingsPage } from '../types/api';
 
-type SettingsTab = 'nodes' | 'models' | 'dictionary';
+// 「数据字典」tab 2026-09-08 随行业字典整体下线（方案 0908）：三侧的业务方向都是
+// 自由标签，没有字典可维护。
+type SettingsTab = 'nodes' | 'models';
 
 export default function Settings() {
   const [tab, setTab] = useState<SettingsTab>('nodes');
@@ -19,19 +20,18 @@ export default function Settings() {
     <div className="space-y-5">
       <header>
         <h1 className="text-lg font-semibold text-gray-900">设置</h1>
-        <p className="mt-1 text-xs text-gray-500">管理 AI 节点的模型与提示词、模型与搜索服务、平台数据字典。</p>
+        <p className="mt-1 text-xs text-gray-500">管理 AI 节点的模型与提示词、模型与搜索服务。</p>
       </header>
       <div className="flex border-b border-gray-200">
         <TabButton active={tab === 'nodes'} onClick={() => setTab('nodes')} icon={<Settings2 className="h-4 w-4" />}>AI 节点</TabButton>
         <TabButton active={tab === 'models'} onClick={() => setTab('models')} icon={<Server className="h-4 w-4" />}>模型与搜索</TabButton>
-        <TabButton active={tab === 'dictionary'} onClick={() => setTab('dictionary')} icon={<Database className="h-4 w-4" />}>数据字典</TabButton>
       </div>
-      {tab === 'dictionary' ? <IndustryDictionary /> : <AiSettings tab={tab} />}
+      <AiSettings tab={tab} />
     </div>
   );
 }
 
-function AiSettings({ tab }: { tab: 'nodes' | 'models' }) {
+function AiSettings({ tab }: { tab: SettingsTab }) {
   const [data, setData] = useState<ModelConfigSettingsPage | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

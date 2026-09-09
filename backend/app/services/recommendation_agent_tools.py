@@ -477,7 +477,7 @@ class RecommendationAgentTools:
                 """
                 select
                   st.id, st.target_name, st.business_summary, st.transaction_summary,
-                  st.risk_summary, st.gap_summary, st.industry_l1, st.industry_l2,
+                  st.risk_summary, st.gap_summary, st.business_tags_json,
                   st.location_province, st.location_city, st.location_district,
                   st.current_revenue_yuan, st.current_net_profit_yuan, st.pe_ratio,
                   st.valuation_yuan, st.asking_price_yuan, st.current_debt_ratio,

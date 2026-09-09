@@ -1,13 +1,20 @@
-"""发布 `recommendation_query_parser` v0.3.0（最近 5 轮驱动的完整当前需求快照）。
+"""发布 `recommendation_query_parser` v0.4.0（行业字典下线，方案 0908）。
 
-Prompt 走 API，不写数据库迁移。默认只做本地或只读检查；只有显式 `--apply`
-才会创建/启用版本。必须从仓库根目录运行，token 读取 `.match-ma-local-auth.json`。
+v0.3.1 的正文里有两段闭集（`{{ industry_l1_list }}` / `{{ industry_l2_list }}`）
+和一节「# 行业」规则，教模型把行业词填进 `industries_json` / `industry_l2_json`。
+那两个字段 0828 就不是可筛字段了（这份 prompt 一直落后于 schema），行业字典本身
+0908 整体下线，两个变量从 NodeSpec 里移除。
 
-用法：
-    python scripts/publish_query_parser_v030_prompt.py --check
-    python scripts/publish_query_parser_v030_prompt.py --dry-run
-    python scripts/publish_query_parser_v030_prompt.py --render-preview
-    python scripts/publish_query_parser_v030_prompt.py --apply
+v0.4.0 只做减法：删掉两段闭集与「# 行业」，换成一节「# 业务方向」——
+业务方向不进 conditions，原样放 qualitative_requirements；排除方向放
+exclusions.industries（自由词）。其余（完整快照契约、中止轮语义、输出 schema）
+与 v0.3.1 逐字一致。
+
+v0.3.0 / v0.3.1 的发布脚本已删除：它们引用的两个变量不在 NodeSpec 里，
+`validate_prompt_contract` 在导入时就会拒绝。历史版本仍在库里，设置页可回滚。
+
+默认只检查；只有显式 ``--apply`` 才写生产 Prompt。两套部署各发一遍
+（阿里云加 --api-base http://<ECS>/api/v1，凭证走 MATCH_MA_SAMPLE_USERNAME / PASSWORD）。
 """
 
 from __future__ import annotations
@@ -33,28 +40,28 @@ from prompt_publish_utils import (  # noqa: E402
 
 API_BASE = "https://match-ma-production.up.railway.app/api/v1"
 NODE_NAME = "recommendation_query_parser"
-VERSION = "v0.3.0"
+VERSION = "v0.4.0"
 
-
-SYSTEM_PROMPT = """你是 Match-MA 并购撮合平台的需求解析器。你会收到最近 5 轮已经完成、未中止的用户问题与 AI 最终正文，以及本轮用户消息。
+SYSTEM_PROMPT = """你是 Match-MA 并购撮合平台的需求解析器。你会收到最近 5 轮对话，以及本轮用户消息。其中大部分是「用户问题 + AI 最终正文」的完整轮；也可能出现 `<aborted_user_turn>`，那是用户主动中止、AI 未作答的一轮，只有用户原话。
 
 你的唯一职责，是判断用户经过本轮表达后**现在完整地要什么**，输出一份完整当前需求快照，供后续筛选使用。这份输出不是本轮增量，也不是对上一份 JSON 做机械补丁。
 
 核心规则：
 
 1. 历史是当前需求判断的一部分。结合最近问答与本轮措辞，自主判断条件是保留、新增、替换、删除还是整体重置。
+1.1 `<aborted_user_turn>` 里的用户原话**同样属于当前需求**，请与后续补充合并理解，不要把它当成一个还需要单独回答的问题。
+1.2 **若后续消息与中止轮原话冲突，一律以后续为准。** 用户中止一轮可能是嫌慢，也可能是说错了要改口；冲突时后者是更可能的解释，被推翻的条件不要保留。
 2. 输出必须是当前仍然有效的全部需求。不要只输出本轮新增或变化的字段。
-3. 不补用户没表达过的条件。历史和本轮里没有的行业、地区、财务门槛、上市状态等，绝不能凭经验新增。
+3. 不补用户没表达过的条件。历史和本轮里没有的业务方向、地区、财务门槛、上市状态等，绝不能凭经验新增。
 4. 历史中的 AI 正文只代表用户当时看到的回答，可用于理解“第二家”“其他不变”等指代；不要把 AI 自己介绍的候选事实误写成用户条件。
 5. 用户表达含糊时采取保守解释：宁可把没把握结构化的原话留在 qualitative_requirements 或 unstructured_notes，也不要编条件。
 6. 只负责理解，不执行筛选、不推荐标的、不回答用户问题。
 
 只输出一个 JSON 对象，不要 Markdown、不要代码块、不要解释。"""
 
-
 USER_PROMPT_TEMPLATE = """推荐方向：{{ mode }}（buyer_to_target = 为买家找标的；target_to_buyer = 为标的找买家）
 
-# 最近 5 轮已完成问答
+# 最近 5 轮对话（含用户中止、AI 未作答的轮次）
 
 {{ history_context }}
 
@@ -65,14 +72,6 @@ USER_PROMPT_TEMPLATE = """推荐方向：{{ mode }}（buyer_to_target = 为买�
 # conditions 可使用的字段（只能从这里选）
 
 {{ screening_fields_json }}
-
-# 一级行业闭集
-
-{{ industry_l1_list }}
-
-# 二级行业闭集
-
-{{ industry_l2_list }}
 
 # 输出结构
 
@@ -87,7 +86,7 @@ USER_PROMPT_TEMPLATE = """推荐方向：{{ mode }}（buyer_to_target = 为买�
     }
   ],
   "qualitative_requirements": ["不能翻成可筛字段、但确实是对标的的要求"],
-  "exclusions": {"industries": ["明确排除的行业"], "risk_flags": ["明确排除的重大风险"]},
+  "exclusions": {"industries": ["明确排除的业务方向"], "risk_flags": ["明确排除的重大风险"]},
   "unstructured_notes": ["用户表达了、但既不是筛选条件也不是对标的要求的话"],
   "raw_text": "本轮原话"
 }
@@ -100,7 +99,7 @@ USER_PROMPT_TEMPLATE = """推荐方向：{{ mode }}（buyer_to_target = 为买�
 
 - 本轮说“只看上市公司”：在当前需求上新增上市条件；输出仍须包含江苏、制造业、净利门槛和上市状态，不能只输出上市状态。
 - 本轮说“净利放宽到 500 万，其他不变”：只把净利下限替换为 5000000，其余历史明确条件全部保留。
-- 本轮说“去掉地区限制”：只删除地区条件，行业、净利等其他条件继续保留。
+- 本轮说“去掉地区限制”：只删除地区条件，制造业、净利等其他要求继续保留。
 - 本轮说“重新找浙江医疗行业”或“重来，找浙江医疗行业”：允许整体重置，丢掉旧的江苏、制造业、净利等条件，只保留新需求明确表达的浙江与医疗行业。
 - 本轮说“其他不变”：所有历史中仍明确有效、且本轮没有点名修改或删除的条件都必须保留。
 
@@ -114,11 +113,10 @@ USER_PROMPT_TEMPLATE = """推荐方向：{{ mode }}（buyer_to_target = 为买�
 - 比率按百分数写：负债率 60% 写 60，股比 51% 写 51；PE 15 倍写 15。
 - strength 只有 required / preferred。“必须、一定、至少、不超过”是 required；“最好、优先、倾向”是 preferred；无修饰的明确数值门槛默认 required。
 
-# 行业
+# 业务方向
 
-- 能确定二级行业时优先用 industry_l2_json；只能确定一级时用 industries_json。
-- 两级行业值都必须逐字来自相应闭集。闭集外细分词不要硬归类，原样放 qualitative_requirements。
-- 排除行业放 exclusions.industries，不能误写成正向条件。
+- 业务方向（行业、赛道、产品，如“医疗器械”“薄膜电容器”“制造业”）**不是可筛字段**，不要塞进 conditions，也不要归到任何分类。用户原话原样放进 qualitative_requirements，由后续环节读标的的业务标签与业务摘要判断。
+- 明确排除的业务方向放 exclusions.industries（自由词，原样保留），不能误写成正向条件。
 
 # 定性诉求与残留
 
@@ -205,15 +203,15 @@ def _payload() -> dict[str, Any]:
     return {
         "node_name": NODE_NAME,
         "version": VERSION,
-        "name": "推荐对话需求解析 v0.3.0（最近 5 轮完整当前快照）",
-        "description": "结合最近 5 轮完整问答与本轮消息，输出用户现在要什么的完整需求快照。",
+        "name": "推荐对话需求解析 v0.4.0（行业字典下线：业务方向不进条件）",
+        "description": "删掉一级/二级行业闭集与「# 行业」规则；业务方向原样放定性诉求，由后续环节读标的业务标签与摘要判断。",
         "system_prompt": SYSTEM_PROMPT,
         "user_prompt_template": USER_PROMPT_TEMPLATE,
         "output_schema_json": OUTPUT_SCHEMA,
         "variables_json": list(EXPECTED_VARIABLES),
         "is_active": True,
         "is_default": True,
-        "metadata_json": {"source": "scripts/publish_query_parser_v030_prompt.py"},
+        "metadata_json": {"source": "scripts/publish_query_parser_v040_prompt.py", "based_on_version": "v0.3.1"},
     }
 
 
@@ -288,17 +286,17 @@ def main() -> int:
     parser.add_argument("--api-base", default=API_BASE)
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--check", action="store_true", help="只做本地 NodeSpec/变量检查，不访问 API")
-    group.add_argument("--dry-run", action="store_true", help="只读检查远端版本冲突，不创建")
-    group.add_argument("--render-preview", action="store_true", help="调用只读渲染端点验证变量替换")
-    group.add_argument("--apply", action="store_true", help="显式创建或启用生产 Prompt")
+    group.add_argument("--render-preview", action="store_true", help="调用只读渲染预览，不 apply")
+    group.add_argument("--dry-run", action="store_true", help="访问 API 查重，不创建")
+    group.add_argument("--apply", action="store_true", help="创建新版本并设为默认")
     args = parser.parse_args()
     try:
         _run(args)
-    except (PromptVersionConflict, RuntimeError) as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+    except PromptVersionConflict as exc:
+        print(f"[conflict] {exc}")
         return 2
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

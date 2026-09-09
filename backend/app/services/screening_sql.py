@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.registry.indicators import indicator_by_column
+from backend.app.services.business_tags import business_tags_text
 from backend.app.services.screening_schema import (
     SCREENING_FIELDS,
     SCREENING_FIELDS_BY_COLUMN,
@@ -74,9 +75,7 @@ _BASE_ROW_COLUMNS: tuple[str, ...] = (
     "target_name",
     "target_grade",
     "updated_at",
-    "industry_pairs_json",
-    "industry_l1",
-    "industry_l2",
+    "business_tags_json",
     "location_province",
     "location_city",
     "location_district",
@@ -450,29 +449,15 @@ def _number(value: Any) -> Any:
     return value
 
 
-def _industry_text(pairs: Any, limit: int = 3) -> str | None:
-    if not isinstance(pairs, list):
-        return None
-    parts: list[str] = []
-    for pair in pairs[:limit]:
-        if not isinstance(pair, dict):
-            continue
-        l1 = str(pair.get("l1") or "").strip()
-        l2 = str(pair.get("l2") or "").strip()
-        label = "/".join(part for part in (l1, l2) if part)
-        if label and label not in parts:
-            parts.append(label)
-    return "、".join(parts) or None
-
-
 def _business_digest(row: dict[str, Any], conditions: dict[str, Any]) -> dict[str, Any]:
     """业务扫描的一条：只回答「这家是做什么的」。
 
     刻意不带财务数字与条件取值 —— 首轮筛判的是业务匹配，数字那一步已经由 SQL
     做过了。带上它们只会把 300 条撑成读不完的体积，而模型在这一步也用不上。
 
-    行业**保留**：它不再是筛选维，但仍是判业务方向的辅助信息（总纲 §2.3
-    仍然承认它是唯一的标的行业事实源）。退役的是「能不能筛」，不是「看不看得见」。
+    业务标签**带上**：它不是筛选维（判决 B），但与摘要、主要产品一起是判业务方向的
+    材料 —— 标签说在哪个赛道，摘要说做什么生意，产品说卖什么。为空则省略键，
+    「没录」与「没有」由读的人分清（SKILL.md 写了）。
     """
     province, city = row.get("location_province"), row.get("location_city")
     # 直辖市的省与市同名，直接拼会变成「北京市北京市」。
@@ -482,9 +467,9 @@ def _business_digest(row: dict[str, Any], conditions: dict[str, Any]) -> dict[st
         "name": row.get("target_name"),
         "grade": row.get("target_grade"),
     }
-    industry = _industry_text(row.get("industry_pairs_json"))
-    if industry:
-        digest["industry"] = industry
+    tags = business_tags_text(row.get("business_tags_json"))
+    if tags:
+        digest["business_tags"] = tags
     if region:
         digest["region"] = region
     summary = (row.get("business_summary") or "").strip()
@@ -507,9 +492,9 @@ def _row_digest(row: dict[str, Any], conditions: dict[str, Any]) -> dict[str, An
         "name": row.get("target_name"),
         "grade": row.get("target_grade"),
     }
-    industry = _industry_text(row.get("industry_pairs_json"))
-    if industry:
-        digest["industry"] = industry
+    tags = business_tags_text(row.get("business_tags_json"))
+    if tags:
+        digest["business_tags"] = tags
     region = "".join(
         str(value)
         for value in (row.get("location_province"), row.get("location_city"), row.get("location_district"))
@@ -520,7 +505,7 @@ def _row_digest(row: dict[str, Any], conditions: dict[str, Any]) -> dict[str, An
     for column in conditions:
         field = SCREENING_FIELDS_BY_COLUMN.get(column)
         if field is None or field.operator not in _PLAIN_OPERATORS:
-            # 行业与地区已经在上面了，不重复。
+            # 地区已经在上面了，不重复。
             continue
         value = row.get(field.target_column)
         if value is not None:

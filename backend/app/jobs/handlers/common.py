@@ -92,7 +92,11 @@ SELLER_TARGET_FIELD_ALIASES = {
     "target_subject_name": "target_subject_name",
     "owner_company": "target_subject_name",
     "company_name": "target_subject_name",
-    "industry": "industry_secondary",
+    # 0908 起指向业务标签（normalize_business_tags 认单字符串）。它以前指向
+    # industry_secondary —— 一个 002 就删掉的列，等于把模型输出静默丢掉。
+    "industry": "business_tags_json",
+    "industries": "business_tags_json",
+    "business_tags": "business_tags_json",
     "location": "location_city",
     "province": "location_province",
     "city": "location_city",
@@ -614,9 +618,6 @@ _SELLER_CONTEXT_READ_ONLY_COLUMNS = (
     "id",
     "target_name",
     "target_type",
-    # 兼容投影列，真正的写入口是 industry_pairs_json。
-    "industry_l1",
-    "industry_l2",
 )
 # parse 可写但**故意**不给模型看的列，每条都要有理由。
 _SELLER_CONTEXT_EXCLUDED_COLUMNS = frozenset(

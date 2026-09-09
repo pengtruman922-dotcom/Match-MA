@@ -23,14 +23,10 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
-from backend.app.ai.prompting import render_template
+from backend.app.ai.prompting import RETIRED_TEMPLATE_VARIABLES, render_template
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.registry.indicators import indicator_by_column, indicators_for
 from backend.app.services.buyer_risk_tolerance import normalize_unacceptable_risk_flags
-from backend.app.services.industry_taxonomy import (
-    industry_l1_prompt_list,
-    industry_l2_prompt_list,
-)
 from backend.app.services.recommendation_trace import (
     RecommendationTraceContext,
     insert_recommendation_node_trace,
@@ -101,7 +97,7 @@ def _coerce_value(kind: str, value: Any) -> Any | None:
         return text_value if text_value in _REQUIREMENT_STRENGTH_VALUES else None
     if kind == "region_list":
         return value if isinstance(value, list) else None
-    if kind in {"industry_list", "string_list"}:
+    if kind == "string_list":
         if isinstance(value, str):
             item = value.strip()
             return [item] if item else None
@@ -524,9 +520,10 @@ def parse_recommendation_intent(
             "mode": mode,
             "user_message": user_message,
             "history_context": history_context or "",
-            "industry_l1_list": industry_l1_prompt_list(db),
-            "industry_l2_list": industry_l2_prompt_list(db),
             "screening_fields_json": screening_fields_prompt_json(),
+            # 行业字典 0908 下线；旧版 prompt（v0.3.1 及之前）还引用两个字典变量，
+            # 传成空串让它渲染出空清单而不是 "null"。阶段 B 删。
+            **RETIRED_TEMPLATE_VARIABLES,
         }
         system_prompt = render_template(node.get("system_prompt"), variables)
         if system_prompt:

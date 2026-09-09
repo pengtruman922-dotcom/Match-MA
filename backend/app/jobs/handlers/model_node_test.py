@@ -11,11 +11,10 @@ from backend.app.ai.embedding_client import (
     call_openai_compatible_embedding,
 )
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
-from backend.app.ai.prompting import render_template
+from backend.app.ai.prompting import RETIRED_TEMPLATE_VARIABLES, render_template
 from backend.app.ai.ocr_client import OcrInput, build_attachment_ocr_input_json, call_attachment_ocr
 from backend.app.jobs.queue import JobClaim
 from backend.app.registry.indicators import indicators_for
-from backend.app.services.industry_taxonomy import industry_l1_prompt_list, industry_l2_prompt_list
 from backend.app.services.region_dictionary import PROVINCES
 
 from backend.app.jobs.handlers.common import (
@@ -333,8 +332,8 @@ def _business_test_variables(
         "buyer_profile_json": json.dumps({"buyer_name": "测试买家"}, ensure_ascii=False),
         "semantic_parse_json": json.dumps(semantic_sample, ensure_ascii=False),
         "field_contract_json": json.dumps(contract, ensure_ascii=False),
-        "industry_l1_list": industry_l1_prompt_list(db),
-        "industry_l2_list": industry_l2_prompt_list(db),
+        # 行业字典 0908 下线；旧版 prompt 还引用的两个字典变量传成空串（阶段 B 删）。
+        **RETIRED_TEMPLATE_VARIABLES,
         "province_list": "、".join(PROVINCES),
         "enum_contract_json": json.dumps(
             {item["field"]: item["enum_values"] for item in contract if item["enum_values"]},

@@ -19,6 +19,7 @@ from backend.app.api.routes.utils import (
 )
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.registry.indicators import indicator_by_column
+from backend.app.services.business_tags import business_tags_text
 from backend.app.services.relation_flow import DEEP_PROGRESS_STATUSES
 
 
@@ -504,14 +505,11 @@ def _target_facts(item: dict[str, Any]) -> dict[str, Any]:
             item.get("location_district"),
         ) if value
     )
-    industry = " / ".join(
-        str(value) for value in (item.get("industry_l1"), item.get("industry_l2")) if value
-    )
     pe_ratio = _optional_float(item.get("pe_ratio"))
     debt_ratio = _optional_float(item.get("current_debt_ratio"))
     transfer_max = _optional_float(item.get("transfer_ratio_max"))
     facts: dict[str, Any] = {
-        "industry": industry or None,
+        "business_tags": business_tags_text(item.get("business_tags_json")),
         "region": region or None,
         "revenue_yuan": _optional_float(item.get("current_revenue_yuan")),
         "revenue_text": _money_text(item.get("current_revenue_yuan")),

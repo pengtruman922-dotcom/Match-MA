@@ -107,7 +107,7 @@ curl -s localhost/api/v1/health/db
 curl -s localhost/api/v1/meta/seed-status
 ```
 
-依次应返回 `status: ok`、`database: reachable`、以及默认 team/workspace/admin 与各字典均已写入。
+依次应返回 `status: ok`、`database: reachable`、以及默认 team/workspace/admin 已写入（行业字典 0908 起不存在，seed-status 不再报字典词条数）。
 
 然后浏览器打开 `http://<服务器公网IP>`，用 `.env` 里的 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 登录，并完成：
 

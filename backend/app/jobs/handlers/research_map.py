@@ -1,11 +1,11 @@
 """Translate a research report into this system's write contract.
 
 The research agent is good at finding things and bad at knowing which of our
-columns exist, what our industry dictionary contains this week, or which enum
-codes are legal. Those are live database state — putting them in the research
-prompt is how the prompt and the code drifted apart in the first place (a
-prompt asking for `industry_l1` while the whitelist only ever accepted
-`industry_pairs_json`, so every fact it produced was discarded).
+columns exist or which enum codes are legal. Those are live registry state —
+putting them in the research prompt is how the prompt and the code drifted
+apart in the first place (a prompt asking for `industry_l1` while the whitelist
+only ever accepted `industry_pairs_json`, so every fact it produced was
+discarded; both names are gone since 方案 0908, the lesson stands).
 
 So the split is: the agent reports what it found, in prose plus loose JSON,
 with a source URL on every claim. This node, holding the dictionaries, turns
@@ -41,7 +41,7 @@ from backend.app.jobs.handlers.research import (
 )
 from backend.app.jobs.queue import JobClaim
 from backend.app.registry.indicators import Indicator, indicators_for
-from backend.app.services.industry_taxonomy import list_l1_terms
+from backend.app.services.business_tags import business_tags_contract_note
 from backend.app.services.profile_sections import (
     PROFILE_SECTION_HINTS,
     load_profile_sections,
@@ -230,10 +230,10 @@ def _writable_indicators() -> list[Indicator]:
 
 
 def _mapping_context(db: Session, *, report: dict[str, Any]) -> dict[str, Any]:
-    """Everything the mapper needs, read fresh from the database every run.
+    """Everything the mapper needs, read fresh from the registry every run.
 
-    Dictionaries and the writable whitelist are handed over as data rather than
-    baked into the prompt, so adding an industry term or opening a column takes
+    Enum sets and the writable whitelist are handed over as data rather than
+    baked into the prompt, so opening a column or adding an enum value takes
     effect on the next run without touching a prompt version.
     """
     fields: list[dict[str, Any]] = []
@@ -256,13 +256,22 @@ def _mapping_context(db: Session, *, report: dict[str, Any]) -> dict[str, Any]:
                     " 该字段只表示公司层面的经营活动现金流量净额（总额）；"
                     "每股经营现金流、元/股等口径不是该字段，必须省略，且不得按股本倒推。"
                 )
-        if indicator.multi_value:
+        if indicator.multi_value and indicator.enum_options:
             # 形状不说清楚，模型看到 allowed_values 就会回一个单值字符串。
             # 由注册表派生而不是写进提示词正文：下一个闭集列自动获得同样的说明。
             entry["multi_value"] = True
             entry["note"] = (
                 "值是数组，元素只能取自 allowed_values；报告不支持任何一个取值时"
                 "省略该字段，不要输出空数组。"
+            )
+        elif indicator.multi_value:
+            # 自由标签列没有 allowed_values。沿用上面那句会让 mapper 按指示
+            # **省略**这个字段 —— 调研永远补不到标签，而且不报错。
+            entry["multi_value"] = True
+            entry["note"] = (
+                business_tags_contract_note("seller_target")
+                if indicator.column == "business_tags_json"
+                else "值是数组，元素是自由文本。"
             )
         fields.append(entry)
 
@@ -279,7 +288,6 @@ def _mapping_context(db: Session, *, report: dict[str, Any]) -> dict[str, Any]:
             for code, label, _ in profile_sections_for("seller_target")
         ],
         "writable_fields": fields,
-        "industry_l1_terms": list_l1_terms(db),
         "money_units": sorted(unit for unit in MONEY_UNIT_MULTIPLIERS if unit),
     }
 

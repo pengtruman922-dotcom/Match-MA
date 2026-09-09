@@ -10,11 +10,10 @@ import {
   Search,
   X,
 } from 'lucide-react';
-import { fieldSources, indicatorRegistry, meta, profileSections, research, sellerTargets } from '../../lib/api';
+import { fieldSources, indicatorRegistry, profileSections, research, sellerTargets } from '../../lib/api';
 import { formatYuan } from '../../lib/format';
 import type {
   IndicatorRegistryResponse,
-  IndustryOptionsResponse,
   FieldValueSource,
   ProfileSection,
   ProfileSectionsResponse,
@@ -27,7 +26,6 @@ import { formatListedStatus, formatTransferRatio, getSubjectDisplay } from './pr
 import { buildInfoGroups, groupFilledCount, type InfoGroup } from './infoGroups';
 import ResearchEvidenceDrawer from './ResearchEvidenceDrawer';
 import ResearchReportDrawer from './ResearchReportDrawer';
-import IndustryPairsEditor from '../../components/IndustryPairsEditor';
 import AdministrativeAreaPicker from '../../components/AdministrativeAreaPicker';
 import { fieldSourceLabel, formatSourceTime } from '../shared/fieldSource';
 
@@ -80,7 +78,6 @@ export default function TargetInfoPanel({
   const [selectedEvidence, setSelectedEvidence] = useState<FieldValueSource | null>(null);
   const [latestResearchJob, setLatestResearchJob] = useState<SellerResearchStatus['latest_job']>(null);
   const [researchReport, setResearchReport] = useState<ResearchReport | null>(null);
-  const [industryOptions, setIndustryOptions] = useState<IndustryOptionsResponse>({ l1: [], l2: [] });
   const researchBusy = researching || isResearchBusy(currentTarget);
 
   const groups = useMemo(
@@ -135,13 +132,12 @@ export default function TargetInfoPanel({
   const load = useCallback(async (showLoading = true) => {
     if (showLoading) setLoading(true);
     try {
-      const [freshTarget, profileData, proposalData, registryData, sourceData, industryData, researchStatus] = await Promise.all([
+      const [freshTarget, profileData, proposalData, registryData, sourceData, researchStatus] = await Promise.all([
         sellerTargets.get(currentTarget.id),
         profileSections.list('seller_target', currentTarget.id),
         research.proposals(currentTarget.id, 'pending_review'),
         indicatorRegistry.list('seller_target'),
         fieldSources.list({ entity_type: 'seller_target', entity_id: currentTarget.id, limit: 200 }),
-        meta.industryOptions(),
         research.sellerTargetStatus(currentTarget.id),
       ]);
       setCurrentTarget(freshTarget);
@@ -150,7 +146,6 @@ export default function TargetInfoPanel({
       setProposals(proposalData.filter((item) => item.proposed_value_json.info_status !== 'not_found'));
       setRegistry(registryData);
       setSources(sourceData);
-      setIndustryOptions(industryData);
       setLatestResearchJob(researchStatus.latest_job);
       setError(null);
     } catch (err) {
@@ -393,7 +388,6 @@ export default function TargetInfoPanel({
                           key={proposal.id}
                           proposal={proposal}
                           registry={registry}
-                          industryOptions={industryOptions}
                           busy={reviewingProposalId === proposal.id}
                           onReview={reviewProposal}
                         />
@@ -408,8 +402,10 @@ export default function TargetInfoPanel({
                         onCancel: () => setEditing(null),
                         proposalCards,
                       };
-                      if (field.field === 'industry_pairs_json') {
-                        return <IndustryPairsField key={field.field} {...shared} pairs={currentTarget.industry_pairs_json || []} options={industryOptions} onSave={(value) => saveField(field.field, value)} />;
+                      if (field.kind === 'json' && field.multiValue && field.enumOptions.length === 0) {
+                        // 自由标签列（业务标签）：没有闭集可勾选，一个文本框顿号分隔。
+                        const values = (currentTarget as unknown as Record<string, unknown>)[field.field];
+                        return <TagsField key={field.field} {...shared} values={Array.isArray(values) ? (values as string[]) : []} onSave={(value) => saveField(field.field, value)} />;
                       }
                       if (field.field === 'location_province') {
                         return <LocationField key={field.field} {...shared} target={currentTarget} onSave={saveFields} />;
@@ -447,7 +443,6 @@ export default function TargetInfoPanel({
                         key={proposal.id}
                         proposal={proposal}
                         registry={registry}
-                        industryOptions={industryOptions}
                         busy={reviewingProposalId === proposal.id}
                         onReview={reviewProposal}
                       />
@@ -468,7 +463,6 @@ export default function TargetInfoPanel({
                 key={proposal.id}
                 proposal={proposal}
                 registry={registry}
-                industryOptions={industryOptions}
                 busy={reviewingProposalId === proposal.id}
                 onReview={reviewProposal}
               />
@@ -539,27 +533,38 @@ function FieldLabel({ field }: { field: InfoGroup['fields'][number] }) {
   return <span className="flex w-28 shrink-0 items-center gap-1 pt-1 text-xs text-gray-500">{field.label}{field.screening && <span title="参与筛选与打分" className="bg-brand-50 px-1 text-[10px] font-medium text-brand-700">筛</span>}</span>;
 }
 
-function IndustryPairsField({ field, editing, saving, source, proposalCards, onStart, onCancel, onShowEvidence, pairs, options, onSave }: SpecialFieldProps & {
-  pairs: Array<{ l1: string; l2?: string }>;
-  options: IndustryOptionsResponse;
-  onSave: (value: Array<{ l1: string; l2?: string }>) => Promise<void>;
+/** 与买家侧同一种切法：顿号、中英文逗号、换行都算分隔符，去重去空。 */
+function splitTags(value: string): string[] {
+  return [...new Set(value.split(/[、，,\n]/).map((item) => item.trim()).filter(Boolean))];
+}
+
+/**
+ * 自由标签列的编辑器（业务标签，0908 起替代行业对编辑器）。
+ *
+ * 没有字典可选：一个文本框，顿号分隔，与买家主体「业务标签」同一种编辑方式。
+ * 标签写细分赛道或产品品类（汽车零部件 / PCB / 污水处理运营），不写一级大类。
+ */
+function TagsField({ field, editing, saving, source, proposalCards, onStart, onCancel, onShowEvidence, values, onSave }: SpecialFieldProps & {
+  values: string[];
+  onSave: (value: string[]) => Promise<void>;
 }) {
-  const [draftPairs, setDraftPairs] = useState<Array<{ l1: string; l2?: string }>>(pairs);
+  const [draftText, setDraftText] = useState(values.join('、'));
 
   useEffect(() => {
     if (editing) {
-      setDraftPairs(pairs);
+      setDraftText(values.join('、'));
     }
-  }, [editing, pairs]);
+  }, [editing, values]);
 
-  const display = pairs.map((pair) => [pair.l1, pair.l2].filter(Boolean).join(' / ')).join('；');
+  const display = values.join('、');
 
   return <div className="flex items-start gap-2 sm:col-span-2">
     <FieldLabel field={field} />
     <div className="min-w-0 flex-1">
-      {editing ? <div className="space-y-2">
-        <IndustryPairsEditor value={draftPairs} options={options} onChange={setDraftPairs} />
-        <div className="flex items-center gap-2"><button type="button" disabled={saving} onClick={() => void onSave(draftPairs)} className="inline-flex items-center gap-1 bg-brand-600 px-2.5 py-1 text-xs text-white disabled:opacity-40"><Check className="h-3 w-3" />保存</button><button type="button" onClick={onCancel} className="text-xs text-gray-400 hover:text-gray-600">取消</button></div>
+      {editing ? <div className="space-y-2 border border-gray-200 bg-gray-50 p-2">
+        <input className="input" value={draftText} onChange={(event) => setDraftText(event.target.value)} placeholder="细分赛道或产品品类，多个用顿号分隔，3~5 个" />
+        <p className="text-[10px] text-gray-400">自由标签，不过行业字典；写这家公司自己经营的赛道或产品，不写一级大类（制造业、能源）。</p>
+        <div className="flex items-center gap-2"><button type="button" disabled={saving} onClick={() => void onSave(splitTags(draftText))} className="inline-flex items-center gap-1 bg-brand-600 px-2.5 py-1 text-xs text-white disabled:opacity-40"><Check className="h-3 w-3" />保存</button><button type="button" onClick={onCancel} className="text-xs text-gray-400 hover:text-gray-600">取消</button></div>
       </div> : <><button type="button" disabled={!field.writable} onClick={onStart} className={`group flex w-full items-center justify-between text-left text-sm ${display ? 'text-gray-800' : 'text-gray-300'} ${field.writable ? 'hover:text-brand-600' : ''}`}><span>{display || '-'}</span>{field.writable && <Pencil className="h-3 w-3 opacity-0 group-hover:opacity-100" />}</button><FieldCaption source={source} onShowEvidence={onShowEvidence} /></>}
       {proposalCards}
     </div>
@@ -746,13 +751,11 @@ function profileSourceLabel(sourceType: string | null): string {
 function ProposalCard({
   proposal,
   registry,
-  industryOptions,
   busy,
   onReview,
 }: {
   proposal: ResearchProposal;
   registry: IndicatorRegistryResponse | null;
-  industryOptions: IndustryOptionsResponse;
   busy: boolean;
   onReview: (proposalId: string, decision: 'accept' | 'reject', reviewedValue?: unknown) => Promise<void>;
 }) {
@@ -775,13 +778,14 @@ function ProposalCard({
   const actionable = proposal.is_actionable !== false && !proposal.validation_error;
   const [modifying, setModifying] = useState(false);
   const [editDraft, setEditDraft] = useState('');
-  const [industryDraft, setIndustryDraft] = useState<Array<{ l1: string; l2?: string }>>([]);
   const [editError, setEditError] = useState<string | null>(null);
+  // 自由标签列（业务标签）的建议值是数组：编辑成顿号串，采纳时再切回数组。
+  const isFreeTagList = Boolean(indicator && indicator.kind === 'json' && indicator.multi_value && indicator.enum_options.length === 0);
 
   const beginModify = () => {
     const initial = proposalEditableValue(proposal);
-    if (proposal.field_path === 'industry_pairs_json') {
-      setIndustryDraft(proposalIndustryPairs(initial));
+    if (Array.isArray(initial)) {
+      setEditDraft(initial.map(String).filter(Boolean).join('、'));
     } else {
       setEditDraft(initial === null || initial === undefined ? '' : String(initial));
     }
@@ -791,12 +795,13 @@ function ProposalCard({
 
   const acceptModified = async () => {
     let reviewedValue: unknown = editDraft.trim();
-    if (proposal.field_path === 'industry_pairs_json') {
-      reviewedValue = industryDraft;
-      if (!industryDraft.length) {
-        setEditError('请至少选择一个行业。');
+    if (isFreeTagList) {
+      const tags = splitTags(editDraft);
+      if (!tags.length) {
+        setEditError('请至少填一个业务标签。');
         return;
       }
+      reviewedValue = tags;
     } else if (indicator?.kind === 'yuan' || indicator?.kind === 'ratio') {
       const numeric = Number(editDraft);
       if (!editDraft.trim() || !Number.isFinite(numeric)) {
@@ -880,8 +885,14 @@ function ProposalCard({
       </div>
       {modifying && (
         <div className="mt-2 space-y-2 border-t border-amber-200 pt-2">
-          {proposal.field_path === 'industry_pairs_json' ? (
-            <IndustryPairsEditor value={industryDraft} options={industryOptions} onChange={setIndustryDraft} />
+          {isFreeTagList ? (
+            <input
+              type="text"
+              value={editDraft}
+              onChange={(event) => setEditDraft(event.target.value)}
+              placeholder="多个标签用顿号分隔"
+              className="w-full border border-amber-200 bg-white px-2 py-1 text-xs outline-none focus:border-amber-500"
+            />
           ) : indicator?.kind === 'enum' ? (
             <select
               value={editDraft}
@@ -935,16 +946,6 @@ function proposalEditableValue(proposal: ResearchProposal): unknown {
     return proposal.proposed_value_json.content_text ?? '';
   }
   return proposal.normalized_proposed_value ?? proposal.proposed_value_json.value ?? '';
-}
-
-function proposalIndustryPairs(value: unknown): Array<{ l1: string; l2?: string }> {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((item) => {
-    const pair = asRecord(item);
-    const l1 = String(pair?.l1 || '').trim();
-    const l2 = String(pair?.l2 || '').trim();
-    return l1 ? [{ l1, ...(l2 ? { l2 } : {}) }] : [];
-  });
 }
 
 type ProposalValueSide = 'current' | 'proposed';

@@ -34,22 +34,22 @@ export const SEARCH_FIELD_LABELS: Record<SellerTargetSearchField | 'all', string
   target_name: '标的',
   target_subject_name: '主体',
   business_summary: '摘要',
-  industry: '行业',
+  business_tags: '业务标签',
 };
 
 export const SEARCH_FIELD_OPTIONS: Array<{ value: '' | SellerTargetSearchField; label: string }> = [
   { value: '', label: '全部字段' },
   { value: 'target_name', label: '标的名称' },
   { value: 'target_subject_name', label: '标的主体' },
-  { value: 'industry', label: '所属行业' },
+  { value: 'business_tags', label: '业务标签' },
   { value: 'business_summary', label: '业务摘要' },
 ];
 
 export type TargetFilters = {
   q: string;
   searchField?: SellerTargetSearchField;
-  industryL1: string;
-  industryL2: string;
+  /** 业务标签（自由词，0908 起替代行业两级级联）。 */
+  businessTag: string;
   province: string;
   city: string;
   district: string;
@@ -69,8 +69,7 @@ export function readTargetFilters(searchParams: URLSearchParams): TargetFilters 
   return {
     q: searchParams.get('q') || '',
     searchField,
-    industryL1: searchParams.get('industryL1') || '',
-    industryL2: searchParams.get('industryL2') || '',
+    businessTag: searchParams.get('businessTag') || '',
     province: searchParams.get('province') || '',
     city: searchParams.get('city') || '',
     district: searchParams.get('district') || '',
@@ -86,7 +85,7 @@ export function isSellerTargetSearchField(value: string | null): value is Seller
     value === 'target_name' ||
     value === 'target_subject_name' ||
     value === 'business_summary' ||
-    value === 'industry'
+    value === 'business_tags'
   );
 }
 
@@ -94,7 +93,7 @@ export function activeTargetFilterCount(filters: TargetFilters): number {
   // 市/区不单独计数：它们只是地区这一个条件的更细层级。
   return [
     filters.q,
-    filters.industryL1,
+    filters.businessTag,
     filters.province,
     filters.status,
     filters.owner,

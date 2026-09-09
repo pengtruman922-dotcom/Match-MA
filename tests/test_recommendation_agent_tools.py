@@ -42,7 +42,7 @@ def _row(index: int) -> dict[str, Any]:
         "id": f"00000000-0000-0000-0000-00000000000{index}",
         "target_name": f"标的{index}",
         "target_grade": "B",
-        "industry_pairs_json": [{"l1": "制造与工业", "l2": "专用设备"}],
+        "business_tags_json": ["专用设备", "半导体设备结构件"],
         "location_province": "浙江省",
         "location_city": "杭州市",
         "current_net_profit_yuan": Decimal("28000000"),
@@ -420,8 +420,7 @@ def test_enum_labels_come_from_the_indicator_registry() -> None:
 def test_target_facts_drops_unknowns_rather_than_reporting_them() -> None:
     facts = _target_facts(
         {
-            "industry_l1": "制造业",
-            "industry_l2": "精密制造",
+            "business_tags_json": ["精密制造", "半导体设备结构件"],
             "location_province": "浙江",
             "location_city": "杭州",
             "current_net_profit_yuan": 28000000,
@@ -431,7 +430,8 @@ def test_target_facts_drops_unknowns_rather_than_reporting_them() -> None:
         }
     )
 
-    assert facts["industry"] == "制造业 / 精密制造"
+    assert facts["business_tags"] == "精密制造、半导体设备结构件"
+    assert "industry" not in facts
     assert facts["region"] == "浙江杭州"
     assert facts["net_profit_text"] == "2800万"
     assert facts["can_control"] == "是"

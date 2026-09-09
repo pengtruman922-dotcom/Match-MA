@@ -76,12 +76,19 @@ def test_mapping_catalog_never_offers_buyer_sections_to_a_target_run() -> None:
 def test_multi_value_fields_tell_the_mapper_to_emit_an_array() -> None:
     context = _mapping_context(_RecordingDb(), report={"report_text": "x"})
     multi = [item for item in context["writable_fields"] if item.get("multi_value")]
-    assert multi, "注册表里的闭集多值列没有出现在映射字段目录中"
-    for entry in multi:
-        assert entry["allowed_values"], f"{entry['field_path']} 没带取值字典"
+    assert multi, "注册表里的多值列没有出现在映射字段目录中"
+    closed = [entry for entry in multi if entry.get("allowed_values")]
+    free = [entry for entry in multi if not entry.get("allowed_values")]
+    assert closed, "闭集多值列（重大风险、可接受交易结构）没有出现"
+    for entry in closed:
         # 「不要输出空数组」这条必须在：空数组在重大风险上的含义是「未核查」，
         # 是系统的默认状态，不是模型能得出的结论。
         assert "数组" in entry["note"] and "空数组" in entry["note"]
+    # 自由标签列（业务标签，0908）没有闭集：note 是三侧共用的契约句，不能套
+    # 「元素只能取自 allowed_values」那句 —— 那会让 mapper 按指示省略字段。
+    assert {entry["field_path"] for entry in free} == {"business_tags_json"}
+    for entry in free:
+        assert "数组" in entry["note"] and "不过任何行业字典" in entry["note"]
 
 
 def test_mapping_field_catalog_covers_everything_the_agent_may_emit() -> None:

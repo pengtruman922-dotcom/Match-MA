@@ -62,19 +62,28 @@ def test_missing_mapper_node_falls_back_instead_of_failing() -> None:
 
 
 def test_mapping_context_hands_over_dictionaries_as_data_not_prose() -> None:
-    """字段白名单、枚举取值、行业字典都是活的库状态。
+    """字段白名单与枚举取值都是活的注册表状态。
 
-    写进提示词就会随着字典更新而过期 —— prompt 要 industry_l1、白名单只收
-    industry_pairs_json，是这轮全额丢弃事故的根因。
+    写进提示词就会随着注册表更新而过期 —— prompt 要 industry_l1、白名单只收
+    industry_pairs_json，是那轮全额丢弃事故的根因（两个名字 0908 都没了，教训还在）。
     """
     context = _mapping_context(
-        _TaxonomyDb(["信息技术与通信", "医药与生命科学"]),
+        _NoNodeDb(),
         report={"report_text": "报告正文", "agent_output_json": {}},
     )
 
     field_paths = {item["field_path"] for item in context["writable_fields"]}
     assert field_paths == RESEARCH_AGENT_STRUCTURED_FIELDS
-    assert context["industry_l1_terms"] == ["信息技术与通信", "医药与生命科学"]
+    # 行业字典 0908 下线：上下文里不再有闭集词表。
+    assert "industry_l1_terms" not in context
+
+    # 自由标签列没有 allowed_values。沿用闭集多值列那句「元素只能取自 allowed_values」
+    # 会让 mapper 按指示省略这个字段 —— 调研永远补不到标签，而且不报错。
+    tags = next(item for item in context["writable_fields"] if item["field_path"] == "business_tags_json")
+    assert tags["multi_value"] is True
+    assert "allowed_values" not in tags
+    assert "不过任何行业字典" in tags["note"]
+    assert "细分赛道" in tags["note"]
 
     # 枚举取值随字段一起交付，模型不必去猜合法 code。
     listed = next(

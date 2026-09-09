@@ -15,7 +15,7 @@ Match-MA 是面向内部咨询公司的并购标的与买家需求撮合管理�
 backend/app/          FastAPI 应用
   api/routes/         API 路由（/api/v1/...）
   jobs/               后台任务队列与 handler
-  services/           业务服务（附件存储、行业字典、搜索文档等）
+  services/           业务服务（附件存储、业务标签、搜索文档、外部 Agent 视图等）
   ai/                 模型客户端（LLM / OCR / embedding / rerank / Doc2X）
   worker.py           worker 入口（--queue llm|ocr|research）
 database/migrations/  SQL 迁移（编号递增，经 backend/app/migration_sql.py 切分后由 Alembic 执行）

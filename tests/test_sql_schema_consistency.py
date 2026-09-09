@@ -76,7 +76,9 @@ SCHEMA = _build_schema()
 def test_schema_rebuild_finds_the_core_tables() -> None:
     assert "buyer_intent" in SCHEMA
     assert "seller_target" in SCHEMA
-    assert "industry_l1" in SCHEMA["seller_target"]
+    # 0908 起标的行业是自由标签列（迁移 025 建）。这个 SCHEMA 只加不减、不处理
+    # drop column，所以别拿退役列（industry_l1）作证 —— 删了它也会一直「存在」。
+    assert "business_tags_json" in SCHEMA["seller_target"]
 
 
 @pytest.mark.parametrize("source_path", CHECKED_SOURCES)

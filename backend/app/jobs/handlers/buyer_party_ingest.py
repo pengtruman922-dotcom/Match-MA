@@ -68,6 +68,7 @@ from backend.app.registry.indicators import (
 )
 from backend.app.registry.nodes import buyer_party_ingest_node_names
 from backend.app.services.attachment_status import attachment_waits_for_text_extraction
+from backend.app.services.business_tags import business_tags_contract_note
 from backend.app.services.image_inputs import (
     is_supported_multimodal_image,
     multimodal_image_constraints,
@@ -367,7 +368,8 @@ def _build_parse_context(*, party: dict[str, Any], material: dict[str, Any]) -> 
                 "（报告期，如「2024年度」），估值必须带 period_label（估值时点）。"
                 "没有时间的财务数字不可用，宁可放进 information_gaps。"
             ),
-            "business_tags": "业务标签是自由文本，不过行业字典，5 个以内，写买家自己的细分主业。",
+            # 三侧共用的契约句（services/business_tags.py），与标的侧解析拿到的是同一段话。
+            "business_tags": business_tags_contract_note("buyer_party"),
         },
     }
 
@@ -1983,7 +1985,7 @@ def _buyer_party_field_contract(columns: frozenset[str] | set[str]) -> list[dict
             if companion:
                 entry["time_companion"] = companion
         if indicator.column == "business_tags_json":
-            entry["note"] = "值是数组，自由文本不过行业字典，写买家自己的细分主业，5 个以内。"
+            entry["note"] = business_tags_contract_note("buyer_party")
         if indicator.column == "buyer_name":
             entry["note"] = "改名永远走人工复核，不会自动生效；只在材料里出现更完整的正式名称时才提。"
         contract.append(entry)

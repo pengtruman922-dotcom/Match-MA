@@ -30,8 +30,8 @@ from backend.app.config import get_settings
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
 from backend.app.registry.indicators import seller_target_fact_columns, writable_columns
+from backend.app.services.business_tags import normalize_business_tags
 from backend.app.services.field_writer import FieldWriteError, WriteProvenance, write_seller_target_fields
-from backend.app.services.industry_taxonomy import normalize_industry_pairs
 from backend.app.services.attachment_storage import (
     AttachmentNotFoundError,
     AttachmentStorageError,
@@ -68,9 +68,9 @@ class SellerTargetCreate(BaseModel):
         "insufficient",
         "parsing",
     ] = "insufficient"
-    industry_l1: str | None = None
-    industry_l2: str | None = None
-    industry_pairs_json: list[dict[str, str]] = Field(default_factory=list)
+    # 自由业务标签（方案 0908）。旧的 industry_l1 / industry_l2 / industry_pairs_json
+    # 入参已删；Pydantic 默认忽略多余字段，缓存了旧页面的前端发来也不会 422。
+    business_tags_json: list[str] = Field(default_factory=list)
     location_province: str | None = None
     location_city: str | None = None
     location_district: str | None = None
@@ -103,6 +103,8 @@ class SellerTargetOut(BaseModel):
     pending_research_conflict_count: int = 0
     research_job_type: str | None = None
     research_job_status: str | None = None
+    business_tags_json: list[str] = Field(default_factory=list)
+    # 三个退役列阶段 A 仍随行出参（值冻结），阶段 B 随 drop 一起删。
     industry_l1: str | None = None
     industry_l2: str | None = None
     industry_pairs_json: list[dict[str, str]] = Field(default_factory=list)
@@ -180,9 +182,7 @@ class SellerTargetUpdate(BaseModel):
     target_name: str | None = Field(default=None, min_length=1, max_length=300)
     target_type: str | None = None
     target_subject_name: str | None = Field(default=None, max_length=300)
-    industry_l1: str | None = None
-    industry_l2: str | None = None
-    industry_pairs_json: list[dict[str, str]] | None = None
+    business_tags_json: list[str] | None = None
     main_products_text: str | None = Field(default=None, max_length=400)
     location_province: str | None = None
     location_city: str | None = None
@@ -267,8 +267,8 @@ class SellerTargetFilterOptionOut(BaseModel):
 
 class SellerTargetCountedOptionOut(BaseModel):
     """A cascader level. ``count`` annotates a dictionary entry, it does not
-    define it — the frontend renders the full taxonomy/area dictionary and uses
-    these counts to show how many targets sit behind each choice."""
+    define it — the frontend renders the full area dictionary and uses these
+    counts to show how many targets sit behind each choice."""
 
     value: str
     count: int
@@ -276,7 +276,8 @@ class SellerTargetCountedOptionOut(BaseModel):
 
 
 class SellerTargetFilterOptionsOut(BaseModel):
-    industries: list[SellerTargetCountedOptionOut]
+    # 业务标签是自由词，没有字典骨架：扁平计数列表，只列库里真实存在的标签。
+    business_tags: list[SellerTargetFilterOptionOut]
     regions: list[SellerTargetCountedOptionOut]
     statuses: list[SellerTargetFilterOptionOut]
     owners: list[SellerTargetFilterOptionOut] = []
@@ -394,18 +395,13 @@ def create_seller_target(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     params = _seller_target_params(payload, current_user)
-    pairs = _normalized_create_industry_pairs(db, params)
-    params["industry_pairs_json"] = pairs
-    if pairs:
-        params["industry_l1"] = pairs[0]["l1"]
-        params["industry_l2"] = pairs[0].get("l2")
     row = db.execute(
         text(
             f"""
             insert into seller_target (
               team_id, workspace_id, target_name, target_type, target_subject_name, owner_user_id,
               target_grade, information_status,
-              industry_l1, industry_l2, industry_pairs_json, location_province, location_city, location_district,
+              business_tags_json, location_province, location_city, location_district,
               listed_status, current_revenue_yuan, current_net_profit_yuan,
               valuation_yuan, valuation_date, asking_price_yuan, asking_price_date, pe_ratio,
               is_for_sale, can_control, can_consolidate,
@@ -415,7 +411,7 @@ def create_seller_target(
             values (
               :team_id, :workspace_id, :target_name, :target_type, :target_subject_name, :owner_user_id,
               :target_grade, :information_status,
-              :industry_l1, :industry_l2, :industry_pairs_json, :location_province, :location_city, :location_district,
+              :business_tags_json, :location_province, :location_city, :location_district,
               :listed_status, :current_revenue_yuan, :current_net_profit_yuan,
               :valuation_yuan, :valuation_date, :asking_price_yuan, :asking_price_date, :pe_ratio,
               :is_for_sale, :can_control, :can_consolidate,
@@ -425,7 +421,7 @@ def create_seller_target(
             returning
 {SELLER_TARGET_OUT_COLUMNS}
             """
-        ).bindparams(bindparam("industry_pairs_json", type_=JSONB)),
+        ).bindparams(bindparam("business_tags_json", type_=JSONB)),
         params,
     ).mappings().one()
     create_search_doc_rebuild_job(
@@ -438,37 +434,21 @@ def create_seller_target(
     return _seller_target_out(row)
 
 
-def _normalized_create_industry_pairs(db: Session, params: dict[str, Any]) -> list[dict[str, str]]:
-    raw_pairs = params["industry_pairs_json"]
-    # An industry is optional at creation time.  Only use the retired scalar
-    # fields as a compatibility input when the caller actually supplied one;
-    # turning an empty pair into ``[{l1: null, l2: null}]`` made a blank
-    # industry incorrectly fail dictionary validation with 422.
-    if not raw_pairs and (params.get("industry_l1") or params.get("industry_l2")):
-        raw_pairs = [{"l1": params.get("industry_l1"), "l2": params.get("industry_l2")}]
-    pairs, notes = normalize_industry_pairs(db, raw_pairs)
-    if raw_pairs and not pairs:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=f"行业不在字典中：{notes[0] if notes else '无有效行业'}")
-    return pairs
-
-
-# Industry is searchable because it is a fact about the target, not just a
-# filter facet: 搜「食品」 must find a 商贸与消费/食品 target whose summary happens
-# to say 预制菜研发生产.
-_INDUSTRY_PAIR_SEARCH_SQL = (
-    "exists (select 1 from jsonb_array_elements(industry_pairs_json) pair "
-    "where pair ->> 'l1' ilike :q or pair ->> 'l2' ilike :q)"
-)
+# Business tags are searchable because they are a fact about the target, not
+# just a filter facet: 搜「食品」 must find a target tagged 休闲食品 whose summary
+# happens to say 预制菜研发生产. The ::text cast keeps it one ilike like the
+# other columns (no jsonb unnest), which is enough at this library size.
+_BUSINESS_TAG_SEARCH_SQL = "business_tags_json::text ilike :q"
 
 SELLER_TARGET_SEARCH_COLUMNS = {
     "target_name": "target_name",
     "target_subject_name": "target_subject_name",
     "business_summary": "business_summary",
-    "industry": _INDUSTRY_PAIR_SEARCH_SQL,
+    "business_tags": _BUSINESS_TAG_SEARCH_SQL,
 }
 
 SellerTargetSearchField = Literal[
-    "target_name", "target_subject_name", "business_summary", "industry"
+    "target_name", "target_subject_name", "business_summary", "business_tags"
 ]
 
 
@@ -481,14 +461,14 @@ def _search_filter(
 ) -> None:
     if not q:
         return
-    if search_field == "industry":
-        where.append(_INDUSTRY_PAIR_SEARCH_SQL)
+    if search_field == "business_tags":
+        where.append(_BUSINESS_TAG_SEARCH_SQL)
     elif search_field:
         where.append(f"{SELLER_TARGET_SEARCH_COLUMNS[search_field]} ilike :q")
     else:
         where.append(
             "(target_name ilike :q or target_subject_name ilike :q "
-            f"or business_summary ilike :q or {_INDUSTRY_PAIR_SEARCH_SQL})"
+            f"or business_summary ilike :q or {_BUSINESS_TAG_SEARCH_SQL})"
         )
     params["q"] = f"%{q}%"
 
@@ -520,28 +500,22 @@ def _location_filter(
         params[column] = normalized
 
 
-def _industry_filter(
+def _business_tag_filter(
     where: list[str],
     params: dict[str, Any],
     *,
-    industry_l1: str | None,
-    industry_l2: str | None,
+    business_tag: str | None,
 ) -> None:
-    """Both levels must hit the *same* pair, so 制造与工业/食品 never satisfies
-    a 商贸与消费 + 食品 filter through two unrelated pairs."""
-    conditions: list[str] = []
-    if industry_l1:
-        conditions.append("pair ->> 'l1' = :industry_l1")
-        params["industry_l1"] = industry_l1
-    if industry_l2:
-        conditions.append("pair ->> 'l2' = :industry_l2")
-        params["industry_l2"] = industry_l2
-    if not conditions:
+    """Exact tag containment, same operator as the buyer-party list (0824).
+
+    The value comes from filter-options, so it is one of the tags that
+    actually exist in the library — no dictionary skeleton any more (方案 0908).
+    """
+    tag = (business_tag or "").strip()
+    if not tag:
         return
-    where.append(
-        "exists (select 1 from jsonb_array_elements(industry_pairs_json) pair "
-        f"where {' and '.join(conditions)})"
-    )
+    where.append("business_tags_json ? :business_tag")
+    params["business_tag"] = tag
 
 
 @router.get("", response_model=SellerTargetListOut)
@@ -552,8 +526,7 @@ def list_seller_targets(
     offset: int = Query(default=0, ge=0),
     q: str | None = Query(default=None, max_length=200),
     search_field: SellerTargetSearchField | None = Query(default=None),
-    industry_l1: str | None = Query(default=None, max_length=120),
-    industry_l2: str | None = Query(default=None, max_length=120),
+    business_tag: str | None = Query(default=None, max_length=200),
     province: str | None = Query(default=None, max_length=60),
     city: str | None = Query(default=None, max_length=60),
     district: str | None = Query(default=None, max_length=60),
@@ -578,7 +551,7 @@ def list_seller_targets(
             params["owner_user_id"] = owner_param
 
     _search_filter(where, params, q=q, search_field=search_field)
-    _industry_filter(where, params, industry_l1=industry_l1, industry_l2=industry_l2)
+    _business_tag_filter(where, params, business_tag=business_tag)
     _location_filter(where, params, province=province, city=city, district=district)
     if status:
         # 参数名沿用 status（旧书签与既有链接不破），值域换成级别 A-E。
@@ -623,42 +596,28 @@ def seller_target_filter_options(current_user: CurrentUser, db: Session = Depend
     if owner_scope_required(current_user):
         params["scope_user_id"] = current_user.user_id
         scope_clause = "and owner_user_id = :scope_user_id"
-    # Both cascaders render a *dictionary* skeleton (industry taxonomy /
-    # @vant/area-data) and use these counts only as annotation, so a value that
-    # nobody has used yet is still selectable. That is why these are grouped by
-    # level instead of by the flattened leaf string the old filters compared.
-    industry_rows = db.execute(
-        text(
-            f"""
-            with target_pairs as (
-              select distinct
-                seller_target.id as target_id,
-                pair ->> 'l1' as l1,
-                nullif(pair ->> 'l2', '') as l2
-              from seller_target
-              cross join lateral jsonb_array_elements(industry_pairs_json) pair
-              where team_id = :team_id
-                and workspace_id = :workspace_id
-                and deleted_at is null
-                {scope_clause}
-                and coalesce(pair ->> 'l1', '') <> ''
-            ), l1_counts as (
-              select l1, count(distinct target_id) as l1_count
-              from target_pairs
-              group by l1
-            )
-            select
-              target_pairs.l1,
-              target_pairs.l2,
-              count(distinct target_pairs.target_id) as count,
-              l1_counts.l1_count
-            from target_pairs
-            join l1_counts using (l1)
-            group by target_pairs.l1, target_pairs.l2, l1_counts.l1_count
-            """
-        ),
+    # 业务标签是自由词，没有字典骨架可渲染：下拉只列库里真实存在的标签及其计数
+    # （照抄 buyer_parties.py 的聚合）。地区级联仍然渲染 @vant/area-data 的字典骨架，
+    # 计数只是注解，所以按层级分组而不是按扁平叶子串比较。
+    business_tags = _filter_options(
+        db,
+        f"""
+        select tag.value as value, count(distinct seller_target.id) as count
+        from seller_target
+        cross join lateral jsonb_array_elements_text(
+          case when jsonb_typeof(business_tags_json) = 'array' then business_tags_json else '[]'::jsonb end
+        ) as tag(value)
+        where team_id = :team_id
+          and workspace_id = :workspace_id
+          and deleted_at is null
+          {scope_clause}
+          and nullif(tag.value, '') is not null
+        group by tag.value
+        order by count desc, tag.value asc
+        limit 120
+        """,
         params,
-    ).mappings().all()
+    )
     region_rows = db.execute(
         text(
             f"""
@@ -696,7 +655,7 @@ def seller_target_filter_options(current_user: CurrentUser, db: Session = Depend
     )
     owners = [] if owner_scope_required(current_user) else owner_filter_options(db, "seller_target", params)
     return {
-        "industries": _industry_option_tree(industry_rows),
+        "business_tags": business_tags,
         "regions": _region_option_tree(region_rows),
         "statuses": statuses,
         "owners": owners,
@@ -747,33 +706,6 @@ def seller_target_dedup_check(
         .all()
     )
     return {"query": query, "matches": list(names)}
-
-
-def _industry_option_tree(rows: list[Any]) -> list[dict[str, Any]]:
-    """Roll (l1, l2, count) rows up into the two levels the cascader renders.
-
-    An L1 count is the number of targets carrying that L1 in *any* pair, so it
-    matches what selecting that L1 alone will return.
-    """
-    by_l1: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        level_one = by_l1.setdefault(
-            row["l1"],
-            {"value": row["l1"], "count": int(row["l1_count"]), "children": {}},
-        )
-        if row["l2"]:
-            child = level_one["children"].setdefault(row["l2"], {"value": row["l2"], "count": 0})
-            child["count"] += int(row["count"])
-    return [
-        {
-            "value": item["value"],
-            "count": item["count"],
-            "children": sorted(
-                item["children"].values(), key=lambda child: (-child["count"], child["value"])
-            ),
-        }
-        for item in sorted(by_l1.values(), key=lambda item: (-item["count"], item["value"]))
-    ]
 
 
 def _region_option_tree(rows: list[Any]) -> list[dict[str, Any]]:
@@ -1195,12 +1127,6 @@ def update_seller_target(
     original = _get_seller_target_or_404(db, seller_target_id)
     ensure_entity_writable(db, current_user, entity_type="seller_target", entity_id=seller_target_id)
     changes = payload.model_dump(exclude_unset=True)
-    if "industry_pairs_json" not in changes and ("industry_l1" in changes or "industry_l2" in changes):
-        legacy_pair = {"l1": changes.get("industry_l1"), "l2": changes.get("industry_l2")}
-        if legacy_pair["l1"] or legacy_pair["l2"]:
-            changes["industry_pairs_json"] = [legacy_pair]
-    changes.pop("industry_l1", None)
-    changes.pop("industry_l2", None)
 
     fact_changes = {key: value for key, value in changes.items() if key in writable_columns("manual")}
     if fact_changes:
@@ -1701,9 +1627,7 @@ def _seller_target_params(payload: SellerTargetCreate, current_user: AuthContext
         "owner_user_id": owner_user_id,
         "target_grade": payload.target_grade,
         "information_status": payload.information_status,
-        "industry_l1": _normalize_optional_text(payload.industry_l1),
-        "industry_l2": _normalize_optional_text(payload.industry_l2),
-        "industry_pairs_json": payload.industry_pairs_json,
+        "business_tags_json": normalize_business_tags(payload.business_tags_json),
         "location_province": normalize_province(payload.location_province),
         "location_city": normalize_city(payload.location_city),
         "location_district": normalize_district(payload.location_district),

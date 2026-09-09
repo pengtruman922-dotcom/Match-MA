@@ -21,11 +21,11 @@ export interface CascadeLevel {
 /**
  * A filter whose levels narrow each other, e.g. 省 → 市 → 区.
  *
- * Options come from a dictionary (行业字典 / 行政区划), not from the values that
- * happen to exist in the library, so a freshly-added target is findable by a
- * category nobody has used yet. `count` only annotates how many targets sit
- * behind each choice; zero-count entries stay selectable but sort last and
- * render muted.
+ * Options come from a dictionary (行政区划), not from the values that happen to
+ * exist in the library, so a freshly-added target is findable by a region
+ * nobody has used yet. `count` only annotates how many targets sit behind each
+ * choice; zero-count entries stay selectable but sort last and render muted.
+ * (行业字典 0908 下线后只剩地区在用它；业务标签是自由词，走扁平的 FilterSelect。)
  */
 export default function CascadeFilter({
   label,

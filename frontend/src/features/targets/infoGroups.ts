@@ -68,10 +68,6 @@ function formatValue(indicator: IndicatorMeta, target: SellerTarget, helpers: In
     }
     case 'location_province':
       return [target.location_province, target.location_city, target.location_district].filter(Boolean).join(' / ') || null;
-    case 'industry_pairs_json': {
-      const pairs = Array.isArray(target.industry_pairs_json) ? target.industry_pairs_json : [];
-      return pairs.map((pair) => [pair.l1, pair.l2].filter(Boolean).join(' / ')).join('；') || null;
-    }
     default:
       break;
   }
@@ -79,8 +75,10 @@ function formatValue(indicator: IndicatorMeta, target: SellerTarget, helpers: In
     case 'yuan':
       return raw ? helpers.formatYuan(String(raw)) : null;
     case 'json': {
-      // 闭集多值列。空数组是一个有含义的状态（重大风险：未核查），但它和「已核查
-      // 无风险」的区别由 `none` 这个取值承担，所以这里空数组仍然显示为占位符。
+      // 多值列：闭集的（重大风险、可接受交易结构）按注册表翻中文名，自由标签
+      // （业务标签，无 enum_options）原样显示。空数组是一个有含义的状态（重大风险：
+      // 未核查），但它和「已核查无风险」的区别由 `none` 这个取值承担，所以这里
+      // 空数组仍然显示为占位符。
       if (!indicator.multi_value || !Array.isArray(raw)) return text(raw);
       const labels = raw.map(
         (item) => indicator.enum_options.find((option) => option.value === item)?.label || String(item),

@@ -233,14 +233,17 @@ def test_structured_facts_are_limited_to_the_whitelist() -> None:
     claims, notes = normalize_research_output(
         {
             "structured_facts": [
-                {"field_path": "industry_pairs_json", "value": [{"l1": "信息技术与通信", "l2": "偏光膜"}], "sources": ["https://a.com/x"]},
+                {"field_path": "business_tags_json", "value": ["偏光膜", "光学膜材"], "sources": ["https://a.com/x"]},
                 {"field_path": "current_revenue_yuan", "value": 100, "sources": ["https://a.com/x"]},
                 {"field_path": "asking_price_yuan", "value": 100, "sources": ["https://a.com/x"]},
+                # 行业字典 0908 下线：旧版调研 prompt 吐的 industry_pairs_json 不再是可写字段。
+                {"field_path": "industry_pairs_json", "value": [{"l1": "信息技术与通信", "l2": "偏光膜"}], "sources": ["https://a.com/x"]},
             ]
         }
     )
 
-    assert [claim["field_path"] for claim in claims] == ["industry_pairs_json", "current_revenue_yuan"]
+    assert [claim["field_path"] for claim in claims] == ["business_tags_json", "current_revenue_yuan"]
+    assert any("unsupported_field:industry_pairs_json" in note for note in notes)
     assert any("unsupported_field:asking_price_yuan" in note for note in notes)
 
 

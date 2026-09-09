@@ -1,11 +1,13 @@
-"""Target list filters: cascading region/industry and industry-aware search.
+"""Target list filters: cascading region, business-tag containment and tag-aware search.
 
 施工单 0727 · T3. The old filters compared a flattened
 ``concat_ws(' ', 省, 市, 区)`` string for exact equality, so "只看广东省" was
-impossible — you could only pick a full 省市区 leaf. Industry had the same
-shape. Search covered name/subject/summary but *not* industry, so searching
-「食品」 missed a target whose industry pair is 商贸与消费/食品 unless the
-summary happened to repeat the word.
+impossible — you could only pick a full 省市区 leaf. Search covered
+name/subject/summary but *not* the industry facet.
+
+方案 0908: the industry dictionary is gone. The facet is now the free business
+tag list (``business_tags_json``), filtered by exact containment (same operator
+as the buyer-party list) and searched through a ``::text ilike``.
 
 The filters are pure ``(where, params)`` builders precisely so they can be
 asserted without a database.
@@ -18,11 +20,11 @@ import pytest
 from backend.app.api.routes.seller_targets import (
     SELLER_TARGET_OUT_COLUMNS,
     SELLER_TARGET_SEARCH_COLUMNS,
-    _industry_filter,
-    _industry_option_tree,
+    _business_tag_filter,
     _location_filter,
     _search_filter,
     list_seller_targets,
+    seller_target_filter_options,
 )
 
 
@@ -81,72 +83,65 @@ def test_region_values_are_normalized_before_matching() -> None:
     assert params["location_province"] == "广东省"
 
 
-# --- 行业 -------------------------------------------------------------------
+# --- 业务标签 ---------------------------------------------------------------
 
 
-def test_industry_l1_count_is_distinct_target_count_not_sum_of_children() -> None:
-    rows = [
-        {"l1": "信息技术与通信", "l2": "软件", "count": 8, "l1_count": 8},
-        {"l1": "信息技术与通信", "l2": "人工智能", "count": 1, "l1_count": 8},
-    ]
-    tree = _industry_option_tree(rows)
-    assert tree[0]["count"] == 8
-    assert sum(child["count"] for child in tree[0]["children"]) == 9
+def test_business_tag_filter_is_exact_containment() -> None:
+    """与买家主体列表同一个算子：`business_tags_json ? :tag`，不做模糊匹配。
+
+    下拉的取值来自 filter-options，本来就是库里真实存在的标签；模糊匹配会让
+    「食品」同时命中「休闲食品」「食品机械」，而顾问点的是那一个词。
+    """
+    where, params = _build(_business_tag_filter, business_tag="汽车零部件")
+    assert where == ["business_tags_json ? :business_tag"]
+    assert params == {"business_tag": "汽车零部件"}
 
 
-def test_industry_l1_only_matches_any_pair() -> None:
-    where, params = _build(_industry_filter, industry_l1="商贸与消费", industry_l2=None)
-    joined = " ".join(where)
-    assert "jsonb_array_elements(industry_pairs_json)" in joined
-    assert "'l1' = :industry_l1" in joined
-    assert ":industry_l2" not in joined
-    assert params == {"industry_l1": "商贸与消费"}
-
-
-def test_industry_l1_and_l2_must_match_the_same_pair() -> None:
-    where, params = _build(_industry_filter, industry_l1="商贸与消费", industry_l2="食品")
-    joined = " ".join(where)
-    # 同一个 pair 内同时命中，否则「商贸与消费/其他」+「制造与工业/食品」会被误判。
-    assert joined.count("jsonb_array_elements(industry_pairs_json)") == 1
-    assert "'l1' = :industry_l1" in joined and "'l2' = :industry_l2" in joined
-    assert params == {"industry_l1": "商贸与消费", "industry_l2": "食品"}
-
-
-def test_industry_l2_only_matches_without_parent() -> None:
-    where, params = _build(_industry_filter, industry_l1=None, industry_l2="食品")
-    joined = " ".join(where)
-    assert "'l2' = :industry_l2" in joined
-    assert ":industry_l1" not in joined
-    assert params == {"industry_l2": "食品"}
-
-
-def test_empty_industry_adds_nothing() -> None:
-    where, params = _build(_industry_filter, industry_l1=None, industry_l2=None)
+def test_business_tag_filter_trims_and_ignores_blank() -> None:
+    where, params = _build(_business_tag_filter, business_tag="  PCB ")
+    assert params == {"business_tag": "PCB"}
+    where, params = _build(_business_tag_filter, business_tag="   ")
     assert where == []
     assert params == {}
+
+
+def test_business_tag_filter_does_not_touch_the_retired_industry_columns() -> None:
+    """行业字典 0908 下线：筛选不得再读 industry_pairs_json / industry_l1 / industry_l2。"""
+    source = inspect.getsource(_business_tag_filter) + inspect.getsource(seller_target_filter_options)
+    for retired in ("industry_pairs_json", "industry_l1", "industry_l2", "industry_taxonomy"):
+        assert retired not in source
+
+
+def test_filter_options_aggregate_real_tags_not_a_dictionary_skeleton() -> None:
+    """自由标签没有字典骨架可渲染：下拉只列库里真实存在的标签及其计数。"""
+    source = inspect.getsource(seller_target_filter_options)
+    assert "jsonb_array_elements_text" in source
+    assert "business_tags" in source
+    assert "industries" not in source
 
 
 # --- 搜索 -------------------------------------------------------------------
 
 
-def test_industry_is_a_searchable_field() -> None:
-    assert "industry" in SELLER_TARGET_SEARCH_COLUMNS
+def test_business_tags_is_a_searchable_field() -> None:
+    assert "business_tags" in SELLER_TARGET_SEARCH_COLUMNS
+    assert "industry" not in SELLER_TARGET_SEARCH_COLUMNS
 
 
-def test_all_field_search_includes_industry_pairs() -> None:
-    """搜「食品」要能命中行业为 商贸与消费/食品 的标的。"""
+def test_all_field_search_includes_business_tags() -> None:
+    """搜「食品」要能命中标签为「休闲食品」的标的，即使摘要里没这个词。"""
     where, params = _build(_search_filter, q="食品", search_field=None)
     joined = " ".join(where)
     assert "target_name ilike :q" in joined
     assert "business_summary ilike :q" in joined
-    assert "jsonb_array_elements(industry_pairs_json)" in joined
+    assert "business_tags_json::text ilike :q" in joined
     assert params["q"] == "%食品%"
 
 
-def test_industry_search_field_only_searches_industry() -> None:
-    where, params = _build(_search_filter, q="食品", search_field="industry")
+def test_business_tags_search_field_only_searches_tags() -> None:
+    where, params = _build(_search_filter, q="食品", search_field="business_tags")
     joined = " ".join(where)
-    assert "jsonb_array_elements(industry_pairs_json)" in joined
+    assert "business_tags_json::text ilike :q" in joined
     assert "target_name" not in joined
     assert "business_summary" not in joined
     assert params["q"] == "%食品%"

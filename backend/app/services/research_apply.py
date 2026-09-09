@@ -25,7 +25,6 @@ from backend.app.services.field_writer import (
     write_buyer_party_fields,
     write_seller_target_fields,
 )
-from backend.app.services.industry_taxonomy import normalize_industry_pairs, normalize_l2_values, resolve_l1
 from backend.app.services.profile_sections import apply_profile_section
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 
@@ -448,20 +447,13 @@ def normalize_structured_fact(
 ) -> Any:
     """Turn one proposed fact into something the field writer will accept.
 
-    Only two things happen here that the writer cannot do for itself: money
-    units (the writer sees a number with no idea whether it was 万元) and the
-    industry dictionaries (a label outside the taxonomy silently removes the
-    target from the pools it belongs in, rather than showing up as a bad value
-    on the page). Type, enum and range checks are left to `field_writer`, which
+    Only one thing happens here that the writer cannot do for itself: money
+    units (the writer sees a number with no idea whether it was 万元). Type,
+    enum, range and business-tag checks are left to `field_writer`, which
     derives them from the same registry — duplicating them here is how the two
-    ends drift apart.
+    ends drift apart. (The industry dictionary branches that used to live here
+    went with the dictionary itself, 方案 0908.)
     """
-    if field_path == "industry_pairs_json":
-        pairs, notes = normalize_industry_pairs(db, value)
-        if not pairs:
-            raise ResearchApplyError(f"行业不在字典中：{notes[0] if notes else '空值'}")
-        return pairs
-
     indicator = _indicator(field_path, entity)
     if indicator is not None and indicator.kind == "yuan":
         if field_path == "current_operating_cash_flow_yuan":
@@ -505,16 +497,6 @@ def normalize_structured_fact(
         if text_value not in LISTED_STATUS_VALUES:
             raise ResearchApplyError("上市状态值无效。")
         return text_value
-    if field_path == "industry_l1":
-        resolved = resolve_l1(db, text_value)
-        if resolved is None:
-            raise ResearchApplyError("一级行业不在字典中。")
-        return resolved
-    if field_path == "industry_l2":
-        resolved_values, _ = normalize_l2_values(db, [text_value])
-        if not resolved_values:
-            raise ResearchApplyError("二级行业不在字典中。")
-        return resolved_values[0]
     # 文本长度上限归 field_writer 的 _TEXT_LIMITS 管，这里不再各留一份 ——
     # 旧的 120 字符兜底会把风险摘要拦腰截断。
     return text_value

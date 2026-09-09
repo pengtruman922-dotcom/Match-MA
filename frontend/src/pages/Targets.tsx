@@ -20,7 +20,6 @@ import SearchSuggestionList from '../components/SearchSuggestionList';
 import { setOrDelete } from '../lib/utils';
 import CreateTargetModal from '../features/targets/CreateTargetModal';
 import TargetRow from '../features/targets/TargetRow';
-import IndustryFilter from '../features/targets/IndustryFilter';
 import RegionFilter from '../features/targets/RegionFilter';
 import {
   activeTargetFilterCount,
@@ -43,7 +42,7 @@ export default function Targets() {
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState(filters.q);
   const [filterOptions, setFilterOptions] = useState<SellerTargetFilterOptions>({
-    industries: [],
+    business_tags: [],
     regions: [],
     statuses: [],
   });
@@ -77,8 +76,7 @@ export default function Targets() {
     const next = new URLSearchParams(searchParams);
     if ('q' in patch) setOrDelete(next, 'q', patch.q);
     if ('searchField' in patch) setOrDelete(next, 'searchField', patch.searchField);
-    if ('industryL1' in patch) setOrDelete(next, 'industryL1', patch.industryL1);
-    if ('industryL2' in patch) setOrDelete(next, 'industryL2', patch.industryL2);
+    if ('businessTag' in patch) setOrDelete(next, 'businessTag', patch.businessTag);
     if ('province' in patch) setOrDelete(next, 'province', patch.province);
     if ('city' in patch) setOrDelete(next, 'city', patch.city);
     if ('district' in patch) setOrDelete(next, 'district', patch.district);
@@ -101,8 +99,7 @@ export default function Targets() {
       .list({
         q: filters.q || undefined,
         search_field: filters.searchField,
-        industry_l1: filters.industryL1 || undefined,
-        industry_l2: filters.industryL2 || undefined,
+        business_tag: filters.businessTag || undefined,
         province: filters.province || undefined,
         city: filters.city || undefined,
         district: filters.district || undefined,
@@ -373,7 +370,7 @@ export default function Targets() {
               onFocus={() => setShowSuggestions(true)}
               onBlur={() => window.setTimeout(() => setShowSuggestions(false), 120)}
               onKeyDown={(event) => event.key === 'Enter' && handleSearch()}
-              placeholder="搜索标的名称、主体、行业或摘要..."
+              placeholder="搜索标的名称、主体、业务标签或摘要..."
               className="w-full pl-9 pr-4 py-2 border border-gray-200 text-sm outline-none focus:border-brand-600 transition-colors bg-white"
             />
             <SearchSuggestionList
@@ -387,10 +384,12 @@ export default function Targets() {
             />
           </div>
         </div>
-        <IndustryFilter
-          value={{ l1: filters.industryL1, l2: filters.industryL2 }}
-          options={filterOptions.industries}
-          onChange={(next) => updateFilters({ industryL1: next.l1, industryL2: next.l2, page: 1 })}
+        {/* 业务标签是自由词，没有字典骨架：下拉只列库里真实存在的标签（0908 起替代行业级联）。 */}
+        <FilterSelect
+          label="业务标签"
+          value={filters.businessTag}
+          options={filterOptions.business_tags}
+          onChange={(value) => updateFilters({ businessTag: value, page: 1 })}
         />
         <RegionFilter
           value={{ province: filters.province, city: filters.city, district: filters.district }}
@@ -428,8 +427,7 @@ export default function Targets() {
               updateFilters({
                 q: '',
                 searchField: undefined,
-                industryL1: '',
-                industryL2: '',
+                businessTag: '',
                 province: '',
                 city: '',
                 district: '',
@@ -503,7 +501,7 @@ export default function Targets() {
                 <th className="w-[100px] text-center px-4 py-3 font-medium text-gray-600">AI 处理</th>
                 <th className="w-[92px] text-left px-4 py-3 font-medium text-gray-600">类型</th>
                 <th className="w-[96px] text-left px-4 py-3 font-medium text-gray-600">上市状态</th>
-                <th className="w-[150px] text-left px-4 py-3 font-medium text-gray-600">行业</th>
+                <th className="w-[150px] text-left px-4 py-3 font-medium text-gray-600">业务标签</th>
                 <th className="w-[130px] text-left px-4 py-3 font-medium text-gray-600">地区</th>
                 <th className="w-[130px] text-right px-4 py-3 font-medium text-gray-600">价格</th>
                 <th className="w-[110px] text-left px-4 py-3 font-medium text-gray-600">价格时间</th>

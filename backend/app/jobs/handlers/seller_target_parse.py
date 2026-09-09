@@ -9,6 +9,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from backend.app.ai.llm_client import LlmCallError, call_openai_compatible_chat
+from backend.app.ai.prompting import RETIRED_TEMPLATE_VARIABLES
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID, SYSTEM_USER_ID
 from backend.app.jobs.queue import JobClaim
 from backend.app.registry.indicators import (
@@ -17,14 +18,8 @@ from backend.app.registry.indicators import (
     writable_columns,
     writable_enum_values,
 )
+from backend.app.services.business_tags import business_tags_contract_note, normalize_business_tags
 from backend.app.services.field_writer import WriteProvenance, write_seller_target_fields
-from backend.app.services.industry_taxonomy import (
-    industry_l1_prompt_list,
-    industry_l2_prompt_list,
-    normalize_industry_pairs,
-    normalize_l2_values,
-    resolve_l1,
-)
 from backend.app.services.seller_target_status import mark_parse_completed
 
 from backend.app.jobs.handlers.common import (
@@ -68,8 +63,9 @@ def _handle_seller_target_parse(db: Session, job: JobClaim) -> dict[str, object]
         {
             "raw_target_text": raw_target_text,
             "target_context_json": target_context_json,
-            "industry_l1_list": industry_l1_prompt_list(db),
-            "industry_l2_list": industry_l2_prompt_list(db),
+            # 行业字典 0908 下线。旧版 prompt（v0.11.0）还引用 industry_l1_list，
+            # 传成空串让它渲染出空清单而不是 "null"；阶段 B 删。
+            **RETIRED_TEMPLATE_VARIABLES,
         },
     )
     input_json = {
@@ -116,7 +112,6 @@ def _handle_seller_target_parse(db: Session, job: JobClaim) -> dict[str, object]
     parsed_output_json = llm_result.parsed_output_json
     schema_validation_json = _validate_seller_target_parse_output(parsed_output_json)
     changes, normalization_notes = _normalize_seller_target_parse_changes(parsed_output_json)
-    normalization_notes.extend(_normalize_seller_target_industry_changes(db, changes, parsed_output_json))
     _insert_seller_target_parse_trace(
         db,
         job=job,
@@ -210,6 +205,8 @@ def _build_seller_target_parse_context(seller_target: dict[str, Any]) -> dict[st
             "money_unit": "Use CNY yuan numbers.",
             "percentage_unit": "Use numeric percentage values, e.g. 51 means 51 percent.",
             "region_policy": "Store actual target location fields; do not store whether it matches any buyer preference.",
+            # 三侧共用的标签契约句：解析、更新、调研映射拿到的是同一段话。
+            "business_tags": business_tags_contract_note("seller_target"),
         },
     }
 
@@ -306,17 +303,8 @@ def _normalize_seller_target_parse_changes(
         legacy_city = candidate.get("headquarter_city") or candidate.get("registered_city")
         if legacy_city:
             candidate["location_city"] = legacy_city
-    if "industry_pairs_json" not in candidate:
-        legacy_pair = {
-            "l1": candidate.get("industry_l1") or candidate.get("industry_primary"),
-            "l2": candidate.get("industry_l2") or candidate.get("industry_secondary"),
-        }
-        if legacy_pair["l1"] or legacy_pair["l2"]:
-            candidate["industry_pairs_json"] = [legacy_pair]
-    # They are normalization inputs only. The canonical writer receives the
-    # paired representation so L2 parentage can never be lost.
-    candidate.pop("industry_l1", None)
-    candidate.pop("industry_l2", None)
+    # 行业字典 0908 下线：旧版 prompt 吐的 industry_l1 / industry_l2 / industry_pairs_json
+    # 不再转换，下面的白名单会把它们记成 ignored_unsupported_field。
 
     notes: list[str] = []
     changes: dict[str, Any] = {}
@@ -347,8 +335,14 @@ def _normalize_seller_target_parse_changes(
         if key in SELLER_TARGET_PARSE_ENUM_FIELDS:
             changes[key] = _normalize_allowed_enum(value, SELLER_TARGET_PARSE_ENUM_FIELDS[key])
             continue
-        if key == "industry_pairs_json":
-            changes[key] = value
+        if key == "business_tags_json":
+            # 自由标签，只做形状归一，不过任何词表。归空了整列摘掉并留 note，
+            # 否则空数组会把库里已有的标签覆盖成空。
+            tags = normalize_business_tags(value)
+            if tags:
+                changes[key] = tags
+            else:
+                notes.append("dropped_business_tags_json:no_usable_tags")
             continue
         text_value = str(value).strip() if value is not None else None
         if text_value and key in SELLER_TARGET_TEXT_LIMITS:
@@ -399,29 +393,6 @@ def _seller_target_changes_with_parse_completion(
     would also roll the target back into ``parsing`` with no job behind it.
     """
     return dict(changes)
-
-def _normalize_seller_target_industry_changes(
-    db: Session,
-    changes: dict[str, Any],
-    parsed_output_json: dict[str, Any] | None = None,
-) -> list[str]:
-    """Normalize current and legacy parser outputs into canonical pairs."""
-    raw_fields = (parsed_output_json or {}).get("fields", parsed_output_json or {})
-    raw_fields = raw_fields if isinstance(raw_fields, dict) else {}
-    values = changes.get("industry_pairs_json")
-    if not values:
-        values = [{
-            "l1": raw_fields.get("industry_l1") or raw_fields.get("industry_primary"),
-            "l2": raw_fields.get("industry_l2") or raw_fields.get("industry_secondary"),
-        }]
-    pairs, notes = normalize_industry_pairs(db, values)
-    if pairs:
-        changes["industry_pairs_json"] = pairs
-    else:
-        changes.pop("industry_pairs_json", None)
-    changes.pop("industry_l1", None)
-    changes.pop("industry_l2", None)
-    return notes
 
 def _mark_seller_target_parse_failed_if_final_attempt(
     db: Session,

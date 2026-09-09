@@ -5,6 +5,9 @@
 
 技术栈：FastAPI + PostgreSQL（raw SQL）+ React/TS + Vite。两套部署并存，见下方「部署与运维」。
 
+**平台定位（2026-09 起）**：信息真源 + 只读查询（MCP，`backend/app/mcp/`）。正反向匹配由 wegent 上的外部 Agent 读文本完成，
+Match-MA 只把材料交出去。**不要往站内加任何匹配用的字典或闭集**（行业字典 0908 已整体下线），站内推荐对话只是正向辅助入口。
+
 **先读图纸**：`docs/系统总纲.md` 是系统的权威描述（业务流程、领域模型、技术决策、死表判决、待办）。做任何跨模块改动前先读它；大改落地后把结论合并回它。`平台优化方案/*.md` 是施工单（进行中与历史），与图纸冲突时以图纸为准。
 
 ## 部署与运维
@@ -92,7 +95,7 @@ ssh match-ma-aliyun 'cd /opt/match-ma/deploy && docker compose ps -a --format "t
 - **镜像只由 `migrate` 构建一次**：`x-backend` 锚点**不带 `build`**。若给每个后端服务都加 `build`，compose 会并发跑 6 份 `pip install`，小内存机器会被直接挤爆（表现为 SSH 被服务器断开）。因此必须先 `build` 再 `up`。
 - **web 容器跑在 UTC**：`Dockerfile.frontend` 的 caddy 阶段未设 `TZ`，其日志与文件时间戳比其他容器早 8 小时，排查时先换算。
 - **性能瓶颈在公网带宽，不在服务端**：实测服务端全部接口 < 13 毫秒、gzip 压缩率 88%~91%，页面慢是 ECS 公网带宽所致（1 Mbps ≈ 130 KB/s，首屏 230 KB 即需 2.5 秒）。遇到"系统慢"先量带宽，不要去优化后端。
-- **模型 / prompt / 节点配置不在代码里，迁移不会带过来**：它们是库里的数据（`model_provider_config`、`model_node_config`、`prompt_template`），`git pull` 与迁移都不管。自建环境是空的 baseline 种子，两侧会各自漂移。对齐办法：拉 Railway 的 `GET /model-config/settings-page` 存快照，再往自建 `POST /model-config/prompts`（新建版本并设默认）。**Railway 用 env 模式存 key（`ALIYUN_API_KEY`），自建没有这个环境变量、用的是 direct 模式的密文**，所以新建 provider 不能照抄——在库里 `insert ... select` 复制现有行的 `api_key_encrypted`（同一个 DashScope key 对该端点所有模型通用），密钥密文不出库。改完调 `POST /model-config/nodes/{id}/test` 验一次；OCR 类型节点该接口一律回 `skipped`，那是没实现，不是坏了。
+- **模型 / prompt / 节点配置不在代码里，迁移不会带过来**：它们是库里的数据（`model_provider_config`、`model_node_config`、`prompt_template`），`git pull` 与迁移都不管。自建环境是空的 baseline 种子，两侧会各自漂移。对齐办法：拉 Railway 的 `GET /model-config/settings-page` 存快照，再往自建 `POST /model-config/prompts`（新建版本并设默认）。带版本号的发布脚本（`scripts/publish_*_prompt*.py`，`--check / --dry-run / --apply`，`--api-base` 可指向 ECS）是首选：同一份正文两边各发一次，`ensure_prompt_version_compatible` 防同版本号漂移。两边默认版本对表用《行业字典下线与标的行业字段改造方案0908.md》附录 A 的 `prompts.sql`。**改了 prompt 变量契约的发版，每套部署都先发 prompt、再上代码**（`render_template` 把未绑定变量渲染成字面量 `null`）。**Railway 用 env 模式存 key（`ALIYUN_API_KEY`），自建没有这个环境变量、用的是 direct 模式的密文**，所以新建 provider 不能照抄——在库里 `insert ... select` 复制现有行的 `api_key_encrypted`（同一个 DashScope key 对该端点所有模型通用），密钥密文不出库。改完调 `POST /model-config/nodes/{id}/test` 验一次；OCR 类型节点该接口一律回 `skipped`，那是没实现，不是坏了。
 
 ## 测试与验证
 
@@ -116,3 +119,4 @@ ssh match-ma-aliyun 'cd /opt/match-ma/deploy && docker compose ps -a --format "t
 - `prompt_template.few_shot_examples_json` 是死存储，不会注入 LLM 消息 —— few-shot 示例必须写进 `user_prompt_template` 正文。
 - 外部 Agent 的查询工具只在 `backend/app/mcp/tools.py` 登记（名称、说明、参数 schema、handler），形状逻辑在 `services/agent_buyer_views.py` / `agent_target_views.py`；**不要再往 `skills/*/` 里写查询代码**，那两个带脚本的 skill 是过渡承载，wegent 走 MCP。新增工具要同步 `tests/test_mcp_tools.py` 的名单与 `skills/match-ma-mcp/SKILL.md`。
 - Prompt 版本通过设置页「Prompt 版本管理」或 `/model-config/prompts` API 维护（新建版本/回滚都即时生效，不需要部署）；**不要再写 prompt seed 迁移**，迁移只管 schema（baseline 里的 prompt 种子是唯一例外，只服务全新安装）。仅当新 prompt 需要新输出字段/新变量时才需要配套代码发版。
+- **三侧业务标签共用一份约定**：`buyer_party` / `buyer_intent_scenario` / `seller_target` 的 `business_tags_json` 都是自由标签，归一函数 `normalize_business_tags` 与契约文案 `business_tags_contract_note(entity)` 只在 `backend/app/services/business_tags.py` 各有一份，解析、更新、调研五个节点的字段契约都引用它。改粒度约定只改那里；**不要再建行业 / 标签字典**，也不要在 `targets_filter` 加标签条件（方案 0908 判决 B，触发条件写在总纲 §2.3）。

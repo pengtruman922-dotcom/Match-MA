@@ -24,7 +24,6 @@ from backend.app.registry.nodes import (
 from backend.app.api.authn import CurrentUser, require_admin
 from backend.app.constants import DEFAULT_ADMIN_USER_ID, DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.db import get_db
-from backend.app.services.industry_taxonomy import industry_l1_prompt_list, industry_l2_prompt_list
 from backend.app.services.model_secrets import (
     ModelSecretError,
     encrypt_model_secret,
@@ -1017,13 +1016,12 @@ def deactivate_node(node_id: UUID, db: Session = Depends(get_db)) -> dict[str, A
     return row
 
 
-# 这几个变量在运行时由 handler 注入真字典，预览也必须给真值，否则编辑者写
+# 这几个变量在运行时由 handler 注入真清单，预览也必须给真值，否则编辑者写
 # 「从清单里逐字挑」时看到的是占位符，无从判断清单里到底有没有那个词。
+# （行业字典的两个变量 0908 随字典一起下线。）
 _PREVIEW_DICTIONARY_LOADERS: dict[str, Callable[[Session], str]] = {
     # 用 lambda 而不是直接引函数：晚绑定，测试替换模块级名字时才拦得住。
     "screening_fields_json": lambda _db: screening_fields_prompt_json(),
-    "industry_l1_list": lambda db: industry_l1_prompt_list(db),
-    "industry_l2_list": lambda db: industry_l2_prompt_list(db),
     "province_list": lambda _db: "、".join(PROVINCES),
 }
 

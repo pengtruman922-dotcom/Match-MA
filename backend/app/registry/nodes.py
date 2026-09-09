@@ -135,10 +135,9 @@ NODES: tuple[NodeSpec, ...] = (
             "两阶段节点未同时就绪时，由它替两者代跑。"
         ),
         runtime_inputs=("买家需求原文（含附件文本）", "买家画像上下文"),
-        # industry_l1_list / industry_l2_list 2026-09-01 从契约里移除，理由与
-        # buyer_intent_normalizer 那条相同（0828 判决一：买家需求侧行业字典下线）。
-        # **handler 仍然照常传这两个变量** —— 线上可能正跑着引用它们的 v0.9.0，
-        # 撤掉传参会让那一版渲染成 "null"。
+        # industry_l1_list / industry_l2_list 2026-09-01 从契约里移除（0828 判决一：
+        # 买家需求侧行业字典下线）。0908 行业字典整体删除后 handler 也不再传它们：
+        # 两套部署的默认版本（v0.10.0）实测都不引用。
         prompt_variables=("raw_requirement_text", "buyer_profile_json"),
         default_timeout_seconds=300,
         sort_order=50,
@@ -165,10 +164,8 @@ NODES: tuple[NodeSpec, ...] = (
         description="两阶段解析的第二步：结合字段契约、行政区划和枚举规则校验标准化。",
         runtime_inputs=("语义解析阶段输出", "买家画像上下文", "字段契约与枚举规则", "省级区划（自动注入）"),
         # industry_l1_list / industry_l2_list 2026-08-28 从契约里移除：买家需求侧的
-        # 行业字典下线，业务方向改走自由标签 + 自由文本，这份提示词不再需要注入
-        # 一百多个二级行业。**handler 仍然照常传这两个变量** —— 线上可能正跑着
-        # 引用它们的旧版本（v0.4.0 就引用），撤掉传参会让那一版渲染成 "null"。
-        # 等新版稳定、确认无回滚需求后，再把 handler 里那两行一起删。
+        # 行业字典下线，业务方向改走自由标签 + 自由文本。0908 行业字典整体删除，
+        # handler 的传参一并删掉（两套部署的默认版本 v0.5.0 实测都不引用）。
         prompt_variables=(
             "semantic_parse_json",
             "buyer_profile_json",
@@ -358,15 +355,16 @@ NODES: tuple[NodeSpec, ...] = (
             "用户消息",
             "最近 5 轮对话原文（含用户中止、AI 未作答的轮次）",
             "可筛字段清单（由指标注册表生成，自动注入）",
-            "一级 / 二级行业字典（自动注入）",
         ),
+        # industry_l1_list / industry_l2_list 2026-09-08 随行业字典整体下线移除
+        # （方案 0908）：业务方向不再是可筛条件，原样放 qualitative_requirements。
+        # 过渡期 handler 仍把这两个名字传成空串（recommendation_conditions.py），
+        # 旧版本 prompt 渲染出来是空清单而不是 "null"；阶段 B 删那两行。
         prompt_variables=(
             "mode",
             "user_message",
             "history_context",
             "screening_fields_json",
-            "industry_l1_list",
-            "industry_l2_list",
         ),
         # 30 秒在带附件正文时确实偏紧。但这个节点**有降级路径**：超时即
         # parser_status=fallback，主 Agent 只能无条件初筛或提问 ——
@@ -521,8 +519,6 @@ PROMPT_VARIABLE_LABELS: dict[str, str] = {
     "field_contract_json": "统一字段契约 JSON（可写字段、类型与枚举）",
     "enum_contract_json": "结构化字段候选值规则 JSON",
     "screening_fields_json": "可筛字段清单 JSON（由指标注册表生成，渲染时自动注入）",
-    "industry_l1_list": "一级行业字典（渲染时自动注入当前启用清单）",
-    "industry_l2_list": "二级行业字典（渲染时自动注入当前启用清单）",
     "province_list": "标准省级行政区划清单",
     "mode": "推荐方向（buyer_to_target / target_to_buyer）",
     "anchor_context": "推荐对象条件与画像文本",

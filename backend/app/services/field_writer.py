@@ -18,6 +18,7 @@ non-indicator fields (owner) and does not record a field-value source. Since
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from datetime import date
@@ -39,14 +40,26 @@ from backend.app.services.buyer_party_name import (
     BuyerPartyNameChangeRequiresReview,
     plan_buyer_party_rename,
 )
+from backend.app.services.business_tags import normalize_business_tags
 from backend.app.services.entity_grade import SELLER_GRADE, resolve_grade_pair
-from backend.app.services.industry_taxonomy import normalize_industry_pairs, normalize_l2_values, resolve_l1
 from backend.app.services.region_dictionary import NORMALIZERS as REGION_NORMALIZERS
 from backend.app.services.search_docs import create_search_doc_rebuild_job
 
 
 class FieldWriteError(ValueError):
     """A change that cannot be written — e.g. a column outside the registry."""
+
+
+def _decode_json_array(value: str) -> list[Any] | None:
+    """模型偶尔把数组 json.dumps 成字符串再塞进 value；先试解码再当标量。"""
+    text_value = value.strip()
+    if not text_value.startswith("["):
+        return None
+    try:
+        decoded = json.loads(text_value)
+    except ValueError:
+        return None
+    return decoded if isinstance(decoded, list) else None
 
 
 @dataclass
@@ -112,21 +125,16 @@ def _normalize_value(
         if indicator.column in required_columns:
             raise FieldWriteError(f"{indicator.column} may not be empty.")
         return None
-    if indicator.column == "industry_l1":
-        resolved = resolve_l1(db, str(value).strip())
-        if resolved is None:
-            raise FieldWriteError(f"一级行业不在字典中: {value!r}")
-        return resolved
-    if indicator.column == "industry_l2":
-        resolved, _ = normalize_l2_values(db, [str(value).strip()])
-        if not resolved:
-            raise FieldWriteError(f"二级行业不在字典中: {value!r}")
-        return resolved[0]
-    if indicator.column == "industry_pairs_json":
-        normalized, notes = normalize_industry_pairs(db, value)
-        if notes and not normalized:
-            raise FieldWriteError(f"行业不在字典中: {notes[0]}")
-        return normalized
+    if indicator.column == "business_tags_json":
+        # 三侧共用的自由标签列（标的 / 买家主体 / 买家方案）。只做形状归一，
+        # 不过任何词表 —— 0827 那次「整串 JSON 变成唯一一个标签」的洞在写入口
+        # 这一层也关上：字符串先试解码再当单标签，数组去空去重限长。
+        if isinstance(value, str):
+            decoded = _decode_json_array(value)
+            value = decoded if decoded is not None else value
+        if not isinstance(value, (str, list)):
+            raise FieldWriteError(f"{indicator.column} must be a JSON array of strings.")
+        return normalize_business_tags(value)
     if indicator.column in REGION_NORMALIZERS:
         # Province is spelled one way for everyone, so cascading filters match
         # regardless of whether a value came from the picker or from an LLM.
@@ -322,13 +330,6 @@ def write_seller_target_fields(
         "team_id": DEFAULT_TEAM_ID,
         "workspace_id": DEFAULT_WORKSPACE_ID,
     }
-    if "industry_pairs_json" in diff:
-        # The retired scalar columns are a read compatibility projection only.
-        # Their values are always derived from the first canonical pair.
-        first_pair = normalized_changes["industry_pairs_json"][0] if normalized_changes["industry_pairs_json"] else {}
-        set_clauses.extend(["industry_l1 = :compat_industry_l1", "industry_l2 = :compat_industry_l2"])
-        statement_params["compat_industry_l1"] = first_pair.get("l1")
-        statement_params["compat_industry_l2"] = first_pair.get("l2")
     set_clauses.extend(["updated_at = now()", "updated_by = :updated_by"])
     statement = text(
         f"""

@@ -105,8 +105,6 @@ def _captured(monkeypatch, module) -> list[dict[str, Any]]:
 
 def test_the_parser_records_a_production_call(monkeypatch) -> None:
     calls = _captured(monkeypatch, conditions)
-    monkeypatch.setattr(conditions, "industry_l1_prompt_list", lambda _db: "")
-    monkeypatch.setattr(conditions, "industry_l2_prompt_list", lambda _db: "")
     monkeypatch.setattr(
         conditions,
         "call_openai_compatible_chat",
@@ -131,8 +129,6 @@ def test_the_parser_records_a_production_call(monkeypatch) -> None:
 def test_a_degraded_parser_still_records_the_attempt(monkeypatch) -> None:
     """「节点没被调用」和「调了但降级了」在设置页上都是一片空白 —— 排查方向却相反。"""
     calls = _captured(monkeypatch, conditions)
-    monkeypatch.setattr(conditions, "industry_l1_prompt_list", lambda _db: "")
-    monkeypatch.setattr(conditions, "industry_l2_prompt_list", lambda _db: "")
 
     def boom(**_: Any):
         raise conditions.LlmCallError("LLM request timed out or dropped after 120s")

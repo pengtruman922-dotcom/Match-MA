@@ -19,9 +19,9 @@ from backend.app.db import get_db
 
 router = APIRouter(prefix="/stats", tags=["stats"])
 
-# 二级行业只取前 N 名。生产现在有 28 个不同的 L2，全画出来是一条长尾，
-# 尾部清一色 1 个，读不出任何东西。
-INDUSTRY_TOP_N = 10
+# 业务标签只取前 N 名。标签是自由词，全画出来是一条长尾，尾部清一色 1 个，
+# 读不出任何东西。（0908 之前这里是二级行业 top N，行业字典随方案 0908 下线。）
+BUSINESS_TAG_TOP_N = 10
 
 # 营收分档。阈值写死而不是按当前最大值分位，理由同地图着色：同一个档位在两次
 # 打开之间含义必须不变。(key, 中文名, 上界(不含)，最后一档为 None 表示无上界)
@@ -49,9 +49,9 @@ def _revenue_bucket_case() -> str:
 def platform_overview(current_user: CurrentUser, db: Session = Depends(get_db)) -> dict[str, Any]:
     """标的与买家主体的存量画像。
 
-    ``industries`` 是「标的数 per 二级行业」，一个标的挂两个不同 L2 会在两边各计
-    一次，所以各项之和大于 total。地区与营收分档没有这种重叠——一个标的只有一个
-    省、一个营收值。
+    ``business_tags`` 是「标的数 per 业务标签」，一个标的挂多个标签会在每个标签下
+    各计一次，所以各项之和大于 total。地区与营收分档没有这种重叠——一个标的只有
+    一个省、一个营收值。
     """
     params = {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID}
 
@@ -63,12 +63,9 @@ def platform_overview(current_user: CurrentUser, db: Session = Depends(get_db)) 
               count(*) as total,
               count(*) filter (where nullif(location_province, '') is null) as province_unknown,
               count(*) filter (
-                where not exists (
-                  select 1
-                  from jsonb_array_elements(coalesce(industry_pairs_json, '[]'::jsonb)) pair
-                  where coalesce(pair ->> 'l2', '') <> ''
-                )
-              ) as industry_unknown,
+                where jsonb_typeof(business_tags_json) <> 'array'
+                   or jsonb_array_length(business_tags_json) = 0
+              ) as tags_unknown,
               count(*) filter (where current_revenue_yuan is null) as revenue_unknown
             from seller_target
             where team_id = :team_id
@@ -95,24 +92,26 @@ def platform_overview(current_user: CurrentUser, db: Session = Depends(get_db)) 
         params,
     ).mappings().all()
 
-    industry_rows = db.execute(
+    tag_rows = db.execute(
         text(
             """
-            with target_l2 as (
+            with target_tag as (
               select distinct
                 seller_target.id as target_id,
-                pair ->> 'l2' as l2
+                tag.value as tag
               from seller_target
-              cross join lateral jsonb_array_elements(industry_pairs_json) pair
+              cross join lateral jsonb_array_elements_text(
+                case when jsonb_typeof(business_tags_json) = 'array' then business_tags_json else '[]'::jsonb end
+              ) as tag(value)
               where team_id = :team_id
                 and workspace_id = :workspace_id
                 and deleted_at is null
-                and coalesce(pair ->> 'l2', '') <> ''
+                and nullif(tag.value, '') is not null
             )
-            select l2, count(*) as count
-            from target_l2
-            group by l2
-            order by count desc, l2
+            select tag, count(*) as count
+            from target_tag
+            group by tag
+            order by count desc, tag
             """
         ),
         params,
@@ -175,13 +174,14 @@ def platform_overview(current_user: CurrentUser, db: Session = Depends(get_db)) 
                 {"province": row["province"], "count": int(row["count"])} for row in province_rows
             ],
             "province_unknown_count": int(totals["province_unknown"]),
-            "industries": [
-                {"l2": row["l2"], "count": int(row["count"])}
-                for row in industry_rows[:INDUSTRY_TOP_N]
+            "business_tags": [
+                {"tag": row["tag"], "count": int(row["count"])}
+                for row in tag_rows[:BUSINESS_TAG_TOP_N]
             ],
-            # 榜外还有多少个二级行业。页面要说出来，否则 top 10 会被读成全部。
-            "industry_other_count": max(len(industry_rows) - INDUSTRY_TOP_N, 0),
-            "industry_unknown_count": int(totals["industry_unknown"]),
+            # 榜外还有多少个标签。页面要说出来，否则 top 10 会被读成全部。
+            "business_tags_other_count": max(len(tag_rows) - BUSINESS_TAG_TOP_N, 0),
+            # 一个标签都没有的标的数（老数据回填只覆盖了有二级行业的那部分）。
+            "business_tags_unknown_count": int(totals["tags_unknown"]),
             # 空档位也要出现，否则条形图会把「这一档一个都没有」画成「这一档不存在」。
             "revenue_buckets": [
                 {"key": key, "label": label, "count": counted_buckets.get(index, 0)}

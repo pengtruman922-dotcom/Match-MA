@@ -55,14 +55,13 @@ from backend.app.jobs.handlers.common import (
 from backend.app.jobs.handlers.seller_target_parse import (
     _mark_bound_seller_targets_complete_after_business_update_parse,
     _mark_bound_seller_targets_parse_failed_if_final_attempt,
-    _normalize_seller_target_industry_changes,
 )
 from backend.app.jobs.handlers.traces import (
     _insert_llm_trace,
 )
 from backend.app.jobs.queue import JobClaim
 from backend.app.shutdown import WorkerShutdown
-from backend.app.services.business_tags import normalize_business_tags
+from backend.app.services.business_tags import business_tags_contract_note, normalize_business_tags
 from backend.app.services.extracted_action_apply import (
     apply_buyer_intent_target_exclusion_action,
     apply_buyer_intent_update_action,
@@ -73,9 +72,6 @@ from backend.app.services.image_inputs import (
     is_supported_multimodal_image,
     multimodal_image_constraints,
     prepare_image_for_multimodal,
-)
-from backend.app.services.industry_taxonomy import (
-    industry_l1_prompt_list,
 )
 from backend.app.services.profile_sections import (
     apply_profile_section,
@@ -347,7 +343,6 @@ def _build_business_update_context(db: Session, business_update: dict[str, Any])
         "bound_seller_targets": _fetch_seller_targets(db, seller_target_ids),
         "bound_buyer_parties": _fetch_buyer_parties(db, buyer_party_ids),
         "bound_buyer_intents": _fetch_buyer_intents(db, buyer_intent_ids),
-        "industry_l1_list": industry_l1_prompt_list(db),
         # Reference date for resolving partial follow-up dates such as 0730.
         "update_date": str(business_update.get("created_at") or "")[:10],
         "instructions": {
@@ -355,6 +350,8 @@ def _build_business_update_context(db: Session, business_update: dict[str, Any])
                 "Use bound object IDs only when they clearly match; otherwise null."
             ),
             "review_policy": "Safe actions are auto-applied first, then remain visible for review and rollback.",
+            # 行业字典 0908 下线，标的的业务方向是自由标签；契约句与解析节点同一份。
+            "seller_business_tags": business_tags_contract_note("seller_target"),
         },
     }
 
@@ -691,10 +688,6 @@ def _normalize_actions(
                 proposed_changes.get("profile_sections_json")
             )
             normalization_notes.extend(profile_notes)
-        if action_type == "seller_fact_update" and db is not None:
-            normalization_notes.extend(
-                _normalize_seller_target_industry_changes(db, normalized_changes)
-            )
         if action_type == "buyer_intent_update":
             update_notes = _normalize_buyer_intent_action_changes(
                 normalized_changes,
@@ -744,19 +737,10 @@ def _normalize_proposed_changes(
     proposed_changes: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str]]:
     if action_type == "seller_fact_update":
-        # Old prompt versions still name raw industry fields. Convert them to
-        # normalization candidates before the registry-derived whitelist drops
-        # retired seller_target columns; originals remain in action evidence.
+        # Old prompt versions may still emit the retired industry keys
+        # (industry_l1 / industry_l2 / industry_pairs_json); the registry-derived
+        # whitelist drops them now that the dictionary is gone (方案 0908).
         candidate = dict(proposed_changes)
-        if "industry_pairs_json" not in candidate:
-            legacy_pair = {
-                "l1": candidate.get("industry_l1") or candidate.get("industry_primary"),
-                "l2": candidate.get("industry_l2") or candidate.get("industry_secondary"),
-            }
-            if legacy_pair["l1"] or legacy_pair["l2"]:
-                candidate["industry_pairs_json"] = [legacy_pair]
-        candidate.pop("industry_l1", None)
-        candidate.pop("industry_l2", None)
         if "location_province" not in candidate:
             legacy_province = candidate.get("headquarter_province") or candidate.get("registered_province")
             if legacy_province:
@@ -765,13 +749,15 @@ def _normalize_proposed_changes(
             legacy_city = candidate.get("headquarter_city") or candidate.get("registered_city")
             if legacy_city:
                 candidate["location_city"] = legacy_city
-        return _normalize_change_fields(
+        changes, notes = _normalize_change_fields(
             candidate,
             allowed_fields=SELLER_TARGET_CHANGE_FIELDS,
             aliases=SELLER_TARGET_FIELD_ALIASES,
             nested_aliases=NESTED_FIELD_ALIASES,
             enum_fields=SELLER_TARGET_ENUM_FIELDS,
         )
+        notes.extend(_normalize_business_tag_fields(changes))
+        return changes, notes
     if action_type == "buyer_intent_update":
         return _normalize_change_fields(
             proposed_changes,
@@ -787,6 +773,25 @@ def _normalize_proposed_changes(
             enum_fields=BUYER_SELLER_RELATION_ENUM_FIELDS,
         )
     return proposed_changes, []
+
+def _normalize_business_tag_fields(changes: dict[str, Any]) -> list[str]:
+    """三侧自由标签列的形状归一（去重去空限长），不过任何词表 —— 0828 判决一。
+
+    标的与买家两种动作走同一个函数：两处各写一份的表现是「带不带附件」决定
+    要不要去重。归空了整列摘掉并留 note，空数组会把库里已有的标签覆盖成空。
+    """
+    notes: list[str] = []
+    for tag_field in ("intent_business_tags_json", "business_tags_json"):
+        if tag_field not in changes:
+            continue
+        cleaned_tags = normalize_business_tags(changes[tag_field])
+        if cleaned_tags:
+            changes[tag_field] = cleaned_tags
+        else:
+            changes.pop(tag_field, None)
+            notes.append(f"dropped_{tag_field}:no_usable_tags")
+    return notes
+
 
 def _normalize_buyer_intent_action_changes(changes: dict[str, Any], *, evidence_text: str) -> list[str]:
     """一条 buyer_intent_update 的取值归一，**两张表的字段一起过**。
@@ -813,16 +818,7 @@ def _normalize_buyer_intent_action_changes(changes: dict[str, Any], *, evidence_
             changes.pop(field, None)
             notes.append(f"{field}:dropped_invalid_json")
 
-    # 业务标签只做形状归一（去重去空限长），不过行业字典 —— 0828 判决一。
-    # 与新建解析走同一个函数：两处各写一份的表现是「带不带附件」决定要不要去重。
-    for tag_field in ("intent_business_tags_json", "business_tags_json"):
-        if tag_field not in changes:
-            continue
-        cleaned_tags = normalize_business_tags(changes[tag_field])
-        if cleaned_tags:
-            changes[tag_field] = cleaned_tags
-        else:
-            changes.pop(tag_field, None)
+    notes.extend(_normalize_business_tag_fields(changes))
 
     source = evidence_text.lower()
     if ("估值" in evidence_text or "valuation" in source) and not (

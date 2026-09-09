@@ -53,14 +53,8 @@ from backend.app.services.buyer_risk_tolerance import normalize_unacceptable_ris
 from backend.app.services.entity_grade import BUYER_GRADE, resolve_grade_pair
 from backend.app.services.listed_status import legacy_listed_status
 from backend.app.services.profile_sections import apply_profile_section, normalize_profile_section_items
-# 行业字典在买家需求侧已于 0828 下线，这里只剩两个**提示词变量**。
-# 留着不是遗漏：prompt_template 是数据库里的版本化资源，部署新代码时线上跑的
-# 仍可能是引用 {industry_l1_list} 的旧版本，变量一撤那一版当场渲染失败。
-# 等新版 buyer_intent_normalizer 发布并确认无回滚需求后，这两行才能删。
-from backend.app.services.industry_taxonomy import (
-    industry_l1_prompt_list,
-    industry_l2_prompt_list,
-)
+# 行业字典 0828 在买家需求侧下线、0908 整体删除。两个字典提示词变量不再传：
+# 两套部署的默认版本（normalizer v0.5.0 / parser v0.10.0）实测都不引用它们。
 from backend.app.services.recommendation_conditions import CONDITION_EFFECTS
 from backend.app.services.region_dictionary import PROVINCES, normalize_buyer_regions
 from backend.app.services.search_docs import (
@@ -117,8 +111,6 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
                 "semantic_parse_json": json.dumps(semantic_output_json, ensure_ascii=False, default=str),
                 "buyer_profile_json": json.dumps(buyer_profile_json, ensure_ascii=False, default=str),
                 "field_contract_json": json.dumps(_buyer_intent_field_contract(), ensure_ascii=False),
-                "industry_l1_list": industry_l1_prompt_list(db),
-                "industry_l2_list": industry_l2_prompt_list(db),
                 "province_list": "、".join(PROVINCES),
                 "enum_contract_json": json.dumps(_buyer_intent_enum_contract(), ensure_ascii=False),
             },
@@ -127,8 +119,6 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
                 "buyer_intent_id": str(buyer_intent_id),
                 "semantic_parse_json": semantic_output_json,
                 "dictionary_snapshot": {
-                    "industry_l1": industry_l1_prompt_list(db),
-                    "industry_l2": industry_l2_prompt_list(db),
                     "provinces": list(PROVINCES),
                 },
             },
@@ -145,8 +135,6 @@ def _handle_buyer_intent_parse(db: Session, job: JobClaim) -> dict[str, object]:
             variables={
                 "raw_requirement_text": raw_requirement_text,
                 "buyer_profile_json": json.dumps(buyer_profile_json, ensure_ascii=False, default=str),
-                "industry_l1_list": industry_l1_prompt_list(db),
-                "industry_l2_list": industry_l2_prompt_list(db),
             },
             input_json={
                 "stage": "legacy_parse_and_normalize",

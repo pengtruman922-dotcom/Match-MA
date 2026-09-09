@@ -1,13 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ExternalLink, Loader2 } from 'lucide-react';
-import { dataDictionaries, modelConfig } from '../../lib/api';
-import type { IndustryDictionaryTerm, ModelNodeConfig, PromptTemplateConfig } from '../../types/api';
+import { Loader2 } from 'lucide-react';
+import { modelConfig } from '../../lib/api';
+import type { ModelNodeConfig, PromptTemplateConfig } from '../../types/api';
 import { Editor, SaveButton } from './shared';
 
 type EditorTab = 'system' | 'user' | 'schema';
-
-/** 会自动注入字典内容的变量，值来自后端渲染，编辑器只提供一个「看一眼」的入口。 */
-const DICTIONARY_VARIABLES = new Set(['industry_l1_list', 'industry_l2_list']);
 
 export default function PromptDrawer({
   node,
@@ -398,21 +395,8 @@ function VariableRow({
   readOnly: boolean;
   onInsert: () => void;
 }) {
-  const [terms, setTerms] = useState<IndustryDictionaryTerm[] | null>(null);
-  const [open, setOpen] = useState(false);
-  const isDictionary = DICTIONARY_VARIABLES.has(name);
-
-  // 懒加载：不点开就不请求字典，避免每次打开 Prompt 都白拉一次全量词条。
-  const toggleDictionary = async () => {
-    setOpen((value) => !value);
-    if (terms) return;
-    try {
-      setTerms(await dataDictionaries.industry({ level: name === 'industry_l2_list' ? 'l2' : 'l1' }));
-    } catch {
-      setTerms([]);
-    }
-  };
-
+  // 行业字典的两个变量 0908 随字典下线，「查看当前内容」入口一并删除；
+  // 运行时注入的清单（可筛字段、省份）用「渲染预览」看真值。
   return (
     <div>
       <button
@@ -426,25 +410,7 @@ function VariableRow({
       </button>
       <div className="ml-4 flex items-center gap-1 text-[11px] text-gray-500">
         <span>{label || (used ? '' : '模板中新增')}</span>
-        {isDictionary ? (
-          <button type="button" onClick={() => void toggleDictionary()} className="inline-flex items-center gap-0.5 text-brand-600 hover:underline">
-            查看当前内容<ExternalLink className="h-3 w-3" />
-          </button>
-        ) : null}
       </div>
-      {isDictionary && open ? (
-        <div className="ml-4 mt-1 flex max-h-32 flex-wrap gap-1 overflow-y-auto border border-gray-100 bg-gray-50 p-2">
-          {terms === null ? (
-            <span className="text-[10px] text-gray-400">加载中...</span>
-          ) : terms.length === 0 ? (
-            <span className="text-[10px] text-gray-400">暂无启用词条</span>
-          ) : (
-            terms.map((item) => (
-              <span key={item.id} className="bg-white px-1.5 py-0.5 text-[10px] text-gray-600">{item.term}</span>
-            ))
-          )}
-        </div>
-      ) : null}
     </div>
   );
 }

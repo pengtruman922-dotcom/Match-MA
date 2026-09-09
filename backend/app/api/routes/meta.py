@@ -85,30 +85,6 @@ def list_indicators(entity: str = "seller_target") -> dict[str, Any]:
     }
 
 
-@router.get("/industry-options")
-def list_industry_options(db: Session = Depends(get_db)) -> dict[str, list[dict[str, str]]]:
-    """Public, active taxonomy choices for the target information editor."""
-    rows = db.execute(
-        text(
-            """
-            select term, level, l1_name
-            from industry_taxonomy
-            where team_id = :team_id and workspace_id = :workspace_id
-              and active = true and level in ('l1', 'l2')
-            order by case level when 'l1' then 0 else 1 end, l1_name, sort_order, term
-            """
-        ),
-        {"team_id": DEFAULT_TEAM_ID, "workspace_id": DEFAULT_WORKSPACE_ID},
-    ).mappings().all()
-    return {
-        "l1": [{"term": str(row["term"])} for row in rows if row["level"] == "l1"],
-        "l2": [
-            {"term": str(row["term"]), "l1": str(row["l1_name"])}
-            for row in rows if row["level"] == "l2"
-        ],
-    }
-
-
 @router.get("/version")
 def version() -> dict[str, Any]:
     return _version_payload()
@@ -140,18 +116,12 @@ def seed_status(db: Session = Depends(get_db)) -> dict[str, Any]:
         "default_admin_user": _exists(db, "app_user", default_admin_id),
     }
 
-    industry_terms = int(
-        db.execute(
-            text("select count(*) from industry_taxonomy where active = true")
-        ).scalar_one()
-    )
-
-    ok = all(checks.values()) and industry_terms > 0
+    # 行业字典 0908 下线，种子只剩默认 team / workspace / admin 三样。
+    ok = all(checks.values())
 
     return {
         "status": "ok" if ok else "degraded",
         "checks": checks,
-        "industry_taxonomy_terms": industry_terms,
     }
 
 

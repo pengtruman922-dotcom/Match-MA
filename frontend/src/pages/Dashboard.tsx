@@ -113,15 +113,15 @@ export default function Dashboard() {
 
           {/* 两块条形图并排，用 items-stretch（grid 默认）让面板等高。 */}
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-            <Panel title="标的行业分布 top">
+            <Panel title="标的业务标签 top">
               <CountBars
-                items={targets.industries.map((item) => ({
-                  label: item.l2,
+                items={targets.business_tags.map((item) => ({
+                  label: item.tag,
                   count: item.count,
                 }))}
                 labelClassName="w-24"
-                emptyText="还没有标的填了二级行业"
-                footnote={industryFootnote(targets)}
+                emptyText="还没有标的填了业务标签"
+                footnote={businessTagFootnote(targets)}
               />
             </Panel>
 
@@ -146,17 +146,16 @@ export default function Dashboard() {
   );
 }
 
-function industryFootnote(targets: PlatformOverview['targets']): string {
+function businessTagFootnote(targets: PlatformOverview['targets']): string {
   const parts = [`共 ${targets.total} 个标的`];
-  if (targets.industry_other_count > 0) {
-    parts.push(`榜外另有 ${targets.industry_other_count} 个二级行业`);
+  if (targets.business_tags_other_count > 0) {
+    parts.push(`榜外另有 ${targets.business_tags_other_count} 个标签`);
   }
-  if (targets.industry_unknown_count > 0) {
-    parts.push(`${targets.industry_unknown_count} 个未细分到二级`);
+  // 老数据回填只覆盖了有二级行业的那部分，没标签的标的必须说出来，
+  // 否则榜单会被读成全库画像。标签是自由词，同义不合并是设计不是失真。
+  if (targets.business_tags_unknown_count > 0) {
+    parts.push(`${targets.business_tags_unknown_count} 个未填业务标签`);
   }
-  // 字典里 食品 / 食品制造 / 食品加工 尚未合并，同义词会各占一行——
-  // 说出来比让人以为榜单是准的强。去重工单见 `数据看板拆除验收单0729.md` §1.3。
-  parts.push('二级行业字典存在同义词未合并，同一赛道可能分散在多行');
   return parts.join('；');
 }
 

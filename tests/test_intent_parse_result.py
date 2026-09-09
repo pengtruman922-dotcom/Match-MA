@@ -59,8 +59,10 @@ def all_text(result: dict) -> str:
 
 
 def _query_prompt_module():
-    path = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "publish_query_parser_v030_prompt.py"
-    spec = importlib.util.spec_from_file_location("publish_query_parser_v030_prompt", path)
+    # 0908 起是 v0.4.0：行业字典下线，v0.3.0 / v0.3.1 的脚本引用的两个闭集变量
+    # 不在 NodeSpec 里，validate_prompt_contract 会在导入时拒绝，脚本已删。
+    path = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "publish_query_parser_v040_prompt.py"
+    spec = importlib.util.spec_from_file_location("publish_query_parser_v040_prompt", path)
     loaded = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(loaded)
@@ -778,23 +780,28 @@ def test_the_region_condition_says_it_keeps_candidates_not_removes_them() -> Non
         assert retired not in by_field, f"{retired} 已退役，不该还在提示词清单里"
 
 
-# -- Prompt v0.3.0 ------------------------------------------------------
+# -- Prompt v0.4.0 ------------------------------------------------------
 
 
-def test_query_parser_v030_uses_exactly_the_node_variables() -> None:
+def test_query_parser_v040_uses_exactly_the_node_variables() -> None:
     from backend.app.ai.prompting import extract_template_variables
     from backend.app.registry.nodes import node_by_name
 
     prompt = _query_prompt_module()
     spec = node_by_name(prompt.NODE_NAME)
     assert spec is not None
-    assert prompt.VERSION == "v0.3.0"
+    assert prompt.VERSION == "v0.4.0"
     assert set(extract_template_variables(prompt.SYSTEM_PROMPT, prompt.USER_PROMPT_TEMPLATE)) == set(
         spec.prompt_variables
     )
+    # 行业字典 0908 下线：闭集变量与「行业」规则都不能再出现。
+    body = prompt.SYSTEM_PROMPT + prompt.USER_PROMPT_TEMPLATE
+    for retired in ("industry_l1_list", "industry_l2_list", "industries_json", "industry_l2_json"):
+        assert retired not in body
+    assert "业务方向" in body and "qualitative_requirements" in body
 
 
-def test_query_parser_v030_spells_out_add_replace_delete_and_reset_semantics() -> None:
+def test_query_parser_v040_spells_out_add_replace_delete_and_reset_semantics() -> None:
     prompt = _query_prompt_module()
     body = prompt.SYSTEM_PROMPT + prompt.USER_PROMPT_TEMPLATE
 
@@ -804,7 +811,7 @@ def test_query_parser_v030_spells_out_add_replace_delete_and_reset_semantics() -
     assert "raw_text" in body and "本轮原话" in body
 
 
-def test_query_parser_v030_rejects_a_same_version_with_different_content() -> None:
+def test_query_parser_v040_rejects_a_same_version_with_different_content() -> None:
     prompt = _query_prompt_module()
     conflicting = {
         "version": prompt.VERSION,
@@ -818,7 +825,7 @@ def test_query_parser_v030_rejects_a_same_version_with_different_content() -> No
         prompt.ensure_existing_version_compatible([conflicting])
 
 
-def test_query_parser_v030_conflict_exits_nonzero(monkeypatch) -> None:
+def test_query_parser_v040_conflict_exits_nonzero(monkeypatch) -> None:
     prompt = _query_prompt_module()
 
     class FakeApi:
@@ -837,6 +844,6 @@ def test_query_parser_v030_conflict_exits_nonzero(monkeypatch) -> None:
             }]
 
     monkeypatch.setattr(prompt, "_api_client", lambda: FakeApi)
-    monkeypatch.setattr(sys, "argv", ["publish_query_parser_v030_prompt.py", "--dry-run"])
+    monkeypatch.setattr(sys, "argv", ["publish_query_parser_v040_prompt.py", "--dry-run"])
 
     assert prompt.main() != 0

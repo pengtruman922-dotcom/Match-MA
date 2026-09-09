@@ -151,7 +151,7 @@ export default function TargetDetail() {
           <div>
             <h1 className="text-lg font-semibold text-gray-900">{target.target_name}</h1>
             <p className="text-xs text-gray-500 mt-0.5 flex items-center gap-2 flex-wrap">
-              {target.industry_l1 && <span>{[target.industry_l1, target.industry_l2].filter(Boolean).join(' / ')}</span>}
+              {(target.business_tags_json || []).length > 0 && <span>{target.business_tags_json.slice(0, 3).join('、')}</span>}
               {target.location_province && <span>· {[target.location_province, target.location_city, target.location_district].filter(Boolean).join('')}</span>}
               {target.current_net_profit_yuan && <span>· 利润{formatYuan(target.current_net_profit_yuan)}</span>}
               {target.asking_price_yuan && <span>· 报价{formatYuan(target.asking_price_yuan)}*</span>}

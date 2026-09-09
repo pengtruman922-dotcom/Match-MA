@@ -342,9 +342,9 @@ def test_directional_deep_eval_offers_no_seed_now_that_it_has_no_understudy() ->
 
 
 def test_prompt_seed_refuses_copy_when_understudy_uses_unavailable_variables() -> None:
-    """买家新建解析会拿到行业字典，语义解析节点不会。
+    """代跑节点的提示词可能引用本节点收不到的变量（这里用可筛字段清单举例）。
 
-    照抄会把 {{ industry_l1_list }} 带进一个收不到该变量的节点，渲染时变成
+    照抄会把 {{ screening_fields_json }} 带进一个收不到该变量的节点，渲染时变成
     "null" 字面量塞给模型 —— 比空白更糟，所以只给理由不给内容。
     """
     spec = node_by_name("buyer_intent_semantic_parser")
@@ -355,13 +355,13 @@ def test_prompt_seed_refuses_copy_when_understudy_uses_unavailable_variables() -
         has_own_prompt=False,
         understudy_prompt=_understudy_prompt(
             None,
-            "行业：{{ industry_l1_list }}\n材料：{{ raw_requirement_text }}",
+            "可筛字段：{{ screening_fields_json }}\n材料：{{ raw_requirement_text }}",
         ),
     )
 
     assert seed is not None
     assert seed["compatible"] is False
-    assert seed["extra_variables"] == ["industry_l1_list"]
+    assert seed["extra_variables"] == ["screening_fields_json"]
     # 不兼容时绝不下发内容，避免页面「不小心」把它填进编辑器。
     assert seed["system_prompt"] is None
     assert seed["user_prompt_template"] is None

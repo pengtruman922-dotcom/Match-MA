@@ -3,8 +3,8 @@
 手写的 schema 与注册表脱钩之后必然漂移：改造前的 `_FILTER_PROPERTIES` 只开放了
 12 个字段（引擎实际支持 26 个），行业名又没有闭集约束，模型写错一个行业名会静默
 清空整个候选池。这里的每个 property 都从 `indicators_for("buyer_intent_scenario")` 里
-`screening=True` 的指标派生，行业闭集在运行时从 `industry_taxonomy` 注入 —— 模型
-填不出字典外的行业名，那条失败路径从根上消失。
+`screening=True` 的指标派生，闭集全部来自注册表的 enum_options —— 没有任何运行时
+词表要注入（行业字典 0828 退出初筛、0908 整体下线）。
 
 SQL 生成（`screening_sql.py`）与这里共用同一份 `ScreeningField`，所以「schema 里
 有、SQL 不认」这种半截接线不可能发生。
@@ -73,7 +73,7 @@ class ScreeningField:
     label: str
     operator: str  # gte | lte | in | eq | overlap | not_overlap | region_any | requirement_capability
     target_column: str  # 注册表原样声明的标的侧对手方
-    value_type: str  # number | boolean | enum | enum_list | industry_l1 | industry_l2 | industry_any | region_list
+    value_type: str  # number | boolean | enum | enum_list | region_list
     enum_values: tuple[str, ...] = ()
     unit_hint: str = ""
     # 标的没录这个数时出局还是通过。见注册表 Indicator.missing_policy ——

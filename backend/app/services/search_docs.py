@@ -13,6 +13,7 @@ from backend.app.registry.indicators import (
     buyer_intent_fact_columns,
     buyer_intent_scenario_fact_columns,
 )
+from backend.app.services.business_tags import business_tags_text
 from backend.app.services.scenario_text import dedupe_scenario_requirements
 from backend.app.services.profile_sections import load_profile_sections, render_profile_text
 
@@ -26,8 +27,7 @@ def rebuild_seller_target_search_doc(db: Session, seller_target_id: UUID) -> dic
             f"标的：{target['target_name']}",
             _kv("标的主体", target.get("target_subject_name")),
             f"类型：{target['target_type']}",
-            _kv("一级行业", target.get("industry_l1")),
-            _kv("二级行业", target.get("industry_l2")),
+            _kv("业务标签", business_tags_text(target.get("business_tags_json"), limit=8)),
             _kv("区域", _region_text(target)),
             _kv("上市状态", target.get("listed_status")),
         ]
@@ -100,7 +100,7 @@ def rebuild_seller_target_search_doc(db: Session, seller_target_id: UUID) -> dic
             "seller_target_id": seller_target_id,
             "title": title,
             "structured_summary": structured_summary,
-            "tag_text": "",
+            "tag_text": business_tags_text(target.get("business_tags_json"), limit=8) or "",
             "business_text": business_text,
             "financial_text": financial_text,
             "transaction_text": transaction_text,
@@ -392,7 +392,7 @@ def _get_seller_target(db: Session, seller_target_id: UUID) -> dict[str, Any]:
         text(
             """
             select
-              id, target_name, target_type, target_subject_name, industry_l1, industry_l2, industry_pairs_json,
+              id, target_name, target_type, target_subject_name, business_tags_json,
               location_province, location_city, location_district, listed_status,
               current_revenue_yuan, current_net_profit_yuan, valuation_yuan, valuation_date,
               asking_price_yuan, asking_price_date, pe_ratio, is_for_sale, can_control,

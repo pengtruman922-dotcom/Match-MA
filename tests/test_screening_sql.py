@@ -610,9 +610,10 @@ def test_a_returned_row_is_a_short_summary_carrying_the_conditions_values(snapsh
     ).as_tool_result()
 
     digest = payload["returned"][0]
-    assert set(digest) <= {"id", "name", "grade", "industry", "region", "current_net_profit_yuan"}
-    # 行业不再是一个筛选条件，但**仍然出现在候选摘要里** —— 主 Agent 要靠它
-    # 和业务摘要判业务匹配。退役的是「能不能筛」，不是「看不看得见」。
+    assert set(digest) <= {"id", "name", "grade", "business_tags", "region", "current_net_profit_yuan"}
+    # 业务标签不是筛选条件（判决 B），但**出现在候选摘要里** —— 主 Agent 要靠它
+    # 和业务摘要判业务匹配。行业字典 0908 下线，摘要里不再有「行业」键。
+    assert "industry" not in digest
     assert "江苏省" in digest["region"]
     # 数字原样取出，不做格式化推断 —— 格式化在写作环节统一做。
     assert isinstance(digest["current_net_profit_yuan"], float)
@@ -650,7 +651,7 @@ def test_business_scan_returns_summaries_instead_of_numbers() -> None:
         "target_grade": "B",
         "location_province": "江苏省",
         "location_city": "苏州市",
-        "industry_pairs_json": [{"l1": "制造与工业", "l2": "专用设备"}],
+        "business_tags_json": ["专用设备", "半导体设备结构件"],
         "business_summary": "做半导体设备精密结构件。",
         "main_products_text": "腔体、载台",
         "current_net_profit_yuan": 12_000_000,
@@ -670,8 +671,9 @@ def test_business_scan_returns_summaries_instead_of_numbers() -> None:
     digest = scan["returned"][0]
     assert digest["business_summary"] == "做半导体设备精密结构件。"
     assert digest["main_products"] == "腔体、载台"
-    # 行业不再是筛选维，但**仍然看得见** —— 主 Agent 要靠它和业务摘要判方向。
-    assert "制造与工业" in digest["industry"]
+    # 业务标签不是筛选维，但**看得见** —— 主 Agent 要靠它和业务摘要判方向。
+    assert digest["business_tags"] == "专用设备、半导体设备结构件"
+    assert "industry" not in digest
     # 财务数字不进业务扫描：那一步判的是业务匹配，数字已经由 SQL 做过了，
     # 带上它们只会把 300 条撑成读不完的体积。
     assert "current_net_profit_yuan" not in digest

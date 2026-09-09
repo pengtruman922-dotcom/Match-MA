@@ -15,12 +15,12 @@ from sqlalchemy.orm import Session
 
 from backend.app.constants import DEFAULT_TEAM_ID, DEFAULT_WORKSPACE_ID
 from backend.app.registry.indicators import indicator_by_column
+from backend.app.services.business_tags import business_tags_text
 from backend.app.services.profile_sections import load_profile_sections, render_profile_text
 from backend.app.services.screening_sql import (
     _GATE_SQL,
     MAX_BUSINESS_SCAN_LIMIT,
     MAX_SCREENING_LIMIT,
-    _industry_text,
     _row_digest,
     screen_targets,
 )
@@ -102,7 +102,7 @@ def targets_scan(
         db.execute(
             text(
                 f"""
-            select st.id, st.target_name, st.target_grade, st.industry_pairs_json,
+            select st.id, st.target_name, st.target_grade, st.business_tags_json,
                    st.location_province, st.location_city, st.location_district,
                    st.listed_status, st.business_summary, st.main_products_text,
                    st.updated_at::text as updated_at
@@ -123,7 +123,7 @@ def targets_scan(
                 "seller_target_id": str(row["id"]),
                 "标的名称": row.get("target_name"),
                 "级别": row.get("target_grade"),
-                "行业": _industry_text(row.get("industry_pairs_json")),
+                "业务标签": business_tags_text(row.get("business_tags_json"), limit=8),
                 "地区": _region(dict(row)),
                 "上市状态": _label("listed_status", row.get("listed_status")),
                 "业务摘要": (row.get("business_summary") or "").strip() or None,
@@ -138,7 +138,8 @@ def targets_scan(
         "offset": offset,
         "returned": returned,
         "notes": [
-            "这是全库业务扫描：每条只有业务摘要和主要产品，没有财务数字。业务是否对口由你读文本判断，行业只是辅助。",
+            "这是全库业务扫描：每条只有业务标签、业务摘要和主要产品，没有财务数字。"
+            "业务是否对口由你读文本判断，业务标签只是辅助；「业务标签」键不存在表示没录，不表示没有业务。",
             "业务摘要为空的标的不要从公司名猜业务，如实说信息不足。",
             "选出候选后用 target_get 取财务事实、交易条件、风险和五组补充说明。",
         ],
@@ -158,7 +159,7 @@ _DETAIL_COLUMNS = (
     "target_grade",
     "updated_at",
     "created_at",
-    "industry_pairs_json",
+    "business_tags_json",
     "location_province",
     "location_city",
     "location_district",
@@ -273,7 +274,7 @@ def _target_dossier(
             "标的名称": row.get("target_name"),
             "标的主体": row.get("target_subject_name"),
             "级别": row.get("target_grade"),
-            "行业": _industry_text(row.get("industry_pairs_json")),
+            "业务标签": business_tags_text(row.get("business_tags_json"), limit=8),
             "地区": _region(row),
             "业务摘要": (row.get("business_summary") or "").strip() or None,
             "主要产品": (row.get("main_products_text") or "").strip() or None,

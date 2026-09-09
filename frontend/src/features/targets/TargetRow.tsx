@@ -33,7 +33,8 @@ export default function TargetRow({
   deleting: boolean;
 }) {
   const subject = getSubjectDisplay(item);
-  const industry = [item.industry_l1, item.industry_l2].filter(Boolean).join(' / ') || '-';
+  // 0908 起列表的「业务标签」列显示自由标签（行业字典下线）；老数据可能还没标签。
+  const businessTags = (item.business_tags_json || []).filter(Boolean).join('、') || '-';
   const region = [item.location_province, item.location_city, item.location_district].filter(Boolean).join(' ') || '-';
   const price = getPreferredPrice(item);
   const priceDisplay = price ? `${formatYuan(price.value)}${price.kind === 'asking' ? '*' : ''}` : '-';
@@ -67,7 +68,7 @@ export default function TargetRow({
       <td className="px-4 py-3 text-center"><TargetAiProcessingBadge item={item} /></td>
       <td className="px-4 py-3 text-gray-600"><ClampedText value={formatTargetType(item.target_type)} /></td>
       <td className="px-4 py-3 text-gray-600"><ClampedText value={formatListedStatus(item.listed_status)} /></td>
-      <td className="px-4 py-3 text-gray-600"><ClampedText value={industry} /></td>
+      <td className="px-4 py-3 text-gray-600"><ClampedText value={businessTags} /></td>
       <td className="px-4 py-3 text-gray-600"><ClampedText value={region} /></td>
       <td className="px-4 py-3 text-right text-gray-700 font-mono" title={priceTitle}>{priceDisplay}</td>
       <td className="px-4 py-3 text-gray-600"><ClampedText value={price?.date || '-'} /></td>
