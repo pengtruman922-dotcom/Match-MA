@@ -34,6 +34,23 @@ user-invocable: true
 Wegent 侧应注册目录中的 `tool.json` 并执行 `search_buyers.py` 的同名入口；
 这个 skill 通过 HTTPS 调 Match-MA REST API，不依赖 Match-MA MCP server。
 
+如果宿主按命令行执行脚本而不是直接导入 Python 函数，使用下面的动作参数：
+
+```bash
+# 全库业务原文
+python3 search_buyers.py --business --detail full
+
+# 按名称或 id 取全量档案（--get 是兼容别名）
+python3 search_buyers.py --get --buyer-party-id <id>
+python3 search_buyers.py --get --name "北大健康"
+
+# 按条件筛选
+python3 search_buyers.py --filter --city "杭州市"
+```
+
+也可以使用 `--operation business|get|filter`。`--get`、`--business`、`--filter`
+只是命令行入口；三种返回形状和 `operation` 的含义保持不变。
+
 ## 什么时候用
 
 - 手上有一个标的（或一段出售需求描述），要找可能的买家。

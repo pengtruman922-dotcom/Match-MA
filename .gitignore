@@ -25,3 +25,6 @@ config.local.json
 
 # tsc -b 的增量缓存，不入库。
 *.tsbuildinfo
+
+# 发给 wegent 的 skill 打包文件：打包时会把同目录的 auth.local.json（管理员 JWT）一起装进去，绝不能提交。
+skills/*.zip

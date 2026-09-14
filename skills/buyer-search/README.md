@@ -1,3 +1,5 @@
+> ⚠️ **2026-09-07 起为过渡承载。** 查询逻辑已收回服务端 MCP 端点（`/api/v1/mcp`），wegent 侧改用「添加 MCP 服务」+ `skills/match-ma-mcp/SKILL.md`。本目录待 MCP 验收后删除。
+
 # 接入说明（给 wegent 那边）
 
 ## 文件
@@ -23,6 +25,14 @@
 {"operation": "business", "detail": "full"}
 {"operation": "get", "name": "北大健康"}
 {"operation": "filter", "city": "杭州市"}
+```
+
+若 Wegent 通过 shell 调用脚本，使用 `--business`、`--get` 或 `--filter` 动作参数；
+其中 `--get` 是按名称/id 取档案的兼容别名。例如：
+
+```bash
+python3 search_buyers.py --get --buyer-party-id <id>
+python3 search_buyers.py --filter --city 杭州市
 ```
 
 如果 Wegent 的导入器只接受一个 `tool.json` 对象，这个版本可以直接导入；如果它

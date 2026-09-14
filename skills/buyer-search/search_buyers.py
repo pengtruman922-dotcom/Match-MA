@@ -1063,9 +1063,16 @@ if __name__ == "__main__":
     parser.add_argument("--issue-token", action="store_true", help="登录换一个 7 天 JWT 并写入同目录的 auth.local.json")
     parser.add_argument("--show", action="store_true", help="配合 --issue-token：把完整令牌也打印出来，供手工粘贴")
     parser.add_argument("--business", action="store_true", help="接口一：全库业务原文")
+    parser.add_argument(
+        "--operation",
+        choices=["business", "get", "filter"],
+        default=None,
+        help="Wegent 单工具入口：business / get / filter；也可使用对应的动作别名",
+    )
     parser.add_argument("--detail", default="full", choices=["full", "brief"], help="接口一的详略")
     parser.add_argument("--name", default=None, help="接口二：按名称取全量档（认别名，模糊匹配）")
     parser.add_argument("--buyer-party-id", default=None, help="接口二：按 id 取全量档")
+    parser.add_argument("--get", action="store_true", help="接口二：按名称或 buyer-party-id 取全量档")
     parser.add_argument("--filter", action="store_true", help="接口三：按条件筛")
     parser.add_argument("--ownership-type", default=None)
     parser.add_argument("--listed-status", default=None)
@@ -1090,9 +1097,12 @@ if __name__ == "__main__":
     if args.check:
         raise SystemExit(check())
 
-    if args.name or args.buyer_party_id:
+    operation = args.operation
+    if operation == "business" or (operation is None and args.business):
+        result = search_buyers_business(detail=args.detail)
+    elif operation == "get" or args.get or args.name or args.buyer_party_id:
         result = get_buyer(name=args.name, buyer_party_id=args.buyer_party_id)
-    elif args.filter:
+    elif operation == "filter" or args.filter:
         result = filter_buyers(
             ownership_type=args.ownership_type,
             listed_status=args.listed_status,
