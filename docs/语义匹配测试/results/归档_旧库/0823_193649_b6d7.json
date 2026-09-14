@@ -1,0 +1,39 @@
+{
+ "id": "0823_193649_b6d7",
+ "status": "done",
+ "total": 1,
+ "done": 1,
+ "records": [
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 50,
+   "rep": 1,
+   "prompt_chars": 4421,
+   "error": "",
+   "elapsed": 23.6,
+   "parse": "json",
+   "reply_chars": 1337,
+   "prompt_tokens": 4232,
+   "completion_tokens": 943,
+   "checked": 50,
+   "checked_ok": true,
+   "expected": 11,
+   "hit_total": 8,
+   "found": 8,
+   "recall": 0.727,
+   "missed": "天津巴莫钴酸锂材料有限公司、宁波盛能电池 Pack 集成有限公司、无锡先导锂电装备股份有限公司",
+   "false_pos": 0,
+   "false_pos_names": "",
+   "extra": 0,
+   "maybe": 1,
+   "recall_thin": 0.571,
+   "recall_thick": 1.0
+  }
+ ],
+ "stop": false,
+ "error": "",
+ "started_at": "2026-08-23 19:36:49",
+ "prompt_id": "v1",
+ "model": "qwen3-max"
+}

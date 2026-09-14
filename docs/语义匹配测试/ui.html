@@ -1,0 +1,620 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>标的匹配评测台</title>
+<style>
+:root{
+  --bg:#f6f7f9; --panel:#fff; --line:#e3e6ea; --ink:#1c2024; --dim:#6b7280;
+  --accent:#2563eb; --ok:#15803d; --warn:#b45309; --bad:#b91c1c; --code:#f3f4f6;
+}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.6 "Segoe UI","Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--ink)}
+header{background:var(--panel);border-bottom:1px solid var(--line);padding:12px 20px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:9}
+header h1{font-size:16px;margin:0;font-weight:600}
+#connDot{margin-left:auto;font-size:12px;color:var(--dim)}
+nav{display:flex;gap:2px;padding:0 20px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:49px;z-index:8}
+nav button{border:0;background:none;padding:10px 16px;font-size:14px;color:var(--dim);cursor:pointer;border-bottom:2px solid transparent}
+nav button.on{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+main{padding:20px;max-width:1180px;margin:0 auto}
+.page{display:none}.page.on{display:block}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px;margin-bottom:16px}
+.card h2{font-size:14px;margin:0 0 14px;font-weight:600}
+label{display:block;font-size:12px;color:var(--dim);margin-bottom:4px}
+input[type=text],input[type=password],input[type=number],select,textarea{
+  width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:6px;font:inherit;background:#fff}
+textarea{font-family:Consolas,"Courier New",monospace;font-size:12.5px;line-height:1.55;resize:vertical}
+.row{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:12px}
+button.act{background:var(--accent);color:#fff;border:0;padding:8px 18px;border-radius:6px;cursor:pointer;font:inherit}
+button.act:disabled{opacity:.5;cursor:default}
+button.ghost{background:#fff;color:var(--ink);border:1px solid var(--line);padding:7px 14px;border-radius:6px;cursor:pointer;font:inherit}
+.hint{font-size:12px;color:var(--dim);margin-top:6px}
+.msg{padding:10px 12px;border-radius:6px;font-size:13px;margin-top:12px;white-space:pre-wrap;word-break:break-all}
+.msg.ok{background:#ecfdf3;color:var(--ok)} .msg.bad{background:#fef2f2;color:var(--bad)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{border-bottom:1px solid var(--line);padding:7px 8px;text-align:left}
+th{color:var(--dim);font-weight:600;font-size:12px}
+tr.click{cursor:pointer} tr.click:hover{background:#f9fafb}
+.pill{display:inline-block;padding:1px 7px;border-radius:99px;font-size:11px;background:var(--code);color:var(--dim)}
+.split{display:grid;grid-template-columns:230px 1fr;gap:16px}
+.list{border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.list div{padding:9px 12px;border-bottom:1px solid var(--line);cursor:pointer;font-size:13px}
+.list div.on{background:#eff6ff;color:var(--accent);font-weight:600}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chips label{display:inline-flex;align-items:center;gap:5px;background:var(--code);padding:4px 10px;border-radius:6px;font-size:12.5px;color:var(--ink);margin:0;cursor:pointer}
+#log{background:#0f172a;color:#cbd5e1;font:12px Consolas,monospace;padding:12px;border-radius:8px;height:230px;overflow:auto;white-space:pre-wrap}
+.bar{height:8px;background:var(--code);border-radius:99px;overflow:hidden;margin:10px 0}
+.bar i{display:block;height:100%;background:var(--accent);width:0;transition:width .3s}
+dialog{border:0;border-radius:10px;padding:0;max-width:860px;width:92vw}
+dialog header{position:static;border-radius:10px 10px 0 0}
+dialog pre{margin:0;padding:18px;max-height:64vh;overflow:auto;white-space:pre-wrap;font:12.5px Consolas,monospace}
+.num{font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+<header>
+  <h1>标的匹配评测台</h1>
+  <span id="connDot">● 未测试</span>
+</header>
+<nav>
+  <button class="on" data-p="conn">① 连接</button>
+  <button data-p="lib">② 标的库</button>
+  <button data-p="prompt">③ 提示词</button>
+  <button data-p="quest">④ 题库与答案</button>
+  <button data-p="run">⑤ 运行</button>
+  <button data-p="res">⑥ 结果</button>
+</nav>
+<main>
+
+<!-- ① 连接 -->
+<section class="page on" id="p-conn">
+  <div class="card">
+    <h2>模型连接</h2>
+    <div class="row">
+      <div style="grid-column:1/-1"><label>Base URL</label><input type="text" id="c_base"></div>
+    </div>
+    <div class="row">
+      <div><label>模型名</label><input type="text" id="c_model"></div>
+      <div><label>API Key</label><input type="password" id="c_key" placeholder="粘贴后点保存"></div>
+      <div><label>温度</label><input type="number" id="c_temp" step="0.1" min="0" max="2"></div>
+    </div>
+    <div class="row">
+      <div><label>超时（秒）</label><input type="number" id="c_timeout"></div>
+      <div><label>并发</label><input type="number" id="c_conc" min="1" max="10"></div>
+    </div>
+    <p class="hint">阿里云 DashScope 的地址必须带 <code>/compatible-mode/v1</code> 后缀，否则 404。
+      温度建议保持 0：评测要可复现，重复多次测的是模型自身的不确定性，不是采样随机性。</p>
+    <div style="margin-top:14px;display:flex;gap:10px">
+      <button class="act" onclick="saveConfig()">保存</button>
+      <button class="ghost" onclick="testConn()">测试连接</button>
+      <button class="ghost" onclick="listModels()">列出可用模型</button>
+    </div>
+    <div id="connMsg"></div>
+  </div>
+  <div class="card">
+    <h2>标的库</h2>
+    <div id="masterInfo" class="hint">加载中…</div>
+  </div>
+</section>
+
+<!-- ② 标的库 -->
+<section class="page" id="p-lib">
+  <div class="card">
+    <h2>标的库 <span class="hint">每次调用时，这张表会按所选规模切片后整份发给模型</span></h2>
+    <div class="row">
+      <div style="grid-column:span 2"><label>搜索（名称 / 摘要 / 行业）</label>
+        <input type="text" id="lib_kw" oninput="renderLib()"></div>
+      <div><label>摘要厚度</label><select id="lib_tag" onchange="renderLib()">
+        <option value="">全部</option><option value="T">薄</option><option value="H">厚</option><option value="E">空</option>
+      </select></div>
+    </div>
+    <div id="lib_stat" class="hint" style="margin-bottom:10px"></div>
+    <div style="max-height:520px;overflow:auto"><div id="lib_table"></div></div>
+  </div>
+</section>
+
+<!-- ② 提示词 -->
+<section class="page" id="p-prompt">
+  <div class="card">
+    <h2>提示词版本</h2>
+    <div style="display:flex;gap:10px;align-items:flex-end;margin-bottom:14px">
+      <div style="flex:1"><label>当前版本</label><select id="pr_sel" onchange="pickPrompt()"></select></div>
+      <button class="ghost" onclick="newPrompt()">另存为新版本</button>
+      <button class="ghost" onclick="delPrompt()">删除</button>
+    </div>
+    <label>版本名称</label><input type="text" id="pr_name" style="margin-bottom:14px">
+    <label>系统提示词 system（给模型的规则）</label>
+    <textarea id="pr_sys" rows="20"></textarea>
+    <label style="margin-top:14px">用户消息模板 user</label>
+    <textarea id="pr_usr" rows="5"></textarea>
+    <p class="hint">可用变量：<code>{question}</code> 问题原文 · <code>{count}</code> 本次条数 · <code>{table}</code> 标的表格</p>
+    <div style="margin-top:12px"><button class="act" onclick="savePrompt()">保存</button><span id="prMsg"></span></div>
+  </div>
+</section>
+
+<!-- ③ 题库 -->
+<section class="page" id="p-quest">
+  <div class="split">
+    <div>
+      <div class="list" id="q_list"></div>
+      <button class="ghost" style="margin-top:10px;width:100%" onclick="newQuestion()">+ 新建题目</button>
+    </div>
+    <div class="card" style="margin:0">
+      <div class="row">
+        <div><label>编号</label><input type="text" id="q_id"></div>
+        <div style="grid-column:span 2"><label>名称</label><input type="text" id="q_name"></div>
+      </div>
+      <label>问题（发给模型的原话）</label>
+      <textarea id="q_prompt" rows="3"></textarea>
+      <label style="margin-top:14px">标准答案 <span class="pill" id="q_expcount">0</span>
+        —— 必然出现在每个规模的切片里，也是召回率的分母</label>
+      <input type="text" id="q_search" placeholder="搜标的名称或摘要关键词，回车不生效，边打边筛"
+             oninput="renderPicker()" style="margin-bottom:8px">
+      <div class="chips" id="q_exp" style="max-height:210px;overflow:auto"></div>
+      <label style="margin-top:14px">禁忌项 <span class="pill" id="q_banned">0</span>
+        —— 模型把这些列进命中就算误检</label>
+      <div class="chips" id="q_must" style="max-height:140px;overflow:auto"></div>
+      <div style="margin-top:14px"><button class="act" onclick="saveQuestion()">保存题目</button><span id="qMsg"></span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ④ 运行 -->
+<section class="page" id="p-run">
+  <div class="card">
+    <h2>运行设置</h2>
+    <div class="row">
+      <div><label>提示词版本</label><select id="r_prompt"></select></div>
+      <div><label>重复次数</label><input type="number" id="r_rep" value="5" min="1" max="20"></div>
+    </div>
+    <label>题目</label><div class="chips" id="r_quest" style="margin-bottom:14px"></div>
+    <label>规模</label><div class="chips" id="r_sizes" style="margin-bottom:14px"></div>
+    <div id="r_est" class="hint"></div>
+    <div style="margin-top:14px;display:flex;gap:10px">
+      <button class="act" id="r_go" onclick="startRun()">开始</button>
+      <button class="ghost" onclick="stopRun()">停止</button>
+    </div>
+    <div class="bar"><i id="r_bar"></i></div>
+    <div id="r_stat" class="hint"></div>
+  </div>
+  <div class="card"><h2>实时日志</h2><div id="log"></div></div>
+</section>
+
+<!-- ⑤ 结果 -->
+<section class="page" id="p-res">
+  <div class="card">
+    <h2>历史运行</h2>
+    <select id="res_pick" onchange="loadRun(this.value)"></select>
+  </div>
+  <div class="card"><h2>召回率曲线</h2><div id="chart"></div></div>
+  <div class="card"><h2>汇总</h2><div id="sumTable"></div></div>
+  <div class="card"><h2>逐次明细 <span class="hint">（点任意一行看该次完整回复）</span></h2><div id="detTable"></div></div>
+  <div class="card"><h2>漏检频次</h2><div id="missList"></div></div>
+  <div class="card">
+    <h2>复核分歧 <span class="hint">（第二次调用：只盲判有分歧的那几条，用来分清「模型漏了」和「答案键定错了」）</span>
+      <span id="revRun" class="pill" style="float:right"></span></h2>
+    <div id="revSetup"></div>
+    <div id="revBody" style="margin-top:14px"></div>
+  </div>
+</section>
+
+</main>
+
+<dialog id="dlg"><header><h1 id="dlgTitle">回复原文</h1>
+  <button class="ghost" style="margin-left:auto" onclick="dlg.close()">关闭</button></header>
+  <pre id="dlgBody"></pre></dialog>
+
+<script>
+const $ = s => document.querySelector(s);
+const api = async (u, o) => {
+  const r = await fetch(u, o);
+  if (!r.ok) throw new Error((await r.text()).slice(0, 300));
+  return r.json();
+};
+let MASTER = [], PROMPTS = [], QUESTIONS = [], CURQ = null, CURP = null, RUNID = null, TIMER = null;
+
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b));
+  document.querySelectorAll('.page').forEach(p => p.classList.toggle('on', p.id === 'p' + '-' + b.dataset.p));
+  if (b.dataset.p === 'res') listRuns();
+  if (b.dataset.p === 'lib') renderLib();
+});
+
+/* ---------- ① 连接 ---------- */
+async function loadConfig(){
+  const c = await api('/api/config');
+  $('#c_base').value = c.base_url; $('#c_model').value = c.model;
+  $('#c_temp').value = c.temperature; $('#c_timeout').value = c.timeout; $('#c_conc').value = c.concurrency;
+  // key 输入框永远留空，已保存的只在 placeholder 里提示。
+  // 曾经把掩码填进 value，用户一点保存就把掩码当成真 key 存了回去。
+  $('#c_key').value = '';
+  $('#c_key').placeholder = c.key_from_env ? '已从环境变量 DASHSCOPE_API_KEY 读取'
+    : (c.has_key ? `已保存 ${c.api_key}（留空＝不修改）` : '粘贴 Key 后点保存');
+}
+async function saveConfig(quiet){
+  const body = {base_url:$('#c_base').value.trim(), model:$('#c_model').value.trim(),
+    temperature:+$('#c_temp').value, timeout:+$('#c_timeout').value, concurrency:+$('#c_conc').value};
+  const k = $('#c_key').value.trim();
+  if (k) body.api_key = k;          // 留空就不动已保存的 key
+  const c = await api('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  if (!quiet) msg('#connMsg','ok',
+    `已保存到 config.local.json（已被 .gitignore 排除）\n当前生效的 Key：${c.api_key || '（无）'}`);
+  await loadConfig();
+}
+async function listModels(){
+  await saveConfig(true);
+  msg('#connMsg','ok','读取中…');
+  const r = await api('/api/models');
+  if (!r.ok) return msg('#connMsg','bad','❌ ' + (r.hint ? '⚠ ' + r.hint + '\n\n' : '') + r.error);
+  msg('#connMsg','ok', `该端点可用模型 ${r.models.length} 个：\n` + r.models.join('\n'));
+}
+function renderLib(){
+  const kw = $('#lib_kw').value.trim(), tag = $('#lib_tag').value;
+  const rows = MASTER.filter(m => (!tag || m.tag === tag) &&
+    (!kw || m.name.includes(kw) || (m.summary||'').includes(kw) || (m.tags||[]).join('').includes(kw)));
+  const TAGCN = {T:'薄', H:'厚', E:'空'};
+  $('#lib_stat').textContent = `筛出 ${rows.length} / ${MASTER.length} 条`;
+  $('#lib_table').innerHTML = '<table><tr><th>标的名称</th><th>标签</th><th>厚度</th><th>业务说明</th></tr>' +
+    rows.map(m => `<tr><td>${esc(m.name)}</td><td style="font-size:12px;color:var(--dim)">${esc((m.tags||[]).join('、') || '—')}</td>
+      <td><span class="pill">${TAGCN[m.tag]}</span></td>
+      <td style="color:${m.summary?'inherit':'var(--dim)'}">${esc(m.summary || '（未录入）')}</td></tr>`).join('') + '</table>';
+}
+async function testConn(){
+  // 先把表单里的东西存下去再测。
+  // 之前「测试连接」读的是已保存的配置，而 key 框又是留空的 —— 粘贴完直接点测试，
+  // 测的其实还是上一把旧 key，报出来的 401 完全指错方向。
+  await saveConfig(true);
+  msg('#connMsg','ok','测试中…');
+  const r = await api('/api/test-connection', {method:'POST'});
+  if (r.ok){
+    $('#connDot').textContent = '● 连接正常'; $('#connDot').style.color = 'var(--ok)';
+    msg('#connMsg','ok',`✅ 连通　耗时 ${r.elapsed}s　返回「${r.reply}」　输入 ${r.prompt_tokens ?? '?'} tokens`);
+  } else {
+    $('#connDot').textContent = '● 连接失败'; $('#connDot').style.color = 'var(--bad)';
+    // 服务端的 hint 是「地址与 key 不匹配」这类定向诊断，比通用提示有用，放最前面
+    msg('#connMsg','bad','❌ ' + (r.hint ? '⚠ ' + r.hint + '\n\n' : '') + r.error + hintFor(r.error));
+  }
+}
+function hintFor(e){
+  e = (e||'').toLowerCase();
+  if (e.includes('404')) return '\n\n404 通常是地址或模型名不对。DashScope 地址要带 /compatible-mode/v1。';
+  if (e.includes('401') || e.includes('invalid_api_key')) return '\n\nKey 不对、或这把 Key 不属于这个平台。';
+  if (e.includes('model')) return '\n\n模型名可能写错了，点「列出可用模型」看准确的 id。';
+  return '';
+}
+function msg(sel, kind, text){ $(sel).innerHTML = `<div class="msg ${kind}">${esc(text)}</div>`; }
+const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+/* ---------- ② 提示词 ---------- */
+async function loadPrompts(){
+  PROMPTS = await api('/api/prompts');
+  $('#pr_sel').innerHTML = PROMPTS.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+  $('#r_prompt').innerHTML = $('#pr_sel').innerHTML;
+  CURP = PROMPTS[0]?.id; pickPrompt();
+}
+function pickPrompt(){
+  CURP = $('#pr_sel').value || CURP;
+  const p = PROMPTS.find(x => x.id === CURP); if (!p) return;
+  $('#pr_name').value = p.name; $('#pr_sys').value = p.system; $('#pr_usr').value = p.user_template;
+}
+async function savePrompt(){
+  const p = PROMPTS.find(x => x.id === CURP); if (!p) return;
+  p.name = $('#pr_name').value; p.system = $('#pr_sys').value; p.user_template = $('#pr_usr').value;
+  await api('/api/prompts', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(PROMPTS)});
+  $('#prMsg').innerHTML = ' <span style="color:var(--ok)">已保存</span>'; loadPrompts();
+}
+function newPrompt(){
+  const id = 'v' + (PROMPTS.length + 1);
+  const p = PROMPTS.find(x => x.id === CURP);
+  PROMPTS.push({id, name:id + ' 副本', system:p?.system || '', user_template:p?.user_template || ''});
+  CURP = id; savePrompt();
+}
+function delPrompt(){
+  if (PROMPTS.length < 2) return alert('至少保留一个版本');
+  PROMPTS = PROMPTS.filter(x => x.id !== CURP); CURP = PROMPTS[0].id;
+  api('/api/prompts', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(PROMPTS)}).then(loadPrompts);
+}
+
+/* ---------- ③ 题库 ---------- */
+async function loadQuestions(){
+  QUESTIONS = await api('/api/questions');
+  $('#q_list').innerHTML = QUESTIONS.map(q =>
+    `<div data-id="${q.id}" onclick="pickQuestion('${q.id}')">${esc(q.id)} · ${esc(q.name||'')}</div>`).join('');
+  $('#r_quest').innerHTML = QUESTIONS.map((q,i) =>
+    `<label><input type="checkbox" value="${q.id}" ${i===0?'checked':''} onchange="estimate()">${esc(q.id)} ${esc(q.name||'')}</label>`).join('');
+  pickQuestion(CURQ || QUESTIONS[0]?.id); estimate();
+}
+function pickQuestion(id){
+  CURQ = id;
+  document.querySelectorAll('#q_list div').forEach(d => d.classList.toggle('on', d.dataset.id === id));
+  const q = QUESTIONS.find(x => x.id === id); if (!q) return;
+  $('#q_id').value = q.id; $('#q_name').value = q.name || ''; $('#q_prompt').value = q.prompt;
+  renderPicker();
+}
+function renderPicker(){
+  const q = QUESTIONS.find(x => x.id === CURQ); if (!q) return;
+  const kw = $('#q_search').value.trim();
+  const exp = new Set(q.expected || []), ban = new Set(q.must_not || []);
+  const show = MASTER.filter(m => !kw || m.name.includes(kw) || (m.summary||'').includes(kw) || (m.tags||[]).join('').includes(kw));
+  // 已勾选的永远显示在最前，否则一搜索就看不见自己选了什么
+  const sorted = [...show].sort((a,b) => (exp.has(b.name)?1:0) - (exp.has(a.name)?1:0));
+  $('#q_exp').innerHTML = sorted.slice(0, 160).map(m =>
+    `<label><input type="checkbox" ${exp.has(m.name)?'checked':''} onchange="tog('expected','${enc(m.name)}',this.checked)">${esc(m.name)}<span class="pill">${m.tag}</span></label>`).join('');
+  $('#q_must').innerHTML = sorted.slice(0, 160).filter(m => ban.has(m.name) || kw).slice(0,60).map(m =>
+    `<label><input type="checkbox" ${ban.has(m.name)?'checked':''} onchange="tog('must_not','${enc(m.name)}',this.checked)">${esc(m.name)}</label>`).join('')
+    || '<span class="hint">在上面的搜索框输入关键词后，这里会出现可勾选项</span>';
+  $('#q_expcount').textContent = exp.size; $('#q_banned').textContent = ban.size;
+}
+const enc = s => s.replace(/'/g, "\\'");
+function tog(field, name, on){
+  const q = QUESTIONS.find(x => x.id === CURQ);
+  q[field] = q[field] || [];
+  q[field] = on ? [...new Set([...q[field], name])] : q[field].filter(n => n !== name);
+  if (field === 'expected') q.protected = [...q.expected];  // 标准答案必须进切片，否则分母就没了
+  renderPicker();
+}
+async function saveQuestion(){
+  const q = QUESTIONS.find(x => x.id === CURQ);
+  q.id = $('#q_id').value.trim(); q.name = $('#q_name').value.trim(); q.prompt = $('#q_prompt').value.trim();
+  q.protected = [...new Set([...(q.expected||[]), ...(q.must_not||[])])];
+  await api('/api/questions', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(QUESTIONS)});
+  CURQ = q.id; $('#qMsg').innerHTML = ' <span style="color:var(--ok)">已保存</span>'; loadQuestions();
+}
+async function newQuestion(){
+  // 必须先存服务端再重载：loadQuestions() 会用服务端数据整个覆盖 QUESTIONS，
+  // 只往本地数组 push 的话，新题目会在重载那一瞬间被丢掉，然后 pickQuestion 找不到它。
+  const used = new Set(QUESTIONS.map(q => q.id));
+  let n = QUESTIONS.length + 1, id;
+  do { id = 'Q' + n++; } while (used.has(id));
+  QUESTIONS.push({id, name:'新题目', prompt:'', protected:[], expected:[], must_not:[]});
+  await api('/api/questions', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(QUESTIONS)});
+  CURQ = id; await loadQuestions();
+}
+
+/* ---------- ④ 运行 ---------- */
+function picked(sel){ return [...document.querySelectorAll(sel + ' input:checked')].map(i => i.value); }
+function estimate(){
+  const qs = picked('#r_quest'), ss = picked('#r_sizes').map(Number), rep = +$('#r_rep').value || 1;
+  const n = qs.length * ss.length * rep;
+  const big = Math.max(0, ...ss);
+  $('#r_est').textContent = `共 ${n} 次调用 · 最大单次约 ${Math.round(big * 90 * 1.6 / 1000)}k tokens 输入`;
+}
+async function startRun(){
+  const body = {prompt_id:$('#r_prompt').value, question_ids:picked('#r_quest'),
+                sizes:picked('#r_sizes').map(Number), repeats:+$('#r_rep').value};
+  $('#log').textContent = ''; $('#r_go').disabled = true;
+  try{
+    const r = await api('/api/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    RUNID = r.run_id; poll();
+  }catch(e){ $('#r_go').disabled = false; alert('启动失败：' + e.message); }
+}
+async function stopRun(){ if (RUNID) await api(`/api/run/${RUNID}/stop`, {method:'POST'}); }
+let SEEN = 0;
+async function poll(){
+  clearTimeout(TIMER);
+  const s = await api('/api/run/' + RUNID);
+  $('#r_bar').style.width = (s.total ? s.done / s.total * 100 : 0) + '%';
+  $('#r_stat').textContent = `${s.done}/${s.total}　状态：${s.status}` + (s.error ? '　' + s.error : '');
+  s.records.slice(SEEN).forEach(r => {
+    const t = new Date().toTimeString().slice(0,8);
+    const line = r.error
+      ? `[${t}] ${r.question} N=${r.size} #${r.rep}  ✗ ${r.error}`
+      : `[${t}] ${r.question} N=${r.size} #${r.rep}  召回 ${r.found}/${r.expected} (${Math.round((r.recall||0)*100)}%)  ${r.elapsed}s` +
+        (r.checked_ok === false ? `  ⚠checked=${r.checked}` : '');
+    $('#log').textContent += line + '\n'; $('#log').scrollTop = 1e9;
+  });
+  SEEN = s.records.length;
+  if (s.status === 'running') TIMER = setTimeout(poll, 1500);
+  else { $('#r_go').disabled = false; SEEN = 0; listRuns(); }
+}
+
+/* ---------- ⑤ 结果 ---------- */
+async function listRuns(){
+  const runs = await api('/api/runs');
+  const cur = $('#res_pick').value;
+  $('#res_pick').innerHTML = runs.map(r =>
+    `<option value="${r.id}">${r.started_at} · ${r.model} · ${r.done}/${r.total} · ${r.status}</option>`).join('');
+  const pick = cur || RUNID || runs[0]?.id;
+  if (pick){ $('#res_pick').value = pick; loadRun(pick); }
+}
+async function loadRun(id){
+  if (!id) return;
+  const s = await api('/api/run/' + id);
+  drawChart(s.summary); drawSummary(s.summary); drawDetail(id, s.records); drawMissed(s.records);
+  loadReview(id);
+}
+function drawChart(sum){
+  if (!sum.length) return $('#chart').innerHTML = '<p class="hint">还没有有效数据</p>';
+  const sizes = [...new Set(sum.map(s => s.size))].sort((a,b) => a-b);
+  const W=640,H=240,L=46,B=30;
+  const x = i => L + (W-L-16) * (sizes.length<2?0.5:i/(sizes.length-1));
+  const y = v => 12 + (H-B-12) * (1-v);
+  const series = [['总体','recall','#2563eb'],['薄摘要组','recall_thin','#b45309'],['厚摘要组','recall_thick','#15803d']];
+  let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px">`;
+  [0,.25,.5,.75,1].forEach(g => {
+    svg += `<line x1="${L}" y1="${y(g)}" x2="${W-16}" y2="${y(g)}" stroke="#e5e7eb"/>`;
+    svg += `<text x="8" y="${y(g)+4}" font-size="11" fill="#6b7280">${g*100}%</text>`;
+  });
+  series.forEach(([name,key,color]) => {
+    const pts = sizes.map((sz,i) => {
+      const rows = sum.filter(s => s.size===sz && s[key]!=null);
+      if (!rows.length) return null;
+      const v = rows.reduce((a,b)=>a+b[key],0)/rows.length;
+      return [x(i), y(v), v];
+    }).filter(Boolean);
+    if (pts.length) svg += `<polyline fill="none" stroke="${color}" stroke-width="2" points="${pts.map(p=>p[0]+','+p[1]).join(' ')}"/>`
+      + pts.map(p => `<circle cx="${p[0]}" cy="${p[1]}" r="3.5" fill="${color}"><title>${name} ${Math.round(p[2]*100)}%</title></circle>`).join('');
+  });
+  sizes.forEach((sz,i) => svg += `<text x="${x(i)}" y="${H-8}" font-size="11" fill="#6b7280" text-anchor="middle">${sz}</text>`);
+  svg += '</svg><p class="hint">' + series.map(([n,,c]) => `<span style="color:${c}">■</span> ${n}`).join('　') + '</p>';
+  $('#chart').innerHTML = svg;
+}
+function drawSummary(sum){
+  $('#sumTable').innerHTML = !sum.length ? '<p class="hint">暂无</p>' : `<table><tr>
+    <th>题目</th><th>规模</th><th>次数</th><th>召回率</th><th>波动</th><th>薄组</th><th>厚组</th>
+    <th>误检</th><th>额外召回</th><th>checked 对上</th><th>耗时</th></tr>` +
+    sum.map(s => `<tr><td>${s.question}</td><td class="num">${s.size}</td><td class="num">${s.n}</td>
+      <td class="num"><b>${pct(s.recall)}</b></td><td class="num">${pct(s.recall_min)}~${pct(s.recall_max)}</td>
+      <td class="num">${pct(s.recall_thin)}</td><td class="num">${pct(s.recall_thick)}</td>
+      <td class="num">${s.false_pos}</td><td class="num">${s.extra}</td>
+      <td class="num">${s.checked_ok}/${s.n}</td><td class="num">${s.elapsed}s</td></tr>`).join('') + '</table>';
+}
+const pct = v => v == null ? '—' : Math.round(v*100) + '%';
+function drawDetail(runId, recs){
+  $('#detTable').innerHTML = `<table><tr><th>题目</th><th>规模</th><th>#</th><th>召回</th><th>漏掉</th>
+    <th>误检</th><th>checked</th><th>解析</th><th>耗时</th><th>输入tok</th></tr>` +
+    recs.map(r => `<tr class="click" onclick="showReply('${runId}','${r.question}',${r.size},${r.rep})">
+      <td>${r.question}</td><td class="num">${r.size}</td><td class="num">${r.rep}</td>
+      <td class="num">${r.error ? '<span style="color:var(--bad)">失败</span>' : r.found + '/' + r.expected}</td>
+      <td style="max-width:280px;font-size:12px;color:var(--dim)">${esc(r.missed || r.error || '')}</td>
+      <td class="num">${r.false_pos ?? ''}</td>
+      <td class="num">${r.checked ?? ''}${r.checked_ok === false ? ' ⚠' : ''}</td>
+      <td>${r.parse || ''}</td><td class="num">${r.elapsed ?? ''}s</td><td class="num">${r.prompt_tokens ?? ''}</td></tr>`).join('') + '</table>';
+}
+function drawMissed(recs){
+  const freq = {};
+  recs.forEach(r => (r.missed || '').split('、').filter(Boolean).forEach(n => freq[n] = (freq[n]||0)+1));
+  const rows = Object.entries(freq).sort((a,b) => b[1]-a[1]);
+  $('#missList').innerHTML = !rows.length ? '<p class="hint">没有漏检</p>' :
+    '<table><tr><th>标的</th><th>漏掉次数</th></tr>' +
+    rows.map(([n,c]) => `<tr><td>${esc(n)}</td><td class="num">${c}</td></tr>`).join('') + '</table>';
+}
+async function showReply(runId, qid, size, rep){
+  try{
+    const r = await api(`/api/reply/${runId}/${qid}/${size}/${rep}`);
+    $('#dlgTitle').textContent = `${qid} · N=${size} · 第 ${rep} 次`;
+    $('#dlgBody').textContent = r.text; dlg.showModal();
+  }catch(e){ alert('这次没有回复原文（可能调用就失败了）'); }
+}
+
+/* ---------- 启动 ---------- */
+(async () => {
+  await loadConfig();
+  const m = await api('/api/master'); MASTER = m.items;
+  $('#masterInfo').innerHTML = `共 <b>${m.count}</b> 条　摘要厚度：薄 ${m.tags.T} · 厚 ${m.tags.H} · 空 ${m.tags.E}
+    <br>薄组复刻生产库现状，厚组是补全画像后的样子。两组混在一起不加标记，结果按组分别统计召回率。`;
+  $('#r_sizes').innerHTML = [30,50,100,200,300].map(s =>
+    `<label><input type="checkbox" value="${s}" ${[50,100,200,300].includes(s)?'checked':''} onchange="estimate()">${s} 条</label>`).join('');
+  $('#r_rep').onchange = estimate;
+  await loadPrompts(); await loadQuestions();
+})();
+/* ---------- ⑥ 复核分歧 ---------- */
+/* 确定性评分只会说「对不上」，说不清是模型漏了还是答案键定错了。
+   这里做第二次调用，只裁判分歧的那几条，而且是盲判 —— 不告诉裁判模型选没选、
+   答案键怎么标的，否则它只会去附和某一方。 */
+let REVQ = null, RTIMER = null;
+const KIND_COLOR = {'漏检':'background:#fef3c7;color:#92400e',
+                    '误检':'background:#fee2e2;color:#991b1b',
+                    '额外召回':'background:#e0e7ff;color:#3730a3'};
+const VERDICT_ICON = {'该命中':'<span style="color:var(--ok)">✓ 该命中</span>',
+                      '不该命中':'<span style="color:var(--bad)">✗ 不该命中</span>',
+                      '说不准':'<span style="color:var(--dim)">? 说不准</span>'};
+
+function revTable(items){
+  if (!items.length) return '<p class="hint">没有分歧</p>';
+  const judged = items.some(i => i.verdict);
+  return '<table><tr><th>题</th><th>分歧</th><th>标的</th><th>频次</th>'
+    + (judged ? '<th>裁判</th><th>类型</th><th>建议</th><th>理由</th>' : '<th>业务摘要</th>')
+    + '</tr>' + items.map(i => `<tr${i.key_wrong ? ' style="background:#fffbeb"' : ''}>
+      <td>${i.qid}</td>
+      <td><span class="pill" style="${KIND_COLOR[i.kind] || ''}">${i.kind}</span></td>
+      <td>${esc(i.name)}</td>
+      <td class="num" style="color:var(--dim)" title="这条在本轮有效跑次中被模型命中的次数">${i.times_hit}/${i.times_total}</td>`
+      + (judged
+        ? `<td>${VERDICT_ICON[i.verdict] || esc(i.verdict || '')}</td>
+           <td>${esc(i.type || '')}</td>
+           <td>${esc(i.action || '')}${i.cached ? ' <span class="pill">缓存</span>' : ''}</td>
+           <td style="font-size:12px;color:var(--dim);max-width:320px">${esc(i.reason || '')}</td>`
+        : `<td style="font-size:12px;color:var(--dim);max-width:460px">${esc((i.summary || '（未录入）').slice(0, 80))}</td>`)
+      + '</tr>').join('') + '</table>';
+}
+
+async function loadReview(id){
+  clearTimeout(RTIMER);
+  $('#revSetup').innerHTML = '<p class="hint">正在统计分歧…</p>';
+  $('#revBody').innerHTML = ''; $('#revRun').textContent = '';
+  let pre;
+  try { pre = await api('/api/review/' + id + '/disputes'); }
+  catch (e){ return msg('#revSetup', 'bad', String(e.message || e)); }
+  REVQ = {};
+  pre.items.forEach(i => (REVQ[i.qid] = REVQ[i.qid] || []).push(i));
+  const qids = Object.keys(REVQ).sort();
+  const notes = pre.notes.length ? `<p class="hint">${pre.notes.map(esc).join('<br>')}</p>` : '';
+  if (!qids.length){
+    $('#revSetup').innerHTML = notes || '<p class="hint">这轮没有分歧，模型的输出和答案键完全对上了。</p>';
+    return;
+  }
+  $('#revSetup').innerHTML =
+    '<div class="chips" style="margin-bottom:12px">'
+    + qids.map(q => `<label><input type="checkbox" class="revq" value="${q}" checked onchange="revEst()">
+        ${q} <span class="pill">${REVQ[q].length} 条</span></label>`).join('')
+    + `</div>
+      <div class="row" style="max-width:520px;margin-bottom:0">
+        <div><label>每题最多复核（按分歧稳定度取前几条）</label>
+          <input type="number" id="revCap" value="20" min="1" max="200" oninput="revEst()"></div>
+        <div style="align-self:end"><button class="act" id="revGo" onclick="startReview('${id}')">开始复核</button></div>
+      </div>
+      <div id="revEst" class="hint"></div>` + notes;
+  revEst();
+  $('#revBody').innerHTML = revTable(pre.items);
+  // 之前复核过就直接显示上次结果，省得重跑
+  try { renderReview(await api('/api/review/' + id)); } catch (e){ /* 没复核过，正常 */ }
+}
+
+function revEst(){
+  const qs = [...document.querySelectorAll('.revq:checked')].map(x => x.value);
+  const cap = Math.max(1, +$('#revCap').value || 20);
+  let n = 0, cached = 0;
+  qs.forEach(q => {
+    const take = REVQ[q].slice(0, cap);
+    n += take.length; cached += take.filter(i => i.cached).length;
+  });
+  $('#revEst').textContent = `本次 ${n} 条，其中 ${cached} 条命中缓存 → 实际约 ${n - cached} 次模型调用。`;
+  $('#revGo').disabled = !n;
+}
+
+async function startReview(id){
+  const qids = [...document.querySelectorAll('.revq:checked')].map(x => x.value);
+  const cap = Math.max(1, +$('#revCap').value || 20);
+  $('#revGo').disabled = true;
+  try {
+    await api('/api/review/' + id, {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({qids, limit_per_question: cap})});
+  } catch (e){ $('#revGo').disabled = false; return msg('#revSetup', 'bad', String(e.message || e)); }
+  pollReview(id);
+}
+
+async function pollReview(id){
+  let s;
+  try { s = await api('/api/review/' + id); } catch (e){ return; }
+  renderReview(s);
+  if (s.status === 'running') RTIMER = setTimeout(() => pollReview(id), 1200);
+  else if ($('#revGo')) $('#revGo').disabled = false;
+}
+
+function renderReview(s){
+  if (!s || !s.items) return;
+  $('#revRun').textContent = `${s.done}/${s.total} · ${s.status}` + (s.error ? ' · ' + s.error : '');
+  let head = '';
+  if (s.status !== 'running' && s.items.length){
+    const del = s.items.filter(i => i.role === 'expected' && i.verdict === '不该命中').length;
+    const add = s.items.filter(i => i.role === 'neither' && i.verdict === '该命中').length;
+    const unban = s.items.filter(i => i.role === 'must_not' && i.verdict === '该命中').length;
+    const unsure = s.items.filter(i => i.verdict === '说不准').length;
+    const total = del + add + unban;
+    head = total
+      ? `<div class="msg bad">裁判认为答案键有 ${total} 处该改：`
+        + [del && `从「该命中」里删掉 ${del} 条`, add && `往「该命中」里补 ${add} 条`,
+           unban && `从「禁忌名单」里删掉 ${unban} 条`].filter(Boolean).join('、')
+        + `。\n改完之前，这一轮的召回率不能当真 —— 去 ④题库 改，然后重跑。`
+        + (unsure ? `\n另有 ${unsure} 条裁判也说不准，得你自己看。` : '') + '</div>'
+      : `<div class="msg ok">裁判和答案键完全一致，这一轮的召回率可以直接用。`
+        + (unsure ? `\n有 ${unsure} 条裁判说不准，可以自己看一眼。` : '') + '</div>';
+  }
+  $('#revBody').innerHTML = head + revTable(s.items);
+}
+
+</script>
+</body>
+</html>

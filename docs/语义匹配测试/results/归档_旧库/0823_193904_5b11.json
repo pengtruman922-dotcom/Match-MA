@@ -1,0 +1,63 @@
+{
+ "id": "0823_193904_5b11",
+ "status": "done",
+ "total": 5,
+ "done": 5,
+ "records": [
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 30,
+   "rep": 3,
+   "prompt_chars": 2711,
+   "error": "UnicodeEncodeError: 'ascii' codec can't encode characters in position 7-14: ordinal not in range(128)",
+   "elapsed": 0,
+   "parse": "error"
+  },
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 30,
+   "rep": 1,
+   "prompt_chars": 2711,
+   "error": "UnicodeEncodeError: 'ascii' codec can't encode characters in position 7-14: ordinal not in range(128)",
+   "elapsed": 0,
+   "parse": "error"
+  },
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 30,
+   "rep": 5,
+   "prompt_chars": 2711,
+   "error": "UnicodeEncodeError: 'ascii' codec can't encode characters in position 7-14: ordinal not in range(128)",
+   "elapsed": 0,
+   "parse": "error"
+  },
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 30,
+   "rep": 2,
+   "prompt_chars": 2711,
+   "error": "UnicodeEncodeError: 'ascii' codec can't encode characters in position 7-14: ordinal not in range(128)",
+   "elapsed": 0,
+   "parse": "error"
+  },
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 30,
+   "rep": 4,
+   "prompt_chars": 2711,
+   "error": "UnicodeEncodeError: 'ascii' codec can't encode characters in position 7-14: ordinal not in range(128)",
+   "elapsed": 0,
+   "parse": "error"
+  }
+ ],
+ "stop": false,
+ "error": "",
+ "started_at": "2026-08-23 19:39:04",
+ "prompt_id": "v1",
+ "model": "qwen3.6-flash"
+}

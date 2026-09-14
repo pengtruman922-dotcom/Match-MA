@@ -1,0 +1,213 @@
+{
+ "id": "0823_195433_4cf1",
+ "status": "done",
+ "total": 20,
+ "done": 20,
+ "records": [
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 50,
+   "rep": 2,
+   "prompt_chars": 4421,
+   "error": "AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided. For details, see: https://help.aliyun.com/zh/model-studio/error-code#apikey-error', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}, 'request_id': 'a8c84104-0db8-903e-9946-137d9f2d029c'}",
+   "elapsed": 0,
+   "parse": "error"
+  },
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 50,
+   "rep": 4,
+   "prompt_chars": 4421,
+   "error": "AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided. For details, see: https://help.aliyun.com/zh/model-studio/error-code#apikey-error', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}, 'request_id': '15220477-4da5-9bd8-aa43-0c15c63370f3'}",
+   "elapsed": 0,
+   "parse": "error"
+  },
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 50,
+   "rep": 5,
+   "prompt_chars": 4421,
+   "error": "AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided. For details, see: https://help.aliyun.com/zh/model-studio/error-code#apikey-error', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}, 'request_id': '9b6316b6-ed50-920c-a85a-a9911252fb15'}",
+   "elapsed": 0,
+   "parse": "error"
+  },
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 50,
+   "rep": 3,
+   "prompt_chars": 4421,
+   "error": "AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided. For details, see: https://help.aliyun.com/zh/model-studio/error-code#apikey-error', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}, 'request_id': '839d756e-c550-9d73-8feb-65d7515db442'}",
+   "elapsed": 0,
+   "parse": "error"
+  },
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 50,
+   "rep": 1,
+   "prompt_chars": 4421,
+   "error": "AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided. For details, see: https://help.aliyun.com/zh/model-studio/error-code#apikey-error', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}, 'request_id': 'd31599db-60a8-91c2-a460-20586a3c0bbd'}",
+   "elapsed": 0,
+   "parse": "error"
+  },
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 100,
+   "rep": 3,
+   "prompt_chars": 8669,
+   "error": "AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided. For details, see: https://help.aliyun.com/zh/model-studio/error-code#apikey-error', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}, 'request_id': '39959409-6056-9ca6-ac67-4023e5e9d084'}",
+   "elapsed": 0,
+   "parse": "error"
+  },
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 100,
+   "rep": 1,
+   "prompt_chars": 8669,
+   "error": "AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided. For details, see: https://help.aliyun.com/zh/model-studio/error-code#apikey-error', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}, 'request_id': 'd8dbe273-a291-925f-8916-94693f3089d4'}",
+   "elapsed": 0,
+   "parse": "error"
+  },
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 100,
+   "rep": 2,
+   "prompt_chars": 8669,
+   "error": "AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided. For details, see: https://help.aliyun.com/zh/model-studio/error-code#apikey-error', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}, 'request_id': '52c0f55c-c9ba-90cf-ba63-3b793eeba239'}",
+   "elapsed": 0,
+   "parse": "error"
+  },
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 100,
+   "rep": 5,
+   "prompt_chars": 8669,
+   "error": "AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided. For details, see: https://help.aliyun.com/zh/model-studio/error-code#apikey-error', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}, 'request_id': 'fd9b7d68-444b-90ae-adbb-aadd7e54e14e'}",
+   "elapsed": 0,
+   "parse": "error"
+  },
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 100,
+   "rep": 4,
+   "prompt_chars": 8669,
+   "error": "AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided. For details, see: https://help.aliyun.com/zh/model-studio/error-code#apikey-error', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}, 'request_id': '95981c72-325a-9568-bc63-100fd9a552d1'}",
+   "elapsed": 0,
+   "parse": "error"
+  },
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 200,
+   "rep": 1,
+   "prompt_chars": 17373,
+   "error": "AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided. For details, see: https://help.aliyun.com/zh/model-studio/error-code#apikey-error', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}, 'request_id': 'f86d24f6-dff1-9301-8347-2488462b6bb9'}",
+   "elapsed": 0,
+   "parse": "error"
+  },
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 200,
+   "rep": 2,
+   "prompt_chars": 17373,
+   "error": "AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided. For details, see: https://help.aliyun.com/zh/model-studio/error-code#apikey-error', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}, 'request_id': '7efed3c3-fb64-9fef-a5fd-a8b05fdc447e'}",
+   "elapsed": 0,
+   "parse": "error"
+  },
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 200,
+   "rep": 3,
+   "prompt_chars": 17373,
+   "error": "AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided. For details, see: https://help.aliyun.com/zh/model-studio/error-code#apikey-error', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}, 'request_id': 'c543dd57-e116-91cc-a1ca-18bc970129b7'}",
+   "elapsed": 0,
+   "parse": "error"
+  },
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 200,
+   "rep": 5,
+   "prompt_chars": 17373,
+   "error": "AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided. For details, see: https://help.aliyun.com/zh/model-studio/error-code#apikey-error', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}, 'request_id': '9c3d9382-e970-9164-90c5-f5d7c0b1ca7c'}",
+   "elapsed": 0,
+   "parse": "error"
+  },
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 200,
+   "rep": 4,
+   "prompt_chars": 17373,
+   "error": "AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided. For details, see: https://help.aliyun.com/zh/model-studio/error-code#apikey-error', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}, 'request_id': 'a13620fc-e916-9233-b27f-6e468cf0b445'}",
+   "elapsed": 0,
+   "parse": "error"
+  },
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 300,
+   "rep": 1,
+   "prompt_chars": 26209,
+   "error": "AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided. For details, see: https://help.aliyun.com/zh/model-studio/error-code#apikey-error', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}, 'request_id': '4d0807ba-c1d7-9101-9e38-b36184e0f83b'}",
+   "elapsed": 0,
+   "parse": "error"
+  },
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 300,
+   "rep": 3,
+   "prompt_chars": 26209,
+   "error": "AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided. For details, see: https://help.aliyun.com/zh/model-studio/error-code#apikey-error', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}, 'request_id': '72a99e7d-f4f3-978b-a164-47283ffd6ee3'}",
+   "elapsed": 0,
+   "parse": "error"
+  },
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 300,
+   "rep": 5,
+   "prompt_chars": 26209,
+   "error": "AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided. For details, see: https://help.aliyun.com/zh/model-studio/error-code#apikey-error', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}, 'request_id': '57b86e96-68d5-9130-8ba7-11f049eaeee2'}",
+   "elapsed": 0,
+   "parse": "error"
+  },
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 300,
+   "rep": 2,
+   "prompt_chars": 26209,
+   "error": "AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided. For details, see: https://help.aliyun.com/zh/model-studio/error-code#apikey-error', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}, 'request_id': '826ca800-91c3-9d5d-91cb-72fbd8221a35'}",
+   "elapsed": 0,
+   "parse": "error"
+  },
+  {
+   "question": "Q2",
+   "question_name": "纵向·锂电产业链",
+   "size": 300,
+   "rep": 4,
+   "prompt_chars": 26209,
+   "error": "AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided. For details, see: https://help.aliyun.com/zh/model-studio/error-code#apikey-error', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}, 'request_id': '6ec18d71-64e5-9cd1-8bee-d05efa047888'}",
+   "elapsed": 0,
+   "parse": "error"
+  }
+ ],
+ "stop": false,
+ "error": "",
+ "started_at": "2026-08-23 19:54:33",
+ "prompt_id": "v1",
+ "model": "qwen3.6-flash"
+}

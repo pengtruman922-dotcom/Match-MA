@@ -1,0 +1,586 @@
+{
+ "b045af45b10f25d4ce740fe61f35bd09d226a846": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "标的做三元正极材料，属于动力电池Pack集成的上游环节。",
+  "elapsed": 18.3,
+  "prompt_tokens": 297,
+  "completion_tokens": 408
+ },
+ "a3a5545c440c6e345e0eef1224e9844d734f639c": {
+  "verdict": "不该命中",
+  "type": "无",
+  "reason": "标的做锂电池生产设备，非电芯材料或电芯，无法为Pack集成保供应链。",
+  "elapsed": 26.5,
+  "prompt_tokens": 293,
+  "completion_tokens": 819
+ },
+ "1eb7e4ac6e9e80af451ab59b6c0ac3168ba285db": {
+  "verdict": "不该命中",
+  "type": "无",
+  "reason": "标的做DC-Link薄膜电容器，属电控/逆变环节，非动力电池Pack集成的上游。",
+  "elapsed": 34.8,
+  "prompt_tokens": 309,
+  "completion_tokens": 1152
+ },
+ "a1f825f5ee1d2cdc60e3a61c782c1a56f260cb54": {
+  "verdict": "说不准",
+  "type": "无",
+  "reason": "摘要仅提及萤石采选及氢氟酸加工，与动力电池Pack上游供应链距离过远，无法确认直接关联",
+  "elapsed": 18.0,
+  "prompt_tokens": 289,
+  "completion_tokens": 807
+ },
+ "0deb5c25508d74d87e1db2ee2c170aa0bc1df3e1": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "标的做新能源车高压高速连接器，是动力电池Pack集成的上游零部件，符合保供应链需求。",
+  "elapsed": 31.5,
+  "prompt_tokens": 285,
+  "completion_tokens": 377
+ },
+ "8b2af67aaedba49ed00679ea41d5634f772988ef": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "标的做动力电池BMS硬件与算法，属于买家Pack集成的上游零部件。",
+  "elapsed": 59.1,
+  "prompt_tokens": 314,
+  "completion_tokens": 397
+ },
+ "4a7ca64b02478369177db8481ee15e7f5bdbc744": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "标的做退役动力电池回收与镍钴锂再生冶炼，属动力电池原材料上游，符合纵向整合保供应链需求。",
+  "elapsed": 63.8,
+  "prompt_tokens": 317,
+  "completion_tokens": 421
+ },
+ "dea08adfe1f1cbea1812d6804e5ca0e6a1615b89": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "标的做铝合金高压压铸及新能源三电系统零部件，可作为电池Pack上游结构件供应商。",
+  "elapsed": 6.7,
+  "prompt_tokens": 298,
+  "completion_tokens": 415
+ },
+ "98296f98da32665f9e5a0fbaef35a5d829b6fccf": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "标的做整车线束及配电盒，属于动力电池Pack集成的上游零部件供应链。",
+  "elapsed": 7.7,
+  "prompt_tokens": 285,
+  "completion_tokens": 424
+ },
+ "925434235de11aafd6935ba17d2670eff7bbcd82": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "标的做电池包结构件，属Pack集成上游环节，符合买家上游整合需求",
+  "elapsed": 10.3,
+  "prompt_tokens": 292,
+  "completion_tokens": 536
+ },
+ "384c75563479569342f27834ee7370232e1f37a7": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "采样电阻是动力电池BMS电流检测的关键元器件，属上游供应链",
+  "elapsed": 5.1,
+  "prompt_tokens": 283,
+  "completion_tokens": 220
+ },
+ "a7e6ab60766f2d0a6b942c1e3bd321beb388d54f": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "摘要明确提到产品覆盖电池托盘，属动力电池Pack上游结构件，符合上游整合需求。",
+  "elapsed": 8.6,
+  "prompt_tokens": 323,
+  "completion_tokens": 291
+ },
+ "a980cd33fa33f83f9ebed12c8e4c386d7dde3ba8": {
+  "verdict": "不该命中",
+  "type": "无",
+  "reason": "IGBT与MOSFET功率模块属电控电力电子器件，非动力电池Pack集成上游供应链",
+  "elapsed": 21.6,
+  "prompt_tokens": 291,
+  "completion_tokens": 861
+ },
+ "894c44ddf47d3dc2e40752793ac7980ef02faab3": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "标的做MOSFET与IGBT功率器件，属动力电池Pack集成的上游电子元器件。",
+  "elapsed": 15.6,
+  "prompt_tokens": 309,
+  "completion_tokens": 612
+ },
+ "cb24df8e40ee467a25bcaf3a36589b6d20e1132a": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "热管理集成模块含电子水泵、膨胀阀，属动力电池Pack上游部件，符合纵向整合需求。",
+  "elapsed": 24.9,
+  "prompt_tokens": 302,
+  "completion_tokens": 1304
+ },
+ "ac9e6d6a6391fd4e1927871e9e33d1825d6be6f8": {
+  "verdict": "该命中",
+  "type": "横向",
+  "reason": "标的生产上下肢康复训练机器人，符合买家机器人方向。",
+  "elapsed": 15.7,
+  "prompt_tokens": 352,
+  "completion_tokens": 420
+ },
+ "f2cefc731a496d1582471350afb1bffa531afd28": {
+  "verdict": "该命中",
+  "type": "横向",
+  "reason": "运营AI智能学习软件，基于大模型打造仿真教师，覆盖多类职业资格认证与技能教程",
+  "elapsed": 17.1,
+  "prompt_tokens": 456,
+  "completion_tokens": 571
+ },
+ "54c4b87c23e1f29779c6b0a3d2b9b36c27fcaf40": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "为工业机器人与协作机器人提供臂体、关节壳体等轻量化结构件，属上下游。",
+  "elapsed": 18.4,
+  "prompt_tokens": 397,
+  "completion_tokens": 475
+ },
+ "e96683071d27037d70d6b1228213b1c5c01f3b12": {
+  "verdict": "该命中",
+  "type": "横向",
+  "reason": "标的生产上下肢康复训练机器人，属于机器人方向。",
+  "elapsed": 21.2,
+  "prompt_tokens": 421,
+  "completion_tokens": 598
+ },
+ "313b6dbc7a18479e674a29ccee5f9875fbb7b6b8": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "从事退役动力电池回收与镍钴锂再生冶炼，再生材料返供正极前驱体环节，属正极材料上游。",
+  "elapsed": 9.5,
+  "prompt_tokens": 392,
+  "completion_tokens": 363
+ },
+ "93d4614393b410017bb28721a3cc24970dc31936": {
+  "verdict": "不该命中",
+  "type": "无",
+  "reason": "主营为教育与油墨，AI智能学习软件仅为职业培训辅助产品，非主营方向。",
+  "elapsed": 30.6,
+  "prompt_tokens": 488,
+  "completion_tokens": 1169
+ },
+ "34c6603757ffe93ca05c950ca7b0ef02d454cdeb": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "标的从事碳酸锂加工，产品供应正极材料厂商，属三元正极材料上游。",
+  "elapsed": 12.4,
+  "prompt_tokens": 425,
+  "completion_tokens": 442
+ },
+ "df3d6ad6e34d9f91ab2d4bee7483066f16b1b2a0": {
+  "verdict": "该命中",
+  "type": "横向",
+  "reason": "产品含上下肢康复训练机器人，与买家机器人方向对口。",
+  "elapsed": 16.8,
+  "prompt_tokens": 351,
+  "completion_tokens": 459
+ },
+ "4fcd8a1f30abba85fac8607253c39d187f702464": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "买家做动力电池Pack集成往上游整合，标的产高镍正极材料供货动力电池厂，属上游原材料",
+  "elapsed": 5.0,
+  "prompt_tokens": 338,
+  "completion_tokens": 246
+ },
+ "4a2d0da98ea974f05e6df1aafe565d38bb7763bc": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "产电池级碳酸锂，是三元正极材料的上游原料，属纵向匹配。",
+  "elapsed": 7.8,
+  "prompt_tokens": 337,
+  "completion_tokens": 441
+ },
+ "d08fdbe94109f304a0d4b37ad6cd02ebf8d88241": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "标的研发生产工业胶粘剂，已在动力电池结构胶方向批量供货，属Pack集成上游材料。",
+  "elapsed": 6.7,
+  "prompt_tokens": 463,
+  "completion_tokens": 382
+ },
+ "794e46e40cb9b0bc103c4e24b1698ac59bcc90e8": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "标的提供冷却板等热管理零部件，属于动力电池Pack集成的上游配套环节。",
+  "elapsed": 6.9,
+  "prompt_tokens": 354,
+  "completion_tokens": 360
+ },
+ "7ff3ebeda4dec4707b1a0e6eef6e349e471d54ad": {
+  "verdict": "不该命中",
+  "type": "无",
+  "reason": "标的主营CMOS图像传感器设计，应用于手机、汽车与安防，未涉及机器人、AI或智能教具。",
+  "elapsed": 30.1,
+  "prompt_tokens": 382,
+  "completion_tokens": 1186
+ },
+ "bfc36bb8be03b8ce2d91912c8855b84273007d93": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "标的提供冷却板、集成模块等热管理零部件，属于动力电池Pack集成的上游供应链。",
+  "elapsed": 9.8,
+  "prompt_tokens": 374,
+  "completion_tokens": 466
+ },
+ "d43cb30de23d68c637cb082e5b61d4e00a377407": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "标的产电池托盘等铝合金结构件，属Pack集成上游零部件，契合买家上游整合需求",
+  "elapsed": 4.6,
+  "prompt_tokens": 339,
+  "completion_tokens": 188
+ },
+ "89e2db132c5dd363b74ab985069d043634492169": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "标的生产新能源汽车高压连接器与薄膜电容器，属动力电池Pack上游零部件，符合纵向整合需求。",
+  "elapsed": 10.0,
+  "prompt_tokens": 519,
+  "completion_tokens": 550
+ },
+ "e4f1ff8e36a9fa806c2b6d097852511e20217295": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "标的提供冷却板等热管理零部件，属于动力电池Pack集成的上游配套。",
+  "elapsed": 15.8,
+  "prompt_tokens": 463,
+  "completion_tokens": 452
+ },
+ "6e3fa63ec330d112263a47df508e46178c025ce9": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "提供冷却板、电子水泵等热管理零部件，属动力电池Pack上游配套环节",
+  "elapsed": 16.9,
+  "prompt_tokens": 466,
+  "completion_tokens": 518
+ },
+ "7bcccf026e61f7b0ab987ecd3aa8f025af6193f6": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "标的提供冷却板、电子水泵等热管理零部件，属动力电池Pack上游供应链环节。",
+  "elapsed": 4.7,
+  "prompt_tokens": 342,
+  "completion_tokens": 155
+ },
+ "319885de4c1e3d13a67e4e5b2f96f46e384f2275": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "标的研发生产工业胶粘剂，在动力电池结构胶方向已批量供货，属Pack集成上游材料。",
+  "elapsed": 6.9,
+  "prompt_tokens": 351,
+  "completion_tokens": 359
+ },
+ "b6016bb8403f458b0dd3894b96ff21c6feb94d69": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "热管理系统含冷却板、电子水泵等，是动力电池Pack的上游配套零部件",
+  "elapsed": 7.5,
+  "prompt_tokens": 512,
+  "completion_tokens": 349
+ },
+ "2c49807e94af11210b0c123795dc582763e99093": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "标的生产新能源汽车高压连接器，属动力电池Pack集成的上游零部件。",
+  "elapsed": 8.0,
+  "prompt_tokens": 391,
+  "completion_tokens": 437
+ },
+ "dece19888d7b3b00893074c4195fe8de0aead4b1": {
+  "verdict": "不该命中",
+  "type": "无",
+  "reason": "标的做锂电池生产设备，下游为电芯厂，不提供电芯或材料，无法为Pack集成保供应链。",
+  "elapsed": 13.0,
+  "prompt_tokens": 398,
+  "completion_tokens": 699
+ },
+ "01d4f683b9775f1e9292a609c12dcee47aa1650e": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "标的制造三电壳体等铝合金压铸件，属动力电池Pack集成的上游结构件供应链。",
+  "elapsed": 6.4,
+  "prompt_tokens": 401,
+  "completion_tokens": 314
+ },
+ "8931bce2089b6bd6381069aaf7eb2fa0e18cdbbf": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "动力电池结构胶是Pack集成上游材料，已批量供货，直接对口保供应链需求",
+  "elapsed": 6.8,
+  "prompt_tokens": 361,
+  "completion_tokens": 347
+ },
+ "c29a4a62a58051ce633c35ba9e9b8dbfad335d94": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "业务二明确在动力电池结构胶方向已批量供货，属Pack上游材料",
+  "elapsed": 6.8,
+  "prompt_tokens": 547,
+  "completion_tokens": 267
+ },
+ "7969389f2dcdc30df2f45f2206c3942e4a1a34aa": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "冷却板、电子水泵、集成模块等热管理零部件属动力电池Pack上游配套件",
+  "elapsed": 12.4,
+  "prompt_tokens": 385,
+  "completion_tokens": 505
+ },
+ "67734376f2215518de75fb51c2c4b9f622d469c3": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "标的生产铝合金压铸件配套三电壳体，属电池Pack上游结构件，符合上游整合需求。",
+  "elapsed": 7.5,
+  "prompt_tokens": 334,
+  "completion_tokens": 400
+ },
+ "a0e2c9018f773d1b819fe4e9578ae2dfe73fc251": {
+  "verdict": "不该命中",
+  "type": "无",
+  "reason": "买家要压铸工艺相通，标的做的是铝合金挤压，压铸与挤压为不同成形工艺，不相通。",
+  "elapsed": 7.3,
+  "prompt_tokens": 344,
+  "completion_tokens": 367
+ },
+ "5a4485bb4778c36e34badf950bc592707f2456a7": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "生产新能源汽车高压连接器与换电连接器，是动力电池Pack上游零部件，可保供应链",
+  "elapsed": 11.8,
+  "prompt_tokens": 390,
+  "completion_tokens": 673
+ },
+ "f4aaf6a6d99f19ba2e0a927d22c8f0a1dc4f8bd5": {
+  "verdict": "该命中",
+  "type": "横向",
+  "reason": "标的同样生产汽车铝合金压铸件，与买家业务完全一致。",
+  "elapsed": 8.1,
+  "prompt_tokens": 339,
+  "completion_tokens": 434
+ },
+ "3ca3dff4212355d59a39a4e62c05490c1b6a9235": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "买家生产压铸件，标的制造压铸机，属上下游设备供应关系。",
+  "elapsed": 18.7,
+  "prompt_tokens": 347,
+  "completion_tokens": 1141
+ },
+ "d134b1d9a6976d0478f72050a687318c6e6a0f69": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "功率MOSFET/IGBT可用于电池Pack的BMS与功率分配，属上游器件",
+  "elapsed": 96.8,
+  "prompt_tokens": 339,
+  "completion_tokens": 7553
+ },
+ "f2615523688a59f810daa56dbac4627dc656e38f": {
+  "verdict": "该命中",
+  "type": "横向",
+  "reason": "面向离散制造提供MES与高级排产系统，有独立研发团队、产品序列及新增授权专利",
+  "elapsed": 5.8,
+  "prompt_tokens": 558,
+  "completion_tokens": 286
+ },
+ "f9b9eb70b2932687c83dfb2365a51f067a05c5f1": {
+  "verdict": "该命中",
+  "type": "横向",
+  "reason": "研发CAD内核与行业设计软件，几何内核自主可控，符合工业软件及自有知识产权需求。",
+  "elapsed": 5.8,
+  "prompt_tokens": 343,
+  "completion_tokens": 312
+ },
+ "d734b18fedb0fcc8adc8888ecb8682a396acb04e": {
+  "verdict": "该命中",
+  "type": "横向",
+  "reason": "面向离散制造提供MES与排产系统，且有3个系列数十个规格的自有产品序列。",
+  "elapsed": 6.4,
+  "prompt_tokens": 438,
+  "completion_tokens": 361
+ },
+ "667592ccc1516afde2bec4c515a36e594a8a2feb": {
+  "verdict": "该命中",
+  "type": "横向",
+  "reason": "提供MES与高级排产系统及低代码平台，配置独立研发团队，符合工业软件及自有产品需求。",
+  "elapsed": 8.7,
+  "prompt_tokens": 554,
+  "completion_tokens": 551
+ },
+ "379e6f9aa209479bac7dd36f8382931aa1932938": {
+  "verdict": "该命中",
+  "type": "横向",
+  "reason": "自主研发CAD几何内核与MES排产系统，属工业软件产品，几何内核自主可控且有授权专利",
+  "elapsed": 10.4,
+  "prompt_tokens": 522,
+  "completion_tokens": 263
+ },
+ "161a5ab5d5fa144d2407d3218849371073b3ada0": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "标的产三元前驱体，属动力电池正极材料直接上游，买家做Pack集成往上游整合，供应链对口",
+  "elapsed": 7.6,
+  "prompt_tokens": 394,
+  "completion_tokens": 352
+ },
+ "6a58466980d428dc3753ea0d42a0fe2d12a3b7f4": {
+  "verdict": "该命中",
+  "type": "横向",
+  "reason": "双方均从事电池包结构件设计与Pack系统集成，属同业横向匹配。",
+  "elapsed": 9.5,
+  "prompt_tokens": 338,
+  "completion_tokens": 451
+ },
+ "668ef95042089242e7169a26b288c0395bcfb2ff": {
+  "verdict": "该命中",
+  "type": "纵向",
+  "reason": "连接器是电池Pack上游零部件，高压互锁、换电连接器直接对口Pack集成供应链。",
+  "elapsed": 12.3,
+  "prompt_tokens": 359,
+  "completion_tokens": 228
+ },
+ "424ab3d6d0d11370085ce4362a9137c83fb89d32": {
+  "verdict": "不该命中",
+  "type": "无",
+  "reason": "标的工艺为CNC与冲压，无压铸工艺，与买家压铸模具能力不相通。",
+  "elapsed": 7.4,
+  "prompt_tokens": 411,
+  "completion_tokens": 412
+ },
+ "98a04f2937740389c661c4e17554623331f4bf07": {
+  "verdict": "不该命中",
+  "type": "无",
+  "reason": "标的结构件工艺为CNC与冲压，与买家的压铸和模具能力不相通。",
+  "elapsed": 10.5,
+  "prompt_tokens": 580,
+  "completion_tokens": 657
+ },
+ "47ad7c35e82c63f9f9a5db008e4ff98904a5ffca": {
+  "verdict": "不该命中",
+  "type": "无",
+  "reason": "标的采用CNC与冲压工艺，未提及压铸，与买家压铸工艺不通。",
+  "elapsed": 23.3,
+  "prompt_tokens": 473,
+  "completion_tokens": 1404
+ },
+ "5299a4e0931f95885c69c6f9840f2be7ba2e0691": {
+  "verdict": "该命中",
+  "type": "相邻",
+  "reason": "标的主营PEM电解槽及制氢设备，与买家所需碱性电解槽技术相通。",
+  "elapsed": 38.9,
+  "prompt_tokens": 386,
+  "completion_tokens": 2515
+ },
+ "e5b5148ee7a9072d98c9a75ca58d853e288c50d4": {
+  "verdict": "不该命中",
+  "type": "无",
+  "reason": "买家需压铸工艺相通，标的为CNC与冲压工艺，工艺不通。",
+  "elapsed": 17.4,
+  "prompt_tokens": 494,
+  "completion_tokens": 1045
+ },
+ "a54af6d853067e595c678212ba2581c20630f195": {
+  "verdict": "说不准",
+  "type": "无",
+  "reason": "标的做制氢设备（电解槽、制氢系统），与船用氢燃料电池动力系统产品线不同，产业链关系存疑",
+  "elapsed": 11.5,
+  "prompt_tokens": 325,
+  "completion_tokens": 595
+ },
+ "fd5282721623b24e77c820e82c48bf891d7d26e4": {
+  "verdict": "不该命中",
+  "type": "无",
+  "reason": "标的生产船用柴油机曲轴缸套等配套件，与氢燃料电池动力系统无关。",
+  "elapsed": 18.3,
+  "prompt_tokens": 325,
+  "completion_tokens": 1039
+ },
+ "4d9856a5de05dacad350a04f70d795b357a467a9": {
+  "verdict": "说不准",
+  "type": "无",
+  "reason": "标的工艺为CNC与冲压，未提及压铸，无法确认与买家压铸工艺相通。",
+  "elapsed": 54.7,
+  "prompt_tokens": 573,
+  "completion_tokens": 2752
+ },
+ "16397c2cf9fd2db14a119e9aba5a57f358e22cbf": {
+  "verdict": "不该命中",
+  "type": "无",
+  "reason": "标的从事制氢设备与系统集成，与船用氢燃料电池动力系统业务不同且无直接供需。",
+  "elapsed": 18.9,
+  "prompt_tokens": 323,
+  "completion_tokens": 1066
+ },
+ "6c549ce98cb609d347e086aeeef0915d755bc094": {
+  "verdict": "不该命中",
+  "type": "无",
+  "reason": "业务说明仅涉及电池包结构件与Pack集成，未提及氢燃料电池或船用。",
+  "elapsed": 14.0,
+  "prompt_tokens": 328,
+  "completion_tokens": 603
+ },
+ "dbe4e36d546db7a39eba95f84bce33c1a8456e0d": {
+  "verdict": "不该命中",
+  "type": "无",
+  "reason": "标的做电解水制氢装置，非船用氢燃料电池动力系统。",
+  "elapsed": 16.0,
+  "prompt_tokens": 327,
+  "completion_tokens": 909
+ },
+ "ead95924d5efff32e2aeffa9bc58f111a783e7eb": {
+  "verdict": "不该命中",
+  "type": "无",
+  "reason": "标的做电解槽制氢设备，买家需船用氢燃料电池动力系统，业务不匹配。",
+  "elapsed": 19.6,
+  "prompt_tokens": 324,
+  "completion_tokens": 1094
+ },
+ "d18d9278c6ce04d1f418534d8cd49cf9f478f414": {
+  "verdict": "该命中",
+  "type": "横向",
+  "reason": "提供数据分类分级与脱敏产品，支持结构化与非结构化数据资产梳理，属数据治理与数据资产管理范畴",
+  "elapsed": 22.7,
+  "prompt_tokens": 436,
+  "completion_tokens": 359
+ },
+ "5a65ff7a68d5de9baf0cb443c333fc3f22516faa": {
+  "verdict": "该命中",
+  "type": "横向",
+  "reason": "提供数据分类分级与脱敏产品，支持数据资产梳理，对口数据治理与资产管理需求。",
+  "elapsed": 8.8,
+  "prompt_tokens": 434,
+  "completion_tokens": 545
+ },
+ "6890012d14b657108720e1cc49b1734d4642c69e": {
+  "verdict": "说不准",
+  "type": "无",
+  "reason": "业务说明仅涉及PEM制氢设备，未提及燃料电池或动力系统业务",
+  "elapsed": 56.3,
+  "prompt_tokens": 378,
+  "completion_tokens": 3518
+ },
+ "2ab6907b79578d8233e9a17aaff9a47d677fef94": {
+  "verdict": "不该命中",
+  "type": "无",
+  "reason": "标的结构件业务采用CNC与冲压工艺，与买家压铸工艺不通。",
+  "elapsed": 311.8,
+  "prompt_tokens": 626,
+  "completion_tokens": 547
+ },
+ "84eae44c0a3fe07fcc3c37ce40dc526ed3761b4d": {
+  "verdict": "不该命中",
+  "type": "无",
+  "reason": "标的是碱性电解水制氢设备，属制氢环节，与船用氢燃料电池动力系统非同一业务",
+  "elapsed": 357.7,
+  "prompt_tokens": 389,
+  "completion_tokens": 391
+ }
+}
